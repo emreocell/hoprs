@@ -1,0 +1,16 @@
+[package]
+name = "hoprs-remote"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[features]
+testing = []
+
+[dependencies]
+hoprs-core = { path = "../hoprs-core" }
+tokio = { workspace = true, features = ["io-util"] }
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "rt"] }
