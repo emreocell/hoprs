@@ -1,11 +1,17 @@
 //! The engine actor: owns the queue store, the in-memory items, the per-site
 //! worker slots and the progress tracker. Never awaits I/O itself: workers
 //! run as spawned tasks and report back through `WorkerMsg`.
+//!
+//! Directories expand lazily: a worker lists a directory when it is
+//! dispatched, and its entries join the queue as child items. Files are
+//! dispatched before directories, so a large tree starts copying before it
+//! has been listed completely. A directory stays `Active` (without holding a
+//! worker slot) until all of its children are terminal.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::{Duration, Instant};
 
-use hoprs_core::{Error, Result, SiteId};
+use hoprs_core::{EntryKind, Error, ErrorKind, RemoteEntry, Result, SiteId};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -18,9 +24,10 @@ use crate::model::{
     ConflictInfo, ConflictPolicy, TransferId, TransferItem, TransferSpec, TransferState,
 };
 use crate::progress::ProgressTracker;
-use crate::store::QueueStore;
+use crate::store::{NewChild, QueueStore};
 
 const MAX_WORKERS: usize = 16;
+const SYMLINK_SKIP: &str = "symlinks are not followed";
 
 /// Appends a queue-store error to `e`'s technical detail.
 fn with_store_detail(e: Error, store_err: &Error) -> Error {
@@ -66,6 +73,40 @@ impl Site {
     }
 }
 
+/// `Queued` items of one site, in dispatch order: items not known to be
+/// directories first, then directories, each by ascending id.
+#[derive(Default)]
+struct SiteQueue {
+    files: BTreeSet<TransferId>,
+    dirs: BTreeSet<TransferId>,
+}
+
+impl SiteQueue {
+    fn push(&mut self, id: TransferId, is_dir: bool) {
+        if is_dir {
+            self.dirs.insert(id);
+        } else {
+            self.files.insert(id);
+        }
+    }
+
+    fn remove(&mut self, id: TransferId) {
+        self.files.remove(&id);
+        self.dirs.remove(&id);
+    }
+
+    fn pop(&mut self) -> Option<TransferId> {
+        self.files.pop_first().or_else(|| self.dirs.pop_first())
+    }
+}
+
+/// Children of an expanded directory that are not terminal yet, and how
+/// many of its finished children did not end `Done` or `Skipped`.
+struct DirProgress {
+    pending: usize,
+    failed: usize,
+}
+
 struct Actor {
     store: QueueStore,
     buf_size: usize,
@@ -73,6 +114,10 @@ struct Actor {
     events: broadcast::Sender<Event>,
     items: BTreeMap<TransferId, TransferItem>,
     sites: HashMap<SiteId, Site>,
+    /// Index of `Queued` items per site (registered or not).
+    queued: HashMap<SiteId, SiteQueue>,
+    /// Expanded directories that still have non-terminal children.
+    dirs: HashMap<TransferId, DirProgress>,
     tracker: ProgressTracker,
     worker_tx: mpsc::UnboundedSender<WorkerMsg>,
 }
@@ -91,6 +136,8 @@ pub(super) async fn run(
         events,
         items: BTreeMap::new(),
         sites: HashMap::new(),
+        queued: HashMap::new(),
+        dirs: HashMap::new(),
         tracker: ProgressTracker::new(),
         worker_tx,
     };
@@ -139,7 +186,7 @@ impl Actor {
                         return;
                     }
                 };
-                let item = TransferItem {
+                self.add_item(TransferItem {
                     id,
                     parent: None,
                     spec,
@@ -147,9 +194,7 @@ impl Actor {
                     size: None,
                     bytes_done: 0,
                     state: TransferState::Queued,
-                };
-                self.items.insert(id, item.clone());
-                self.emit(Event::Added(item));
+                });
                 let _ = reply.send(Ok(id));
                 self.dispatch();
             }
@@ -163,8 +208,21 @@ impl Actor {
         }
     }
 
+    /// Tracks a newly persisted item and emits `Added`.
+    fn add_item(&mut self, item: TransferItem) {
+        if item.state == TransferState::Queued {
+            self.queued
+                .entry(item.spec.site.clone())
+                .or_default()
+                .push(item.id, item.is_dir == Some(true));
+        }
+        self.items.insert(item.id, item.clone());
+        self.emit(Event::Added(item));
+    }
+
     /// Persists and applies `state`, then emits `StateChanged`. If persisting
     /// fails, the item becomes `Failed` with the store error instead.
+    /// An item that becomes terminal is reported to its parent directory.
     /// Returns whether `state` itself was applied.
     fn transition(&mut self, id: TransferId, state: TransferState) -> bool {
         let (state, applied) = match self.store.set_state(id, &state) {
@@ -176,41 +234,91 @@ impl Actor {
                 (failed, false)
             }
         };
+        let mut finished_child_of = None;
         if let Some(item) = self.items.get_mut(&id) {
+            let was_queued = item.state == TransferState::Queued;
+            let is_queued = state == TransferState::Queued;
+            if was_queued != is_queued {
+                let queue = self.queued.entry(item.spec.site.clone()).or_default();
+                if is_queued {
+                    queue.push(id, item.is_dir == Some(true));
+                } else {
+                    queue.remove(id);
+                }
+            }
+            if !item.state.is_terminal() && state.is_terminal() {
+                finished_child_of = item.parent;
+            }
             item.state = state.clone();
         }
+        let ok = matches!(state, TransferState::Done | TransferState::Skipped(_));
         self.emit(Event::StateChanged { id, state });
+        if let Some(parent) = finished_child_of {
+            self.child_finished(parent, ok);
+        }
         applied
     }
 
-    /// Starts `Queued` items, lowest id first, while their site has free workers.
+    /// Accounts for a child of `dir` that reached a terminal state. When it
+    /// was the last one, `dir` finishes too (which recurses to its parent).
+    fn child_finished(&mut self, dir: TransferId, ok: bool) {
+        let Some(progress) = self.dirs.get_mut(&dir) else {
+            return;
+        };
+        progress.pending = progress.pending.saturating_sub(1);
+        if !ok {
+            progress.failed += 1;
+        }
+        if progress.pending > 0 {
+            return;
+        }
+        let failed = progress.failed;
+        self.dirs.remove(&dir);
+        let state = if failed == 0 {
+            TransferState::Done
+        } else {
+            TransferState::Failed(Error::new(ErrorKind::Io, format!("{failed} items failed")))
+        };
+        self.transition(dir, state);
+    }
+
+    /// Starts `Queued` items while their site has free workers: per site,
+    /// items not known to be directories first, then directories, each
+    /// lowest id first.
     fn dispatch(&mut self) {
-        let candidates: Vec<TransferId> = self
-            .items
-            .values()
-            .filter(|i| i.state == TransferState::Queued)
-            .map(|i| i.id)
+        let ready: Vec<SiteId> = self
+            .sites
+            .iter()
+            .filter(|(_, s)| s.free() > 0)
+            .map(|(id, _)| id.clone())
             .collect();
-        for id in candidates {
-            if !self.sites.values().any(|s| s.free() > 0) {
-                break;
+        for site_id in ready {
+            while self.sites.get(&site_id).is_some_and(|s| s.free() > 0) {
+                let Some(id) = self.queued.get_mut(&site_id).and_then(SiteQueue::pop) else {
+                    break;
+                };
+                let (Some(item), Some(site)) = (self.items.get(&id), self.sites.get(&site_id))
+                else {
+                    continue;
+                };
+                let route = Route::new(&item.spec, &site.endpoints);
+                if !self.transition(id, TransferState::Active) {
+                    continue;
+                }
+                if let Some(site) = self.sites.get_mut(&site_id) {
+                    site.busy += 1;
+                }
+                worker::spawn_prepare(id, route, self.policy, self.worker_tx.clone());
             }
-            let spec = &self.items[&id].spec;
-            let Some(site) = self.sites.get(&spec.site) else {
-                continue;
-            };
-            if site.free() == 0 {
-                continue;
-            }
-            let route = Route::new(spec, &site.endpoints);
-            let site_id = spec.site.clone();
-            if !self.transition(id, TransferState::Active) {
-                continue;
-            }
-            if let Some(site) = self.sites.get_mut(&site_id) {
-                site.busy += 1;
-            }
-            worker::spawn_prepare(id, route, self.policy, self.worker_tx.clone());
+        }
+    }
+
+    /// Frees the worker slot held by `id`.
+    fn free_slot(&mut self, id: TransferId) {
+        if let Some(item) = self.items.get(&id)
+            && let Some(site) = self.sites.get_mut(&item.spec.site)
+        {
+            site.busy = site.busy.saturating_sub(1);
         }
     }
 
@@ -218,18 +326,24 @@ impl Actor {
     /// dispatches the next item.
     fn release(&mut self, id: TransferId, state: TransferState) {
         self.transition(id, state);
-        if let Some(item) = self.items.get(&id)
-            && let Some(site) = self.sites.get_mut(&item.spec.site)
-        {
-            site.busy = site.busy.saturating_sub(1);
-        }
+        self.free_slot(id);
         self.dispatch();
     }
 
     fn handle_worker(&mut self, msg: WorkerMsg) {
         match msg {
-            WorkerMsg::Prepared { id, route, result } => match result {
-                Ok(prepared) => self.on_prepared(id, route, *prepared),
+            WorkerMsg::Prepared { id, route, result } => match result.map(|p| *p) {
+                Ok(Prepared::File { src, dst, decision }) => {
+                    self.on_file_prepared(id, route, src, dst, decision)
+                }
+                Ok(Prepared::Dir { entries }) => {
+                    self.free_slot(id);
+                    self.expand(id, entries);
+                    self.dispatch();
+                }
+                Ok(Prepared::Symlink) => {
+                    self.release(id, TransferState::Skipped(SYMLINK_SKIP.to_string()))
+                }
                 Err(e) => self.release(id, TransferState::Failed(e)),
             },
             WorkerMsg::Copied { id, bytes, result } => {
@@ -252,8 +366,73 @@ impl Actor {
         }
     }
 
-    fn on_prepared(&mut self, id: TransferId, route: Route, prepared: Prepared) {
-        let Prepared { src, dst, decision } = prepared;
+    /// Inserts one child per entry of the listed directory `id`. The
+    /// directory stays `Active` until its children finish, or becomes `Done`
+    /// right away if none is pending.
+    fn expand(&mut self, id: TransferId, entries: Vec<RemoteEntry>) {
+        if let Err(e) = self.store.set_meta(id, true, None) {
+            self.transition(id, TransferState::Failed(e));
+            return;
+        }
+        let Some(dir) = self.items.get_mut(&id) else {
+            return;
+        };
+        dir.is_dir = Some(true);
+        dir.size = None;
+        let parent = dir.spec.clone();
+        let children: Vec<NewChild> = entries
+            .iter()
+            .map(|e| NewChild {
+                spec: TransferSpec {
+                    site: parent.site.clone(),
+                    direction: parent.direction,
+                    local: parent.local.join(&e.name),
+                    remote: parent.remote.join(&e.name),
+                },
+                is_dir: e.kind == EntryKind::Dir,
+                size: (e.kind == EntryKind::File).then_some(e.size),
+                state: if e.kind == EntryKind::Symlink {
+                    TransferState::Skipped(SYMLINK_SKIP.to_string())
+                } else {
+                    TransferState::Queued
+                },
+            })
+            .collect();
+        let ids = match self.store.insert_children(id, &children) {
+            Ok(ids) => ids,
+            Err(e) => {
+                self.transition(id, TransferState::Failed(e));
+                return;
+            }
+        };
+        let pending = children.iter().filter(|c| !c.state.is_terminal()).count();
+        if pending > 0 {
+            self.dirs.insert(id, DirProgress { pending, failed: 0 });
+        }
+        for (child_id, child) in ids.into_iter().zip(children) {
+            self.add_item(TransferItem {
+                id: child_id,
+                parent: Some(id),
+                spec: child.spec,
+                is_dir: Some(child.is_dir),
+                size: child.size,
+                bytes_done: 0,
+                state: child.state,
+            });
+        }
+        if pending == 0 {
+            self.transition(id, TransferState::Done);
+        }
+    }
+
+    fn on_file_prepared(
+        &mut self,
+        id: TransferId,
+        route: Route,
+        src: RemoteEntry,
+        dst: Option<RemoteEntry>,
+        decision: Decision,
+    ) {
         if let Err(e) = self.store.set_meta(id, false, Some(src.size)) {
             self.release(id, TransferState::Failed(e));
             return;

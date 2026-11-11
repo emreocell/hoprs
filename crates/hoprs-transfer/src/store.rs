@@ -41,6 +41,16 @@ impl PausedFrom {
     }
 }
 
+/// A child item for `QueueStore::insert_children`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NewChild {
+    pub spec: TransferSpec,
+    pub is_dir: bool,
+    pub size: Option<u64>,
+    /// Initial state, normally `Queued`.
+    pub state: TransferState,
+}
+
 /// SQLite-backed persistent transfer queue. Synchronous: operations are short.
 pub struct QueueStore {
     conn: Connection,
@@ -190,6 +200,79 @@ fn item_from_row(row: &Row<'_>) -> Result<TransferItem> {
     })
 }
 
+fn insert_row(
+    conn: &Connection,
+    parent: Option<TransferId>,
+    spec: &TransferSpec,
+) -> Result<TransferId> {
+    let direction = match spec.direction {
+        Direction::Upload => "upload",
+        Direction::Download => "download",
+    };
+    conn.execute(
+        "INSERT INTO transfers (parent_id, site, direction, local_path, remote_path, state, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6)",
+        params![
+            parent.map(|p| p.0),
+            spec.site.0,
+            direction,
+            spec.local.as_str(),
+            spec.remote.as_str(),
+            now_secs()
+        ],
+    ).db()?;
+    Ok(TransferId(conn.last_insert_rowid()))
+}
+
+/// Persists a new state. Moving to `Paused` records the state it was paused from.
+fn write_state(conn: &Connection, id: TransferId, state: &TransferState) -> Result<()> {
+    let mut detail: Option<String> = None;
+    let (mut kind, mut message, mut err_detail, mut conflict) = (None, None, None, None);
+    let name = match state {
+        TransferState::Queued => "queued",
+        TransferState::Active => "active",
+        TransferState::Paused => {
+            let current: Option<(String, Option<String>)> = conn
+                .query_row(
+                    "SELECT state, state_detail FROM transfers WHERE id = ?1",
+                    [id.0],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .db()?;
+            detail = match current {
+                Some((s, _)) if PausedFrom::parse(&s).is_some() => Some(s),
+                Some((s, d)) if s == "paused" => d,
+                _ => None,
+            };
+            "paused"
+        }
+        TransferState::AwaitingDecision(c) => {
+            conflict = Some(conflict_to_json(c));
+            "awaiting_decision"
+        }
+        TransferState::Done => "done",
+        TransferState::Skipped(reason) => {
+            detail = Some(reason.clone());
+            "skipped"
+        }
+        TransferState::Failed(e) => {
+            kind = Some(e.kind.as_str());
+            message = Some(e.message.clone());
+            err_detail = e.detail.clone();
+            "failed"
+        }
+        TransferState::Cancelled => "cancelled",
+    };
+    conn.execute(
+        "UPDATE transfers SET state = ?2, state_detail = ?3, error_kind = ?4, error_message = ?5, \
+         error_detail = ?6, conflict_json = ?7 WHERE id = ?1",
+        params![id.0, name, detail, kind, message, err_detail, conflict],
+    )
+    .db()?;
+    Ok(())
+}
+
 impl QueueStore {
     /// Opens (creating if needed) the queue database at `path`, in WAL mode.
     pub fn open(path: &Path) -> Result<QueueStore> {
@@ -223,72 +306,37 @@ impl QueueStore {
         parent: Option<TransferId>,
         spec: &TransferSpec,
     ) -> Result<TransferId> {
-        let direction = match spec.direction {
-            Direction::Upload => "upload",
-            Direction::Download => "download",
-        };
-        self.conn.execute(
-            "INSERT INTO transfers (parent_id, site, direction, local_path, remote_path, state, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6)",
-            params![
-                parent.map(|p| p.0),
-                spec.site.0,
-                direction,
-                spec.local.as_str(),
-                spec.remote.as_str(),
-                now_secs()
-            ],
-        ).db()?;
-        Ok(TransferId(self.conn.last_insert_rowid()))
+        insert_row(&self.conn, parent, spec)
+    }
+
+    /// Inserts the children of `parent` (with their metadata and initial
+    /// state) in one transaction and returns their ids, in order.
+    pub fn insert_children(
+        &mut self,
+        parent: TransferId,
+        children: &[NewChild],
+    ) -> Result<Vec<TransferId>> {
+        let tx = self.conn.transaction().db()?;
+        let mut ids = Vec::with_capacity(children.len());
+        for child in children {
+            let id = insert_row(&tx, Some(parent), &child.spec)?;
+            tx.execute(
+                "UPDATE transfers SET is_dir = ?2, size = ?3 WHERE id = ?1",
+                params![id.0, child.is_dir, child.size.map(|s| s as i64)],
+            )
+            .db()?;
+            if child.state != TransferState::Queued {
+                write_state(&tx, id, &child.state)?;
+            }
+            ids.push(id);
+        }
+        tx.commit().db()?;
+        Ok(ids)
     }
 
     /// Persists a new state. Moving to `Paused` records the state it was paused from.
     pub fn set_state(&mut self, id: TransferId, state: &TransferState) -> Result<()> {
-        let mut detail: Option<String> = None;
-        let (mut kind, mut message, mut err_detail, mut conflict) = (None, None, None, None);
-        let name = match state {
-            TransferState::Queued => "queued",
-            TransferState::Active => "active",
-            TransferState::Paused => {
-                let current: Option<(String, Option<String>)> = self
-                    .conn
-                    .query_row(
-                        "SELECT state, state_detail FROM transfers WHERE id = ?1",
-                        [id.0],
-                        |r| Ok((r.get(0)?, r.get(1)?)),
-                    )
-                    .optional()
-                    .db()?;
-                detail = match current {
-                    Some((s, _)) if PausedFrom::parse(&s).is_some() => Some(s),
-                    Some((s, d)) if s == "paused" => d,
-                    _ => None,
-                };
-                "paused"
-            }
-            TransferState::AwaitingDecision(c) => {
-                conflict = Some(conflict_to_json(c));
-                "awaiting_decision"
-            }
-            TransferState::Done => "done",
-            TransferState::Skipped(reason) => {
-                detail = Some(reason.clone());
-                "skipped"
-            }
-            TransferState::Failed(e) => {
-                kind = Some(e.kind.as_str());
-                message = Some(e.message.clone());
-                err_detail = e.detail.clone();
-                "failed"
-            }
-            TransferState::Cancelled => "cancelled",
-        };
-        self.conn.execute(
-            "UPDATE transfers SET state = ?2, state_detail = ?3, error_kind = ?4, error_message = ?5, \
-             error_detail = ?6, conflict_json = ?7 WHERE id = ?1",
-            params![id.0, name, detail, kind, message, err_detail, conflict],
-        ).db()?;
-        Ok(())
+        write_state(&self.conn, id, state)
     }
 
     /// Returns what a `Paused` item was paused from, or `None` if it is not paused.
@@ -553,6 +601,68 @@ mod tests {
         assert_eq!(kids[0].id, c1);
         assert_eq!(kids[0].parent, Some(p1));
         assert_eq!(s.list_all().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn insert_children_persists_meta_and_state() {
+        let mut s = QueueStore::open_in_memory().unwrap();
+        let parent = new_item(&mut s);
+        let other = new_item(&mut s);
+        let children = vec![
+            NewChild {
+                spec: spec("/a/f", "/b/f"),
+                is_dir: false,
+                size: Some(42),
+                state: TransferState::Queued,
+            },
+            NewChild {
+                spec: spec("/a/d", "/b/d"),
+                is_dir: true,
+                size: None,
+                state: TransferState::Queued,
+            },
+            NewChild {
+                spec: spec("/a/l", "/b/l"),
+                is_dir: false,
+                size: None,
+                state: TransferState::Skipped("symlinks are not followed".to_string()),
+            },
+        ];
+        let ids = s.insert_children(parent, &children).unwrap();
+        assert_eq!(ids.len(), 3);
+        assert!(ids.windows(2).all(|w| w[0] < w[1]));
+        assert!(ids[0] > other);
+
+        let kids = s.children(parent).unwrap();
+        assert_eq!(kids.iter().map(|k| k.id).collect::<Vec<_>>(), ids);
+        for (kid, want) in kids.iter().zip(&children) {
+            assert_eq!(kid.parent, Some(parent));
+            assert_eq!(kid.spec, want.spec);
+            assert_eq!(kid.is_dir, Some(want.is_dir));
+            assert_eq!(kid.size, want.size);
+            assert_eq!(kid.state, want.state);
+            assert_eq!(kid.bytes_done, 0);
+        }
+        assert!(s.insert_children(parent, &[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn insert_children_is_all_or_nothing() {
+        let mut s = QueueStore::open_in_memory().unwrap();
+        let child = NewChild {
+            spec: spec("/a/f", "/b/f"),
+            is_dir: false,
+            size: None,
+            state: TransferState::Queued,
+        };
+        // The parent does not exist: the foreign key rejects the batch.
+        assert_eq!(
+            s.insert_children(TransferId(999), &[child.clone(), child])
+                .unwrap_err()
+                .kind,
+            ErrorKind::Io
+        );
+        assert!(s.list_all().unwrap().is_empty());
     }
 
     #[test]

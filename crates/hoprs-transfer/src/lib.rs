@@ -12,4 +12,4 @@ pub use model::{
     ConflictInfo, ConflictPolicy, Direction, TransferId, TransferItem, TransferSpec, TransferState,
 };
 pub use progress::{ProgressTracker, ProgressUpdate};
-pub use store::{PausedFrom, QueueStore};
+pub use store::{NewChild, PausedFrom, QueueStore};

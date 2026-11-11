@@ -14,18 +14,6 @@ use hoprs_transfer::{
 };
 use tokio::sync::broadcast::Receiver;
 
-async fn wait_terminal(rx: &mut Receiver<Event>, id: TransferId) -> TransferState {
-    match wait_for(
-        rx,
-        |e| matches!(e, Event::StateChanged { id: i, state } if *i == id && state.is_terminal()),
-    )
-    .await
-    {
-        Event::StateChanged { state, .. } => state,
-        _ => unreachable!(),
-    }
-}
-
 /// Collects events until `n` items reached a terminal state. Returns the final
 /// states and the maximum number of simultaneously `Active` items.
 async fn collect_terminal(

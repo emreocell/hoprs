@@ -3,7 +3,8 @@
 //! A file goes through two phases, each a spawned task that reports back to
 //! the actor: `prepare` (stat source and destination, apply the conflict
 //! policy) and `copy` (stream the bytes). The actor holds the worker slot
-//! across both.
+//! across both. For a directory, `prepare` creates the destination and lists
+//! the source; the actor frees the slot as soon as the listing arrives.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -49,10 +50,17 @@ impl Route {
 }
 
 /// Result of the `prepare` phase.
-pub(super) struct Prepared {
-    pub src: RemoteEntry,
-    pub dst: Option<RemoteEntry>,
-    pub decision: Decision,
+pub(super) enum Prepared {
+    /// A regular file, ready to copy (or skip, or ask about).
+    File {
+        src: RemoteEntry,
+        dst: Option<RemoteEntry>,
+        decision: Decision,
+    },
+    /// A directory: the destination exists and these are the source entries.
+    Dir { entries: Vec<RemoteEntry> },
+    /// A symlink, which is never followed.
+    Symlink,
 }
 
 /// Messages from worker tasks to the actor.
@@ -111,9 +119,10 @@ pub(super) fn spawn_prepare(
 
 async fn prepare(route: &Route, policy: ConflictPolicy) -> Result<Prepared> {
     let src = route.src.stat(&route.src_path).await?;
-    if src.kind != EntryKind::File {
-        return Err(Error::new(ErrorKind::Io, "Source is not a regular file")
-            .with_detail(route.src_path.to_string()));
+    match src.kind {
+        EntryKind::File => {}
+        EntryKind::Dir => return prepare_dir(route).await,
+        EntryKind::Symlink => return Ok(Prepared::Symlink),
     }
     let dst = match route.dst.stat(&route.dst_path).await {
         Ok(entry) => Some(entry),
@@ -121,7 +130,31 @@ async fn prepare(route: &Route, policy: ConflictPolicy) -> Result<Prepared> {
         Err(e) => return Err(e),
     };
     let decision = decide(policy, &src, dst.as_ref());
-    Ok(Prepared { src, dst, decision })
+    Ok(Prepared::File { src, dst, decision })
+}
+
+/// Creates the destination directory (an existing one is fine) and lists the source.
+async fn prepare_dir(route: &Route) -> Result<Prepared> {
+    if let Err(e) = route.dst.mkdir(&route.dst_path).await {
+        match route.dst.stat(&route.dst_path).await {
+            Ok(entry) if entry.kind == EntryKind::Dir => {}
+            _ => return Err(e),
+        }
+    }
+    let entries = route.src.list(&route.src_path).await?;
+    // The actor joins these names onto paths, which must not panic.
+    if let Some(bad) = entries.iter().find(|e| !is_plain_name(&e.name)) {
+        return Err(
+            Error::new(ErrorKind::Io, "Invalid name in directory listing")
+                .with_detail(format!("{:?} in {}", bad.name, route.src_path)),
+        );
+    }
+    Ok(Prepared::Dir { entries })
+}
+
+/// Whether `name` is a single path component accepted by `RemotePath::join`.
+fn is_plain_name(name: &str) -> bool {
+    !name.is_empty() && !name.contains('/') && name != "." && name != ".."
 }
 
 #[allow(clippy::too_many_arguments)]

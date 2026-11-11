@@ -7,7 +7,8 @@ use std::time::{Duration, SystemTime};
 use hoprs_core::{RemotePath, SiteId};
 use hoprs_remote::{MemFs, RemoteFs};
 use hoprs_transfer::{
-    Direction, EngineConfig, Event, QueueStore, SiteEndpoints, TransferEngine, TransferSpec,
+    Direction, EngineConfig, Event, QueueStore, SiteEndpoints, TransferEngine, TransferId,
+    TransferSpec, TransferState,
 };
 use tokio::sync::broadcast::Receiver;
 use tokio::sync::broadcast::error::RecvError;
@@ -107,4 +108,17 @@ pub async fn wait_for<F: FnMut(&Event) -> bool>(rx: &mut Receiver<Event>, mut f:
     tokio::time::timeout(WAIT_TIMEOUT, fut)
         .await
         .expect("timed out waiting for event")
+}
+
+/// Waits for `id` to reach a terminal state and returns it; panics after 5 s.
+pub async fn wait_terminal(rx: &mut Receiver<Event>, id: TransferId) -> TransferState {
+    match wait_for(
+        rx,
+        |e| matches!(e, Event::StateChanged { id: i, state } if *i == id && state.is_terminal()),
+    )
+    .await
+    {
+        Event::StateChanged { state, .. } => state,
+        _ => unreachable!(),
+    }
 }
