@@ -9,8 +9,9 @@ testing = []
 
 [dependencies]
 hoprs-core = { path = "../hoprs-core" }
-tokio = { workspace = true, features = ["io-util"] }
+tokio = { workspace = true, features = ["io-util", "fs", "rt"] }
 async-trait.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["io-util", "macros", "rt"] }
+tokio = { workspace = true, features = ["io-util", "fs", "macros", "rt"] }
+tempfile.workspace = true

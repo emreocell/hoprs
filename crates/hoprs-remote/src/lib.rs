@@ -5,10 +5,13 @@ use std::time::SystemTime;
 use async_trait::async_trait;
 use hoprs_core::{RemoteEntry, RemotePath, Result};
 
+mod local;
 #[cfg(feature = "testing")]
 mod mem;
 #[cfg(feature = "testing")]
 pub use mem::MemFs;
+
+pub use local::LocalFs;
 
 pub type BoxAsyncRead = Box<dyn tokio::io::AsyncRead + Send + Unpin>;
 pub type BoxAsyncWrite = Box<dyn tokio::io::AsyncWrite + Send + Unpin>;
