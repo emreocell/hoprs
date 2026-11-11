@@ -73,16 +73,16 @@ fn now_secs() -> i64 {
 
 fn time_to_secs(t: SystemTime) -> i64 {
     match t.duration_since(UNIX_EPOCH) {
-        Ok(d) => d.as_secs() as i64,
-        Err(e) => -(e.duration().as_secs() as i64),
+        Ok(d) => i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
+        Err(e) => i64::try_from(e.duration().as_secs()).map_or(i64::MIN, |v| -v),
     }
 }
 
-fn secs_to_time(s: i64) -> SystemTime {
+fn secs_to_time(s: i64) -> Option<SystemTime> {
     if s >= 0 {
-        UNIX_EPOCH + Duration::from_secs(s as u64)
+        UNIX_EPOCH.checked_add(Duration::from_secs(s as u64))
     } else {
-        UNIX_EPOCH - Duration::from_secs(s.unsigned_abs())
+        UNIX_EPOCH.checked_sub(Duration::from_secs(s.unsigned_abs()))
     }
 }
 
@@ -120,8 +120,10 @@ fn conflict_from_json(json: &str) -> Result<ConflictInfo> {
             Some("null") => Ok(None),
             Some(v) => v
                 .parse::<i64>()
-                .map(|s| Some(secs_to_time(s)))
-                .map_err(|_| corrupt("conflict json")),
+                .ok()
+                .and_then(secs_to_time)
+                .map(Some)
+                .ok_or_else(|| corrupt("conflict json")),
             None => Err(corrupt("conflict json")),
         }
     };
@@ -432,11 +434,73 @@ mod tests {
     #[test]
     fn leaving_a_state_clears_its_columns() {
         let mut s = QueueStore::open_in_memory().unwrap();
-        let id = new_item(&mut s);
-        s.set_state(id, &TransferState::Failed(Error::new(ErrorKind::Io, "x")))
+        let conflict = ConflictInfo {
+            src_size: 1,
+            dst_size: 2,
+            src_modified: None,
+            dst_modified: None,
+        };
+        let leaving = [
+            TransferState::Failed(Error::new(ErrorKind::Io, "x").with_detail("d")),
+            TransferState::AwaitingDecision(conflict),
+            TransferState::Skipped("why".to_string()),
+        ];
+        for st in leaving {
+            let id = new_item(&mut s);
+            s.set_state(id, &st).unwrap();
+            s.set_state(id, &TransferState::Queued).unwrap();
+            let nulls: i64 = s
+                .conn
+                .query_row(
+                    "SELECT error_kind IS NULL AND error_message IS NULL AND error_detail IS NULL \
+                     AND conflict_json IS NULL AND state_detail IS NULL FROM transfers WHERE id = ?1",
+                    [id.0],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(nulls, 1, "columns not cleared after leaving {st:?}");
+        }
+    }
+
+    #[test]
+    fn out_of_range_stored_timestamps_are_errors_not_panics() {
+        for bad in [
+            "-9223372036854775808",
+            "9223372036854775807",
+            "99999999999999999",
+        ] {
+            let mut s = QueueStore::open_in_memory().unwrap();
+            let id = new_item(&mut s);
+            s.set_state(
+                id,
+                &TransferState::AwaitingDecision(ConflictInfo {
+                    src_size: 1,
+                    dst_size: 2,
+                    src_modified: None,
+                    dst_modified: None,
+                }),
+            )
             .unwrap();
-        s.set_state(id, &TransferState::Queued).unwrap();
-        assert_eq!(s.get(id).unwrap().unwrap().state, TransferState::Queued);
+            let json = format!(
+                "{{\"src_size\":1,\"dst_size\":2,\"src_modified\":{bad},\"dst_modified\":null}}"
+            );
+            s.conn
+                .execute("UPDATE transfers SET conflict_json = ?1", [json])
+                .unwrap();
+            // Representable on some platforms (Linux i64 seconds), not on others (Windows):
+            // either way it must be a value or an Io error, never a panic. Unparseable
+            // numbers are an error everywhere.
+            let got = s.get(id);
+            let listed = s.list_all();
+            let recovered = s.recover();
+            if bad.parse::<i64>().is_err() {
+                assert_eq!(got.unwrap_err().kind, ErrorKind::Io);
+                assert_eq!(listed.unwrap_err().kind, ErrorKind::Io);
+                assert_eq!(recovered.unwrap_err().kind, ErrorKind::Io);
+            } else if let Err(e) = got {
+                assert_eq!(e.kind, ErrorKind::Io);
+            }
+        }
     }
 
     #[test]
