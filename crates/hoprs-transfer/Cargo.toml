@@ -8,7 +8,10 @@ license.workspace = true
 hoprs-core = { path = "../hoprs-core" }
 hoprs-remote = { path = "../hoprs-remote" }
 rusqlite = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "time", "sync", "rt"] }
+tokio-util = { workspace = true }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "time", "io-util"] }
 tempfile = { workspace = true }
 hoprs-remote = { path = "../hoprs-remote", features = ["testing"] }
