@@ -328,6 +328,20 @@ impl QueueStore {
         Ok(())
     }
 
+    /// Persists several byte counts in one transaction.
+    pub fn set_bytes_done_many(&mut self, updates: &[(TransferId, u64)]) -> Result<()> {
+        let tx = self.conn.transaction().db()?;
+        {
+            let mut stmt = tx
+                .prepare_cached("UPDATE transfers SET bytes_done = ?2 WHERE id = ?1")
+                .db()?;
+            for (id, bytes) in updates {
+                stmt.execute(params![id.0, *bytes as i64]).db()?;
+            }
+        }
+        tx.commit().db()
+    }
+
     pub fn get(&self, id: TransferId) -> Result<Option<TransferItem>> {
         self.query(&format!("{SELECT} WHERE id = ?1"), params![id.0])
             .map(|mut v| v.pop())
@@ -514,6 +528,17 @@ mod tests {
             (item.is_dir, item.size, item.bytes_done),
             (Some(false), Some(42), 7)
         );
+    }
+
+    #[test]
+    fn set_bytes_done_many_updates_each_listed_item() {
+        let mut s = QueueStore::open_in_memory().unwrap();
+        let (a, b, c) = (new_item(&mut s), new_item(&mut s), new_item(&mut s));
+        s.set_bytes_done(c, 5).unwrap();
+        s.set_bytes_done_many(&[(a, 100), (b, 200)]).unwrap();
+        let bytes: Vec<u64> = s.list_all().unwrap().iter().map(|i| i.bytes_done).collect();
+        assert_eq!(bytes, vec![100, 200, 5]);
+        s.set_bytes_done_many(&[]).unwrap();
     }
 
     #[test]

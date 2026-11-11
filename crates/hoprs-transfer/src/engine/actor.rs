@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
-use hoprs_core::{Result, SiteId};
+use hoprs_core::{Error, Result, SiteId};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -21,6 +21,19 @@ use crate::progress::ProgressTracker;
 use crate::store::QueueStore;
 
 const MAX_WORKERS: usize = 16;
+
+/// Appends a queue-store error to `e`'s technical detail.
+fn with_store_detail(e: Error, store_err: &Error) -> Error {
+    let store = match &store_err.detail {
+        Some(d) => format!("queue store: {}: {d}", store_err.message),
+        None => format!("queue store: {}", store_err.message),
+    };
+    let detail = match &e.detail {
+        Some(d) => format!("{d}; {store}"),
+        None => store,
+    };
+    e.with_detail(detail)
+}
 
 pub(super) enum Command {
     RegisterSite {
@@ -224,13 +237,15 @@ impl Actor {
                 if let Some(item) = self.items.get_mut(&id) {
                     item.bytes_done = bytes;
                 }
-                let state = match self.store.set_bytes_done(id, bytes) {
-                    Err(e) => TransferState::Failed(e),
-                    Ok(()) => match result {
-                        Ok(CopyOutcome::Completed) => TransferState::Done,
-                        Ok(CopyOutcome::Cancelled) => TransferState::Cancelled,
-                        Err(e) => TransferState::Failed(e),
-                    },
+                let state = match (result, self.store.set_bytes_done(id, bytes)) {
+                    (Ok(CopyOutcome::Completed), Ok(())) => TransferState::Done,
+                    (Ok(CopyOutcome::Cancelled), Ok(())) => TransferState::Cancelled,
+                    (Ok(_), Err(store_err)) => TransferState::Failed(store_err),
+                    (Err(e), Ok(())) => TransferState::Failed(e),
+                    // Keep the copy's own error; the store error goes into its detail.
+                    (Err(e), Err(store_err)) => {
+                        TransferState::Failed(with_store_detail(e, &store_err))
+                    }
                 };
                 self.release(id, state);
             }
@@ -281,12 +296,43 @@ impl Actor {
         if updates.is_empty() {
             return;
         }
+        let mut batch = Vec::with_capacity(updates.len());
         for u in &updates {
             if let Some(item) = self.items.get_mut(&u.id) {
                 item.bytes_done = u.bytes_done;
             }
-            let _ = self.store.set_bytes_done(u.id, u.bytes_done);
+            batch.push((u.id, u.bytes_done));
         }
+        let _ = self.store.set_bytes_done_many(&batch);
         self.emit(Event::Progress(updates));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use hoprs_core::ErrorKind;
+
+    use super::*;
+
+    #[test]
+    fn store_error_goes_into_the_copy_error_detail() {
+        let store_err = Error::new(ErrorKind::Io, "Queue database error").with_detail("disk full");
+        let copy = Error::new(ErrorKind::Permission, "denied");
+        let e = with_store_detail(copy, &store_err);
+        assert_eq!(
+            (e.kind, e.message.as_str()),
+            (ErrorKind::Permission, "denied")
+        );
+        assert_eq!(
+            e.detail.as_deref(),
+            Some("queue store: Queue database error: disk full")
+        );
+
+        let copy = Error::new(ErrorKind::Io, "read failed").with_detail("eof");
+        let e = with_store_detail(copy, &store_err);
+        assert_eq!(
+            e.detail.as_deref(),
+            Some("eof; queue store: Queue database error: disk full")
+        );
     }
 }

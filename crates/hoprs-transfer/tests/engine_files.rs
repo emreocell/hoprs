@@ -341,12 +341,16 @@ async fn persists_items_and_emits_added() {
     assert_eq!(snap[0], stored);
 }
 
-/// `MemFs` whose read streams sleep before every poll that moves data, so a
-/// copy spans several progress intervals.
-struct SlowReadFs {
+/// `MemFs` wrapper for tests: read streams sleep `per_read` before every poll
+/// (so a copy spans several progress intervals), and `open_read` of
+/// `panic_on_read` panics.
+struct TestFs {
     inner: MemFs,
     per_read: Duration,
+    panic_on_read: Option<RemotePath>,
 }
+
+const INJECTED_PANIC: &str = "injected test panic";
 
 struct SlowRead {
     inner: BoxAsyncRead,
@@ -373,7 +377,7 @@ impl tokio::io::AsyncRead for SlowRead {
 }
 
 #[async_trait::async_trait]
-impl RemoteFs for SlowReadFs {
+impl RemoteFs for TestFs {
     async fn list(&self, path: &RemotePath) -> Result<Vec<RemoteEntry>> {
         self.inner.list(path).await
     }
@@ -381,6 +385,9 @@ impl RemoteFs for SlowReadFs {
         self.inner.stat(path).await
     }
     async fn open_read(&self, path: &RemotePath, offset: u64) -> Result<BoxAsyncRead> {
+        if self.panic_on_read.as_ref() == Some(path) {
+            panic!("{INJECTED_PANIC}");
+        }
         let inner = self.inner.open_read(path, offset).await?;
         Ok(Box::new(SlowRead {
             inner,
@@ -415,9 +422,10 @@ async fn slow_copy_emits_bounded_monotonic_progress() {
     let local_mem = MemFs::new();
     let bytes = data(1 << 20);
     local_mem.add_file("/w/a.bin", &bytes, mtime());
-    let local = SlowReadFs {
+    let local = TestFs {
         inner: local_mem,
         per_read: Duration::from_millis(2),
+        panic_on_read: None,
     };
     let remote = MemFs::new();
     remote.add_dir("/srv");
@@ -461,4 +469,77 @@ async fn slow_copy_emits_bounded_monotonic_progress() {
     );
     assert!(seen.windows(2).all(|w| w[0] < w[1]));
     assert_eq!(remote.read_file("/srv/a.bin").unwrap(), bytes);
+}
+
+/// Silences the default panic message for `INJECTED_PANIC` only; every other
+/// panic still goes to the previous hook.
+fn silence_injected_panics() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| info.payload().downcast_ref::<&str>().copied());
+        if msg != Some(INJECTED_PANIC) {
+            previous(info);
+        }
+    }));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_panic_fails_item_and_frees_slot() {
+    silence_injected_panics();
+    let local_mem = MemFs::new();
+    local_mem.add_file("/w/a.bin", &data(10_000), mtime());
+    local_mem.add_file("/w/b.bin", &data(20_000), mtime());
+    let local = TestFs {
+        inner: local_mem,
+        per_read: Duration::ZERO,
+        panic_on_read: Some(path("/w/a.bin")),
+    };
+    let remote = MemFs::new();
+    remote.add_dir("/srv");
+    let (engine, mut rx) = engine_with(
+        Arc::new(local),
+        Arc::new(remote.clone()),
+        1,
+        EngineConfig::default(),
+    )
+    .await;
+
+    let a = engine
+        .enqueue(spec(Direction::Upload, "/w/a.bin", "/srv/a.bin"))
+        .await
+        .unwrap();
+    let b = engine
+        .enqueue(spec(Direction::Upload, "/w/b.bin", "/srv/b.bin"))
+        .await
+        .unwrap();
+
+    match wait_terminal(&mut rx, a).await {
+        TransferState::Failed(e) => {
+            assert_eq!(e.kind, ErrorKind::Io);
+            assert_eq!(e.message, "Worker panicked");
+        }
+        other => panic!("expected Failed(Io), got {other:?}"),
+    }
+    assert_eq!(wait_terminal(&mut rx, b).await, TransferState::Done);
+    assert_eq!(remote.read_file("/srv/b.bin").unwrap(), data(20_000));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn uploads_zero_byte_file() {
+    let (engine, local, remote, mut rx) = engine_with_memfs(1).await;
+    local.add_file("/w/empty", b"", mtime());
+    remote.add_dir("/srv");
+
+    let id = engine
+        .enqueue(spec(Direction::Upload, "/w/empty", "/srv/empty"))
+        .await
+        .unwrap();
+    assert_eq!(wait_terminal(&mut rx, id).await, TransferState::Done);
+    assert_eq!(remote.read_file("/srv/empty").unwrap(), b"");
+    let snap = engine.snapshot().await;
+    assert_eq!((snap[0].size, snap[0].bytes_done), (Some(0), 0));
 }

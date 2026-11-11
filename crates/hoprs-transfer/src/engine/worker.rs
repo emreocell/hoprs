@@ -70,16 +70,43 @@ pub(super) enum WorkerMsg {
     },
 }
 
+fn panicked() -> Error {
+    Error::new(ErrorKind::Io, "Worker panicked")
+}
+
+/// Runs one worker phase as its own task and always reports to the actor:
+/// the phase's own message, or `on_panic()` if the phase panicked (so its
+/// slot is never leaked).
+fn spawn_phase<F, P>(tx: mpsc::UnboundedSender<WorkerMsg>, phase: F, on_panic: P)
+where
+    F: Future<Output = WorkerMsg> + Send + 'static,
+    P: FnOnce() -> WorkerMsg + Send + 'static,
+{
+    tokio::spawn(async move {
+        let msg = tokio::spawn(phase).await.unwrap_or_else(|_| on_panic());
+        let _ = tx.send(msg);
+    });
+}
+
 pub(super) fn spawn_prepare(
     id: TransferId,
     route: Route,
     policy: ConflictPolicy,
     tx: mpsc::UnboundedSender<WorkerMsg>,
 ) {
-    tokio::spawn(async move {
-        let result = prepare(&route, policy).await.map(Box::new);
-        let _ = tx.send(WorkerMsg::Prepared { id, route, result });
-    });
+    let route_on_panic = route.clone();
+    spawn_phase(
+        tx,
+        async move {
+            let result = prepare(&route, policy).await.map(Box::new);
+            WorkerMsg::Prepared { id, route, result }
+        },
+        move || WorkerMsg::Prepared {
+            id,
+            route: route_on_panic,
+            result: Err(panicked()),
+        },
+    );
 }
 
 async fn prepare(route: &Route, policy: ConflictPolicy) -> Result<Prepared> {
@@ -108,19 +135,28 @@ pub(super) fn spawn_copy(
     cancel: CancellationToken,
     tx: mpsc::UnboundedSender<WorkerMsg>,
 ) {
-    tokio::spawn(async move {
-        let result = copy_file(
-            route.src.as_ref(),
-            &src,
-            route.dst.as_ref(),
-            &route.dst_path,
-            offset,
-            buf_size,
-            &counter,
-            &cancel,
-        )
-        .await;
-        let bytes = counter.load(Ordering::Relaxed);
-        let _ = tx.send(WorkerMsg::Copied { id, bytes, result });
-    });
+    let counter_on_panic = Arc::clone(&counter);
+    spawn_phase(
+        tx,
+        async move {
+            let result = copy_file(
+                route.src.as_ref(),
+                &src,
+                route.dst.as_ref(),
+                &route.dst_path,
+                offset,
+                buf_size,
+                &counter,
+                &cancel,
+            )
+            .await;
+            let bytes = counter.load(Ordering::Relaxed);
+            WorkerMsg::Copied { id, bytes, result }
+        },
+        move || WorkerMsg::Copied {
+            id,
+            bytes: counter_on_panic.load(Ordering::Relaxed),
+            result: Err(panicked()),
+        },
+    );
 }
