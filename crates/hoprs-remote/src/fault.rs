@@ -80,11 +80,13 @@ impl<F: RemoteFs> FaultFs<F> {
     }
 
     /// Fails once, when the cumulative bytes read or written through streams
-    /// (counted since creation) would exceed `bytes`. Data up to the threshold
+    /// (counted from this call) would exceed `bytes`. Data up to the threshold
     /// is still delivered; the next read/write then fails with an `io::Error`
     /// that `Error::from` maps back to `kind` (see `io_kind_for`).
     pub fn fail_io_after(&self, bytes: u64, kind: ErrorKind) {
-        lock(&self.state).fail_after = Some((bytes, kind));
+        let mut st = lock(&self.state);
+        st.bytes = 0;
+        st.fail_after = Some((bytes, kind));
     }
 
     /// The next call of `op` fails once with `kind`.
@@ -311,6 +313,22 @@ mod tests {
         let io_err = w.write_all(b"abcd").await.unwrap_err();
         assert_eq!(Error::from(io_err).kind, ErrorKind::Permission);
         w.write_all(b"abcd").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fail_io_after_budget_counts_from_arming() {
+        let fs = fs_with_hello();
+        let mut r = fs.open_read(&p("/f"), 0).await.unwrap();
+        let mut out = Vec::new();
+        r.read_to_end(&mut out).await.unwrap();
+        assert_eq!(out, b"hello");
+
+        fs.fail_io_after(3, ErrorKind::Network);
+        let mut r = fs.open_read(&p("/f"), 0).await.unwrap();
+        let mut out = Vec::new();
+        let io_err = r.read_to_end(&mut out).await.unwrap_err();
+        assert_eq!(out, b"hel");
+        assert_eq!(Error::from(io_err).kind, ErrorKind::Network);
     }
 
     #[tokio::test]
