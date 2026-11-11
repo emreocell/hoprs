@@ -5,9 +5,13 @@ use std::time::SystemTime;
 use async_trait::async_trait;
 use hoprs_core::{RemoteEntry, RemotePath, Result};
 
+#[cfg(feature = "testing")]
+mod fault;
 mod local;
 #[cfg(feature = "testing")]
 mod mem;
+#[cfg(feature = "testing")]
+pub use fault::{FaultFs, Op};
 #[cfg(feature = "testing")]
 pub use mem::MemFs;
 
