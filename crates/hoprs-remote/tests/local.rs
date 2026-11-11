@@ -175,3 +175,30 @@ async fn chmod_and_symlinks() {
         ErrorKind::NotFound
     );
 }
+
+#[cfg(windows)]
+#[tokio::test]
+async fn rejects_components_escaping_root() {
+    let (_dir, fs) = setup();
+    for bad in ["/a\\..\\..\\x", "/C:", "/C:\\x"] {
+        assert_eq!(
+            fs.stat(&p(bad)).await.unwrap_err().kind,
+            ErrorKind::Io,
+            "{bad}"
+        );
+        assert_eq!(
+            fs.open_write(&p(bad), 0).await.err().unwrap().kind,
+            ErrorKind::Io,
+            "{bad}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn backslash_name_stays_inside_root() {
+    let (dir, fs) = setup();
+    write(&fs, "/a\\b.txt", 0, b"hi").await;
+    assert!(dir.path().join("a\\b.txt").is_file());
+    assert_eq!(read(&fs, "/a\\b.txt", 0).await, "hi");
+}

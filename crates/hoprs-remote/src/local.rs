@@ -6,7 +6,7 @@
 
 use std::fs::Metadata;
 use std::io::{self, SeekFrom};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
 use async_trait::async_trait;
@@ -69,21 +69,34 @@ impl LocalFs {
         LocalFs { root: root.into() }
     }
 
-    fn local(&self, path: &RemotePath) -> PathBuf {
+    /// Maps a remote path under `root`. Every component must be a single
+    /// plain name on the running OS, so remote-supplied names (drive
+    /// prefixes, embedded separators, `..`) can never escape `root`.
+    fn local(&self, path: &RemotePath) -> Result<PathBuf> {
         let mut out = self.root.clone();
-        out.extend(path.as_str().split('/').filter(|s| !s.is_empty()));
-        out
+        for comp in path.as_str().split('/').filter(|s| !s.is_empty()) {
+            let mut parts = Path::new(comp).components();
+            match (parts.next(), parts.next()) {
+                (Some(Component::Normal(n)), None) if n == std::ffi::OsStr::new(comp) => {}
+                _ => {
+                    return Err(Error::new(ErrorKind::Io, "Invalid local path")
+                        .with_detail(format!("unsafe path component: {comp:?}")));
+                }
+            }
+            out.push(comp);
+        }
+        Ok(out)
     }
 
     async fn meta(&self, path: &RemotePath) -> Result<Metadata> {
-        Ok(tokio::fs::symlink_metadata(self.local(path)).await?)
+        Ok(tokio::fs::symlink_metadata(self.local(path)?).await?)
     }
 }
 
 #[async_trait]
 impl RemoteFs for LocalFs {
     async fn list(&self, path: &RemotePath) -> Result<Vec<RemoteEntry>> {
-        let mut rd = tokio::fs::read_dir(self.local(path)).await?;
+        let mut rd = tokio::fs::read_dir(self.local(path)?).await?;
         let mut out = Vec::new();
         while let Some(de) = rd.next_entry().await? {
             let name = de.file_name().to_string_lossy().into_owned();
@@ -105,7 +118,7 @@ impl RemoteFs for LocalFs {
     }
 
     async fn open_read(&self, path: &RemotePath, offset: u64) -> Result<BoxAsyncRead> {
-        let local = self.local(path);
+        let local = self.local(path)?;
         if tokio::fs::metadata(&local).await?.is_dir() {
             return Err(io_err(format!("not a file: {path}")));
         }
@@ -117,7 +130,7 @@ impl RemoteFs for LocalFs {
     }
 
     async fn open_write(&self, path: &RemotePath, offset: u64) -> Result<BoxAsyncWrite> {
-        let local = self.local(path);
+        let local = self.local(path)?;
         match tokio::fs::metadata(&local).await {
             Ok(m) if m.is_dir() => return Err(io_err(format!("not a file: {path}"))),
             Ok(m) if offset > m.len() => {
@@ -144,7 +157,7 @@ impl RemoteFs for LocalFs {
     }
 
     async fn mkdir(&self, path: &RemotePath) -> Result<()> {
-        let local = self.local(path);
+        let local = self.local(path)?;
         match tokio::fs::create_dir(&local).await {
             Ok(()) => Ok(()),
             Err(e) => match tokio::fs::metadata(&local).await {
@@ -155,28 +168,28 @@ impl RemoteFs for LocalFs {
     }
 
     async fn rename(&self, from: &RemotePath, to: &RemotePath) -> Result<()> {
-        Ok(tokio::fs::rename(self.local(from), self.local(to)).await?)
+        Ok(tokio::fs::rename(self.local(from)?, self.local(to)?).await?)
     }
 
     async fn remove_file(&self, path: &RemotePath) -> Result<()> {
         if self.meta(path).await?.is_dir() {
             return Err(io_err(format!("is a directory: {path}")));
         }
-        Ok(tokio::fs::remove_file(self.local(path)).await?)
+        Ok(tokio::fs::remove_file(self.local(path)?).await?)
     }
 
     async fn remove_dir(&self, path: &RemotePath) -> Result<()> {
         if !self.meta(path).await?.is_dir() {
             return Err(io_err(format!("not a directory: {path}")));
         }
-        Ok(tokio::fs::remove_dir(self.local(path)).await?)
+        Ok(tokio::fs::remove_dir(self.local(path)?).await?)
     }
 
     #[cfg(unix)]
     async fn chmod(&self, path: &RemotePath, mode: u32) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         Ok(
-            tokio::fs::set_permissions(self.local(path), std::fs::Permissions::from_mode(mode))
+            tokio::fs::set_permissions(self.local(path)?, std::fs::Permissions::from_mode(mode))
                 .await?,
         )
     }
@@ -187,10 +200,10 @@ impl RemoteFs for LocalFs {
     }
 
     async fn set_modified(&self, path: &RemotePath, mtime: SystemTime) -> Result<()> {
-        let local = self.local(path);
+        let local = self.local(path)?;
         tokio::task::spawn_blocking(move || -> io::Result<()> {
             let file = std::fs::File::options().write(true).open(&local);
-            // Directories cannot be opened for writing on every platform.
+            // Fall back to a read-only handle for directories (Unix).
             let file = match file {
                 Ok(f) => f,
                 Err(_) if local.is_dir() => std::fs::File::open(&local)?,
