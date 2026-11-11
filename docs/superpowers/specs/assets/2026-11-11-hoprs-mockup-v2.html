@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="hoprs main window mockup: workspaces, dual-pane files and the transfer queue.">
+<title>hoprs mockup v2</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* Hallmark · shape: app screen · genre: atmospheric · theme: Terminal (by request, toned down: neutral ground, white signal, sans chrome, mono data)
+ * nav: top tab strip + workspace sidebar · signature: the transfer queue · states: full, loading, empty, error
+ * axes: dark/sans+mono/achromatic · posture: restrained · contrast: pass · v2.0.0 */
+/* Hallmark · pre-emit critique: P4 H4 E4 S4 R3 V4 · weakest: R, static brainstorming data; error and waiting states shown in the queue */
+/* Hallmark · waive 22 · user request: "mude o verde para branco e tons de branco" · a pure achromatic ramp is the brief */
+/* Hallmark · waive 64 · .tag holds only ssh, sftp, ftps · protocol identifiers are code, not labels */
+:root {
+  color-scheme: dark;
+  --space-3xs: 2px; --space-2xs: 4px; --space-xs: 8px; --space-sm: 12px; --space-md: 16px; --space-lg: 24px;
+  --text-xs: 0.75rem; --text-sm: 0.8125rem; --text-md: 0.9375rem;
+  --dur-micro: 120ms;
+  --color-error: oklch(70% 0.14 25);
+  --color-paper: oklch(13% 0 0); --color-paper-2: oklch(16.5% 0 0); --color-paper-3: oklch(21% 0 0);
+  --color-ink: oklch(97% 0 0); --color-ink-2: oklch(84% 0 0); --color-muted: oklch(63% 0 0);
+  --color-rule: oklch(25% 0 0); --color-rule-2: oklch(34% 0 0);
+  --color-accent: oklch(98% 0 0); --color-accent-ink: oklch(14% 0 0); --color-focus: oklch(98% 0 0);
+  --color-accent-wash: oklch(24% 0 0);
+  --font-ui: "Inter", system-ui, sans-serif;
+  --font-data: "JetBrains Mono", ui-monospace, monospace;
+  --rule-hair: 1px; --radius: 4px;
+}
+*, *::before, *::after { box-sizing: border-box; }
+html, body { overflow-x: clip; }
+html { scrollbar-color: var(--color-rule-2) var(--color-paper); }
+body { margin: 0; background: var(--color-paper); color: var(--color-ink); font-family: var(--font-ui); font-size: var(--text-sm); line-height: 1.5; font-variant-numeric: tabular-nums; -webkit-font-smoothing: antialiased; caret-color: var(--color-accent); }
+::selection { background: var(--color-rule-2); color: var(--color-ink); }
+:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
+button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; border-radius: var(--radius); }
+button:disabled { color: var(--color-rule-2); cursor: not-allowed; background: none; }
+h2 { margin: 0; text-wrap: balance; font-weight: 600; font-size: var(--text-sm); overflow-wrap: break-word; min-width: 0; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
+.mono { font-family: var(--font-data); font-size: 0.78rem; }
+
+.app { display: grid; grid-template-columns: 256px minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto auto; height: 100vh; min-height: 640px; }
+
+.top { grid-column: 1 / -1; display: flex; align-items: stretch; border-bottom: var(--rule-hair) solid var(--color-rule); }
+.brand { width: 256px; display: flex; align-items: center; gap: var(--space-xs); padding-inline: var(--space-md); border-right: var(--rule-hair) solid var(--color-rule); font-weight: 600; font-size: var(--text-md); letter-spacing: -0.01em; }
+.brand span { color: var(--color-muted); font-weight: 400; font-size: var(--text-xs); }
+.tabs { display: flex; flex: 1; min-width: 0; overflow-x: auto; gap: var(--space-3xs); padding: var(--space-2xs) var(--space-xs) 0; }
+.tab { display: flex; align-items: center; gap: var(--space-xs); height: 36px; padding-inline: var(--space-md); color: var(--color-muted); white-space: nowrap; border-radius: var(--radius) var(--radius) 0 0; transition: background-color var(--dur-micro) ease, color var(--dur-micro) ease; }
+.tab:hover { background: var(--color-paper-2); color: var(--color-ink-2); }
+.tab[aria-selected="true"] { background: var(--color-paper-3); color: var(--color-ink); box-shadow: inset 0 -2px 0 var(--color-accent); }
+.tag { font-family: var(--font-data); font-size: 0.7rem; color: var(--color-muted); }
+.tab[aria-selected="true"] .tag { color: var(--color-ink-2); }
+.palette { display: flex; align-items: center; gap: var(--space-sm); margin: var(--space-2xs) var(--space-sm); padding-inline: var(--space-sm); color: var(--color-muted); border: var(--rule-hair) solid var(--color-rule); }
+.palette:hover { color: var(--color-ink); border-color: var(--color-rule-2); }
+.kbd { border: var(--rule-hair) solid var(--color-rule-2); border-radius: 3px; padding: 0 var(--space-2xs); font-size: var(--text-xs); color: var(--color-ink-2); }
+
+.side { grid-row: 2 / 5; background: var(--color-paper-2); border-right: var(--rule-hair) solid var(--color-rule); display: flex; flex-direction: column; min-height: 0; overflow-y: auto; }
+.search { margin: var(--space-sm); display: flex; align-items: center; border: var(--rule-hair) solid var(--color-rule-2); border-radius: var(--radius); background: var(--color-paper); padding: 0 var(--space-xs); height: 32px; }
+.search input { flex: 1; min-width: 0; background: none; border: 0; color: var(--color-ink); font: inherit; outline: none; }
+.search input::placeholder { color: var(--color-muted); }
+.search:focus-within { border-color: var(--color-accent); }
+.group { padding: var(--space-xs) 0; border-top: var(--rule-hair) solid var(--color-rule); }
+.group-head { display: flex; justify-content: space-between; align-items: center; padding: var(--space-2xs) var(--space-md); color: var(--color-muted); font-size: var(--text-xs); }
+.group-head button { color: var(--color-muted); padding: 0 var(--space-2xs); }
+.group-head button:hover { color: var(--color-ink); }
+.ws { display: block; width: calc(100% - 2 * var(--space-xs)); margin-inline: var(--space-xs); text-align: left; padding: var(--space-xs); transition: background-color var(--dur-micro) ease; }
+.ws:hover { background: var(--color-paper-3); }
+.ws-name { display: flex; justify-content: space-between; color: var(--color-ink-2); font-weight: 500; }
+.ws-name .count { font-weight: 400; color: var(--color-muted); font-size: var(--text-xs); }
+.ws.open { background: var(--color-paper-3); }
+.ws.open .ws-name { color: var(--color-ink); }
+.ws-sites { list-style: none; margin: var(--space-2xs) 0 0 var(--space-lg); padding: 0 var(--space-xs) 0 var(--space-xs); border-left: var(--rule-hair) solid var(--color-rule-2); }
+.ws-sites.flat { border: 0; margin-left: var(--space-xs); }
+.site { display: flex; justify-content: space-between; gap: var(--space-xs); width: 100%; text-align: left; padding: var(--space-3xs) var(--space-xs); color: var(--color-ink-2); }
+.site:hover { background: var(--color-paper-3); color: var(--color-ink); }
+.open-ws { margin: var(--space-sm) var(--space-md) var(--space-xs); width: calc(100% - 2 * var(--space-md)); height: 32px; background: var(--color-accent); color: var(--color-accent-ink); font-weight: 600; transition: background-color var(--dur-micro) ease; }
+.open-ws:hover { background: var(--color-ink-2); }
+.open-ws:active { background: var(--color-muted); }
+.side-foot { margin-top: auto; padding: var(--space-sm) var(--space-md); border-top: var(--rule-hair) solid var(--color-rule); display: flex; gap: var(--space-md); font-size: var(--text-xs); }
+.side-foot button { color: var(--color-muted); }
+.side-foot button:hover { color: var(--color-ink); }
+
+.panes { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); min-height: 0; }
+.pane { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.pane + .pane { border-left: var(--rule-hair) solid var(--color-rule); }
+.path { display: flex; align-items: center; gap: var(--space-sm); height: 38px; padding-inline: var(--space-md); border-bottom: var(--rule-hair) solid var(--color-rule); }
+.path .where { color: var(--color-muted); font-size: var(--text-xs); }
+.crumbs { display: flex; min-width: 0; overflow: hidden; white-space: nowrap; font-family: var(--font-data); font-size: 0.78rem; }
+.crumbs button { color: var(--color-ink-2); padding: 0 var(--space-3xs); }
+.crumbs button:hover { color: var(--color-ink); text-decoration: underline; }
+.crumbs .sep { color: var(--color-rule-2); }
+.scroll { overflow: auto; min-height: 0; flex: 1; }
+table { width: 100%; border-collapse: collapse; }
+th { position: sticky; top: 0; background: var(--color-paper); text-align: left; font-weight: 500; font-size: var(--text-xs); color: var(--color-muted); padding: var(--space-xs) var(--space-md); border-bottom: var(--rule-hair) solid var(--color-rule); }
+td { padding: 0 var(--space-md); height: 30px; white-space: nowrap; color: var(--color-ink-2); }
+td.r, th.r { text-align: right; }
+td.dim { color: var(--color-muted); }
+td.name { font-family: var(--font-data); font-size: 0.78rem; }
+tbody tr:hover td { background: var(--color-paper-2); color: var(--color-ink); }
+tbody tr.sel td { background: var(--color-accent-wash); color: var(--color-ink); }
+.dir { color: var(--color-ink); font-weight: 500; }
+.dir::after { content: "/"; color: var(--color-muted); }
+
+.queue { border-top: var(--rule-hair) solid var(--color-rule-2); max-height: 210px; display: flex; flex-direction: column; min-height: 0; }
+.queue-head { display: flex; align-items: center; gap: var(--space-lg); height: 36px; padding-inline: var(--space-md); border-bottom: var(--rule-hair) solid var(--color-rule); }
+.qtab { color: var(--color-muted); height: 100%; border-radius: 0; }
+.qtab[aria-selected="true"] { color: var(--color-ink); box-shadow: inset 0 -2px 0 var(--color-accent); }
+.qtab:hover { color: var(--color-ink); }
+.queue-head .total { margin-left: auto; color: var(--color-muted); }
+.queue-head .total b { color: var(--color-ink); font-weight: 600; }
+.bar { width: 180px; }
+.track { height: 4px; background: var(--color-rule); border-radius: 2px; overflow: hidden; }
+.fill { height: 100%; background: var(--color-accent); border-radius: 2px; }
+.st-err { color: var(--color-error); }
+.st-wait { color: var(--color-muted); }
+.act { color: var(--color-muted); padding: var(--space-3xs) var(--space-xs); }
+.act:hover { color: var(--color-ink); background: var(--color-paper-3); }
+
+.status { grid-column: 2; display: flex; gap: var(--space-lg); height: 26px; align-items: center; padding-inline: var(--space-md); border-top: var(--rule-hair) solid var(--color-rule); font-size: var(--text-xs); color: var(--color-muted); background: var(--color-paper-2); }
+.status .ok { color: var(--color-ink); }
+
+@media (max-width: 60rem) { .app { grid-template-columns: minmax(0, 1fr); } .side, .brand { display: none; } .panes { grid-template-columns: minmax(0, 1fr); } .pane:first-child { display: none; } .status { grid-column: 1; } }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <header class="top">
+    <div class="brand">hoprs <span>0.1</span></div>
+    <nav class="tabs" role="tablist" aria-label="Open sessions">
+      <button class="tab" role="tab" aria-selected="true">shop-prod <span class="tag">sftp</span></button>
+      <button class="tab" role="tab" aria-selected="false">shop-prod <span class="tag">ssh</span></button>
+      <button class="tab" role="tab" aria-selected="false">shop-staging <span class="tag">sftp</span></button>
+      <button class="tab" role="tab" aria-selected="false">shop-cdn <span class="tag">ftps</span></button>
+    </nav>
+    <button class="palette">Go to anything <span class="kbd">Ctrl K</span></button>
+  </header>
+
+  <aside class="side" aria-label="Workspaces and sites">
+    <label class="search"><input type="search" placeholder="Filter sites"></label>
+
+    <div class="group">
+      <div class="group-head">Workspaces <button aria-label="New workspace">+ New</button></div>
+      <button class="ws open" aria-expanded="true"><span class="ws-name">Shop <span class="count">3 sites</span></span></button>
+      <ul class="ws-sites">
+        <li><button class="site">shop-prod <span class="tag">ssh + sftp</span></button></li>
+        <li><button class="site">shop-staging <span class="tag">sftp</span></button></li>
+        <li><button class="site">shop-cdn <span class="tag">ftps</span></button></li>
+      </ul>
+      <button class="open-ws">Open workspace</button>
+      <button class="ws" aria-expanded="false"><span class="ws-name">Client blog <span class="count">2 sites</span></span></button>
+      <button class="ws" aria-expanded="false"><span class="ws-name">Homelab <span class="count">4 sites</span></span></button>
+    </div>
+
+    <div class="group">
+      <div class="group-head">All sites <button aria-label="New site">+ New</button></div>
+      <ul class="ws-sites flat">
+        <li><button class="site">blog-ftp <span class="tag">ftp</span></button></li>
+        <li><button class="site">nas <span class="tag">ssh</span></button></li>
+        <li><button class="site">pi-hole <span class="tag">ssh</span></button></li>
+        <li><button class="site">old-host <span class="tag">ftp</span></button></li>
+      </ul>
+    </div>
+
+    <div class="side-foot"><button>Import from FileZilla</button><button>Settings</button></div>
+  </aside>
+
+  <main class="panes">
+    <section class="pane" aria-label="Local files">
+      <div class="path"><span class="where">Local</span>
+        <div class="crumbs"><button>~</button><span class="sep">/</span><button>work</button><span class="sep">/</span><button>shop</button><span class="sep">/</span><button>dist</button></div>
+      </div>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Name</th><th class="r">Size</th><th>Modified</th></tr></thead>
+          <tbody>
+            <tr><td class="name dir">..</td><td></td><td></td></tr>
+            <tr><td class="name dir">assets</td><td class="r dim">-</td><td class="dim">11 Nov 14:02</td></tr>
+            <tr class="sel"><td class="name dir">build</td><td class="r dim">-</td><td class="dim">11 Nov 15:40</td></tr>
+            <tr><td class="name">index.html</td><td class="r">4.1 KB</td><td class="dim">11 Nov 15:40</td></tr>
+            <tr><td class="name">app.3f9c1a.js</td><td class="r">812 KB</td><td class="dim">11 Nov 15:40</td></tr>
+            <tr><td class="name">app.3f9c1a.css</td><td class="r">96 KB</td><td class="dim">11 Nov 15:40</td></tr>
+            <tr><td class="name">robots.txt</td><td class="r">68 B</td><td class="dim">02 Oct 09:11</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="pane" aria-label="Remote files on shop-prod">
+      <div class="path"><span class="where">shop-prod</span>
+        <div class="crumbs"><button>/</button><button>var</button><span class="sep">/</span><button>www</button><span class="sep">/</span><button>shop</button><span class="sep">/</span><button>current</button></div>
+      </div>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Name</th><th class="r">Size</th><th>Modified</th><th>Permissions</th></tr></thead>
+          <tbody>
+            <tr><td class="name dir">..</td><td></td><td></td><td></td></tr>
+            <tr><td class="name dir">assets</td><td class="r dim">-</td><td class="dim">09 Nov 18:20</td><td class="dim mono">drwxr-xr-x</td></tr>
+            <tr><td class="name dir">storage</td><td class="r dim">-</td><td class="dim">01 Nov 08:03</td><td class="dim mono">drwxrwx---</td></tr>
+            <tr><td class="name">.env</td><td class="r">612 B</td><td class="dim">20 Oct 10:44</td><td class="dim mono">-rw-------</td></tr>
+            <tr><td class="name">index.html</td><td class="r">4.0 KB</td><td class="dim">09 Nov 18:20</td><td class="dim mono">-rw-r--r--</td></tr>
+            <tr><td class="name">app.91be02.js</td><td class="r">809 KB</td><td class="dim">09 Nov 18:20</td><td class="dim mono">-rw-r--r--</td></tr>
+            <tr><td class="name">access.log</td><td class="r">38 MB</td><td class="dim">11 Nov 15:51</td><td class="dim mono">-rw-r-----</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <section class="queue" aria-label="Transfer queue">
+    <div class="queue-head">
+      <h2>Transfers</h2>
+      <button class="qtab" aria-selected="true">Active 3</button>
+      <button class="qtab" aria-selected="false">Queued 12</button>
+      <button class="qtab" aria-selected="false">Failed 1</button>
+      <button class="qtab" aria-selected="false">Done 48</button>
+      <span class="total"><b>41.7 MB/s</b> total, 4 workers</span>
+    </div>
+    <div class="scroll">
+      <table>
+        <tbody>
+          <tr><td class="name">↑ build/app.3f9c1a.js</td><td class="dim">shop-prod</td><td class="bar"><div class="track"><div class="fill" style="width:51%"></div></div></td><td class="r">51%</td><td class="r">18.2 MB/s</td><td class="r"><button class="act">Pause</button><button class="act">Cancel</button></td></tr>
+          <tr><td class="name">↑ build/media/hero.webp</td><td class="dim">shop-cdn</td><td class="bar"><div class="track"><div class="fill" style="width:82%"></div></div></td><td class="r">82%</td><td class="r">12.9 MB/s</td><td class="r"><button class="act">Pause</button><button class="act">Cancel</button></td></tr>
+          <tr><td class="name">↓ access.log</td><td class="dim">shop-prod</td><td class="bar"><div class="track"><div class="fill" style="width:22%"></div></div></td><td class="r">22%</td><td class="r">10.6 MB/s</td><td class="r"><button class="act">Pause</button><button class="act">Cancel</button></td></tr>
+          <tr><td class="name">↑ build/fonts/inter.woff2</td><td class="dim">shop-staging</td><td class="st-err" colspan="3">Permission denied: /var/www/shop/fonts</td><td class="r"><button class="act">Retry</button><button class="act">Skip</button></td></tr>
+          <tr><td class="name">↑ build/index.html</td><td class="dim">shop-prod</td><td class="st-wait" colspan="3">Waiting for a worker</td><td></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer class="status">
+    <span class="ok">Connected</span><span class="mono">deploy@203.0.113.4:22</span><span>ed25519 via ssh-agent</span><span>3 of 3 sites in Shop</span>
+  </footer>
+
+</div>
+</body>
+</html>
