@@ -31,3 +31,7 @@ required-features = ["testing"]
 [[test]]
 name = "reconnect"
 required-features = ["testing"]
+
+[[test]]
+name = "shell"
+required-features = ["testing"]
