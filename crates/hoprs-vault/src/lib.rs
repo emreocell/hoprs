@@ -1,16 +1,24 @@
 //! Local storage of saved sites and workspaces.
 //!
 //! Profiles live in two TOML files (`sites.toml`, `workspaces.toml`) under
-//! [`default_dir`]. They never contain secrets.
+//! [`default_dir`]. They never contain secrets: passwords and key
+//! passphrases go to a [`SecretStore`] (the system keyring in the app), and
+//! the site only records that one exists (`has_password`,
+//! `has_key_passphrase`).
 
 mod atomic;
 mod profiles;
+mod secrets;
 
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use hoprs_core::{Error, ErrorKind, Result, Site, SiteId, Workspace, WorkspaceId};
+use secrecy::SecretString;
 
 pub use profiles::UnreadableEntry;
+pub use secrets::{KeyringStore, MemoryStore, SecretKind, SecretStore};
 
 use profiles::Profiles;
 
@@ -19,23 +27,52 @@ pub fn default_dir() -> Option<PathBuf> {
     dirs::config_dir().map(|dir| dir.join("hoprs"))
 }
 
-/// Saved sites and workspaces. Every mutation is written to disk before it
-/// becomes visible; a failed write leaves the vault unchanged.
-#[derive(Debug)]
+/// Saved sites and workspaces, plus their secrets. Every profile mutation
+/// is written to disk before it becomes visible; a failed write leaves the
+/// vault unchanged.
 pub struct Vault {
     dir: PathBuf,
     profiles: Profiles,
+    secrets: Arc<dyn SecretStore>,
+}
+
+/// Lists ids and names only.
+impl fmt::Debug for Vault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let sites: Vec<_> = self
+            .profiles
+            .sites
+            .iter()
+            .map(|s| (&s.id.0, &s.name))
+            .collect();
+        let workspaces: Vec<_> = self
+            .profiles
+            .workspaces
+            .iter()
+            .map(|w| (&w.id.0, &w.name))
+            .collect();
+        f.debug_struct("Vault")
+            .field("dir", &self.dir)
+            .field("sites", &sites)
+            .field("workspaces", &workspaces)
+            .field("unreadable", &self.profiles.unreadable().len())
+            .finish_non_exhaustive()
+    }
+}
+
+fn unknown_site(id: &SiteId) -> Error {
+    Error::new(ErrorKind::NotFound, "Unknown site").with_detail(id.0.clone())
 }
 
 impl Vault {
-    /// Opens the profiles in `dir` without a secret store.
-    ///
-    /// Temporary constructor: replaced by `Vault::open(dir, secrets)` once
-    /// secrets are wired in.
-    pub fn open_profiles_only(dir: &Path) -> Result<Vault> {
+    /// Opens the profiles in `dir`, keeping secrets in `secrets`. A missing
+    /// directory or file is an empty vault; nothing is created until the
+    /// first save.
+    pub fn open(dir: &Path, secrets: Arc<dyn SecretStore>) -> Result<Vault> {
         Ok(Vault {
             dir: dir.to_path_buf(),
             profiles: profiles::load(dir)?,
+            secrets,
         })
     }
 
@@ -114,6 +151,146 @@ impl Vault {
     pub fn unreadable_entries(&self) -> &[UnreadableEntry] {
         self.profiles.unreadable()
     }
+
+    fn site_index(&self, id: &SiteId) -> Result<usize> {
+        self.profiles
+            .sites
+            .iter()
+            .position(|s| &s.id == id)
+            .ok_or_else(|| unknown_site(id))
+    }
+
+    /// Applies `change` to a copy of the site, saves `sites.toml`, then
+    /// commits.
+    fn edit_site(&mut self, id: &SiteId, change: impl FnOnce(&mut Site)) -> Result<()> {
+        let pos = self.site_index(id)?;
+        let mut next = self.profiles.clone();
+        change(&mut next.sites[pos]);
+        profiles::save_sites(&self.dir, &next)?;
+        self.profiles = next;
+        Ok(())
+    }
+
+    /// Removes the site, its references in every workspace and its secrets.
+    ///
+    /// `workspaces.toml` is saved first, then `sites.toml`, each committed
+    /// as soon as it is written: a failure in between leaves the site in
+    /// place without dangling references. Secrets are deleted last; if the
+    /// keyring fails there, the site is already removed and the error is
+    /// returned as `Io`.
+    pub fn remove_site(&mut self, id: &SiteId) -> Result<()> {
+        let pos = self.site_index(id)?;
+        let name = self.profiles.sites[pos].name.clone();
+
+        let mut next = self.profiles.clone();
+        let mut referenced = false;
+        for ws in &mut next.workspaces {
+            let before = ws.sites.len();
+            ws.sites.retain(|s| &s.site != id);
+            referenced |= ws.sites.len() != before;
+        }
+        if referenced {
+            profiles::save_workspaces(&self.dir, &next)?;
+            self.profiles = next.clone();
+        }
+
+        next.sites.remove(pos);
+        next.forget_site_extras(&id.0);
+        profiles::save_sites(&self.dir, &next)?;
+        self.profiles = next;
+
+        // Flags may be stale, so both secrets are always deleted.
+        let mut failure = None;
+        for kind in [SecretKind::Password, SecretKind::KeyPassphrase] {
+            if let Err(err) = self.secrets.delete(id, kind) {
+                failure.get_or_insert(err);
+            }
+        }
+        match failure {
+            None => Ok(()),
+            Some(err) => {
+                let cause = match err.detail {
+                    Some(detail) => format!("{}: {detail}", err.message),
+                    None => err.message,
+                };
+                Err(Error::new(
+                    ErrorKind::Io,
+                    "Site removed, but its secrets could not be deleted from the keyring",
+                )
+                .with_detail(format!("site {name:?} ({id}): {cause}")))
+            }
+        }
+    }
+
+    /// Stores a secret of the site and records that it has one.
+    ///
+    /// If the store fails, nothing changes. If the store succeeds but the
+    /// profile cannot be saved, the secret is deleted again (best effort)
+    /// and the save error is returned.
+    pub fn set_secret(
+        &mut self,
+        site: &SiteId,
+        kind: SecretKind,
+        value: &SecretString,
+    ) -> Result<()> {
+        let pos = self.site_index(site)?;
+        self.secrets.set(site, kind, value)?;
+        if flag(&self.profiles.sites[pos], kind) {
+            return Ok(());
+        }
+        let result = self.edit_site(site, |s| *flag_mut(s, kind) = true);
+        if result.is_err() {
+            let _ = self.secrets.delete(site, kind);
+        }
+        result
+    }
+
+    /// The site's secret, if it has one. A site whose flag is unset answers
+    /// `None` without asking the store.
+    pub fn secret(&self, site: &SiteId, kind: SecretKind) -> Result<Option<SecretString>> {
+        let pos = self.site_index(site)?;
+        if !flag(&self.profiles.sites[pos], kind) {
+            return Ok(None);
+        }
+        self.secrets.get(site, kind)
+    }
+
+    /// Deletes a secret of the site and clears its flag. The store is
+    /// always asked, even if the flag is already unset.
+    pub fn delete_secret(&mut self, site: &SiteId, kind: SecretKind) -> Result<()> {
+        let pos = self.site_index(site)?;
+        self.secrets.delete(site, kind)?;
+        if !flag(&self.profiles.sites[pos], kind) {
+            return Ok(());
+        }
+        self.edit_site(site, |s| *flag_mut(s, kind) = false)
+    }
+
+    /// Pins the FTPS certificate fingerprint of the site.
+    pub fn set_ftps_pin(&mut self, site: &SiteId, fingerprint: &str) -> Result<()> {
+        self.edit_site(site, |s| {
+            s.ftp.pinned_fingerprint = Some(fingerprint.to_owned());
+        })
+    }
+
+    /// Forgets the pinned FTPS certificate of the site.
+    pub fn clear_ftps_pin(&mut self, site: &SiteId) -> Result<()> {
+        self.edit_site(site, |s| s.ftp.pinned_fingerprint = None)
+    }
+}
+
+fn flag(site: &Site, kind: SecretKind) -> bool {
+    match kind {
+        SecretKind::Password => site.has_password,
+        SecretKind::KeyPassphrase => site.has_key_passphrase,
+    }
+}
+
+fn flag_mut(site: &mut Site, kind: SecretKind) -> &mut bool {
+    match kind {
+        SecretKind::Password => &mut site.has_password,
+        SecretKind::KeyPassphrase => &mut site.has_key_passphrase,
+    }
 }
 
 #[cfg(test)]
@@ -142,6 +319,10 @@ mod tests {
         }
     }
 
+    fn open(dir: &Path) -> Result<Vault> {
+        Vault::open(dir, Arc::new(MemoryStore::new()))
+    }
+
     fn read_table(path: &Path) -> toml::Table {
         fs::read_to_string(path).unwrap().parse().unwrap()
     }
@@ -156,7 +337,7 @@ mod tests {
     #[test]
     fn empty_dir_loads_empty() {
         let tmp = tempfile::tempdir().unwrap();
-        let vault = Vault::open_profiles_only(tmp.path()).unwrap();
+        let vault = open(tmp.path()).unwrap();
         assert!(vault.sites().is_empty());
         assert!(vault.workspaces().is_empty());
         assert!(vault.unreadable_entries().is_empty());
@@ -167,7 +348,7 @@ mod tests {
     #[test]
     fn missing_dir_loads_empty() {
         let tmp = tempfile::tempdir().unwrap();
-        let vault = Vault::open_profiles_only(&tmp.path().join("nope")).unwrap();
+        let vault = open(&tmp.path().join("nope")).unwrap();
         assert!(vault.sites().is_empty());
     }
 
@@ -195,13 +376,13 @@ mod tests {
             },
         ];
         {
-            let mut vault = Vault::open_profiles_only(tmp.path()).unwrap();
+            let mut vault = open(tmp.path()).unwrap();
             vault.upsert_site(a.clone()).unwrap();
             vault.upsert_site(b.clone()).unwrap();
             vault.upsert_workspace(ws.clone()).unwrap();
             assert_eq!(vault.site(&b.id), Some(&b));
         }
-        let vault = Vault::open_profiles_only(tmp.path()).unwrap();
+        let vault = open(tmp.path()).unwrap();
         assert_eq!(vault.sites(), [a.clone(), b.clone()]);
         assert_eq!(vault.workspaces(), [ws]);
         assert_eq!(vault.site(&a.id), Some(&a));
@@ -219,7 +400,7 @@ mod tests {
     #[test]
     fn upsert_replaces_by_id() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut vault = Vault::open_profiles_only(tmp.path()).unwrap();
+        let mut vault = open(tmp.path()).unwrap();
         let mut a = ssh_site("A");
         vault.upsert_site(a.clone()).unwrap();
         vault.upsert_site(ssh_site("B")).unwrap();
@@ -227,14 +408,14 @@ mod tests {
         vault.upsert_site(a.clone()).unwrap();
         assert_eq!(vault.sites().len(), 2);
         assert_eq!(vault.sites()[0], a);
-        let reopened = Vault::open_profiles_only(tmp.path()).unwrap();
+        let reopened = open(tmp.path()).unwrap();
         assert_eq!(reopened.sites(), vault.sites());
     }
 
     #[test]
     fn remove_workspace_saves_and_unknown_is_not_found() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut vault = Vault::open_profiles_only(tmp.path()).unwrap();
+        let mut vault = open(tmp.path()).unwrap();
         let s = ssh_site("A");
         vault.upsert_site(s.clone()).unwrap();
         let w1 = workspace("one", &[&s]);
@@ -245,7 +426,7 @@ mod tests {
         assert_eq!(vault.workspaces(), std::slice::from_ref(&w2));
         let err = vault.remove_workspace(&w1.id).unwrap_err();
         assert_eq!(err.kind, ErrorKind::NotFound);
-        let reopened = Vault::open_profiles_only(tmp.path()).unwrap();
+        let reopened = open(tmp.path()).unwrap();
         assert_eq!(reopened.workspaces(), [w2]);
     }
 
@@ -254,7 +435,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("sites.toml");
         fs::write(&path, "[[site]\nname =").unwrap();
-        let err = Vault::open_profiles_only(tmp.path()).unwrap_err();
+        let err = open(tmp.path()).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Protocol);
         assert_eq!(err.message, "Cannot read sites.toml");
         let detail = err.detail.unwrap();
@@ -266,7 +447,7 @@ mod tests {
     fn corrupt_workspaces_toml_is_protocol() {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(tmp.path().join("workspaces.toml"), "version = = 1").unwrap();
-        let err = Vault::open_profiles_only(tmp.path()).unwrap_err();
+        let err = open(tmp.path()).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Protocol);
         assert_eq!(err.message, "Cannot read workspaces.toml");
     }
@@ -280,7 +461,7 @@ mod tests {
             "[[workspace]]\nid = \"w\"\nname = \"Hand\"\n",
         )
         .unwrap();
-        let mut vault = Vault::open_profiles_only(tmp.path()).unwrap();
+        let mut vault = open(tmp.path()).unwrap();
         assert!(vault.sites().is_empty());
         assert_eq!(vault.workspaces()[0].name, "Hand");
         vault.upsert_site(ssh_site("A")).unwrap();
@@ -292,7 +473,7 @@ mod tests {
     fn non_integer_version_is_protocol() {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(tmp.path().join("sites.toml"), "version = \"1\"\n").unwrap();
-        let err = Vault::open_profiles_only(tmp.path()).unwrap_err();
+        let err = open(tmp.path()).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Protocol);
     }
 
@@ -302,7 +483,7 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let path = tmp.path().join(file);
             fs::write(&path, "version = 2\n").unwrap();
-            let err = Vault::open_profiles_only(tmp.path()).unwrap_err();
+            let err = open(tmp.path()).unwrap_err();
             assert_eq!(err.kind, ErrorKind::Protocol, "{file}");
             assert_eq!(err.message, "Profile was written by a newer hoprs");
             assert_eq!(fs::read(&path).unwrap(), b"version = 2\n");
@@ -333,7 +514,7 @@ future_nested = 7
 "#,
         )
         .unwrap();
-        let mut vault = Vault::open_profiles_only(tmp.path()).unwrap();
+        let mut vault = open(tmp.path()).unwrap();
         assert!(!vault.sites()[0].ssh.use_agent);
         vault.upsert_site(ssh_site("New")).unwrap();
         // Editing the site itself keeps its unknown fields as well.
@@ -351,7 +532,7 @@ future_nested = 7
         assert_eq!(first["ssh"]["future_nested"].as_integer(), Some(7));
         assert_eq!(first["ssh"]["use_agent"].as_bool(), Some(false));
 
-        let reopened = Vault::open_profiles_only(tmp.path()).unwrap();
+        let reopened = open(tmp.path()).unwrap();
         assert_eq!(reopened.sites(), vault.sites());
     }
 
@@ -386,7 +567,7 @@ future_tab_key = "split"
 "#,
         )
         .unwrap();
-        let mut vault = Vault::open_profiles_only(tmp.path()).unwrap();
+        let mut vault = open(tmp.path()).unwrap();
         let mut ws = vault.workspaces()[0].clone();
         ws.name = "Renamed".into();
         vault.upsert_workspace(ws.clone()).unwrap();
@@ -412,16 +593,16 @@ future_tab_key = "split"
     #[test]
     fn cleared_optional_field_is_not_resurrected() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut vault = Vault::open_profiles_only(tmp.path()).unwrap();
+        let mut vault = open(tmp.path()).unwrap();
         let mut s = ssh_site("A");
         s.remote_dir = Some("/srv".into());
         s.ssh.key_file = Some(PathBuf::from("key"));
         vault.upsert_site(s.clone()).unwrap();
-        let mut vault = Vault::open_profiles_only(tmp.path()).unwrap();
+        let mut vault = open(tmp.path()).unwrap();
         s.remote_dir = None;
         s.ssh.key_file = None;
         vault.upsert_site(s.clone()).unwrap();
-        let reopened = Vault::open_profiles_only(tmp.path()).unwrap();
+        let reopened = open(tmp.path()).unwrap();
         assert_eq!(reopened.sites(), [s]);
     }
 
@@ -462,7 +643,7 @@ protocol = "ftp"
         .unwrap();
         let original_entry = read_table(&path)["site"].as_array().unwrap()[1].clone();
 
-        let mut vault = Vault::open_profiles_only(tmp.path()).unwrap();
+        let mut vault = open(tmp.path()).unwrap();
         let ids: Vec<_> = vault.sites().iter().map(|s| s.id.0.as_str()).collect();
         assert_eq!(ids, ["s1", "s2"]);
         let unreadable = vault.unreadable_entries();
@@ -482,7 +663,7 @@ protocol = "ftp"
         assert_eq!(entries.len(), 4);
         assert_eq!(entries[1], original_entry, "kept verbatim, in place");
 
-        let reopened = Vault::open_profiles_only(tmp.path()).unwrap();
+        let reopened = open(tmp.path()).unwrap();
         assert_eq!(reopened.sites().len(), 3);
         assert!(reopened.sites().iter().all(|s| s.id.0 != "s3-id"));
         assert_eq!(reopened.unreadable_entries(), vault.unreadable_entries());
@@ -497,7 +678,7 @@ protocol = "ftp"
              [[site]]\nid = \"dup\"\nname = \"y\"\nhost = \"h\"\nport = 22\nuser = \"u\"\nprotocol = \"ssh\"\n",
         )
         .unwrap();
-        let err = Vault::open_profiles_only(tmp.path()).unwrap_err();
+        let err = open(tmp.path()).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Protocol);
 
         let tmp = tempfile::tempdir().unwrap();
@@ -506,7 +687,7 @@ protocol = "ftp"
             "version = 1\n\n[[site]]\nid = \"future\"\nname = \"x\"\nprotocol = \"s3\"\n",
         )
         .unwrap();
-        let mut vault = Vault::open_profiles_only(tmp.path()).unwrap();
+        let mut vault = open(tmp.path()).unwrap();
         let mut clash = ssh_site("clash");
         clash.id = SiteId("future".into());
         assert_eq!(
@@ -533,7 +714,7 @@ protocol = "ftp"
         )
         .unwrap();
         let original = read_table(&path)["workspace"].clone();
-        let mut vault = Vault::open_profiles_only(tmp.path()).unwrap();
+        let mut vault = open(tmp.path()).unwrap();
         assert!(vault.workspaces().is_empty());
         assert_eq!(vault.unreadable_entries()[0].file, "workspaces.toml");
         assert_eq!(vault.unreadable_entries()[0].name.as_deref(), Some("Odd"));
@@ -552,7 +733,7 @@ protocol = "ftp"
             format!("version = 1\n\n{entry}\n{entry}"),
         )
         .unwrap();
-        let err = Vault::open_profiles_only(tmp.path()).unwrap_err();
+        let err = open(tmp.path()).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Protocol);
 
         let tmp = tempfile::tempdir().unwrap();
@@ -562,14 +743,14 @@ protocol = "ftp"
             format!("version = 1\n\n{entry}\n{entry}"),
         )
         .unwrap();
-        let err = Vault::open_profiles_only(tmp.path()).unwrap_err();
+        let err = open(tmp.path()).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Protocol);
     }
 
     #[test]
     fn workspace_with_unknown_site_is_rejected() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut vault = Vault::open_profiles_only(tmp.path()).unwrap();
+        let mut vault = open(tmp.path()).unwrap();
         let known = ssh_site("known");
         vault.upsert_site(known.clone()).unwrap();
         let ghost = ssh_site("ghost");
@@ -601,7 +782,7 @@ protocol = "ftp"
 
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("hoprs");
-        let mut vault = Vault::open_profiles_only(&dir).unwrap();
+        let mut vault = open(&dir).unwrap();
         let a = ssh_site("A");
         vault.upsert_site(a.clone()).unwrap();
         let path = dir.join("sites.toml");
@@ -623,7 +804,7 @@ protocol = "ftp"
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1, "no temporary left");
 
         drop(_guard);
-        let reopened = Vault::open_profiles_only(&dir).unwrap();
+        let reopened = open(&dir).unwrap();
         assert_eq!(reopened.sites(), [a]);
     }
 
@@ -634,7 +815,7 @@ protocol = "ftp"
         use std::os::unix::ffi::OsStrExt;
 
         let tmp = tempfile::tempdir().unwrap();
-        let mut vault = Vault::open_profiles_only(tmp.path()).unwrap();
+        let mut vault = open(tmp.path()).unwrap();
         let a = ssh_site("A");
         vault.upsert_site(a.clone()).unwrap();
         let before = fs::read(tmp.path().join("sites.toml")).unwrap();
@@ -656,7 +837,7 @@ protocol = "ftp"
 
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("config").join("hoprs");
-        let mut vault = Vault::open_profiles_only(&dir).unwrap();
+        let mut vault = open(&dir).unwrap();
         let s = ssh_site("A");
         vault.upsert_site(s.clone()).unwrap();
         vault.upsert_workspace(workspace("w", &[&s])).unwrap();
@@ -665,5 +846,345 @@ protocol = "ftp"
         assert_eq!(mode(&dir), 0o700);
         assert_eq!(mode(&dir.join("sites.toml")), 0o600);
         assert_eq!(mode(&dir.join("workspaces.toml")), 0o600);
+    }
+
+    // ---- Secrets and the rest of the facade ----
+
+    use secrecy::ExposeSecret;
+
+    /// A secret store whose backend is never reachable.
+    struct FailingStore;
+
+    fn unavailable() -> Error {
+        Error::new(ErrorKind::Io, "System keyring unavailable").with_detail("no D-Bus session")
+    }
+
+    impl SecretStore for FailingStore {
+        fn get(&self, _: &SiteId, _: SecretKind) -> Result<Option<SecretString>> {
+            Err(unavailable())
+        }
+        fn set(&self, _: &SiteId, _: SecretKind, _: &SecretString) -> Result<()> {
+            Err(unavailable())
+        }
+        fn delete(&self, _: &SiteId, _: SecretKind) -> Result<()> {
+            Err(unavailable())
+        }
+    }
+
+    fn secret(s: &str) -> SecretString {
+        SecretString::from(s)
+    }
+
+    fn exposed(s: Option<SecretString>) -> Option<String> {
+        s.map(|s| s.expose_secret().to_owned())
+    }
+
+    #[test]
+    fn secret_roundtrip_sets_flag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let mut vault = Vault::open(tmp.path(), store.clone()).unwrap();
+        let a = ssh_site("A");
+        vault.upsert_site(a.clone()).unwrap();
+        assert_eq!(
+            exposed(vault.secret(&a.id, SecretKind::Password).unwrap()),
+            None
+        );
+
+        vault
+            .set_secret(&a.id, SecretKind::Password, &secret("hunter2"))
+            .unwrap();
+        let site = vault.site(&a.id).unwrap();
+        assert!(site.has_password);
+        assert!(!site.has_key_passphrase);
+        assert_eq!(
+            exposed(vault.secret(&a.id, SecretKind::Password).unwrap()).as_deref(),
+            Some("hunter2")
+        );
+        assert_eq!(
+            exposed(vault.secret(&a.id, SecretKind::KeyPassphrase).unwrap()),
+            None
+        );
+        vault
+            .set_secret(&a.id, SecretKind::KeyPassphrase, &secret("phrase"))
+            .unwrap();
+        // Replacing a secret keeps the flag.
+        vault
+            .set_secret(&a.id, SecretKind::Password, &secret("hunter3"))
+            .unwrap();
+
+        let reopened = Vault::open(tmp.path(), store).unwrap();
+        let site = reopened.site(&a.id).unwrap();
+        assert!(site.has_password && site.has_key_passphrase);
+        assert_eq!(
+            exposed(reopened.secret(&a.id, SecretKind::Password).unwrap()).as_deref(),
+            Some("hunter3")
+        );
+        assert_eq!(
+            exposed(reopened.secret(&a.id, SecretKind::KeyPassphrase).unwrap()).as_deref(),
+            Some("phrase")
+        );
+    }
+
+    #[test]
+    fn delete_secret_clears_flag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let mut vault = Vault::open(tmp.path(), store.clone()).unwrap();
+        let a = ssh_site("A");
+        vault.upsert_site(a.clone()).unwrap();
+        vault
+            .set_secret(&a.id, SecretKind::Password, &secret("hunter2"))
+            .unwrap();
+        vault
+            .set_secret(&a.id, SecretKind::KeyPassphrase, &secret("phrase"))
+            .unwrap();
+
+        vault.delete_secret(&a.id, SecretKind::Password).unwrap();
+        let site = vault.site(&a.id).unwrap();
+        assert!(!site.has_password);
+        assert!(site.has_key_passphrase);
+        assert_eq!(
+            exposed(store.get(&a.id, SecretKind::Password).unwrap()),
+            None
+        );
+        assert_eq!(
+            exposed(vault.secret(&a.id, SecretKind::Password).unwrap()),
+            None
+        );
+        // Deleting again is fine.
+        vault.delete_secret(&a.id, SecretKind::Password).unwrap();
+
+        let reopened = Vault::open(tmp.path(), store).unwrap();
+        assert!(!reopened.site(&a.id).unwrap().has_password);
+        assert_eq!(
+            exposed(reopened.secret(&a.id, SecretKind::KeyPassphrase).unwrap()).as_deref(),
+            Some("phrase")
+        );
+    }
+
+    #[test]
+    fn unknown_site_is_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let mut vault = Vault::open(tmp.path(), store.clone()).unwrap();
+        let ghost = SiteId::new();
+        let errors = [
+            vault.secret(&ghost, SecretKind::Password).unwrap_err(),
+            vault
+                .set_secret(&ghost, SecretKind::Password, &secret("hunter2"))
+                .unwrap_err(),
+            vault
+                .delete_secret(&ghost, SecretKind::Password)
+                .unwrap_err(),
+            vault.remove_site(&ghost).unwrap_err(),
+            vault.set_ftps_pin(&ghost, "AB").unwrap_err(),
+            vault.clear_ftps_pin(&ghost).unwrap_err(),
+        ];
+        for err in errors {
+            assert_eq!(err.kind, ErrorKind::NotFound);
+            assert_eq!(err.message, "Unknown site");
+            assert_eq!(err.detail.as_deref(), Some(ghost.0.as_str()));
+        }
+        assert_eq!(
+            exposed(store.get(&ghost, SecretKind::Password).unwrap()),
+            None
+        );
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn remove_site_deletes_secrets_and_workspace_refs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let mut vault = Vault::open(tmp.path(), store.clone()).unwrap();
+        let a = ssh_site("A");
+        let b = ssh_site("B");
+        vault.upsert_site(a.clone()).unwrap();
+        vault.upsert_site(b.clone()).unwrap();
+        vault
+            .set_secret(&a.id, SecretKind::Password, &secret("hunter2"))
+            .unwrap();
+        vault
+            .set_secret(&a.id, SecretKind::KeyPassphrase, &secret("phrase"))
+            .unwrap();
+        vault
+            .set_secret(&b.id, SecretKind::Password, &secret("other"))
+            .unwrap();
+        let both = workspace("both", &[&a, &b]);
+        let only_a = workspace("only a", &[&a]);
+        vault.upsert_workspace(both.clone()).unwrap();
+        vault.upsert_workspace(only_a.clone()).unwrap();
+
+        vault.remove_site(&a.id).unwrap();
+
+        assert_eq!(vault.sites().len(), 1);
+        assert_eq!(vault.sites()[0].id, b.id);
+        let ids = |ws: &Workspace| ws.sites.iter().map(|s| s.site.clone()).collect::<Vec<_>>();
+        assert_eq!(vault.workspaces().len(), 2);
+        assert_eq!(ids(&vault.workspaces()[0]), std::slice::from_ref(&b.id));
+        assert!(ids(&vault.workspaces()[1]).is_empty());
+        assert_eq!(
+            exposed(store.get(&a.id, SecretKind::Password).unwrap()),
+            None
+        );
+        assert_eq!(
+            exposed(store.get(&a.id, SecretKind::KeyPassphrase).unwrap()),
+            None
+        );
+        assert_eq!(
+            exposed(vault.secret(&b.id, SecretKind::Password).unwrap()).as_deref(),
+            Some("other")
+        );
+
+        let reopened = Vault::open(tmp.path(), store).unwrap();
+        assert_eq!(reopened.sites(), vault.sites());
+        assert_eq!(reopened.workspaces(), vault.workspaces());
+        for file in ["sites.toml", "workspaces.toml"] {
+            let text = fs::read_to_string(tmp.path().join(file)).unwrap();
+            assert!(!text.contains(&a.id.0), "{file}: {text}");
+        }
+        assert_eq!(
+            vault.remove_site(&a.id).unwrap_err().kind,
+            ErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn remove_site_with_keyring_down_still_removes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vault = Vault::open(tmp.path(), Arc::new(FailingStore)).unwrap();
+        let a = ssh_site("Doomed");
+        vault.upsert_site(a.clone()).unwrap();
+        vault.upsert_workspace(workspace("w", &[&a])).unwrap();
+
+        let err = vault.remove_site(&a.id).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Io);
+        let detail = err.detail.unwrap();
+        assert!(detail.contains("Doomed"), "{detail}");
+        assert!(vault.sites().is_empty());
+        assert!(vault.workspaces()[0].sites.is_empty());
+
+        let reopened = Vault::open(tmp.path(), Arc::new(FailingStore)).unwrap();
+        assert!(reopened.sites().is_empty());
+        assert!(reopened.workspaces()[0].sites.is_empty());
+    }
+
+    #[test]
+    fn keyring_failure_leaves_flag_unset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vault = Vault::open(tmp.path(), Arc::new(FailingStore)).unwrap();
+        let a = ssh_site("A");
+        vault.upsert_site(a.clone()).unwrap();
+        let before = fs::read(tmp.path().join("sites.toml")).unwrap();
+
+        let err = vault
+            .set_secret(&a.id, SecretKind::Password, &secret("hunter2"))
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Io);
+        assert_eq!(err.message, "System keyring unavailable");
+        assert!(!vault.site(&a.id).unwrap().has_password);
+        assert_eq!(fs::read(tmp.path().join("sites.toml")).unwrap(), before);
+
+        let reopened = Vault::open(tmp.path(), Arc::new(FailingStore)).unwrap();
+        assert!(!reopened.site(&a.id).unwrap().has_password);
+        // A site without a secret does not need the keyring to answer.
+        assert_eq!(
+            exposed(reopened.secret(&a.id, SecretKind::Password).unwrap()),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_save_failure_rolls_back_secret() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("hoprs");
+        let store = Arc::new(MemoryStore::new());
+        let mut vault = Vault::open(&dir, store.clone()).unwrap();
+        let a = ssh_site("A");
+        vault.upsert_site(a.clone()).unwrap();
+
+        let _guard = RestoreMode(dir.clone());
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
+        if fs::write(dir.join("probe"), b"").is_ok() {
+            // Privileged user: permissions are not enforced, nothing to test.
+            return;
+        }
+
+        assert!(
+            vault
+                .set_secret(&a.id, SecretKind::Password, &secret("hunter2"))
+                .is_err()
+        );
+        assert_eq!(
+            exposed(store.get(&a.id, SecretKind::Password).unwrap()),
+            None
+        );
+        assert!(!vault.site(&a.id).unwrap().has_password);
+
+        drop(_guard);
+        let reopened = Vault::open(&dir, store).unwrap();
+        assert!(!reopened.site(&a.id).unwrap().has_password);
+    }
+
+    #[test]
+    fn set_and_clear_ftps_pin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vault = open(tmp.path()).unwrap();
+        let s = Site::new("F", "ftp.example.com", "web", Protocol::FtpsExplicit);
+        vault.upsert_site(s.clone()).unwrap();
+
+        vault.set_ftps_pin(&s.id, "AB:CD:EF").unwrap();
+        assert_eq!(
+            vault.site(&s.id).unwrap().ftp.pinned_fingerprint.as_deref(),
+            Some("AB:CD:EF")
+        );
+        let mut reopened = open(tmp.path()).unwrap();
+        assert_eq!(
+            reopened
+                .site(&s.id)
+                .unwrap()
+                .ftp
+                .pinned_fingerprint
+                .as_deref(),
+            Some("AB:CD:EF")
+        );
+
+        reopened.clear_ftps_pin(&s.id).unwrap();
+        assert_eq!(reopened.site(&s.id).unwrap().ftp.pinned_fingerprint, None);
+        let reopened = open(tmp.path()).unwrap();
+        assert_eq!(reopened.site(&s.id).unwrap().ftp.pinned_fingerprint, None);
+        let text = fs::read_to_string(tmp.path().join("sites.toml")).unwrap();
+        assert!(!text.contains("pinned_fingerprint"), "{text}");
+    }
+
+    #[test]
+    fn no_secret_in_toml_or_debug() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let mut vault = Vault::open(tmp.path(), store.clone()).unwrap();
+        let a = ssh_site("Visible name");
+        vault.upsert_site(a.clone()).unwrap();
+        vault.upsert_workspace(workspace("Prod", &[&a])).unwrap();
+        vault
+            .set_secret(&a.id, SecretKind::Password, &secret("hunter2"))
+            .unwrap();
+        vault
+            .set_secret(&a.id, SecretKind::KeyPassphrase, &secret("swordfish"))
+            .unwrap();
+
+        for file in ["sites.toml", "workspaces.toml"] {
+            let text = fs::read_to_string(tmp.path().join(file)).unwrap();
+            assert!(!text.contains("hunter2"), "{file}: {text}");
+            assert!(!text.contains("swordfish"), "{file}: {text}");
+        }
+        let debug = format!("{vault:?} {store:?}");
+        assert!(!debug.contains("hunter2"), "{debug}");
+        assert!(!debug.contains("swordfish"), "{debug}");
+        assert!(debug.contains("Visible name"), "{debug}");
+        assert!(debug.contains(&a.id.0), "{debug}");
     }
 }

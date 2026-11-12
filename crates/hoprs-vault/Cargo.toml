@@ -9,6 +9,9 @@ hoprs-core = { path = "../hoprs-core" }
 serde = { workspace = true }
 toml = { workspace = true, features = ["preserve_order"] }
 dirs = { workspace = true }
+secrecy = { workspace = true }
+keyring = { workspace = true }
+keyring-core = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

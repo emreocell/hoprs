@@ -81,6 +81,10 @@ impl Profiles {
         self.workspaces_rest.has_unreadable_id(id)
     }
 
+    pub fn forget_site_extras(&mut self, id: &str) {
+        self.site_extras.remove(id);
+    }
+
     pub fn forget_workspace_extras(&mut self, id: &str) {
         self.workspace_extras.remove(id);
     }
