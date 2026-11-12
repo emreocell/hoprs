@@ -8,7 +8,7 @@ use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
 use hmac::{Hmac, Mac};
 use hoprs_core::Result;
-use russh::keys::PublicKey;
+use russh::keys::{Algorithm, PublicKey};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 
@@ -65,6 +65,26 @@ pub fn check(path: &Path, host: &str, port: u16, key: &PublicKey) -> Result<Host
         Some(line) => HostKeyStatus::Changed { line },
         None => HostKeyStatus::Unknown,
     })
+}
+
+/// Algorithms of the keys recorded for `host:port` (`@revoked` lines excluded), in file
+/// order, without duplicates. A missing or unreadable file yields none.
+pub fn known_algorithms(path: &Path, host: &str, port: u16) -> Vec<Algorithm> {
+    let Ok(Some(data)) = read_optional(path) else {
+        return Vec::new();
+    };
+    let name = host_name(host, port);
+    let mut found: Vec<Algorithm> = Vec::new();
+    for raw in data.split_inclusive(|b| *b == b'\n') {
+        let Some(entry) = parse_line(raw) else {
+            continue;
+        };
+        let algorithm = entry.key.algorithm();
+        if !entry.revoked && patterns_match(entry.patterns, &name) && !found.contains(&algorithm) {
+            found.push(algorithm);
+        }
+    }
+    found
 }
 
 /// Appends a plain-text entry for `host:port`, creating the file and parent directory if needed.
@@ -596,5 +616,30 @@ mod tests {
         let expected = fs::read_to_string(format!("{FIXTURE_DIR}/fingerprint.txt")).unwrap();
         let expected = expected.split_whitespace().nth(1).unwrap();
         assert_eq!(fingerprint(&fixture_key()), expected);
+    }
+
+    #[test]
+    fn known_algorithms_lists_host_entries_in_order() {
+        let dir = TempDir::new().unwrap();
+        let p = kh_path(&dir);
+        assert!(known_algorithms(&p, "h.example", 22).is_empty());
+        let p256 = Algorithm::Ecdsa {
+            curve: russh::keys::EcdsaCurve::NistP256,
+        };
+        let mut data = String::new();
+        data.push_str(&line_for("other.example", &ed()));
+        data.push_str(&line_for("h.example", &key(p256.clone())));
+        data.push_str(&format!(
+            "@revoked {}",
+            line_for("h.example", &key(Algorithm::Ed25519))
+        ));
+        data.push_str(&line_for("h.example,x", &ed()));
+        data.push_str(&line_for("h.example", &key(p256.clone())));
+        fs::write(&p, data).unwrap();
+        assert_eq!(
+            known_algorithms(&p, "h.example", 22),
+            vec![p256, Algorithm::Ed25519]
+        );
+        assert!(known_algorithms(&p, "h.example", 2222).is_empty());
     }
 }

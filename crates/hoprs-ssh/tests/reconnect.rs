@@ -259,6 +259,36 @@ async fn host_key_rotated_blocks_reconnect() {
     assert_eq!(s.generation(), 1);
 }
 
+/// A server that comes back with a key of another algorithm (here ecdsa only, for a host
+/// known by its ed25519 key) is refused as a changed key, without prompting: the session
+/// pins the key verified on its first connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn host_key_algorithm_change_blocks_reconnect() {
+    let (s, p, _dir) = connected().await;
+    let rec = record_until_disconnected(s.state());
+
+    let _restore = restore(&[&["down", "-v"], &["up", "-d", "--build", "--wait"]]);
+    // sshd reads the key type from the file, not its name: this serves an ecdsa key only.
+    docker(&[
+        "exec",
+        "-T",
+        "sshd",
+        "sh",
+        "-c",
+        "rm /etc/ssh/keys/ssh_host_ed25519_key* && ssh-keygen -q -N \"\" -t ecdsa -f /etc/ssh/keys/ssh_host_ed25519_key && pkill -HUP -x sshd",
+    ]);
+    kill_ssh_sessions();
+    let states = recorded(rec).await;
+
+    assert_eq!(attempts(&states), vec![1], "{states:?}");
+    let e = disconnected_error(&states);
+    assert_eq!(e.kind, ErrorKind::HostKey, "{e:?}");
+    assert_eq!(e.message, "Host key for 127.0.0.1 has changed", "{e:?}");
+    assert_eq!(p.calls().host, 1, "a changed key must never prompt");
+    assert_eq!(s.generation(), 1);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
 async fn explicit_disconnect_does_not_reconnect() {

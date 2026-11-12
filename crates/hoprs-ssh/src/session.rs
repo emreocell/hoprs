@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use hoprs_core::{Error, ErrorKind, Result};
 use russh::client;
-use russh::keys::PublicKeyOrCertificate;
+use russh::keys::{Algorithm, PublicKey, PublicKeyOrCertificate};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -119,9 +119,11 @@ impl SshSession {
     /// Connects, verifies the host key against `config.known_hosts` and authenticates.
     ///
     /// Reconnection attempts reuse `config` and `prompter`: a password that was prompted
-    /// for (not configured) is prompted for again.
+    /// for (not configured) is prompted for again. They must present the host key verified
+    /// by this first connection: any other key, of any algorithm, ends the session with
+    /// `HostKey`, "Host key for {host} has changed", without prompting.
     pub async fn connect(config: SshConfig, prompter: Arc<dyn Prompter>) -> Result<SshSession> {
-        let conn = establish(&config, &prompter).await?;
+        let conn = establish(&config, &prompter, None).await?;
         let (state, _) = watch::channel(SessionState::Connected);
         let shared = Arc::new(Shared {
             handle: RwLock::new(Some((Arc::new(conn.handle), 1))),
@@ -132,6 +134,7 @@ impl SshSession {
         let supervisor = Supervisor {
             cfg: config.clone(),
             prompter,
+            host_key: conn.host_key,
             shared: shared.clone(),
             commands: rx,
         };
@@ -223,6 +226,8 @@ enum Phase {
 struct Supervisor {
     cfg: SshConfig,
     prompter: Arc<dyn Prompter>,
+    /// The server key verified on the first connection; every reconnection must present it.
+    host_key: PublicKey,
     shared: Arc<Shared>,
     commands: mpsc::UnboundedReceiver<Command>,
 }
@@ -276,6 +281,7 @@ impl Supervisor {
         let Self {
             cfg,
             prompter,
+            host_key,
             shared,
             commands,
         } = self;
@@ -289,7 +295,7 @@ impl Supervisor {
             };
             let try_once = async {
                 tokio::time::sleep(delay).await;
-                establish(cfg, prompter).await
+                establish(cfg, prompter, Some(&*host_key)).await
             };
             tokio::pin!(try_once);
             let result = loop {
@@ -372,6 +378,8 @@ fn user_disconnected() -> SessionState {
 /// An established, authenticated connection.
 pub(crate) struct Connection {
     pub(crate) handle: client::Handle<ClientHandler>,
+    /// The server key that was verified.
+    pub(crate) host_key: PublicKey,
     /// Resolves (with the reason, or closed without one) when the session task ends.
     pub(crate) lost: oneshot::Receiver<Error>,
 }
@@ -386,24 +394,33 @@ impl Drop for CancelPrompts {
 }
 
 /// One full connection attempt: TCP, key exchange with host key check, authentication.
+/// With `pinned`, the server must present exactly that key (see [`check_pinned`]).
 ///
 /// Bounded by `cfg.connect_timeout` of network time; time spent in prompts does not count
 /// (see [`crate::watchdog`]). On timeout the attempt future is dropped. If russh had already
 /// spawned its session task (key exchange started), that task may linger until the server
 /// closes the socket or russh's own timeouts end it; it holds no handle we expose, and its
 /// prompts are cancelled (answered "no") once this function returns or is dropped.
-pub(crate) async fn establish(cfg: &SshConfig, prompter: &Arc<dyn Prompter>) -> Result<Connection> {
+pub(crate) async fn establish(
+    cfg: &SshConfig,
+    prompter: &Arc<dyn Prompter>,
+    pinned: Option<&PublicKey>,
+) -> Result<Connection> {
     let watched = Arc::new(WatchedPrompter::new(prompter.clone()));
     let _cancel = CancelPrompts(watched.clone());
     tokio::select! {
-        result = attempt(cfg, watched.clone()) => result,
+        result = attempt(cfg, watched.clone(), pinned) => result,
         _ = watchdog::expired(&watched, cfg.connect_timeout) => {
             Err(Error::new(ErrorKind::Network, "Connection timed out"))
         }
     }
 }
 
-async fn attempt(cfg: &SshConfig, prompter: Arc<WatchedPrompter>) -> Result<Connection> {
+async fn attempt(
+    cfg: &SshConfig,
+    prompter: Arc<WatchedPrompter>,
+    pinned: Option<&PublicKey>,
+) -> Result<Connection> {
     let stream = TcpStream::connect((cfg.host.as_str(), cfg.port))
         .await
         .map_err(|e| {
@@ -412,29 +429,83 @@ async fn attempt(cfg: &SshConfig, prompter: Arc<WatchedPrompter>) -> Result<Conn
     // Nagle only delays interactive traffic; a failure here is harmless.
     let _ = stream.set_nodelay(true);
 
-    let russh_config = Arc::new(russh_config(cfg));
+    let mut known = Vec::from_iter(pinned.map(PublicKey::algorithm));
+    known.extend(known_hosts::known_algorithms(
+        &cfg.known_hosts,
+        &cfg.host,
+        cfg.port,
+    ));
+    let russh_config = Arc::new(russh_config(cfg, &known));
     let (lost_tx, lost) = oneshot::channel();
+    let (verified_tx, mut verified) = oneshot::channel();
     let handler = ClientHandler {
         host: cfg.host.clone(),
         port: cfg.port,
         known_hosts: cfg.known_hosts.clone(),
         prompter: prompter.clone(),
+        pinned: pinned.cloned(),
+        verified: Some(verified_tx),
         lost: Some(lost_tx),
     };
     let mut handle = client::connect_stream(russh_config, stream, handler)
         .await
         .map_err(|e| e.0)?;
+    // russh only completes the key exchange after `check_server_key` accepted the key.
+    let host_key = verified.try_recv().map_err(|_| {
+        Error::new(ErrorKind::Protocol, "SSH protocol error")
+            .with_detail("the server key was never verified")
+    })?;
     crate::auth::authenticate(&mut handle, cfg, prompter.as_ref()).await?;
-    Ok(Connection { handle, lost })
+    Ok(Connection {
+        handle,
+        host_key,
+        lost,
+    })
 }
 
 /// russh client settings for `cfg`. `keepalive_max` is clamped to at least 1: russh treats
-/// 0 as unlimited, which would never detect a hung connection.
-fn russh_config(cfg: &SshConfig) -> client::Config {
+/// 0 as unlimited, which would never detect a hung connection. Host key algorithms in
+/// `known` (already recorded for the host) are negotiated first, so a server cannot steer
+/// the exchange to an algorithm we hold no key for while it still offers a known one.
+fn russh_config(cfg: &SshConfig, known: &[Algorithm]) -> client::Config {
     client::Config {
         keepalive_interval: Some(cfg.keepalive_interval),
         keepalive_max: cfg.keepalive_max.max(1) as usize,
+        preferred: russh::Preferred {
+            key: preferred_keys(known).into(),
+            ..russh::Preferred::DEFAULT
+        },
         ..Default::default()
+    }
+}
+
+/// Host key algorithms to negotiate: russh's defaults, with those of `known` (keys already
+/// recorded for the host) moved first, keeping russh's order. An RSA key covers every RSA
+/// signature algorithm.
+fn preferred_keys(known: &[Algorithm]) -> Vec<Algorithm> {
+    let rsa = |a: &Algorithm| matches!(a, Algorithm::Rsa { .. });
+    let is_known = |a: &Algorithm| known.iter().any(|k| k == a || (rsa(k) && rsa(a)));
+    let default = russh::Preferred::DEFAULT.key;
+    let (mut first, rest): (Vec<_>, Vec<_>) = default.iter().cloned().partition(is_known);
+    first.extend(rest);
+    first
+}
+
+/// Refuses a server key other than `pinned` (the key verified on the session's first
+/// connection), whatever its algorithm.
+fn check_pinned(pinned: Option<&PublicKey>, host: &str, key: &PublicKey) -> Result<()> {
+    match pinned {
+        Some(pinned) if pinned.key_data() != key.key_data() => Err(Error::new(
+            ErrorKind::HostKey,
+            format!("Host key for {host} has changed"),
+        )
+        .with_detail(format!(
+            "the server presented a {} key ({}) instead of the key verified when this \
+             session connected",
+            key.algorithm().as_str(),
+            known_hosts::fingerprint(key)
+        ))),
+        _ => Ok(()),
     }
 }
 
@@ -447,6 +518,10 @@ pub(crate) struct ClientHandler {
     port: u16,
     known_hosts: std::path::PathBuf,
     prompter: Arc<WatchedPrompter>,
+    /// On a reconnection, the only key the server may present.
+    pinned: Option<PublicKey>,
+    /// Receives the server key once it is accepted.
+    verified: Option<oneshot::Sender<PublicKey>>,
     lost: Option<oneshot::Sender<Error>>,
 }
 
@@ -480,6 +555,14 @@ pub(crate) fn map_russh_error(e: russh::Error) -> Error {
         _ => "SSH protocol error",
     };
     Error::new(kind, message).with_detail(e.to_string())
+}
+
+impl ClientHandler {
+    fn accepted(&mut self, key: &PublicKey) {
+        if let Some(verified) = self.verified.take() {
+            let _ = verified.send(key.clone());
+        }
+    }
 }
 
 impl client::Handler for ClientHandler {
@@ -516,10 +599,14 @@ impl client::Handler for ClientHandler {
             )));
         };
         let host = &self.host;
+        check_pinned(self.pinned.as_ref(), host, key).map_err(HandlerError)?;
         let status =
             known_hosts::check(&self.known_hosts, host, self.port, key).map_err(HandlerError)?;
         match status {
-            HostKeyStatus::Known => Ok(true),
+            HostKeyStatus::Known => {
+                self.accepted(key);
+                Ok(true)
+            }
             HostKeyStatus::Unknown => {
                 let fingerprint = known_hosts::fingerprint(key);
                 let accepted = self
@@ -534,6 +621,7 @@ impl client::Handler for ClientHandler {
                 }
                 known_hosts::learn(&self.known_hosts, host, self.port, key)
                     .map_err(HandlerError)?;
+                self.accepted(key);
                 Ok(true)
             }
             HostKeyStatus::Changed { line } => Err(HandlerError(
@@ -557,16 +645,67 @@ impl client::Handler for ClientHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use russh::keys::{EcdsaCurve, HashAlg, PrivateKey};
+
+    fn key(algorithm: Algorithm) -> PublicKey {
+        PrivateKey::random(&mut rand::rng(), algorithm)
+            .unwrap()
+            .public_key()
+            .clone()
+    }
+
+    #[test]
+    fn preferred_keys_puts_known_algorithms_first() {
+        let p256 = Algorithm::Ecdsa {
+            curve: EcdsaCurve::NistP256,
+        };
+        let default = russh::Preferred::DEFAULT.key.to_vec();
+        assert_eq!(preferred_keys(&[]), default);
+        assert_eq!(preferred_keys(&[Algorithm::Ed25519]), default);
+
+        let got = preferred_keys(&[Algorithm::Rsa { hash: None }, p256.clone()]);
+        assert_eq!(
+            got[..4],
+            [
+                p256,
+                Algorithm::Rsa {
+                    hash: Some(HashAlg::Sha512)
+                },
+                Algorithm::Rsa {
+                    hash: Some(HashAlg::Sha256)
+                },
+                Algorithm::Rsa { hash: None },
+            ]
+        );
+        assert_eq!(got[4], Algorithm::Ed25519);
+        assert_eq!(got.len(), default.len());
+    }
+
+    #[test]
+    fn pinned_key_refuses_any_other_key() {
+        let ed = key(Algorithm::Ed25519);
+        let other_ed = key(Algorithm::Ed25519);
+        let ecdsa = key(Algorithm::Ecdsa {
+            curve: EcdsaCurve::NistP256,
+        });
+        check_pinned(None, "h", &ecdsa).unwrap();
+        check_pinned(Some(&ed), "h", &ed).unwrap();
+        for other in [&other_ed, &ecdsa] {
+            let e = check_pinned(Some(&ed), "h", other).unwrap_err();
+            assert_eq!(e.kind, ErrorKind::HostKey);
+            assert_eq!(e.message, "Host key for h has changed");
+        }
+    }
 
     #[test]
     fn keepalive_max_is_at_least_one() {
         let mut cfg = SshConfig::new("h", 22, "u");
         cfg.keepalive_max = 0;
-        assert_eq!(russh_config(&cfg).keepalive_max, 1);
+        assert_eq!(russh_config(&cfg, &[]).keepalive_max, 1);
         cfg.keepalive_max = 3;
-        assert_eq!(russh_config(&cfg).keepalive_max, 3);
+        assert_eq!(russh_config(&cfg, &[]).keepalive_max, 3);
         assert_eq!(
-            russh_config(&cfg).keepalive_interval,
+            russh_config(&cfg, &[]).keepalive_interval,
             Some(cfg.keepalive_interval)
         );
     }
