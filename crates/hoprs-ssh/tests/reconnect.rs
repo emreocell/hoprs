@@ -234,6 +234,44 @@ async fn hung_connection_detected_by_keepalive() {
     s.disconnect().await;
 }
 
+/// Host keys the listener presents right now (empty while it is not accepting connections).
+fn scan_host_keys() -> String {
+    let out = std::process::Command::new("ssh-keyscan")
+        .args([
+            "-T",
+            "2",
+            "-p",
+            &hoprs_ssh::testing::SSH_PORT.to_string(),
+            "127.0.0.1",
+        ])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .expect("ssh-keyscan must be installed");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Waits until the listener, after a SIGHUP re-exec, accepts connections again and presents
+/// other host keys than `old`. Without this, reconnect attempt 1 can race the re-exec and
+/// fail with a network error before reaching the host key check.
+fn wait_for_rotated_listener(old: &str) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let now = scan_host_keys();
+        if !now.is_empty() && now != old {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "sshd did not present a new host key in time"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
 async fn host_key_rotated_blocks_reconnect() {
@@ -241,6 +279,7 @@ async fn host_key_rotated_blocks_reconnect() {
     let rec = record_until_disconnected(s.state());
 
     let _restore = restore(&[&["down", "-v"], &["up", "-d", "--build", "--wait"]]);
+    let old_keys = scan_host_keys();
     docker(&[
         "exec",
         "-T",
@@ -249,6 +288,7 @@ async fn host_key_rotated_blocks_reconnect() {
         "-c",
         "rm /etc/ssh/keys/ssh_host_ed25519_key* && ssh-keygen -q -N \"\" -t ed25519 -f /etc/ssh/keys/ssh_host_ed25519_key && pkill -HUP -x sshd",
     ]);
+    wait_for_rotated_listener(&old_keys);
     kill_ssh_sessions();
     let states = recorded(rec).await;
 
@@ -270,6 +310,7 @@ async fn host_key_algorithm_change_blocks_reconnect() {
 
     let _restore = restore(&[&["down", "-v"], &["up", "-d", "--build", "--wait"]]);
     // sshd reads the key type from the file, not its name: this serves an ecdsa key only.
+    let old_keys = scan_host_keys();
     docker(&[
         "exec",
         "-T",
@@ -278,6 +319,7 @@ async fn host_key_algorithm_change_blocks_reconnect() {
         "-c",
         "rm /etc/ssh/keys/ssh_host_ed25519_key* && ssh-keygen -q -N \"\" -t ecdsa -f /etc/ssh/keys/ssh_host_ed25519_key && pkill -HUP -x sshd",
     ]);
+    wait_for_rotated_listener(&old_keys);
     kill_ssh_sessions();
     let states = recorded(rec).await;
 
