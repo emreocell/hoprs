@@ -1,0 +1,16 @@
+[package]
+name = "hoprs-import"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hoprs-core = { path = "../hoprs-core" }
+quick-xml = { workspace = true }
+base64 = { workspace = true }
+secrecy = { workspace = true }
+zeroize = { workspace = true }
+dirs = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
