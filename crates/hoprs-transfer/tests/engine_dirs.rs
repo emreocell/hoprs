@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::*;
-use hoprs_core::{EntryKind, ErrorKind};
-use hoprs_remote::{FaultFs, MemFs, Op, RemoteFs};
+use hoprs_core::{EntryKind, ErrorKind, RemoteEntry, RemotePath, Result};
+use hoprs_remote::{BoxAsyncRead, BoxAsyncWrite, FaultFs, MemFs, Op, RemoteFs};
 use hoprs_transfer::{Direction, EngineConfig, Event, TransferItem, TransferState};
 use tokio::sync::broadcast::error::RecvError;
 
@@ -283,4 +283,88 @@ async fn large_tree_is_lazy() {
         remote.read_file("/srv/big/d49/f99").as_deref(),
         Some(b"49:99".as_slice())
     );
+}
+
+/// `MemFs` whose listings report every entry named `a.txt` twice, like a
+/// broken or hostile server.
+struct DuplicatingFs(MemFs);
+
+#[async_trait::async_trait]
+impl RemoteFs for DuplicatingFs {
+    async fn list(&self, p: &RemotePath) -> Result<Vec<RemoteEntry>> {
+        let mut out = Vec::new();
+        for entry in self.0.list(p).await? {
+            if entry.name == "a.txt" {
+                out.push(entry.clone());
+            }
+            out.push(entry);
+        }
+        Ok(out)
+    }
+    async fn stat(&self, p: &RemotePath) -> Result<RemoteEntry> {
+        self.0.stat(p).await
+    }
+    async fn open_read(&self, p: &RemotePath, offset: u64) -> Result<BoxAsyncRead> {
+        self.0.open_read(p, offset).await
+    }
+    async fn open_write(&self, p: &RemotePath, offset: u64) -> Result<BoxAsyncWrite> {
+        self.0.open_write(p, offset).await
+    }
+    async fn mkdir(&self, p: &RemotePath) -> Result<()> {
+        self.0.mkdir(p).await
+    }
+    async fn rename(&self, from: &RemotePath, to: &RemotePath) -> Result<()> {
+        self.0.rename(from, to).await
+    }
+    async fn remove_file(&self, p: &RemotePath) -> Result<()> {
+        self.0.remove_file(p).await
+    }
+    async fn remove_dir(&self, p: &RemotePath) -> Result<()> {
+        self.0.remove_dir(p).await
+    }
+    async fn chmod(&self, p: &RemotePath, mode: u32) -> Result<()> {
+        self.0.chmod(p, mode).await
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn duplicate_names_in_listing() {
+    let local = MemFs::new();
+    local.add_file("/w/d/a.txt", &data(50_000), mtime());
+    local.add_file("/w/d/b.txt", b"b", mtime());
+    let remote = MemFs::new();
+    remote.add_dir("/srv");
+    let (engine, mut rx) = engine_with(
+        Arc::new(DuplicatingFs(local)),
+        Arc::new(remote.clone()),
+        4,
+        EngineConfig::default(),
+    )
+    .await;
+
+    let root = engine
+        .enqueue(spec(Direction::Upload, "/w/d", "/srv/d"))
+        .await
+        .unwrap();
+    match wait_terminal(&mut rx, root).await {
+        TransferState::Failed(e) => assert_eq!(e.message, "1 items failed"),
+        other => panic!("root ended {other:?}"),
+    }
+
+    let snap = engine.snapshot().await;
+    let a: Vec<&TransferItem> = snap
+        .iter()
+        .filter(|i| i.spec.local.as_str() == "/w/d/a.txt")
+        .collect();
+    assert_eq!(a.len(), 2);
+    assert_eq!(a[0].state, TransferState::Done);
+    match &a[1].state {
+        TransferState::Failed(e) => assert_eq!(
+            (e.kind, e.message.as_str()),
+            (ErrorKind::Io, "Duplicate name in directory listing")
+        ),
+        other => panic!("duplicate ended {other:?}"),
+    }
+    assert_eq!(item(&snap, "/w/d/b.txt").state, TransferState::Done);
+    assert_eq!(remote.read_file("/srv/d/a.txt").unwrap(), data(50_000));
 }

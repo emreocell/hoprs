@@ -134,7 +134,11 @@ impl Actor {
             if running.intent != Some(Intent::Cancel) {
                 running.intent = Some(intent);
             }
-            running.cancel.cancel();
+            // A pause lets a prepare finish (a folder being listed then
+            // gets its children, paused); a cancel stops it at once.
+            if intent != Intent::Pause || running.copying {
+                running.cancel.cancel();
+            }
             return;
         }
         self.overrides.remove(&id);

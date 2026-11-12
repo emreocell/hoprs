@@ -767,3 +767,110 @@ async fn apply_to_all_covers_in_flight_prepare() {
     );
     assert_eq!(remote.read_file("/srv/b").unwrap(), b"old");
 }
+
+/// Cancelling an item whose prepare is stuck (a destination `stat` that
+/// takes 10 s) does not wait for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn cancel_during_prepare_is_prompt() {
+    let local = MemFs::new();
+    let remote_mem = MemFs::new();
+    let remote = FaultFs::new(remote_mem.clone());
+    let (engine, mut rx) = engine_with(
+        Arc::new(local.clone()),
+        Arc::new(remote.clone()),
+        1,
+        EngineConfig::default(),
+    )
+    .await;
+    local.add_file("/w/a.bin", &data(1_000), mtime());
+    remote_mem.add_dir("/srv");
+    remote.set_latency(Duration::from_secs(10));
+
+    let id = engine
+        .enqueue(spec(Direction::Upload, "/w/a.bin", "/srv/a.bin"))
+        .await
+        .unwrap();
+    wait_state(&mut rx, id, TransferState::Active).await;
+    let start = std::time::Instant::now();
+    engine.cancel(id).await.unwrap();
+    assert_eq!(wait_terminal(&mut rx, id).await, TransferState::Cancelled);
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "took {:?}",
+        start.elapsed()
+    );
+    assert!(remote_mem.read_file("/srv/a.bin").is_none());
+}
+
+/// A copy that failed partway (not a network error) is retried from the
+/// start, even under `Skip`, which would otherwise keep the partial file.
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_after_write_failure_overwrites_partial_destination() {
+    let local = MemFs::new();
+    let remote_mem = MemFs::new();
+    let remote = FaultFs::new(remote_mem.clone());
+    let config = EngineConfig {
+        buf_size: 64 * 1024,
+        ..EngineConfig::default()
+    };
+    let (engine, mut rx) =
+        engine_with(Arc::new(local.clone()), Arc::new(remote.clone()), 1, config).await;
+    let bytes = data(MIB);
+    local.add_file("/w/a.bin", &bytes, mtime());
+    remote_mem.add_dir("/srv");
+    remote.fail_io_after(300_000, ErrorKind::Io);
+
+    let id = engine
+        .enqueue(spec(Direction::Upload, "/w/a.bin", "/srv/a.bin"))
+        .await
+        .unwrap();
+    match wait_terminal(&mut rx, id).await {
+        TransferState::Failed(e) => assert_eq!(e.kind, ErrorKind::Io),
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    assert_eq!(
+        remote_mem.read_file("/srv/a.bin").map(|f| f.len()),
+        Some(300_000)
+    );
+
+    engine
+        .set_policy(hoprs_transfer::ConflictPolicy::Skip)
+        .await;
+    engine.retry(id).await.unwrap();
+    assert_eq!(wait_terminal(&mut rx, id).await, TransferState::Done);
+    assert!(remote_mem.read_file("/srv/a.bin").unwrap() == bytes);
+}
+
+/// A copy cancelled partway continues from its partial destination when
+/// retried, even under `Skip`.
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_after_cancel_resumes_partial_destination() {
+    let Slow {
+        engine,
+        fault,
+        local,
+        remote,
+        mut rx,
+    } = slow_upload_engine(1, Duration::from_millis(20), EngineConfig::default()).await;
+    let bytes = data(4 * MIB);
+    local.add_file("/w/a.bin", &bytes, mtime());
+    remote.add_dir("/srv");
+
+    let id = engine
+        .enqueue(spec(Direction::Upload, "/w/a.bin", "/srv/a.bin"))
+        .await
+        .unwrap();
+    wait_progress(&mut rx).await;
+    engine.cancel(id).await.unwrap();
+    wait_state(&mut rx, id, TransferState::Cancelled).await;
+    let partial = remote.read_file("/srv/a.bin").map_or(0, |f| f.len()) as u64;
+    assert!(partial > 0 && partial < bytes.len() as u64, "{partial}");
+
+    engine
+        .set_policy(hoprs_transfer::ConflictPolicy::Skip)
+        .await;
+    engine.retry(id).await.unwrap();
+    assert_eq!(wait_terminal(&mut rx, id).await, TransferState::Done);
+    assert!(remote.read_file("/srv/a.bin").unwrap() == bytes);
+    assert_eq!(fault.read_offsets(), vec![0, partial]);
+}

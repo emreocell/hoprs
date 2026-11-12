@@ -155,7 +155,11 @@ impl TransferEngine {
     }
 
     /// Requeues a failed or cancelled transfer (a folder: with its failed or
-    /// cancelled descendants).
+    /// cancelled descendants). A file that had started copying is never
+    /// skipped because of its partial destination: a cancelled one continues
+    /// it (one that was replacing an existing file starts over), a failed
+    /// one starts over. One that never opened its destination runs under
+    /// the global policy.
     pub async fn retry(&self, id: TransferId) -> Result<()> {
         self.control(id, Control::Retry).await
     }
@@ -180,17 +184,38 @@ impl TransferEngine {
             .await;
     }
 
-    /// Stops dispatching the items of `site`; transfers already running
-    /// continue. Has no effect on an unknown or already paused site.
+    /// Stops dispatching the items of `site` (a user pause); transfers
+    /// already running continue. Has no effect on an unknown site. A network
+    /// failure on a user-paused site still emits `SitePaused`.
     pub async fn pause_site(&self, site: SiteId) {
         self.request(|reply| Command::PauseSite { site, reply })
             .await;
     }
 
-    /// Dispatches the items of a paused `site` again (after a manual pause or
-    /// a network failure). Has no effect on an unknown or unpaused site.
+    /// Dispatches the items of `site` again: clears both its user pause and
+    /// its network pause (an explicit "go" from the user; during a real
+    /// outage the next network error pauses the site again). Has no effect
+    /// on an unknown site.
     pub async fn resume_site(&self, site: SiteId) {
         self.request(|reply| Command::ResumeSite { site, reply })
+            .await;
+    }
+
+    /// Clears the network pause of `site` (set by a network error, announced
+    /// by `Event::SitePaused`). The site dispatches again unless the user
+    /// also paused it (`pause_site`). Has no effect on an unknown site.
+    ///
+    /// Integration pattern (the app wires one task per connected site):
+    /// the task watches `SshSession::state()` and
+    /// - when the state returns to `Connected` with a new
+    ///   `SshSession::generation()` (a reconnection), calls
+    ///   `network_restored(site)`;
+    /// - when a `SitePaused` for the site arrives while the state is still
+    ///   `Connected` (a request failed, e.g. timed out, but the connection
+    ///   never dropped, so no reconnection will follow), waits 2 s and, if
+    ///   the state is still `Connected`, calls `network_restored(site)`.
+    pub async fn network_restored(&self, site: SiteId) {
+        self.request(|reply| Command::NetworkRestored { site, reply })
             .await;
     }
 

@@ -9,9 +9,13 @@
 //! Files are dispatched before directories, so a large tree starts copying
 //! before it has been listed completely.
 //!
-//! A network error pauses the item's whole site: the item goes back to
-//! `Queued` (a file continues from its partial destination later) and the
-//! site dispatches nothing until `resume_site`. Other sites keep running.
+//! A site has two pause flags and dispatches only while both are off:
+//! `user_paused` (`pause_site`) and `network_paused`. A network error sets
+//! `network_paused` on the item's whole site, emitting `SitePaused` when the
+//! flag turns on (even while the site is also paused by the user): the item
+//! goes back to `Queued` (a file continues from its partial destination
+//! later). `network_restored` clears `network_paused`; `resume_site` clears
+//! both. Other sites keep running.
 //!
 //! At start, items left unfinished by a previous run are loaded as `Paused`
 //! (see `recovery::recover`); nothing resumes automatically.
@@ -22,7 +26,11 @@
 //! continues its copy once the copy is decided (`Resume`, or `Overwrite`
 //! when it replaces an existing file). Pausing, requeueing or recovering an
 //! item carries it forward; an item with none runs under the global policy
-//! (its destination was never opened for writing).
+//! (its destination was never opened for writing). A cancelled item keeps
+//! its continuation too, and a failed one that had one gets `Overwrite`
+//! instead (a failed write can leave stale bytes or holes below the
+//! destination's size), so `retry` never skips or appends to a partial
+//! destination.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::{Duration, Instant};
@@ -96,6 +104,10 @@ pub(super) enum Command {
         site: SiteId,
         reply: oneshot::Sender<()>,
     },
+    NetworkRestored {
+        site: SiteId,
+        reply: oneshot::Sender<()>,
+    },
     /// Stops the actor; `reply` is answered once it has stopped.
     Shutdown { reply: oneshot::Sender<()> },
 }
@@ -118,19 +130,28 @@ pub(super) struct Running {
     /// override this run consumed, until the copy is decided; then the
     /// policy that continues that copy. Mirrors the stored `next_policy`.
     pub(super) retry: Option<ConflictPolicy>,
+    /// The copy phase has started (`prepare` is over).
+    pub(super) copying: bool,
 }
 
 pub(super) struct Site {
     endpoints: SiteEndpoints,
     /// Worker slots currently held by items of this site.
     busy: usize,
-    /// Set by `pause_site` or a network error: nothing new is dispatched.
-    paused: bool,
+    /// Set by `pause_site`, cleared by `resume_site`.
+    user_paused: bool,
+    /// Set by a network error, cleared by `network_restored` or `resume_site`.
+    network_paused: bool,
 }
 
 impl Site {
     fn free(&self) -> usize {
         self.endpoints.workers.saturating_sub(self.busy)
+    }
+
+    /// Whether new items may start.
+    fn dispatching(&self) -> bool {
+        !self.user_paused && !self.network_paused
     }
 }
 
@@ -248,7 +269,8 @@ impl Actor {
                             Site {
                                 endpoints,
                                 busy: 0,
-                                paused: false,
+                                user_paused: false,
+                                network_paused: false,
                             },
                         );
                     }
@@ -293,13 +315,21 @@ impl Actor {
             }
             Command::PauseSite { site, reply } => {
                 if let Some(site) = self.sites.get_mut(&site) {
-                    site.paused = true;
+                    site.user_paused = true;
                 }
                 let _ = reply.send(());
             }
             Command::ResumeSite { site, reply } => {
                 if let Some(site) = self.sites.get_mut(&site) {
-                    site.paused = false;
+                    site.user_paused = false;
+                    site.network_paused = false;
+                }
+                let _ = reply.send(());
+                self.dispatch();
+            }
+            Command::NetworkRestored { site, reply } => {
+                if let Some(site) = self.sites.get_mut(&site) {
+                    site.network_paused = false;
                 }
                 let _ = reply.send(());
                 self.dispatch();
@@ -396,7 +426,7 @@ impl Actor {
         let ready: Vec<SiteId> = self
             .sites
             .iter()
-            .filter(|(_, s)| !s.paused && s.free() > 0)
+            .filter(|(_, s)| s.dispatching() && s.free() > 0)
             .map(|(id, _)| id.clone())
             .collect();
         for site_id in ready {
@@ -424,16 +454,18 @@ impl Actor {
                     self.transition(id, TransferState::Failed(e));
                     continue;
                 }
+                let cancel = CancellationToken::new();
                 self.running.insert(
                     id,
                     Running {
-                        cancel: CancellationToken::new(),
+                        cancel: cancel.clone(),
                         intent: None,
                         retry: policy_override,
+                        copying: false,
                     },
                 );
                 let policy = policy_override.unwrap_or(self.policy);
-                worker::spawn_prepare(id, route, policy, self.worker_tx.clone());
+                worker::spawn_prepare(id, route, policy, cancel, self.worker_tx.clone());
             }
         }
     }
@@ -449,25 +481,47 @@ impl Actor {
     }
 
     /// Moves an item that holds a worker slot to `state`, frees the slot and
-    /// dispatches the next item.
+    /// dispatches the next item. A failed item with a continuation keeps
+    /// `Overwrite` as its continuation.
     fn release(&mut self, id: TransferId, state: TransferState) {
+        let state = match state {
+            TransferState::Failed(e) => TransferState::Failed(self.overwrite_on_retry(id, e)),
+            state => state,
+        };
         self.transition(id, state);
         self.free_slot(id);
         self.dispatch();
     }
 
+    /// Before a running item fails: if it has a continuation (its
+    /// destination was, or may have been, opened for writing), stores
+    /// `Overwrite` as its continuation, so that a retry rewrites the whole
+    /// destination. Returns `error`, with a store error in its detail.
+    fn overwrite_on_retry(&mut self, id: TransferId, error: Error) -> Error {
+        if !self.running.get(&id).is_some_and(|r| r.retry.is_some()) {
+            return error;
+        }
+        match self
+            .store
+            .set_next_policy(id, Some(ConflictPolicy::Overwrite))
+        {
+            Ok(()) => error,
+            Err(store_err) => with_store_detail(error, &store_err),
+        }
+    }
+
     /// Puts an item whose worker hit a network error back in the queue,
-    /// under its continuation, and pauses its site. `SitePaused` is emitted
-    /// only if the site was not paused already.
+    /// under its continuation, and network-pauses its site. `SitePaused` is
+    /// emitted only if the site was not network-paused already.
     fn network_requeue(&mut self, id: TransferId, error: Error) {
         let site_id = self.items.get(&id).map(|i| i.spec.site.clone());
         self.requeue(id);
         self.free_slot(id);
         if let Some(site_id) = site_id
             && let Some(site) = self.sites.get_mut(&site_id)
-            && !site.paused
+            && !site.network_paused
         {
-            site.paused = true;
+            site.network_paused = true;
             self.emit(Event::SitePaused {
                 site: site_id,
                 error,
@@ -528,6 +582,8 @@ impl Actor {
                     (Ok(Prepared::Symlink), None) => {
                         self.release(id, TransferState::Skipped(SYMLINK_SKIP.to_string()))
                     }
+                    // Only a control command or shutdown cancels the token.
+                    (Ok(Prepared::Stopped), None) => self.release_stopped(id, None),
                     (Err(e), None) if e.kind == ErrorKind::Network => self.network_requeue(id, e),
                     (Err(e), None) => self.release(id, TransferState::Failed(e)),
                 }
@@ -609,6 +665,7 @@ impl Actor {
                 let cancel = match self.running.get_mut(&id) {
                     Some(running) => {
                         running.retry = Some(retry);
+                        running.copying = true;
                         running.cancel.clone()
                     }
                     None => CancellationToken::new(),

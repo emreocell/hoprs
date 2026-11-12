@@ -3,6 +3,8 @@
 //! items. A directory stays `Active` (without holding a worker slot) until
 //! all of its children are terminal, counting them in a `DirProgress`.
 
+use std::collections::HashSet;
+
 use hoprs_core::{EntryKind, Error, ErrorKind, RemoteEntry};
 
 use super::actor::{Actor, Intent, SYMLINK_SKIP};
@@ -93,10 +95,13 @@ impl Actor {
         self.transition(dir, state);
     }
 
-    /// Inserts one child per entry of the listed directory `id`. The
-    /// directory stays `Active` until its children finish, or becomes `Done`
-    /// right away if none is pending. If it was paused or cancelled while
-    /// listing, its children are created (and it ends) paused or cancelled.
+    /// Inserts one child per entry of the listed directory `id`. Only the
+    /// first entry of a name is copied: a later one with the same name
+    /// becomes a `Failed` child, so that two items never write the same
+    /// path. The directory stays `Active` until its children finish, or
+    /// finishes right away if none is pending. If it was paused or cancelled
+    /// while listing, its children are created (and it ends) paused or
+    /// cancelled.
     pub(super) fn expand(
         &mut self,
         id: TransferId,
@@ -118,6 +123,7 @@ impl Actor {
         dir.is_dir = Some(true);
         dir.size = None;
         let parent = dir.spec.clone();
+        let mut seen = HashSet::new();
         let children: Vec<NewChild> = entries
             .iter()
             .map(|e| NewChild {
@@ -129,7 +135,12 @@ impl Actor {
                 },
                 is_dir: e.kind == EntryKind::Dir,
                 size: (e.kind == EntryKind::File).then_some(e.size),
-                state: if e.kind == EntryKind::Symlink {
+                state: if !seen.insert(e.name.as_str()) {
+                    TransferState::Failed(
+                        Error::new(ErrorKind::Io, "Duplicate name in directory listing")
+                            .with_detail(format!("{:?} in {}", e.name, parent.local)),
+                    )
+                } else if e.kind == EntryKind::Symlink {
                     TransferState::Skipped(SYMLINK_SKIP.to_string())
                 } else {
                     initial.clone()
@@ -144,8 +155,12 @@ impl Actor {
             }
         };
         let pending = children.iter().filter(|c| !c.state.is_terminal()).count();
+        let failed = children
+            .iter()
+            .filter(|c| matches!(c.state, TransferState::Failed(_)))
+            .count();
         if pending > 0 && initial == TransferState::Queued {
-            self.dirs.insert(id, DirProgress { pending, failed: 0 });
+            self.dirs.insert(id, DirProgress { pending, failed });
         }
         for (child_id, child) in ids.into_iter().zip(children) {
             self.add_item(TransferItem {
@@ -161,7 +176,7 @@ impl Actor {
         if initial == TransferState::Cancelled {
             self.transition(id, TransferState::Cancelled);
         } else if pending == 0 {
-            self.transition(id, TransferState::Done);
+            self.finish_dir(id, failed);
         } else if initial == TransferState::Paused {
             self.transition(id, TransferState::Paused);
         }
