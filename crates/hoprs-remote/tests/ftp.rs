@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use hoprs_core::{ConnectionState, Error, ErrorKind, ReconnectPolicy};
 use hoprs_remote::testing::{
     FtpSession, OtherCertificate, TestControl, ftp_config, ftps_fixture, kill_ftp_sessions,
-    open_test_control, pooled_quote, server_fingerprint, session_quote,
+    open_test_control, pooled_quote, server_fingerprint, session_command, session_quote,
 };
 use hoprs_remote::{
     CertProblem, Connection, FtpConfig, FtpPrompter, FtpSecurity, ScriptedFtpPrompter,
@@ -725,4 +725,155 @@ async fn supervisor_ends_when_last_handle_drops() {
         .await
         .expect("supervisor still running 1 s after the last handle dropped");
     assert!(closed.is_err(), "expected the state channel to close");
+}
+
+/// A minimal FTP server on 127.0.0.1 that logs anyone in and accepts any number of
+/// connections. It answers `NOOP` and `PWD`, answers `DATA425` with `425`, and never answers
+/// `HANG`. Returns its port.
+async fn fake_server() -> u16 {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((sock, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let (read, mut write) = sock.into_split();
+                if write.write_all(b"220 fake\r\n").await.is_err() {
+                    return;
+                }
+                let mut lines = BufReader::new(read).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let verb = line.split(' ').next().unwrap_or("").to_ascii_uppercase();
+                    let reply: &[u8] = match verb.as_str() {
+                        "USER" => b"331 Password please.\r\n",
+                        "PASS" => b"230 Logged in.\r\n",
+                        "TYPE" => b"200 Binary.\r\n",
+                        "NOOP" => b"200 NOOP ok.\r\n",
+                        "PWD" => b"257 \"/\"\r\n",
+                        "DATA425" => b"425 Can't open data connection.\r\n",
+                        "HANG" => continue,
+                        _ => b"502 Not implemented.\r\n",
+                    };
+                    if write.write_all(reply).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    port
+}
+
+/// A session on [`fake_server`] with the given command timeout and no keepalive in sight.
+async fn fake_session(command_timeout: Duration) -> FtpSession {
+    let mut cfg = session_config();
+    cfg.port = fake_server().await;
+    cfg.keepalive_interval = Duration::from_secs(60);
+    cfg.command_timeout = command_timeout;
+    session_with(cfg).await.0
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hung_control_command_times_out() {
+    let s = fake_session(Duration::from_secs(1)).await;
+    let rec = record_until(s.state(), |st| *st == ConnectionState::Connected);
+
+    let start = Instant::now();
+    let e = session_command(&s, "HANG").await.unwrap_err();
+    let elapsed = start.elapsed();
+    assert_eq!(e.kind, ErrorKind::Network, "{e:?}");
+    assert_eq!(e.message, "Control command timed out", "{e:?}");
+    assert!(
+        elapsed >= Duration::from_secs(1) && elapsed < Duration::from_millis(2500),
+        "{elapsed:?}"
+    );
+    // A timeout is control loss: the session reconnects (the fake server accepts again).
+    let states = recorded(rec).await;
+    assert_eq!(
+        states,
+        vec![
+            ConnectionState::Reconnecting { attempt: 1 },
+            ConnectionState::Connected
+        ]
+    );
+    assert_eq!(s.generation(), 2);
+    assert_eq!(session_command(&s, "PWD").await.unwrap(), "\"/\"");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disconnect_while_command_hangs() {
+    let s = fake_session(Duration::from_secs(30)).await;
+    let mut rx = s.state();
+    let hung = tokio::spawn({
+        let s = s.clone();
+        async move { session_command(&s, "HANG").await }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!hung.is_finished());
+
+    tokio::time::timeout(Duration::from_secs(1), s.disconnect())
+        .await
+        .expect("disconnect waited for the hung command");
+    let by_user =
+        ConnectionState::Disconnected(Error::new(ErrorKind::Network, "Disconnected by user"));
+    assert_eq!(*rx.borrow_and_update(), by_user);
+    let result = tokio::time::timeout(Duration::from_secs(1), hung)
+        .await
+        .expect("the hung command was not cancelled")
+        .unwrap();
+    assert_not_connected(result);
+    assert_not_connected(session_command(&s, "PWD").await);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(*rx.borrow(), by_user);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn data_channel_reply_keeps_session() {
+    let s = fake_session(Duration::from_secs(5)).await;
+    let mut rx = s.state();
+    rx.mark_unchanged();
+    let e = session_command(&s, "DATA425").await.unwrap_err();
+    assert_eq!(e.kind, ErrorKind::Network, "{e:?}");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !rx.has_changed().unwrap(),
+        "state changed: {:?}",
+        *rx.borrow()
+    );
+    assert_eq!(*rx.borrow(), ConnectionState::Connected);
+    assert_eq!(s.generation(), 1);
+    assert_eq!(session_command(&s, "PWD").await.unwrap(), "\"/\"");
+}
+
+/// A connection loss seen on a transfer connection makes the session probe its control
+/// connection at once, instead of after up to `keepalive_interval`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn pooled_connection_loss_probes_control() {
+    let mut cfg = session_config();
+    cfg.keepalive_interval = Duration::from_secs(60);
+    let (s, _p) = session_with(cfg).await;
+    let mut rx = s.state();
+    let mut conn = s.checkout().await.unwrap();
+    kill_ftp_sessions();
+
+    let e = pooled_quote(&mut conn, "NOOP").await.unwrap_err();
+    assert_eq!(e.kind, ErrorKind::Network, "{e:?}");
+    conn.report(&e);
+    drop(conn);
+    wait_state(
+        &mut rx,
+        |st| matches!(st, ConnectionState::Reconnecting { .. }),
+        Duration::from_secs(3),
+    )
+    .await;
+    wait_state(
+        &mut rx,
+        |st| *st == ConnectionState::Connected,
+        Duration::from_secs(10),
+    )
+    .await;
+    assert_eq!(s.generation(), 2);
+    s.disconnect().await;
 }

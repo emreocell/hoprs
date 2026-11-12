@@ -57,6 +57,10 @@ pub struct FtpConfig {
     pub keepalive_interval: Duration,
     /// Bounds TCP connect, greeting, login and `FEAT`; time spent in prompts does not count.
     pub connect_timeout: Duration,
+    /// Bounds a whole command on the control connection, from sending it to its last reply
+    /// (a directory listing included, data transfer and all). Sized generously on purpose:
+    /// it only exists to detect a dead peer, and a command that exceeds it costs a reconnect.
+    pub command_timeout: Duration,
     pub reconnect: ReconnectPolicy,
     /// SHA-256 fingerprint of a certificate the user accepted (FTPS).
     pub pinned_fingerprint: Option<String>,
@@ -66,7 +70,8 @@ pub struct FtpConfig {
 
 impl FtpConfig {
     /// Passive mode with the NAT workaround, 4 transfer connections, 30 s keepalive,
-    /// 15 s connect timeout, default reconnect policy, no pin, no extra roots.
+    /// 15 s connect timeout, 120 s command timeout, default reconnect policy, no pin, no
+    /// extra roots.
     pub fn new(
         host: impl Into<String>,
         port: u16,
@@ -84,6 +89,7 @@ impl FtpConfig {
             transfer_connections: 4,
             keepalive_interval: Duration::from_secs(30),
             connect_timeout: Duration::from_secs(15),
+            command_timeout: Duration::from_secs(120),
             reconnect: ReconnectPolicy::default(),
             pinned_fingerprint: None,
             extra_roots: Vec::new(),
@@ -104,6 +110,7 @@ impl fmt::Debug for FtpConfig {
             .field("transfer_connections", &self.transfer_connections)
             .field("keepalive_interval", &self.keepalive_interval)
             .field("connect_timeout", &self.connect_timeout)
+            .field("command_timeout", &self.command_timeout)
             .field("reconnect", &self.reconnect)
             .field("pinned_fingerprint", &self.pinned_fingerprint)
             .field("extra_roots", &self.extra_roots)
@@ -130,6 +137,7 @@ mod tests {
         assert_eq!(c.transfer_connections, 4);
         assert_eq!(c.keepalive_interval, Duration::from_secs(30));
         assert_eq!(c.connect_timeout, Duration::from_secs(15));
+        assert_eq!(c.command_timeout, Duration::from_secs(120));
         assert_eq!(c.reconnect, ReconnectPolicy::default());
         assert!(c.password.is_none() && c.pinned_fingerprint.is_none());
         assert!(c.extra_roots.is_empty());

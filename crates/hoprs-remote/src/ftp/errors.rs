@@ -25,7 +25,26 @@ pub(crate) fn map_reply(code: u32, text: &str, context: &str) -> Error {
         553 => (ErrorKind::Io, "File name not allowed"),
         _ => (ErrorKind::Protocol, "Unexpected FTP reply"),
     };
-    Error::new(kind, format!("{what}: {context}")).with_detail(format!("{code} {text}"))
+    let detail = match code {
+        425 | 426 => format!("{DATA_CHANNEL}{code} {text}"),
+        _ => format!("{code} {text}"),
+    };
+    Error::new(kind, format!("{what}: {context}")).with_detail(detail)
+}
+
+/// Detail prefix of the `Network` errors for data channel replies (`425`, `426`): they come
+/// over a healthy control connection.
+const DATA_CHANNEL: &str = "data channel: ";
+
+/// Whether `e`, returned by a command, means the connection it ran on is lost: a socket or
+/// I/O failure, a timeout, or `421`. Data channel replies (`425`, `426`) are `Network` errors
+/// too, but the control connection that carried them is fine.
+pub(crate) fn is_control_loss(e: &Error) -> bool {
+    e.kind == ErrorKind::Network
+        && !e
+            .detail
+            .as_deref()
+            .is_some_and(|d| d.starts_with(DATA_CHANNEL))
 }
 
 /// Maps any suppaftp error. Replies go through [`map_reply`].
@@ -86,6 +105,34 @@ mod tests {
     fn network() {
         for code in [421, 425, 426] {
             assert_eq!(kind(code, "x"), ErrorKind::Network, "{code}");
+        }
+    }
+
+    #[test]
+    fn data_channel_replies_are_not_control_loss() {
+        for code in [425, 426] {
+            let e = map_reply(code, "Can't open data connection.", "/a");
+            assert_eq!(e.kind, ErrorKind::Network, "{code}");
+            assert!(!is_control_loss(&e), "{e:?}");
+            let detail = e.detail.as_deref().unwrap_or("");
+            assert!(detail.contains(&format!("{code} Can't open")), "{e:?}");
+        }
+        assert!(is_control_loss(&map_reply(421, "Timeout.", "/a")));
+        let io = std::io::Error::from(std::io::ErrorKind::ConnectionReset);
+        assert!(is_control_loss(&map_ftp_error(
+            FtpError::ConnectionError(io),
+            "h"
+        )));
+        assert!(is_control_loss(&Error::new(
+            ErrorKind::Network,
+            "Control command timed out"
+        )));
+        for e in [
+            map_reply(550, "No such file or directory", "/a"),
+            map_reply(530, "Login incorrect.", "/a"),
+            map_reply(500, "Unknown command.", "/a"),
+        ] {
+            assert!(!is_control_loss(&e), "{e:?}");
         }
     }
 

@@ -17,7 +17,7 @@ pub const FTPS_IMPLICIT_PORT: u16 = 2990;
 
 /// Config for `frank` on the test containers: the `ftps-implicit` service for
 /// [`FtpSecurity::ImplicitTls`], the `ftp` service otherwise. No extra roots, no pin.
-/// Keepalive every 2 s, well under vsftpd's `idle_session_timeout=8`.
+/// Keepalive every 2 s, well under vsftpd's `idle_session_timeout=8`; command timeout 10 s.
 pub fn ftp_config(security: FtpSecurity) -> FtpConfig {
     let port = match security {
         FtpSecurity::ImplicitTls => FTPS_IMPLICIT_PORT,
@@ -26,6 +26,7 @@ pub fn ftp_config(security: FtpSecurity) -> FtpConfig {
     let mut cfg = FtpConfig::new("127.0.0.1", port, "frank", security);
     cfg.password = Some(SecretString::from("frank-pass"));
     cfg.keepalive_interval = Duration::from_secs(2);
+    cfg.command_timeout = Duration::from_secs(10);
     cfg
 }
 
@@ -133,4 +134,21 @@ pub async fn session_quote(session: &FtpSession, command: &str) -> Result<(u32, 
 /// Sends a raw command on a pooled transfer connection.
 pub async fn pooled_quote(conn: &mut PooledConn, command: &str) -> Result<(u32, String)> {
     quote(conn.stream(), command).await
+}
+
+/// Sends a raw command on the session's control connection; a reply of 400 or more is an
+/// error (mapped like every FTP reply), otherwise the reply's text is returned.
+pub async fn session_command(session: &FtpSession, command: &str) -> Result<String> {
+    let command = command.to_owned();
+    session
+        .with_control(move |c| {
+            Box::pin(async move {
+                let (code, text) = quote(&mut c.stream, &command).await?;
+                if code >= 400 {
+                    return Err(crate::ftp::errors::map_reply(code, &text, &command));
+                }
+                Ok(text)
+            })
+        })
+        .await
 }

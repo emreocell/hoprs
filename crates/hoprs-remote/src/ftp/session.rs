@@ -13,11 +13,13 @@ use suppaftp::FtpError;
 use suppaftp::Status;
 use suppaftp::tokio::{AsyncRustlsConnector, AsyncRustlsFtpStream};
 use suppaftp::types::FileType;
-use tokio::sync::{Mutex, MutexGuard, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
+use tokio::sync::{
+    Mutex, MutexGuard, Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch,
+};
 use tokio::time::Instant;
 
 use super::config::{FtpConfig, FtpSecurity};
-use super::errors::{map_ftp_error, reply_parts};
+use super::errors::{is_control_loss, map_ftp_error, reply_parts};
 use super::prompt::FtpPrompter;
 use super::tls::{RejectedCert, RejectedSlot, connector, fingerprint};
 
@@ -251,6 +253,8 @@ struct Shared {
     keepalive_interval: Duration,
     /// Bounds a keepalive `NOOP` and the check of an idle transfer connection.
     reply_timeout: Duration,
+    /// Bounds every `with_control` command (see [`FtpConfig::command_timeout`]).
+    command_timeout: Duration,
     /// The control connection and its generation; `None` once lost or closed.
     control: Mutex<Option<(Control, u64)>>,
     /// When the control connection last finished a command.
@@ -263,6 +267,9 @@ struct Shared {
     permits: Arc<Semaphore>,
     /// Tells the supervisor that the control connection of a generation was lost.
     lost: mpsc::UnboundedSender<(u64, Error)>,
+    /// Asks the supervisor to probe the control connection now (a transfer connection was
+    /// lost, so the server may be gone).
+    probe: Notify,
 }
 
 impl Shared {
@@ -332,9 +339,12 @@ impl Shared {
         drop(stale);
     }
 
-    /// Closes the control connection and every idle transfer connection.
-    async fn close(&self) {
-        self.control.lock().await.take();
+    /// Closes the control connection, unless a command is running on it (that command sees
+    /// the state change and closes it), and every idle transfer connection. Never waits.
+    fn close(&self) {
+        if let Ok(mut slot) = self.control.try_lock() {
+            slot.take();
+        }
         self.clear_idle();
     }
 }
@@ -385,6 +395,7 @@ impl FtpSession {
         let shared = Arc::new(Shared {
             keepalive_interval: cfg.keepalive_interval,
             reply_timeout: cfg.connect_timeout,
+            command_timeout: cfg.command_timeout,
             permits: Arc::new(Semaphore::new(cfg.transfer_connections)),
             cfg: StdMutex::new(cfg),
             prompter,
@@ -394,6 +405,7 @@ impl FtpSession {
             state,
             idle: StdMutex::new(Vec::new()),
             lost,
+            probe: Notify::new(),
         });
         let (commands, rx) = mpsc::unbounded_channel();
         let supervisor = Supervisor {
@@ -421,10 +433,16 @@ impl FtpSession {
     /// Runs `f` on the control connection; calls are serialized.
     ///
     /// Never waits for a reconnection: unless `Connected` it fails at once with `Network`,
-    /// "Not connected". A `Network` error from `f` means the control connection is lost:
-    /// it is discarded, the supervisor starts reconnecting, and the error is returned. If the
-    /// returned future is dropped before `f` finishes, the connection is in an unknown state
-    /// (a reply may be pending) and is treated as lost as well.
+    /// "Not connected". A control loss from `f` (see [`is_control_loss`]: socket errors,
+    /// `421`, but not the data channel replies `425`/`426`) discards the control connection,
+    /// starts the supervisor reconnecting, and is returned.
+    ///
+    /// The whole of `f` (a directory listing included) is bounded by
+    /// [`FtpConfig::command_timeout`], generous on purpose; exceeding it is a control loss,
+    /// `Network`, "Control command timed out". If the session is disconnected meanwhile, `f`
+    /// is abandoned, the connection closed, and the result is "Not connected". If the returned
+    /// future is dropped before `f` finishes, the connection is in an unknown state (a reply
+    /// may be pending) and is treated as lost as well.
     pub(crate) async fn with_control<T, F>(&self, f: F) -> Result<T>
     where
         F: for<'c> FnOnce(&'c mut Control) -> BoxFuture<'c, Result<T>>,
@@ -433,6 +451,7 @@ impl FtpSession {
         if !shared.is_connected() {
             return Err(not_connected());
         }
+        let mut state = shared.state.subscribe();
         let slot = shared.control.lock().await;
         let mut guard = InFlight {
             slot,
@@ -444,11 +463,23 @@ impl FtpSession {
             return Err(not_connected());
         };
         let generation = *generation;
-        let result = f(control).await;
+        let outcome = tokio::select! {
+            result = tokio::time::timeout(shared.command_timeout, f(control)) => {
+                Some(result.unwrap_or_else(|_| {
+                    Err(Error::new(ErrorKind::Network, "Control command timed out"))
+                }))
+            }
+            _ = state.wait_for(|s| matches!(s, ConnectionState::Disconnected(_))) => None,
+        };
         guard.done = true;
         shared.touch();
+        let Some(result) = outcome else {
+            // Disconnected by the user: the abandoned command may have left a reply pending.
+            guard.slot.take();
+            return Err(not_connected());
+        };
         if let Err(e) = &result
-            && e.kind == ErrorKind::Network
+            && is_control_loss(e)
         {
             guard.slot.take();
             let _ = shared.lost.send((generation, e.clone()));
@@ -556,6 +587,21 @@ impl PooledConn {
         self.generation
     }
 
+    /// Tells the session about an error on this connection. A connection loss (see
+    /// [`is_control_loss`]) makes the session probe its control connection at once with a
+    /// `NOOP`, so a server that is gone is detected without waiting for the keepalive. It does
+    /// not reconnect by itself: only a failed probe does.
+    pub fn report(&self, error: &Error) {
+        if !is_control_loss(error) {
+            return;
+        }
+        if let Some(shared) = self.shared.upgrade()
+            && shared.generation() == self.generation
+        {
+            shared.probe.notify_one();
+        }
+    }
+
     /// The connection is idle again (no transfer open, every reply read) and can be reused.
     pub fn mark_clean(&mut self) {
         self.clean = true;
@@ -604,7 +650,7 @@ impl Supervisor {
                 Phase::Stop => break,
             };
         }
-        self.shared.close().await;
+        self.shared.close();
     }
 
     async fn connected(&mut self) -> Phase {
@@ -618,15 +664,20 @@ impl Supervisor {
                         return Phase::Reconnecting(e);
                     }
                 }
-                _ = tokio::time::sleep_until(next) => match self.keepalive().await {
+                _ = tokio::time::sleep_until(next) => match self.keepalive(false).await {
+                    Ok(at) => next = at,
+                    Err(e) => return Phase::Reconnecting(e),
+                },
+                _ = self.shared.probe.notified() => match self.keepalive(true).await {
                     Ok(at) => next = at,
                     Err(e) => return Phase::Reconnecting(e),
                 },
                 command = self.commands.recv() => match command {
                     None => return Phase::Stop,
                     Some(Command::Disconnect(ack)) => {
+                        // A running command sees the state change and closes the connection.
                         self.shared.set_state(user_disconnected());
-                        self.shared.close().await;
+                        self.shared.close();
                         let _ = ack.send(());
                         return Phase::Disconnected;
                     }
@@ -635,9 +686,10 @@ impl Supervisor {
         }
     }
 
-    /// Sends `NOOP` if the control connection has been idle for `keepalive_interval`.
-    /// Returns when to check again, or the error that lost the connection.
-    async fn keepalive(&self) -> Result<Instant> {
+    /// Sends `NOOP` if the control connection has been idle for `keepalive_interval`, or
+    /// whenever it is not busy with `probe`. Returns when to check again, or the error that
+    /// lost the connection.
+    async fn keepalive(&self, probe: bool) -> Result<Instant> {
         let shared = &*self.shared;
         let interval = shared.keepalive_interval;
         // A running command means the connection is not idle.
@@ -645,7 +697,7 @@ impl Supervisor {
             return Ok(Instant::now() + interval);
         };
         let last = shared.last_used();
-        if last.elapsed() < interval {
+        if !probe && last.elapsed() < interval {
             return Ok(last + interval);
         }
         // Already lost: the report is on its way.
