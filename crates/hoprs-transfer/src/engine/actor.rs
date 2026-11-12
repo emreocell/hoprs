@@ -369,10 +369,8 @@ impl Actor {
                 let _ = reply.send(());
                 self.dispatch();
             }
-            // `run` handles it, since it ends the actor.
-            Command::Shutdown { reply } => {
-                let _ = reply.send(());
-            }
+            // `run` takes it out of the command stream, since it ends the actor.
+            Command::Shutdown { .. } => unreachable!("shutdown is handled by run"),
         }
     }
 
@@ -527,16 +525,21 @@ impl Actor {
             if !restartable(&item.state) {
                 continue;
             }
-            // Only the continuation of an interrupted copy forces `Resume`;
-            // anything else runs under the global policy again.
+            // The continuation of an interrupted copy forces `Resume`; an
+            // item requeued by a network error gets its stored override
+            // back; anything else runs under the global policy again.
             let resume_copy = item.state == TransferState::Paused
                 && item.is_dir != Some(true)
                 && matches!(self.store.paused_from(i), Ok(Some(PausedFrom::Active)));
-            if resume_copy {
-                self.overrides.insert(i, ConflictPolicy::Resume);
+            let policy = if resume_copy {
+                Some(ConflictPolicy::Resume)
             } else {
-                self.overrides.remove(&i);
-            }
+                self.store.pending_override(i).ok().flatten()
+            };
+            match policy {
+                Some(policy) => self.overrides.insert(i, policy),
+                None => self.overrides.remove(&i),
+            };
             if let Some(kids) = children.get(&i) {
                 self.reactivate_dir(i, kids);
             } else {
@@ -779,12 +782,21 @@ impl Actor {
     /// Puts an item whose worker hit a network error back in the queue, with
     /// `retry` as the policy override of its next run, and pauses its site.
     /// `SitePaused` is emitted only if the site was not paused already.
+    ///
+    /// The override is also stored, so that it survives a pause and resume
+    /// of the item or a restart: without it, the partial destination could
+    /// be skipped as an existing file.
     fn network_requeue(&mut self, id: TransferId, error: Error, retry: Option<ConflictPolicy>) {
-        if let Some(policy) = retry {
-            self.overrides.insert(id, policy);
-        }
         let site_id = self.items.get(&id).map(|i| i.spec.site.clone());
-        self.transition(id, TransferState::Queued);
+        let requeued = self.transition(id, TransferState::Queued);
+        if let Some(policy) = retry
+            && requeued
+        {
+            self.overrides.insert(id, policy);
+            if let Err(e) = self.store.set_pending_override(id, policy) {
+                self.transition(id, TransferState::Failed(e));
+            }
+        }
         self.free_slot(id);
         if let Some(site_id) = site_id
             && let Some(site) = self.sites.get_mut(&site_id)

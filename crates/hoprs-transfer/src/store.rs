@@ -5,7 +5,7 @@ use hoprs_core::{Error, ErrorKind, RemotePath, Result, SiteId};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::model::{
-    ConflictInfo, Direction, TransferId, TransferItem, TransferSpec, TransferState,
+    ConflictInfo, ConflictPolicy, Direction, TransferId, TransferItem, TransferSpec, TransferState,
 };
 
 const MIGRATION_V1: &str = "
@@ -39,6 +39,60 @@ impl PausedFrom {
             _ => None,
         }
     }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            PausedFrom::Queued => "queued",
+            PausedFrom::Active => "active",
+            PausedFrom::AwaitingDecision => "awaiting_decision",
+        }
+    }
+}
+
+/// Prefix of a pending override in `state_detail`.
+const OVERRIDE: &str = "override:";
+
+fn policy_name(policy: ConflictPolicy) -> &'static str {
+    match policy {
+        ConflictPolicy::Ask => "ask",
+        ConflictPolicy::Overwrite => "overwrite",
+        ConflictPolicy::Skip => "skip",
+        ConflictPolicy::OverwriteIfNewer => "overwrite_if_newer",
+        ConflictPolicy::Resume => "resume",
+    }
+}
+
+fn parse_policy(s: &str) -> Option<ConflictPolicy> {
+    match s {
+        "ask" => Some(ConflictPolicy::Ask),
+        "overwrite" => Some(ConflictPolicy::Overwrite),
+        "skip" => Some(ConflictPolicy::Skip),
+        "overwrite_if_newer" => Some(ConflictPolicy::OverwriteIfNewer),
+        "resume" => Some(ConflictPolicy::Resume),
+        _ => None,
+    }
+}
+
+/// Decodes `state_detail` of a `queued` row (`override:<policy>`) or a
+/// `paused` row (`<origin>` or `<origin>;override:<policy>`) into the pause
+/// origin and the pending override. Other rows have neither.
+fn decode_detail(
+    state: &str,
+    detail: Option<&str>,
+) -> (Option<PausedFrom>, Option<ConflictPolicy>) {
+    let pending = |s: &str| s.strip_prefix(OVERRIDE).and_then(parse_policy);
+    match (state, detail) {
+        ("queued", Some(d)) => (None, pending(d)),
+        ("paused", Some(d)) => match d.split_once(';') {
+            Some((origin, rest)) => (PausedFrom::parse(origin), pending(rest)),
+            None => (PausedFrom::parse(d), None),
+        },
+        _ => (None, None),
+    }
+}
+
+fn override_detail(policy: ConflictPolicy) -> String {
+    format!("{OVERRIDE}{}", policy_name(policy))
 }
 
 /// A child item for `QueueStore::insert_children`.
@@ -224,27 +278,41 @@ fn insert_row(
     Ok(TransferId(conn.last_insert_rowid()))
 }
 
-/// Persists a new state. Moving to `Paused` records the state it was paused from.
+fn current_state(conn: &Connection, id: TransferId) -> Result<Option<(String, Option<String>)>> {
+    conn.query_row(
+        "SELECT state, state_detail FROM transfers WHERE id = ?1",
+        [id.0],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()
+    .db()
+}
+
+/// Persists a new state. Moving to `Paused` records the state it was paused
+/// from. A pending override is kept while the item moves between `Queued`
+/// and `Paused`, and cleared by any other state.
 fn write_state(conn: &Connection, id: TransferId, state: &TransferState) -> Result<()> {
     let mut detail: Option<String> = None;
     let (mut kind, mut message, mut err_detail, mut conflict) = (None, None, None, None);
     let name = match state {
-        TransferState::Queued => "queued",
+        TransferState::Queued => {
+            if let Some((s, d)) = current_state(conn, id)? {
+                detail = decode_detail(&s, d.as_deref()).1.map(override_detail);
+            }
+            "queued"
+        }
         TransferState::Active => "active",
         TransferState::Paused => {
-            let current: Option<(String, Option<String>)> = conn
-                .query_row(
-                    "SELECT state, state_detail FROM transfers WHERE id = ?1",
-                    [id.0],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()
-                .db()?;
-            detail = match current {
-                Some((s, _)) if PausedFrom::parse(&s).is_some() => Some(s),
-                Some((s, d)) if s == "paused" => d,
-                _ => None,
-            };
+            if let Some((s, d)) = current_state(conn, id)? {
+                let (origin, pending) = match PausedFrom::parse(&s) {
+                    Some(origin) => (Some(origin), decode_detail(&s, d.as_deref()).1),
+                    None => decode_detail(&s, d.as_deref()),
+                };
+                detail = origin.map(|o| match pending {
+                    Some(p) => format!("{};{}", o.as_str(), override_detail(p)),
+                    None => o.as_str().to_owned(),
+                });
+            }
             "paused"
         }
         TransferState::AwaitingDecision(c) => {
@@ -341,19 +409,26 @@ impl QueueStore {
 
     /// Returns what a `Paused` item was paused from, or `None` if it is not paused.
     pub fn paused_from(&self, id: TransferId) -> Result<Option<PausedFrom>> {
-        let row: Option<(String, Option<String>)> = self
-            .conn
-            .query_row(
-                "SELECT state, state_detail FROM transfers WHERE id = ?1",
-                [id.0],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+        Ok(current_state(&self.conn, id)?.and_then(|(s, d)| decode_detail(&s, d.as_deref()).0))
+    }
+
+    /// Records the one-shot policy override for the next run of a `Queued`
+    /// item. It is kept while the item moves between `Queued` and `Paused`
+    /// (including recovery) and cleared by any other state.
+    /// Does nothing if the item is not `Queued`.
+    pub fn set_pending_override(&mut self, id: TransferId, policy: ConflictPolicy) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE transfers SET state_detail = ?2 WHERE id = ?1 AND state = 'queued'",
+                params![id.0, override_detail(policy)],
             )
-            .optional()
             .db()?;
-        Ok(match row {
-            Some((s, Some(d))) if s == "paused" => PausedFrom::parse(&d),
-            _ => None,
-        })
+        Ok(())
+    }
+
+    /// The override recorded by `set_pending_override`, if still pending.
+    pub fn pending_override(&self, id: TransferId) -> Result<Option<ConflictPolicy>> {
+        Ok(current_state(&self.conn, id)?.and_then(|(s, d)| decode_detail(&s, d.as_deref()).1))
     }
 
     pub fn set_meta(&mut self, id: TransferId, is_dir: bool, size: Option<u64>) -> Result<()> {
@@ -714,6 +789,72 @@ mod tests {
         assert_eq!(s.paused_from(id).unwrap(), None);
         s.set_state(id, &TransferState::Paused).unwrap();
         assert_eq!(s.paused_from(id).unwrap(), Some(PausedFrom::Queued));
+    }
+
+    #[test]
+    fn pending_override_survives_pause_resume_and_recovery_until_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queue.db");
+        let mut s = QueueStore::open(&path).unwrap();
+        let id = new_item(&mut s);
+        assert_eq!(s.pending_override(id).unwrap(), None);
+        s.set_state(id, &TransferState::Active).unwrap();
+        s.set_state(id, &TransferState::Queued).unwrap();
+        s.set_pending_override(id, ConflictPolicy::Resume).unwrap();
+        assert_eq!(s.get(id).unwrap().unwrap().state, TransferState::Queued);
+        assert_eq!(
+            s.pending_override(id).unwrap(),
+            Some(ConflictPolicy::Resume)
+        );
+
+        // Pause keeps it, alongside the pause origin.
+        s.set_state(id, &TransferState::Paused).unwrap();
+        assert_eq!(s.paused_from(id).unwrap(), Some(PausedFrom::Queued));
+        assert_eq!(
+            s.pending_override(id).unwrap(),
+            Some(ConflictPolicy::Resume)
+        );
+        s.set_state(id, &TransferState::Paused).unwrap();
+        assert_eq!(s.paused_from(id).unwrap(), Some(PausedFrom::Queued));
+        // Resume keeps it.
+        s.set_state(id, &TransferState::Queued).unwrap();
+        assert_eq!(
+            s.pending_override(id).unwrap(),
+            Some(ConflictPolicy::Resume)
+        );
+
+        // Recovery after a restart keeps it.
+        drop(s);
+        let mut s = QueueStore::open(&path).unwrap();
+        s.recover().unwrap();
+        s.set_state(id, &TransferState::Paused).unwrap();
+        assert_eq!(s.paused_from(id).unwrap(), Some(PausedFrom::Queued));
+        assert_eq!(
+            s.pending_override(id).unwrap(),
+            Some(ConflictPolicy::Resume)
+        );
+        assert_eq!(s.get(id).unwrap().unwrap().state, TransferState::Paused);
+
+        // Running consumes it.
+        s.set_state(id, &TransferState::Queued).unwrap();
+        s.set_state(id, &TransferState::Active).unwrap();
+        assert_eq!(s.pending_override(id).unwrap(), None);
+        s.set_state(id, &TransferState::Paused).unwrap();
+        assert_eq!(s.paused_from(id).unwrap(), Some(PausedFrom::Active));
+        assert_eq!(s.pending_override(id).unwrap(), None);
+
+        // Any other state clears it too.
+        let other = new_item(&mut s);
+        s.set_pending_override(other, ConflictPolicy::Overwrite)
+            .unwrap();
+        assert_eq!(
+            s.pending_override(other).unwrap(),
+            Some(ConflictPolicy::Overwrite)
+        );
+        s.set_state(other, &TransferState::Cancelled).unwrap();
+        assert_eq!(s.pending_override(other).unwrap(), None);
+        s.set_state(other, &TransferState::Queued).unwrap();
+        assert_eq!(s.pending_override(other).unwrap(), None);
     }
 
     #[test]

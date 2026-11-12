@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use common::*;
 use hoprs_core::{ErrorKind, SiteId};
-use hoprs_remote::{FaultFs, MemFs};
+use hoprs_remote::{FaultFs, MemFs, Op};
 use hoprs_transfer::{
     Direction, EngineConfig, Event, QueueStore, SiteEndpoints, TransferEngine, TransferId,
     TransferItem, TransferSpec, TransferState,
@@ -438,4 +438,201 @@ async fn restart_keeps_expanded_folder_and_pauses_queued_items() {
             local.read_file(&format!("/w/d/f{i}.bin"))
         );
     }
+}
+
+/// Collects every event received until `pred` matches one, then (after a
+/// `snapshot` round trip, so the actor has emitted everything caused by
+/// what it already handled) every event still buffered.
+async fn events_until(
+    rx: &mut Receiver<Event>,
+    engine: &TransferEngine,
+    mut pred: impl FnMut(&[Event]) -> bool,
+) -> Vec<Event> {
+    let mut seen = Vec::new();
+    while !pred(&seen) {
+        let ev = wait_for(rx, |_| true).await;
+        seen.push(ev);
+    }
+    engine.snapshot().await;
+    while let Ok(ev) = rx.try_recv() {
+        seen.push(ev);
+    }
+    seen
+}
+
+fn requeued(events: &[Event], id: TransferId) -> bool {
+    events.iter().any(
+        |e| matches!(e, Event::StateChanged { id: i, state: TransferState::Queued } if *i == id),
+    )
+}
+
+fn site_paused_count(events: &[Event]) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(e, Event::SitePaused { .. }))
+        .count()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn network_requeued_file_resumes_after_manual_pause() {
+    let local = MemFs::new();
+    let remote_mem = MemFs::new();
+    let remote = FaultFs::new(remote_mem.clone());
+    let (engine, mut rx) = engine_with(
+        Arc::new(local.clone()),
+        Arc::new(remote.clone()),
+        1,
+        EngineConfig::default(),
+    )
+    .await;
+    remote_mem.add_dir("/srv");
+    let bytes = data(MIB);
+    local.add_file("/w/a", &bytes, mtime());
+    remote.fail_io_after(200_000, ErrorKind::Network);
+
+    let id = engine
+        .enqueue(spec(Direction::Upload, "/w/a", "/srv/a"))
+        .await
+        .unwrap();
+    wait_for(&mut rx, |e| matches!(e, Event::SitePaused { .. })).await;
+    assert_eq!(
+        remote_mem.read_file("/srv/a").map(|f| f.len()),
+        Some(200_000),
+        "a partial destination is left behind"
+    );
+
+    // Under `Skip` the partial destination would be skipped as existing.
+    engine
+        .set_policy(hoprs_transfer::ConflictPolicy::Skip)
+        .await;
+    engine.pause(id).await.unwrap();
+    engine.resume_site(site()).await;
+    engine.resume(id).await.unwrap();
+    assert_eq!(wait_terminal(&mut rx, id).await, TransferState::Done);
+    assert_eq!(remote_mem.read_file("/srv/a").unwrap(), bytes);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn network_requeued_file_resumes_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("queue.db");
+    let local = MemFs::new();
+    let remote = MemFs::new();
+    remote.add_dir("/srv");
+    let bytes = data(MIB);
+    local.add_file("/w/a", &bytes, mtime());
+
+    let fault = FaultFs::new(local.clone());
+    fault.fail_io_after(200_000, ErrorKind::Network);
+    let (engine, mut rx) = engine_on_file(
+        &db,
+        Arc::new(fault),
+        remote.clone(),
+        1,
+        EngineConfig::default(),
+    )
+    .await;
+    let id = engine
+        .enqueue(spec(Direction::Upload, "/w/a", "/srv/a"))
+        .await
+        .unwrap();
+    wait_for(&mut rx, |e| matches!(e, Event::SitePaused { .. })).await;
+    engine.shutdown().await;
+    assert_eq!(
+        remote.read_file("/srv/a").map(|f| f.len()),
+        Some(200_000),
+        "a partial destination is left behind"
+    );
+
+    let config = EngineConfig {
+        default_policy: hoprs_transfer::ConflictPolicy::Skip,
+        ..EngineConfig::default()
+    };
+    let fault = FaultFs::new(local.clone());
+    let (engine, mut rx) =
+        engine_on_file(&db, Arc::new(fault.clone()), remote.clone(), 1, config).await;
+    assert_eq!(
+        find(&engine.snapshot().await, id).state,
+        TransferState::Paused
+    );
+    engine.resume(id).await.unwrap();
+    assert_eq!(wait_terminal(&mut rx, id).await, TransferState::Done);
+    assert_eq!(remote.read_file("/srv/a").unwrap(), bytes);
+    assert_eq!(fault.read_offsets(), vec![200_000]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_network_failures_pause_site_once() {
+    let local_mem = MemFs::new();
+    let remote_mem = MemFs::new();
+    let local = FaultFs::new(local_mem.clone());
+    let remote = FaultFs::new(remote_mem.clone());
+    remote_mem.add_dir("/srv");
+    local_mem.add_file("/w/a", &data(MIB), mtime());
+    local_mem.add_file("/w/b", &data(MIB), mtime());
+    // Whichever copy opens first fails reading; the other then fails writing.
+    local.fail_next(Op::OpenRead, ErrorKind::Network);
+    remote.fail_next(Op::OpenWrite, ErrorKind::Network);
+
+    let (engine, mut rx) = start_engine(EngineConfig::default());
+    let a = engine
+        .enqueue(spec(Direction::Upload, "/w/a", "/srv/a"))
+        .await
+        .unwrap();
+    let b = engine
+        .enqueue(spec(Direction::Upload, "/w/b", "/srv/b"))
+        .await
+        .unwrap();
+    // Both are dispatched together, so both are in flight when one fails.
+    engine
+        .register_site(
+            site(),
+            SiteEndpoints {
+                local: Arc::new(local),
+                remote: Arc::new(remote),
+                workers: 2,
+            },
+        )
+        .await;
+    let events = events_until(&mut rx, &engine, |seen| {
+        requeued(seen, a) && requeued(seen, b)
+    })
+    .await;
+    assert_eq!(site_paused_count(&events), 1, "{events:?}");
+    assert!(!events.iter().any(is_failed));
+    let snap = engine.snapshot().await;
+    assert_eq!(find(&snap, a).state, TransferState::Queued);
+    assert_eq!(find(&snap, b).state, TransferState::Queued);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn site_pauses_again_after_resume() {
+    let local = MemFs::new();
+    let remote_mem = MemFs::new();
+    let remote = FaultFs::new(remote_mem.clone());
+    let (engine, mut rx) = engine_with(
+        Arc::new(local.clone()),
+        Arc::new(remote.clone()),
+        1,
+        EngineConfig::default(),
+    )
+    .await;
+    remote_mem.add_dir("/srv");
+    let bytes = data(10_000);
+    local.add_file("/w/a", &bytes, mtime());
+    remote.fail_next(Op::OpenWrite, ErrorKind::Network);
+
+    let id = engine
+        .enqueue(spec(Direction::Upload, "/w/a", "/srv/a"))
+        .await
+        .unwrap();
+    wait_for(&mut rx, |e| matches!(e, Event::SitePaused { .. })).await;
+
+    remote.fail_next(Op::OpenWrite, ErrorKind::Network);
+    engine.resume_site(site()).await;
+    wait_for(&mut rx, |e| matches!(e, Event::SitePaused { .. })).await;
+
+    engine.resume_site(site()).await;
+    assert_eq!(wait_terminal(&mut rx, id).await, TransferState::Done);
+    assert_eq!(remote_mem.read_file("/srv/a").unwrap(), bytes);
 }
