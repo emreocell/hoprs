@@ -368,3 +368,160 @@ async fn duplicate_names_in_listing() {
     assert_eq!(item(&snap, "/w/d/b.txt").state, TransferState::Done);
     assert_eq!(remote.read_file("/srv/d/a.txt").unwrap(), data(50_000));
 }
+
+/// `MemFs` whose first `fail_writes` `open_write` calls on `/srv/d/a.txt`
+/// fail with `Io`, and which counts every `open_write` of that path.
+struct AWritesFs {
+    inner: MemFs,
+    fail_writes: std::sync::atomic::AtomicUsize,
+    writes: std::sync::atomic::AtomicUsize,
+}
+
+impl AWritesFs {
+    fn new(inner: MemFs, fail_writes: usize) -> Self {
+        AWritesFs {
+            inner,
+            fail_writes: fail_writes.into(),
+            writes: 0.into(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl RemoteFs for AWritesFs {
+    async fn list(&self, p: &RemotePath) -> Result<Vec<RemoteEntry>> {
+        self.inner.list(p).await
+    }
+    async fn stat(&self, p: &RemotePath) -> Result<RemoteEntry> {
+        self.inner.stat(p).await
+    }
+    async fn open_read(&self, p: &RemotePath, offset: u64) -> Result<BoxAsyncRead> {
+        self.inner.open_read(p, offset).await
+    }
+    async fn open_write(&self, p: &RemotePath, offset: u64) -> Result<BoxAsyncWrite> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if p.as_str() == "/srv/d/a.txt" {
+            self.writes.fetch_add(1, SeqCst);
+            let failing = self
+                .fail_writes
+                .try_update(SeqCst, SeqCst, |n| n.checked_sub(1))
+                .is_ok();
+            if failing {
+                return Err(hoprs_core::Error::new(
+                    ErrorKind::Io,
+                    "injected write failure",
+                ));
+            }
+        }
+        self.inner.open_write(p, offset).await
+    }
+    async fn mkdir(&self, p: &RemotePath) -> Result<()> {
+        self.inner.mkdir(p).await
+    }
+    async fn rename(&self, from: &RemotePath, to: &RemotePath) -> Result<()> {
+        self.inner.rename(from, to).await
+    }
+    async fn remove_file(&self, p: &RemotePath) -> Result<()> {
+        self.inner.remove_file(p).await
+    }
+    async fn remove_dir(&self, p: &RemotePath) -> Result<()> {
+        self.inner.remove_dir(p).await
+    }
+    async fn chmod(&self, p: &RemotePath, mode: u32) -> Result<()> {
+        self.inner.chmod(p, mode).await
+    }
+}
+
+/// Uploads `/w/d` (whose listing reports `a.txt` twice) to `/srv/d`, where
+/// the first `fail_writes` writes of `a.txt` fail. Returns the engine, the
+/// remote, the events, the root id and the two `a.txt` ids (first entry,
+/// duplicate), once the root is terminal.
+async fn duplicate_upload(
+    fail_writes: usize,
+) -> (
+    hoprs_transfer::TransferEngine,
+    MemFs,
+    Arc<AWritesFs>,
+    tokio::sync::broadcast::Receiver<Event>,
+    hoprs_transfer::TransferId,
+    [hoprs_transfer::TransferId; 2],
+) {
+    let local = MemFs::new();
+    local.add_file("/w/d/a.txt", &data(50_000), mtime());
+    local.add_file("/w/d/b.txt", b"b", mtime());
+    let remote = MemFs::new();
+    remote.add_dir("/srv");
+    let counting = Arc::new(AWritesFs::new(remote.clone(), fail_writes));
+    let (engine, mut rx) = engine_with(
+        Arc::new(DuplicatingFs(local)),
+        counting.clone(),
+        4,
+        EngineConfig::default(),
+    )
+    .await;
+    let root = engine
+        .enqueue(spec(Direction::Upload, "/w/d", "/srv/d"))
+        .await
+        .unwrap();
+    assert!(matches!(
+        wait_terminal(&mut rx, root).await,
+        TransferState::Failed(_)
+    ));
+    let snap = engine.snapshot().await;
+    let a: Vec<hoprs_transfer::TransferId> = snap
+        .iter()
+        .filter(|i| i.spec.local.as_str() == "/w/d/a.txt")
+        .map(|i| i.id)
+        .collect();
+    assert_eq!(a.len(), 2);
+    (engine, remote, counting, rx, root, [a[0], a[1]])
+}
+
+/// Retrying the folder while the first `a.txt` failed requeues only that
+/// one: the duplicate never writes the same path.
+#[tokio::test(flavor = "multi_thread")]
+async fn folder_retry_never_requeues_duplicate_name() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let (engine, remote, counting, mut rx, root, [first, dup]) = duplicate_upload(1).await;
+    assert_eq!(counting.writes.load(SeqCst), 1);
+
+    engine.retry(root).await.unwrap();
+    match wait_terminal(&mut rx, root).await {
+        TransferState::Failed(e) => assert_eq!(e.message, "1 items failed"),
+        other => panic!("root ended {other:?}"),
+    }
+    let snap = engine.snapshot().await;
+    assert_eq!(item_by_id(&snap, first).state, TransferState::Done);
+    match &item_by_id(&snap, dup).state {
+        TransferState::Failed(e) => {
+            assert_eq!(e.message, "Duplicate name in directory listing")
+        }
+        other => panic!("duplicate ended {other:?}"),
+    }
+    assert_eq!(
+        counting.writes.load(SeqCst),
+        2,
+        "only one retry wrote a.txt"
+    );
+    assert_eq!(remote.read_file("/srv/d/a.txt").unwrap(), data(50_000));
+}
+
+/// A duplicate-name child is terminal: retrying it directly is a conflict.
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_duplicate_name_conflicts() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let (engine, _remote, counting, _rx, _root, [_first, dup]) = duplicate_upload(0).await;
+    let err = engine.retry(dup).await.unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Conflict);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let snap = engine.snapshot().await;
+    assert!(matches!(
+        item_by_id(&snap, dup).state,
+        TransferState::Failed(_)
+    ));
+    assert_eq!(counting.writes.load(SeqCst), 1);
+}
+
+fn item_by_id(snap: &[TransferItem], id: hoprs_transfer::TransferId) -> &TransferItem {
+    snap.iter().find(|i| i.id == id).expect("item in snapshot")
+}

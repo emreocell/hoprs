@@ -11,6 +11,22 @@ use super::actor::{Actor, Intent, SYMLINK_SKIP};
 use crate::model::{TransferId, TransferItem, TransferSpec, TransferState};
 use crate::store::NewChild;
 
+/// The error of a child whose name repeats an earlier entry of the same
+/// listing. Such a child is terminal for good: retrying it (directly or
+/// with its folder) would make two items write the same path. It is
+/// recognised by this message, which the queue persists with the error, so
+/// the rule survives a restart.
+pub(super) const DUPLICATE_NAME: &str = "Duplicate name in directory listing";
+
+/// Whether `state` is the failure of a duplicate-name child (see
+/// `DUPLICATE_NAME`).
+pub(super) fn is_duplicate_name(state: &TransferState) -> bool {
+    matches!(
+        state,
+        TransferState::Failed(e) if e.kind == ErrorKind::Io && e.message == DUPLICATE_NAME
+    )
+}
+
 /// Children of an expanded directory that are not terminal yet, and how
 /// many of its finished children ended `Failed`.
 pub(super) struct DirProgress {
@@ -97,9 +113,9 @@ impl Actor {
 
     /// Inserts one child per entry of the listed directory `id`. Only the
     /// first entry of a name is copied: a later one with the same name
-    /// becomes a `Failed` child, so that two items never write the same
-    /// path. The directory stays `Active` until its children finish, or
-    /// finishes right away if none is pending. If it was paused or cancelled
+    /// becomes a `Failed` child (`DUPLICATE_NAME`, never retried), so that
+    /// two items never write the same path. The directory stays `Active`
+    /// until its children finish, or finishes right away if none is pending. If it was paused or cancelled
     /// while listing, its children are created (and it ends) paused or
     /// cancelled.
     pub(super) fn expand(
@@ -137,7 +153,7 @@ impl Actor {
                 size: (e.kind == EntryKind::File).then_some(e.size),
                 state: if !seen.insert(e.name.as_str()) {
                     TransferState::Failed(
-                        Error::new(ErrorKind::Io, "Duplicate name in directory listing")
+                        Error::new(ErrorKind::Io, DUPLICATE_NAME)
                             .with_detail(format!("{:?} in {}", e.name, parent.local)),
                     )
                 } else if e.kind == EntryKind::Symlink {

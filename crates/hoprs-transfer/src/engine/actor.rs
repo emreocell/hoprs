@@ -493,10 +493,17 @@ impl Actor {
         self.dispatch();
     }
 
-    /// Before a running item fails: if it has a continuation (its
-    /// destination was, or may have been, opened for writing), stores
-    /// `Overwrite` as its continuation, so that a retry rewrites the whole
-    /// destination. Returns `error`, with a store error in its detail.
+    /// Before a running item fails: if its run held any continuation
+    /// (`Running::retry`), stores `Overwrite` as its continuation, so that a
+    /// retry rewrites the whole destination instead of trusting a partial
+    /// one. That covers a copy that was decided (its destination was, or
+    /// may have been, opened), and also a run that only consumed an
+    /// override (a stored continuation, or a user `resolve`) and failed
+    /// before the copy was decided. A run without one keeps no
+    /// continuation, so a retry uses the global policy. (A `Cancelled` item
+    /// is not handled here: it keeps its own continuation, `Resume`, or
+    /// `Overwrite` when the run was replacing an existing file.) Returns
+    /// `error`, with a store error in its detail.
     fn overwrite_on_retry(&mut self, id: TransferId, error: Error) -> Error {
         if !self.running.get(&id).is_some_and(|r| r.retry.is_some()) {
             return error;

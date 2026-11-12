@@ -155,11 +155,19 @@ impl TransferEngine {
     }
 
     /// Requeues a failed or cancelled transfer (a folder: with its failed or
-    /// cancelled descendants). A file that had started copying is never
-    /// skipped because of its partial destination: a cancelled one continues
-    /// it (one that was replacing an existing file starts over), a failed
-    /// one starts over. One that never opened its destination runs under
-    /// the global policy.
+    /// cancelled descendants). Each item runs under its stored continuation
+    /// when it has one, never skipped because of its partial destination:
+    /// - a cancelled item keeps the continuation of the run it stopped:
+    ///   `Resume` (it continues its partial destination), or `Overwrite`
+    ///   when that run was replacing an existing file (it starts over);
+    /// - a failed item whose run held any continuation (its copy had been
+    ///   decided, or it ran under an override such as a user `resolve`)
+    ///   gets `Overwrite`: it starts over;
+    /// - any other item runs under the global policy.
+    ///
+    /// A child that failed because its name repeats an earlier entry of
+    /// its folder's listing is never retried: retrying it returns
+    /// `Conflict`, and retrying the folder leaves it failed.
     pub async fn retry(&self, id: TransferId) -> Result<()> {
         self.control(id, Control::Retry).await
     }
@@ -213,7 +221,13 @@ impl TransferEngine {
     /// - when a `SitePaused` for the site arrives while the state is still
     ///   `Connected` (a request failed, e.g. timed out, but the connection
     ///   never dropped, so no reconnection will follow), waits 2 s and, if
-    ///   the state is still `Connected`, calls `network_restored(site)`.
+    ///   the state is still `Connected`, calls `network_restored(site)`;
+    /// - when its event receiver reports `RecvError::Lagged` (a `SitePaused`
+    ///   may have been lost) and the state is `Connected`, calls
+    ///   `network_restored(site)`.
+    ///
+    /// Calling it when the site is not network-paused does nothing, so the
+    /// task never needs to know whether the site is paused.
     pub async fn network_restored(&self, site: SiteId) {
         self.request(|reply| Command::NetworkRestored { site, reply })
             .await;

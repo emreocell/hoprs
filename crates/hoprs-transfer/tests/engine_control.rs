@@ -806,15 +806,35 @@ async fn cancel_during_prepare_is_prompt() {
 /// start, even under `Skip`, which would otherwise keep the partial file.
 #[tokio::test(flavor = "multi_thread")]
 async fn retry_after_write_failure_overwrites_partial_destination() {
+    retry_after_write_failure_under(hoprs_transfer::ConflictPolicy::Skip).await;
+}
+
+/// The same under `OverwriteIfNewer`: the partial destination is newer than
+/// the source, which would otherwise skip it.
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_after_write_failure_overwrites_partial_destination_if_newer() {
+    retry_after_write_failure_under(hoprs_transfer::ConflictPolicy::OverwriteIfNewer).await;
+}
+
+/// Fails an upload partway with a write error, sets `policy` and retries
+/// it: the item copies the whole source again (it never continues the
+/// partial destination) and ends `Done`.
+async fn retry_after_write_failure_under(policy: hoprs_transfer::ConflictPolicy) {
     let local = MemFs::new();
+    let local_fault = FaultFs::new(local.clone());
     let remote_mem = MemFs::new();
     let remote = FaultFs::new(remote_mem.clone());
     let config = EngineConfig {
         buf_size: 64 * 1024,
         ..EngineConfig::default()
     };
-    let (engine, mut rx) =
-        engine_with(Arc::new(local.clone()), Arc::new(remote.clone()), 1, config).await;
+    let (engine, mut rx) = engine_with(
+        Arc::new(local_fault.clone()),
+        Arc::new(remote.clone()),
+        1,
+        config,
+    )
+    .await;
     let bytes = data(MIB);
     local.add_file("/w/a.bin", &bytes, mtime());
     remote_mem.add_dir("/srv");
@@ -833,12 +853,15 @@ async fn retry_after_write_failure_overwrites_partial_destination() {
         Some(300_000)
     );
 
-    engine
-        .set_policy(hoprs_transfer::ConflictPolicy::Skip)
-        .await;
+    engine.set_policy(policy).await;
     engine.retry(id).await.unwrap();
     assert_eq!(wait_terminal(&mut rx, id).await, TransferState::Done);
     assert!(remote_mem.read_file("/srv/a.bin").unwrap() == bytes);
+    assert_eq!(
+        local_fault.read_offsets(),
+        vec![0, 0],
+        "the retry starts over"
+    );
 }
 
 /// A copy cancelled partway continues from its partial destination when

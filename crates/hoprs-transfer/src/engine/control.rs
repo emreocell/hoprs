@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use hoprs_core::{Error, ErrorKind, Result};
 
 use super::actor::{Actor, Intent};
+use super::dirs::is_duplicate_name;
 use super::{Resolution, ResolveAction};
 use crate::model::{ConflictPolicy, TransferId, TransferState};
 
@@ -28,8 +29,10 @@ fn conflict(message: &str) -> Error {
     Error::new(ErrorKind::Conflict, message)
 }
 
+/// Failed or cancelled, except a duplicate-name child, which stays failed.
 fn is_retryable(state: &TransferState) -> bool {
     matches!(state, TransferState::Failed(_) | TransferState::Cancelled)
+        && !is_duplicate_name(state)
 }
 
 impl Actor {
@@ -59,6 +62,9 @@ impl Actor {
                 self.restart_subtree(id, |s| *s == TransferState::Paused, Intent::Pause);
                 Ok(())
             }
+            Control::Retry if is_duplicate_name(state) => Err(conflict(
+                "A duplicate name in a directory listing cannot be retried",
+            )),
             Control::Retry if !is_retryable(state) => {
                 Err(conflict("Transfer is not failed or cancelled"))
             }

@@ -3,9 +3,12 @@
 //!
 //! Every test works in its own remote directory, removed (best effort) when the test ends.
 
+use std::future::Future;
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, ready};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hoprs_core::{EntryKind, ErrorKind, RemoteEntry, RemotePath, Result, SiteId};
@@ -18,7 +21,8 @@ use hoprs_transfer::{
 };
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWrite};
+use tokio::sync::Notify;
 use tokio::sync::broadcast::Receiver;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::task::JoinHandle;
@@ -226,7 +230,9 @@ fn failed(events: &[Event]) -> Vec<&Event> {
 ///   `network_restored` at once;
 /// - a `SitePaused` for `site` arrives while the state is still `Connected` (a request
 ///   failed, e.g. timed out, but the connection never dropped, so no reconnection will
-///   follow): after a 2 s grace, if the state is still `Connected`, call `network_restored`.
+///   follow): after a 2 s grace, if the state is still `Connected`, call `network_restored`;
+/// - the event receiver lagged (a `SitePaused` may have been lost): if the state is
+///   `Connected`, call `network_restored` (it does nothing when the site is not paused).
 ///
 /// Abort the returned task to stop watching.
 fn spawn_network_watcher(
@@ -265,7 +271,12 @@ fn spawn_network_watcher(
                             });
                         }
                     }
-                    Ok(_) | Err(RecvError::Lagged(_)) => {}
+                    Err(RecvError::Lagged(_)) => {
+                        if *session.state().borrow() == SessionState::Connected {
+                            engine.network_restored(site.clone()).await;
+                        }
+                    }
+                    Ok(_) => {}
                     Err(RecvError::Closed) => break,
                 },
             }
@@ -273,10 +284,84 @@ fn spawn_network_watcher(
     })
 }
 
-/// `RemoteFs` that forwards to an `SftpFs` and records the offset of every `open_write`.
+/// Holds every write stream that has passed `after` bytes until `release` is called, so
+/// that a test can act while a copy is known to be unfinished.
+struct WriteGate {
+    after: u64,
+    released: AtomicBool,
+    notify: Notify,
+}
+
+impl WriteGate {
+    fn new(after: u64) -> Arc<Self> {
+        Arc::new(WriteGate {
+            after,
+            released: AtomicBool::new(false),
+            notify: Notify::new(),
+        })
+    }
+
+    /// Lets every held and future write through.
+    fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    async fn wait(self: Arc<Self>) {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            // Registered before the check, so a `release` in between is not missed.
+            notified.as_mut().enable();
+            if self.released.load(Ordering::SeqCst) {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+/// A write stream that stops at its `WriteGate`.
+struct GatedWriter {
+    inner: BoxAsyncWrite,
+    gate: Arc<WriteGate>,
+    written: u64,
+    waiting: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
+}
+
+impl AsyncWrite for GatedWriter {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        if this.written >= this.gate.after && !this.gate.released.load(Ordering::SeqCst) {
+            let gate = Arc::clone(&this.gate);
+            let waiting = this.waiting.get_or_insert_with(|| Box::pin(gate.wait()));
+            ready!(waiting.as_mut().poll(cx));
+            this.waiting = None;
+        }
+        let n = ready!(Pin::new(&mut this.inner).poll_write(cx, buf))?;
+        this.written += n as u64;
+        Poll::Ready(Ok(n))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+/// `RemoteFs` that forwards to an `SftpFs`, records the offset of every `open_write`
+/// and holds its write streams at `gate`.
 struct RecordingFs {
     inner: SftpFs,
     write_offsets: Arc<Mutex<Vec<u64>>>,
+    gate: Arc<WriteGate>,
 }
 
 #[async_trait::async_trait]
@@ -292,7 +377,13 @@ impl RemoteFs for RecordingFs {
     }
     async fn open_write(&self, path: &RemotePath, offset: u64) -> Result<BoxAsyncWrite> {
         self.write_offsets.lock().unwrap().push(offset);
-        self.inner.open_write(path, offset).await
+        let inner = self.inner.open_write(path, offset).await?;
+        Ok(Box::new(GatedWriter {
+            inner,
+            gate: Arc::clone(&self.gate),
+            written: 0,
+            waiting: None,
+        }))
     }
     async fn mkdir(&self, path: &RemotePath) -> Result<()> {
         self.inner.mkdir(path).await
@@ -407,9 +498,13 @@ async fn network_drop_pauses_and_resumes() {
     drop(bytes);
 
     let write_offsets = Arc::new(Mutex::new(Vec::new()));
+    // The upload cannot finish before the connection is killed: it stops after 8 MiB
+    // until then.
+    let gate = WriteGate::new(8 * MIB as u64);
     let recording = RecordingFs {
         inner: remote.fs.clone(),
         write_offsets: Arc::clone(&write_offsets),
+        gate: Arc::clone(&gate),
     };
     let (engine, mut rx) = start_engine(local.path(), Arc::new(recording)).await;
     let watcher = spawn_network_watcher(engine.clone(), site(), remote.session.clone());
@@ -435,6 +530,8 @@ async fn network_drop_pauses_and_resumes() {
         .await
         .expect("no progress");
     kill_ssh_sessions();
+    // The held stream now writes on the dead connection and fails.
+    gate.release();
 
     let (rest, state) = run_until_terminal(&mut rx, id, Duration::from_secs(120)).await;
     events.extend(rest);
