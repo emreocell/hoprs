@@ -334,6 +334,29 @@ pub fn outline_box(_: &Theme) -> container::Style {
     }
 }
 
+/// Behind a dialog: the window dimmed (no blur, no shadow).
+pub fn backdrop(_: &Theme) -> container::Style {
+    let paper = palette().paper;
+    container::Style {
+        background: Some(Background::Color(Color { a: 0.72, ..paper })),
+        ..container::Style::default()
+    }
+}
+
+/// A dialog: the second surface, a 1 px `rule_2` outline, 4 px corners, no shadow.
+pub fn dialog_box(_: &Theme) -> container::Style {
+    let p = palette();
+    container::Style {
+        text_color: Some(p.ink),
+        border: Border {
+            color: p.rule_2,
+            width: HAIRLINE,
+            radius: radius(),
+        },
+        ..surface(p.paper_2)
+    }
+}
+
 /// A key cap, e.g. "Ctrl K".
 pub fn kbd(_: &Theme) -> container::Style {
     let p = palette();

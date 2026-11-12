@@ -98,6 +98,16 @@ impl VaultHandle {
         .await
     }
 
+    /// Stores one secret of the site in the keyring; the vault sets its `has_*` flag.
+    pub async fn set_secret(
+        &self,
+        site: SiteId,
+        kind: SecretKind,
+        secret: SecretString,
+    ) -> Result<()> {
+        self.call(move |v| v.set_secret(&site, kind, &secret)).await
+    }
+
     pub async fn remove_site(&self, id: SiteId) -> Result<()> {
         self.call(move |v| v.remove_site(&id)).await
     }

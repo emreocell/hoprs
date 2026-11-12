@@ -8,7 +8,7 @@ use iced::{Alignment, Element, Length, Padding};
 use crate::app::{App, Form, Message};
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
-use crate::ui::{files, queue, sidebar, site_form, tabs, workspace_form};
+use crate::ui::{dialogs, files, queue, sidebar, site_form, tabs, workspace_form};
 
 pub const SIDEBAR_WIDTH: f32 = sidebar::WIDTH;
 /// 4 px above the 36 px tabs.
@@ -23,11 +23,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let right = column![center(app), queue::view(app), status_bar()].width(Length::Fill);
     let body = row![sidebar::view(app), vrule(), right].height(Length::Fill);
 
-    container(column![top_bar(app), hrule(), body])
+    let base = container(column![top_bar(app), hrule(), body])
         .width(Length::Fill)
         .height(Length::Fill)
         .style(theme::paper)
-        .into()
+        .into();
+    dialogs::overlay(app, base)
 }
 
 fn hrule<'a>() -> Element<'a, Message> {

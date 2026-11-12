@@ -152,6 +152,56 @@ pub fn remove(path: &Path, host: &str, port: u16) -> Result<usize> {
     Ok(removed)
 }
 
+/// One `known_hosts` line that applies to a host, as [`entries_for`] reports it: what
+/// [`remove`] would delete, for the UI to show before it does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnownHostEntry {
+    /// 1-based line number.
+    pub line: usize,
+    /// The key's algorithm (`ssh-ed25519`, `ecdsa-sha2-nistp256`, ...).
+    pub key_type: String,
+    /// The line also names other hosts: a comma list with other names, or a wildcard or
+    /// negated pattern. Removing it forgets the key for those hosts too.
+    pub covers_other_hosts: bool,
+    /// The host field is hashed (`|1|salt|hash`): it names exactly one host, which cannot
+    /// be read back from the file.
+    pub hashed: bool,
+}
+
+/// The lines [`remove`] would delete for `host:port` (same matching: plain, pattern and
+/// hashed lines; `@revoked` and other marker lines excluded), in file order. Read-only. A
+/// missing file has none.
+pub fn entries_for(path: &Path, host: &str, port: u16) -> Result<Vec<KnownHostEntry>> {
+    let Some(data) = read_optional(path)? else {
+        return Ok(Vec::new());
+    };
+    let name = host_name(host, port);
+    let mut entries = Vec::new();
+    for (idx, raw) in data.split_inclusive(|b| *b == b'\n').enumerate() {
+        let Some(entry) = parse_line(raw) else {
+            continue;
+        };
+        if entry.revoked || !patterns_match(entry.patterns, &name) {
+            continue;
+        }
+        let hashed = entry.patterns.starts_with("|1|");
+        // A hashed field is one host; otherwise any pattern other than this exact name
+        // (another name, a wildcard, a negation) reaches other hosts.
+        let covers_other_hosts = !hashed
+            && entry
+                .patterns
+                .split(',')
+                .any(|pattern| !pattern.eq_ignore_ascii_case(&name));
+        entries.push(KnownHostEntry {
+            line: idx + 1,
+            key_type: entry.key.algorithm().as_str().to_owned(),
+            covers_other_hosts,
+            hashed,
+        });
+    }
+    Ok(entries)
+}
+
 struct Entry<'a> {
     revoked: bool,
     patterns: &'a str,
@@ -684,5 +734,83 @@ mod tests {
             vec![p256, Algorithm::Ed25519]
         );
         assert!(known_algorithms(&p, "h.example", 2222).is_empty());
+    }
+
+    #[test]
+    fn entries_for_lists_what_remove_deletes() {
+        let dir = TempDir::new().unwrap();
+        let p = kh_path(&dir);
+        assert!(entries_for(&p, "h.example", 22).unwrap().is_empty());
+        let p256 = Algorithm::Ecdsa {
+            curve: russh::keys::EcdsaCurve::NistP256,
+        };
+        let mut data = String::from("# comment\n");
+        // 2: exactly this host.
+        data.push_str(&line_for("h.example", &ed()));
+        // 3: another host only.
+        data.push_str(&line_for("other.example", &ed()));
+        // 4: a comma list naming another host too.
+        data.push_str(&line_for("h.example,192.0.2.7", &key(p256.clone())));
+        // 5: a wildcard pattern.
+        data.push_str(&line_for("*.example", &ed()));
+        // 6: revoked lines are never removed.
+        data.push_str(&format!("@revoked {}", line_for("h.example", &ed())));
+        // 7: the same name twice is still only this host (any case).
+        data.push_str(&line_for("h.example,H.EXAMPLE", &ed()));
+        // 8: a negation excludes this host.
+        data.push_str(&line_for("*.example,!h.example", &ed()));
+        fs::write(&p, data).unwrap();
+
+        let entries = entries_for(&p, "H.example", 22).unwrap();
+        let summary: Vec<_> = entries
+            .iter()
+            .map(|e| (e.line, e.key_type.as_str(), e.covers_other_hosts, e.hashed))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (2, "ssh-ed25519", false, false),
+                (4, "ecdsa-sha2-nistp256", true, false),
+                (5, "ssh-ed25519", true, false),
+                (7, "ssh-ed25519", false, false),
+            ]
+        );
+        // Read-only, and exactly the lines `remove` deletes.
+        let before = fs::read(&p).unwrap();
+        entries_for(&p, "h.example", 22).unwrap();
+        assert_eq!(fs::read(&p).unwrap(), before);
+        assert_eq!(remove(&p, "h.example", 22).unwrap(), entries.len());
+        assert!(entries_for(&p, "h.example", 22).unwrap().is_empty());
+    }
+
+    #[test]
+    fn entries_for_bracketed_port_and_hashed_lines() {
+        let dir = TempDir::new().unwrap();
+        let p = kh_path(&dir);
+        fs::copy(format!("{FIXTURE_DIR}/known_hosts"), &p).unwrap();
+        let k = ed();
+        learn(&p, "h", 2222, &k).unwrap();
+        let mut text = fs::read_to_string(&p).unwrap();
+        text.push_str(&line_for("[h]:2222,[h]:2200", &k));
+        fs::write(&p, text).unwrap();
+
+        // A hashed line names one host: removing it touches no other.
+        assert_eq!(
+            entries_for(&p, "hashed.example", 22).unwrap(),
+            [KnownHostEntry {
+                line: 2,
+                key_type: "ssh-ed25519".into(),
+                covers_other_hosts: false,
+                hashed: true,
+            }]
+        );
+        // `[host]:port` off port 22; the plain name on port 22 is another entry.
+        let entries = entries_for(&p, "h", 2222).unwrap();
+        let lines: Vec<_> = entries
+            .iter()
+            .map(|e| (e.line, e.covers_other_hosts, e.hashed))
+            .collect();
+        assert_eq!(lines, [(3, false, false), (4, true, false)]);
+        assert!(entries_for(&p, "h", 22).unwrap().is_empty());
     }
 }

@@ -113,8 +113,8 @@ fn view(state: &Hoprs) -> iced::Element<'_, Message> {
     ui::layout::view(&state.app)
 }
 
-/// The keyboard for the file panes, the mouse button and dropped files (drags), and the
-/// transfer engine's events.
+/// The keyboard for the file panes and dialogs, the mouse button and dropped files
+/// (drags), the transfer engine's events and the prompt broker's dialogs.
 fn subscription(state: &Hoprs) -> iced::Subscription<Message> {
     iced::Subscription::batch([
         iced::event::listen_with(ui::files::key_message),
@@ -122,7 +122,20 @@ fn subscription(state: &Hoprs) -> iced::Subscription<Message> {
         iced::Subscription::run_with(TransferFeed(Arc::clone(&state.backend)), |feed| {
             effects::transfer_feed(feed.0.as_ref())
         }),
+        iced::Subscription::run_with(PromptFeed(Arc::clone(&state.backend)), |feed| {
+            effects::prompt_feed(feed.0.as_ref())
+        }),
     ])
+}
+
+/// The backend, as the identity of the dialogs' subscription (one for the whole run: the
+/// broker hands its channel out once).
+struct PromptFeed(Arc<dyn BackendApi>);
+
+impl std::hash::Hash for PromptFeed {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        "prompt-feed".hash(state);
+    }
 }
 
 /// The backend, as the identity of the transfer events' subscription: there is one

@@ -313,3 +313,99 @@ pub fn deleted_then(done: u64, error: &str) -> String {
         format!("Deleted {done} items, then: {error}")
     }
 }
+
+// Security and credential dialogs.
+pub const HOST_KEY_TITLE: &str = "Unknown host key";
+pub const HOST_KEY_INTRO: &str = "hoprs has not connected to this server before. Check the fingerprint with its administrator before you trust it.";
+pub const TRUST_AND_CONNECT: &str = "Trust and connect";
+pub const CERT_UNTRUSTED_TITLE: &str = "Untrusted certificate";
+pub const CERT_UNTRUSTED_INTRO: &str = "The server's certificate can't be verified. Check the fingerprint with its administrator before you trust it.";
+pub const CERT_CHANGED_TITLE: &str = "Certificate changed";
+pub const CERT_CHANGED_INTRO: &str = "The server's certificate is not the one you trusted before. Someone may be intercepting the connection.";
+pub const TRUST_CERTIFICATE: &str = "Trust this certificate";
+pub const LABEL_HOST: &str = "Host";
+pub const LABEL_ACCOUNT: &str = "Account";
+pub const LABEL_KEY_TYPE: &str = "Key type";
+pub const LABEL_FINGERPRINT: &str = "Fingerprint (SHA-256)";
+pub const LABEL_REASON: &str = "Reason";
+pub const LABEL_TRUSTED_BEFORE: &str = "Trusted before";
+pub const LABEL_PRESENTED_NOW: &str = "Presented now";
+pub const LABEL_KEY_FILE: &str = "Key";
+pub const PASSWORD_TITLE: &str = "Password";
+pub const PASSPHRASE_TITLE: &str = "Key passphrase";
+pub const FIELD_PASSPHRASE: &str = "Passphrase";
+pub const KBD_TITLE: &str = "Authentication";
+pub const SAVE_IN_KEYRING: &str = "Save in the system keyring";
+pub const SAVE_IN_KEYRING_HINT: &str = "Saved only once the connection succeeds";
+pub const CONNECT: &str = "Connect";
+pub const UNLOCK: &str = "Unlock";
+pub const CONTINUE: &str = "Continue";
+
+/// Under a dialog, when others wait behind it: "1 more waiting".
+pub fn dialogs_waiting(n: usize) -> String {
+    format!("{n} more waiting")
+}
+
+/// The warning of a host known with other key types.
+pub fn other_key_types(types: &[String]) -> String {
+    format!(
+        "This host is known with a different key type ({}). Someone may be impersonating it.",
+        types.join(", ")
+    )
+}
+
+/// Why a certificate needs the user's decision.
+pub fn cert_reason(reason: &hoprs_remote::CertReason) -> String {
+    use hoprs_remote::CertReason;
+    match reason {
+        CertReason::Expired => "Expired".to_owned(),
+        CertReason::NotYetValid => "Not valid yet".to_owned(),
+        CertReason::WrongName => "Issued for a different name".to_owned(),
+        CertReason::UnknownIssuer => {
+            "Unknown authority (self-signed or untrusted issuer)".to_owned()
+        }
+        CertReason::Other(text) => text.clone(),
+    }
+}
+
+// Changed host key, in the tab.
+pub const HOST_KEY_CHANGED_TITLE: &str = "The host key has changed";
+pub const HOST_KEY_CHANGED_BODY: &str = "The server presented a different key than the one recorded for it. That happens when the server was reinstalled, or when someone intercepts the connection. hoprs won't connect while the old entry is in known_hosts.";
+pub const REMOVE_OLD_ENTRY: &str = "Remove the old entry…";
+pub const READING_KNOWN_HOSTS: &str = "Reading known_hosts…";
+pub const REMOVING_KNOWN_HOSTS: &str = "Removing…";
+pub const REMOVE: &str = "Remove";
+pub const CONNECT_AGAIN: &str = "Connect again";
+pub const NO_KNOWN_HOSTS_ENTRY: &str =
+    "known_hosts has no entry for this host any more. Connect again to check the new key.";
+
+/// "known_hosts line 3".
+pub fn known_hosts_line(line: usize) -> String {
+    format!("known_hosts line {line}")
+}
+
+/// The removal question: "Remove 2 lines for [h]:2222 from known_hosts? …".
+pub fn remove_known_hosts_question(lines: usize, host: &str) -> String {
+    let lines = if lines == 1 {
+        "1 line".to_owned()
+    } else {
+        format!("{lines} lines")
+    };
+    format!(
+        "Remove {lines} for {host} from known_hosts? The next connect asks you to trust the new key."
+    )
+}
+
+/// The warning for lines that also name other hosts.
+pub fn also_covers_other_hosts(lines: &[usize]) -> String {
+    let list: Vec<String> = lines.iter().map(ToString::to_string).collect();
+    match lines {
+        [line] => format!(
+            "Line {line} also covers other hosts (a pattern or a list of names): removing it forgets this key for them too."
+        ),
+        _ => format!(
+            "Lines {} also cover other hosts (patterns or lists of names): removing them forgets these keys for them too.",
+            list.join(", ")
+        ),
+    }
+}

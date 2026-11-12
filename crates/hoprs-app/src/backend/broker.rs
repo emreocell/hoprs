@@ -15,6 +15,10 @@
 //!   session ([`SessionPrompter::cancel`]) refuses its open and future prompts; its open
 //!   dialogs are withdrawn ([`BrokerEvent::Withdrawn`]). A dialog withdrawn that way is not
 //!   an answer: the requests waiting on it ask again, in a dialog of their own.
+//! - **Saving a typed secret:** a password or passphrase answered with `save: true` is
+//!   kept by the session's prompter ([`SessionPrompter::take_pending_secrets`]) until the
+//!   session manager sees the session connect with it (then it goes to the keyring) or fail
+//!   or close (then it is dropped). A later answer of the same kind replaces it.
 //! - **Pins:** `store_pin` writes the accepted certificate to the session's site
 //!   ([`Vault::set_ftps_pin`](hoprs_vault::Vault::set_ftps_pin)); `pin_superseded` (a trusted
 //!   chain beat a stale pin, ruling R5 of Plan 3) clears it.
@@ -29,6 +33,7 @@ use async_trait::async_trait;
 use hoprs_core::SiteId;
 use hoprs_remote::{CertProblem, FtpPrompter};
 use hoprs_ssh::{KbdPrompt, Prompter};
+use hoprs_vault::SecretKind;
 use secrecy::SecretString;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
@@ -96,8 +101,9 @@ pub struct KbdField {
 pub enum PromptAnswer {
     /// Host key or certificate: trust it or not.
     Decision(bool),
-    /// Password or passphrase.
-    Secret(SecretString),
+    /// Password or passphrase. `save`: store it in the system keyring once the session
+    /// connects with it (never before, never after a failure).
+    Secret { secret: SecretString, save: bool },
     /// Keyboard-interactive: one response per prompt.
     Responses(Vec<SecretString>),
     /// The dialog was closed: a refusal.
@@ -109,7 +115,7 @@ impl fmt::Debug for PromptAnswer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Decision(accept) => f.debug_tuple("Decision").field(accept).finish(),
-            Self::Secret(_) => f.write_str("Secret(<redacted>)"),
+            Self::Secret { save, .. } => write!(f, "Secret(<redacted>, save: {save})"),
             Self::Responses(r) => write!(f, "Responses(<{} redacted>)", r.len()),
             Self::Cancel => f.write_str("Cancel"),
         }
@@ -200,6 +206,7 @@ impl PromptBroker {
             site,
             key: endpoint_key(host, port),
             cancel: CancellationToken::new(),
+            pending: Arc::default(),
         }
     }
 
@@ -387,6 +394,8 @@ pub struct SessionPrompter {
     /// `host:port` of the session's connection.
     key: String,
     cancel: CancellationToken,
+    /// Typed secrets to save once the session connects (see the module docs).
+    pending: Arc<Mutex<HashMap<SecretKind, SecretString>>>,
 }
 
 impl SessionPrompter {
@@ -396,19 +405,44 @@ impl SessionPrompter {
         self.cancel.cancel();
     }
 
-    async fn secret(&self, kind: PromptKind) -> Option<SecretString> {
+    fn pending(&self) -> MutexGuard<'_, HashMap<SecretKind, SecretString>> {
+        self.pending.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The typed secrets the user asked to save, taken out: the session just connected
+    /// with them.
+    pub fn take_pending_secrets(&self) -> Vec<(SecretKind, SecretString)> {
+        self.pending().drain().collect()
+    }
+
+    /// Forgets the typed secrets waiting to be saved: the connection failed or closed.
+    pub fn discard_pending_secrets(&self) {
+        self.pending().clear();
+    }
+
+    /// Asks for a password or passphrase, which `slot` names for saving.
+    async fn secret(&self, kind: PromptKind, slot: SecretKind) -> Option<SecretString> {
         match self.broker.ask(self, self.key.clone(), kind).await {
-            Some(PromptAnswer::Secret(secret)) => Some(secret),
+            Some(PromptAnswer::Secret { secret, save }) => {
+                let mut pending = self.pending();
+                if save {
+                    pending.insert(slot, secret.clone());
+                } else {
+                    // A new answer without "save": an earlier one was not the right one.
+                    pending.remove(&slot);
+                }
+                Some(secret)
+            }
             _ => None,
         }
     }
 
     async fn password_prompt(&self, user: &str, host: &str) -> Option<SecretString> {
-        self.secret(PromptKind::Password {
+        let kind = PromptKind::Password {
             user: user.to_owned(),
             host: host.to_owned(),
-        })
-        .await
+        };
+        self.secret(kind, SecretKind::Password).await
     }
 }
 
@@ -440,10 +474,10 @@ impl Prompter for SessionPrompter {
     }
 
     async fn key_passphrase(&self, path: &Path) -> Option<SecretString> {
-        self.secret(PromptKind::Passphrase {
+        let kind = PromptKind::Passphrase {
             path: path.to_path_buf(),
-        })
-        .await
+        };
+        self.secret(kind, SecretKind::KeyPassphrase).await
     }
 
     async fn keyboard_interactive(
@@ -599,6 +633,13 @@ mod tests {
         }
     }
 
+    fn secret(value: &str, save: bool) -> PromptAnswer {
+        PromptAnswer::Secret {
+            secret: SecretString::from(value),
+            save,
+        }
+    }
+
     fn problem() -> CertProblem {
         CertProblem::Untrusted {
             reason: CertReason::UnknownIssuer,
@@ -732,10 +773,8 @@ mod tests {
                 host: "h".into()
             }
         );
-        f.broker
-            .answer(a.id, PromptAnswer::Secret(SecretString::from("one")));
-        f.broker
-            .answer(b.id, PromptAnswer::Secret(SecretString::from("two")));
+        f.broker.answer(a.id, secret("one", false));
+        f.broker.answer(b.id, secret("two", false));
         let mut got: Vec<String> = Vec::new();
         for ask in asks {
             got.push(join(ask).await.unwrap().expose_secret().to_owned());
@@ -783,8 +822,7 @@ mod tests {
         // An answer of the wrong shape is a refusal too.
         let ask = ask_cert(p.clone(), "SHA256:AA");
         let r = f.next_request().await;
-        f.broker
-            .answer(r.id, PromptAnswer::Secret(SecretString::from("x")));
+        f.broker.answer(r.id, secret("x", false));
         assert!(!join(ask).await);
 
         // Closing the session refuses its open dialog and withdraws it...
@@ -865,6 +903,65 @@ mod tests {
             PromptAnswer::Responses(vec![SecretString::from("123456")])
         );
         assert!(!debug.contains("123456"), "{debug}");
+    }
+
+    /// A secret answered with "save" waits in the prompter (for the session manager);
+    /// one answered without it, of the same kind, drops the earlier one.
+    #[tokio::test]
+    async fn saved_secret_waits_in_the_prompter() {
+        let mut f = fixture();
+        let p = f.prompter(1);
+        let answer = |value: &'static str, save: bool| {
+            let q = p.clone();
+            let ask = tokio::spawn(async move { Prompter::password(&q, "u", "h").await });
+            (ask, value, save)
+        };
+        let (ask, value, save) = answer("pw", true);
+        let r = f.next_request().await;
+        f.broker.answer(r.id, secret(value, save));
+        assert_eq!(join(ask).await.unwrap().expose_secret(), "pw");
+        let q = p.clone();
+        let ask = tokio::spawn(async move { q.key_passphrase(Path::new("/k")).await });
+        let r = f.next_request().await;
+        f.broker.answer(r.id, secret("phrase", true));
+        join(ask).await.unwrap();
+
+        let mut taken: Vec<_> = p
+            .take_pending_secrets()
+            .into_iter()
+            .map(|(kind, s)| (kind.account(), s.expose_secret().to_owned()))
+            .collect();
+        taken.sort();
+        assert_eq!(
+            taken,
+            [
+                ("key-passphrase", "phrase".to_owned()),
+                ("password", "pw".to_owned())
+            ]
+        );
+        assert!(p.take_pending_secrets().is_empty(), "taken once");
+
+        // Without "save", a new answer of the same kind drops the earlier one.
+        let (ask, value, save) = answer("first", true);
+        let r = f.next_request().await;
+        f.broker.answer(r.id, secret(value, save));
+        join(ask).await;
+        let (ask, value, save) = answer("second", false);
+        let r = f.next_request().await;
+        f.broker.answer(r.id, secret(value, save));
+        join(ask).await;
+        assert!(p.take_pending_secrets().is_empty());
+
+        // Discarding forgets them.
+        let (ask, value, save) = answer("third", true);
+        let r = f.next_request().await;
+        f.broker.answer(r.id, secret(value, save));
+        join(ask).await;
+        p.discard_pending_secrets();
+        assert!(p.take_pending_secrets().is_empty());
+        // Debug of an answer shows the flag, never the secret.
+        let debug = format!("{:?}", secret("hunter2", true));
+        assert_eq!(debug, "Secret(<redacted>, save: true)");
     }
 
     #[tokio::test]

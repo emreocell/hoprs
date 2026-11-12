@@ -82,3 +82,9 @@ pub fn test_config(user: &str, known_hosts_dir: &Path) -> SshConfig {
 pub fn fixture(name: &str) -> PathBuf {
     repo_root().join("docker/fixtures").join(name)
 }
+
+/// The error a session reports when `known_hosts` has another key of the same type for
+/// `host` at `line` (what [`crate::host_key_change`] recognizes), for UI tests.
+pub fn changed_host_key_error(host: &str, line: usize) -> hoprs_core::Error {
+    crate::session::known_hosts_changed(host, line)
+}

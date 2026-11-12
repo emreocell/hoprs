@@ -622,20 +622,72 @@ fn preferred_keys(known: &[Algorithm]) -> Vec<Algorithm> {
     first
 }
 
+/// A connection refused because the server's host key changed: either `known_hosts` has
+/// another key of the same type for the host (`line`, 1-based), or the server presented
+/// another key than the one verified when the session first connected (`line: None`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostKeyChange {
+    pub line: Option<usize>,
+}
+
+/// Recognizes the error this crate reports for a changed host key (see
+/// [`HostKeyChange`]). Any other error, `HostKey` ones included (cancelled, revoked), is
+/// `None`.
+pub fn host_key_change(error: &Error) -> Option<HostKeyChange> {
+    let changed = error.kind == ErrorKind::HostKey
+        && error.message.starts_with("Host key for ")
+        && error.message.ends_with(" has changed");
+    if !changed {
+        return None;
+    }
+    let line = error.detail.as_deref().and_then(|detail| {
+        detail
+            .strip_prefix(CHANGED_LINE_PREFIX)?
+            .strip_suffix(CHANGED_LINE_SUFFIX)?
+            .parse()
+            .ok()
+    });
+    Some(HostKeyChange { line })
+}
+
+/// The message of a changed host key; [`host_key_change`] recognizes it.
+fn changed_message(host: &str) -> String {
+    format!("Host key for {host} has changed")
+}
+
+/// The detail of a change found in `known_hosts`, at `line` (1-based).
+const CHANGED_LINE_PREFIX: &str = "known_hosts line ";
+const CHANGED_LINE_SUFFIX: &str = "; remove it to continue";
+
+/// `known_hosts` has another key of the same type for `host`, at `line`.
+pub(crate) fn known_hosts_changed(host: &str, line: usize) -> Error {
+    Error::new(ErrorKind::HostKey, changed_message(host))
+        .with_detail(format!("{CHANGED_LINE_PREFIX}{line}{CHANGED_LINE_SUFFIX}"))
+}
+
+/// `known_hosts` revokes the presented key for `host`, at `line`.
+fn known_hosts_revoked(host: &str, line: usize) -> Error {
+    Error::new(
+        ErrorKind::HostKey,
+        format!("Host key for {host} has been revoked"),
+    )
+    .with_detail(format!("known_hosts line {line}"))
+}
+
 /// Refuses a server key other than `pinned` (the key verified on the session's first
 /// connection), whatever its algorithm.
 fn check_pinned(pinned: Option<&PublicKey>, host: &str, key: &PublicKey) -> Result<()> {
     match pinned {
-        Some(pinned) if pinned.key_data() != key.key_data() => Err(Error::new(
-            ErrorKind::HostKey,
-            format!("Host key for {host} has changed"),
-        )
-        .with_detail(format!(
-            "the server presented a {} key ({}) instead of the key verified when this \
+        Some(pinned) if pinned.key_data() != key.key_data() => {
+            Err(
+                Error::new(ErrorKind::HostKey, changed_message(host)).with_detail(format!(
+                    "the server presented a {} key ({}) instead of the key verified when this \
              session connected",
-            key.algorithm().as_str(),
-            known_hosts::fingerprint(key)
-        ))),
+                    key.algorithm().as_str(),
+                    known_hosts::fingerprint(key)
+                )),
+            )
+        }
         _ => Ok(()),
     }
 }
@@ -766,20 +818,8 @@ impl client::Handler for ClientHandler {
                 self.accepted(key);
                 Ok(true)
             }
-            HostKeyStatus::Changed { line } => Err(HandlerError(
-                Error::new(
-                    ErrorKind::HostKey,
-                    format!("Host key for {host} has changed"),
-                )
-                .with_detail(format!("known_hosts line {line}; remove it to continue")),
-            )),
-            HostKeyStatus::Revoked { line } => Err(HandlerError(
-                Error::new(
-                    ErrorKind::HostKey,
-                    format!("Host key for {host} has been revoked"),
-                )
-                .with_detail(format!("known_hosts line {line}")),
-            )),
+            HostKeyStatus::Changed { line } => Err(HandlerError(known_hosts_changed(host, line))),
+            HostKeyStatus::Revoked { line } => Err(HandlerError(known_hosts_revoked(host, line))),
         }
     }
 }
@@ -836,6 +876,27 @@ mod tests {
             let e = check_pinned(Some(&ed), "h", other).unwrap_err();
             assert_eq!(e.kind, ErrorKind::HostKey);
             assert_eq!(e.message, "Host key for h has changed");
+        }
+    }
+
+    #[test]
+    fn host_key_change_is_recognized() {
+        let ed = key(Algorithm::Ed25519);
+        let pinned = check_pinned(Some(&ed), "h", &key(Algorithm::Ed25519)).unwrap_err();
+        assert_eq!(host_key_change(&pinned), Some(HostKeyChange { line: None }));
+        let changed = known_hosts_changed("h", 7);
+        assert_eq!(changed.kind, ErrorKind::HostKey);
+        assert_eq!(
+            host_key_change(&changed),
+            Some(HostKeyChange { line: Some(7) })
+        );
+        // Other host key errors are not a change.
+        for other in [
+            Error::new(ErrorKind::HostKey, "Cancelled by user"),
+            known_hosts_revoked("h", 3),
+            Error::new(ErrorKind::Network, "Host key for h has changed"),
+        ] {
+            assert_eq!(host_key_change(&other), None, "{other:?}");
         }
     }
 

@@ -361,14 +361,19 @@ impl SessionManager {
     /// Waits for the session's first `Connected` (or its failure), then, once per session,
     /// builds its remote filesystem, registers the site and spawns its watcher. Called
     /// with the site's lock held.
+    ///
+    /// The outcome also settles the secrets typed with "Save in the system keyring" (see
+    /// [`SessionPrompter::take_pending_secrets`]): `Connected` writes them to the keyring,
+    /// a failure drops them.
     async fn ready(&self, id: SessionId) -> Result<()> {
-        let (link, site, built) = {
+        let (link, site, built, prompter) = {
             let sessions = lock(&self.inner.sessions);
             let entry = sessions.get(&id).ok_or_else(closed)?;
             (
                 entry.link.clone(),
                 entry.site.clone(),
                 entry.remote.is_some(),
+                entry.prompter.clone(),
             )
         };
         let mut state = link.state();
@@ -383,8 +388,14 @@ impl SessionManager {
             .map(|s| s.clone())
             .map_err(|_| closed())?;
         if let ConnectionState::Disconnected(error) = outcome {
+            prompter.discard_pending_secrets();
             return Err(error);
         }
+        if !lock(&self.inner.sessions).contains_key(&id) {
+            // Closed while connecting: `close` dropped the secrets already.
+            return Err(closed());
+        }
+        self.save_typed_secrets(&site, &prompter).await;
         if built {
             return Ok(());
         }
@@ -430,6 +441,22 @@ impl SessionManager {
         Err(closed())
     }
 
+    /// Writes the secrets the user typed with "Save in the system keyring" now that the
+    /// session connected with them. A failure is logged: the session works anyway, and
+    /// the next connect asks again.
+    async fn save_typed_secrets(&self, site: &SiteId, prompter: &SessionPrompter) {
+        for (kind, secret) in prompter.take_pending_secrets() {
+            let saved = self
+                .inner
+                .vault
+                .set_secret(site.clone(), kind, secret)
+                .await;
+            if let Err(err) = saved {
+                tracing::warn!(site = %site, secret = kind.account(), error = %err, "cannot save the typed secret in the keyring");
+            }
+        }
+    }
+
     /// Retries a session whose connection is `Disconnected` (first connection included)
     /// and waits for it like `connect`.
     pub async fn reconnect(&self, id: SessionId) -> Result<()> {
@@ -461,6 +488,7 @@ impl SessionManager {
             (entry, replaced)
         };
         entry.prompter.cancel();
+        entry.prompter.discard_pending_secrets();
         if let Some(watcher) = &entry.watcher {
             watcher.abort();
         }
@@ -480,6 +508,15 @@ impl SessionManager {
             .remote
             .clone()
             .ok_or_else(|| Error::new(ErrorKind::Network, "Not connected"))
+    }
+
+    /// The `known_hosts` file SSH sessions check: the configured one, else
+    /// `~/.ssh/known_hosts`.
+    pub fn known_hosts_path(&self) -> PathBuf {
+        match &self.inner.config.known_hosts {
+            Some(path) => path.clone(),
+            None => hoprs_ssh::SshConfig::new("", 22, "").known_hosts,
+        }
     }
 
     /// The local filesystem every session transfers with.
@@ -517,6 +554,14 @@ impl SessionManager {
         let _turn = site_lock.lock().await;
         self.ready(id).await?;
         Ok(id)
+    }
+
+    /// The prompter of a session (tests answer its prompts directly).
+    #[cfg(test)]
+    fn prompter(&self, id: SessionId) -> Option<SessionPrompter> {
+        lock(&self.inner.sessions)
+            .get(&id)
+            .map(|entry| entry.prompter.clone())
     }
 
     #[cfg(test)]
@@ -696,7 +741,13 @@ mod tests {
             async move {
                 while let Some(event) = events.recv().await {
                     if let BrokerEvent::Request(r) = event {
-                        broker.answer(r.id, PromptAnswer::Secret(SecretString::from("pw")));
+                        broker.answer(
+                            r.id,
+                            PromptAnswer::Secret {
+                                secret: SecretString::from("pw"),
+                                save: false,
+                            },
+                        );
                     }
                 }
             }
@@ -730,7 +781,13 @@ mod tests {
                 while let Some(event) = events.recv().await {
                     if let BrokerEvent::Request(r) = event {
                         seen.lock().unwrap().push(r.kind);
-                        broker.answer(r.id, PromptAnswer::Secret(SecretString::from("pw")));
+                        broker.answer(
+                            r.id,
+                            PromptAnswer::Secret {
+                                secret: SecretString::from("pw"),
+                                save: false,
+                            },
+                        );
                     }
                 }
             }
@@ -889,6 +946,91 @@ mod tests {
         }
         assert_eq!(state_of(engine.snapshot().await), TransferState::Done);
         assert_eq!(std::fs::read(local.path().join("f.txt")).unwrap(), b"data");
+    }
+
+    /// "Save in the system keyring": the typed password reaches the keyring only once the
+    /// session it was typed for connects; a failed connection or a close drops it.
+    #[tokio::test]
+    async fn typed_secret_saved_only_after_connect() {
+        use hoprs_ssh::Prompter as _;
+        use hoprs_vault::SecretStore as _;
+        use secrecy::ExposeSecret;
+
+        let store = Arc::new(MemoryStore::new());
+        let f = fixture_with(store.clone());
+        let mut events = f.broker.take_events().unwrap();
+        let stored = |site: &Site| {
+            store
+                .get(&site.id, SecretKind::Password)
+                .unwrap()
+                .map(|s| s.expose_secret().to_owned())
+        };
+
+        // Each case: a session still connecting, whose password prompt is answered with
+        // "save"; then the connection succeeds, fails, or the session is closed.
+        for (n, outcome) in ["connects", "fails", "closes"].into_iter().enumerate() {
+            let site = Site::new(outcome, "h", "u", Protocol::Ssh);
+            f.vault.upsert_site(site.clone()).await.unwrap();
+            let (state, _) = watch::channel(ConnectionState::Connecting);
+            let conn = Arc::new(FakeConn { state });
+            let attach = tokio::spawn({
+                let manager = f.manager.clone();
+                let site = site.id.clone();
+                let conn = conn.clone();
+                async move { manager.attach(site, conn, Arc::new(MemFs::new())).await }
+            });
+            let id = SessionId(n as u64 + 1);
+            eventually("the session", || f.manager.prompter(id).is_some()).await;
+            let prompter = f.manager.prompter(id).unwrap();
+            let ask = tokio::spawn({
+                let prompter = prompter.clone();
+                async move { prompter.password("u", "h").await }
+            });
+            let Some(BrokerEvent::Request(r)) = events.recv().await else {
+                panic!("a password prompt");
+            };
+            f.broker.answer(
+                r.id,
+                PromptAnswer::Secret {
+                    secret: SecretString::from(format!("pw-{outcome}")),
+                    save: true,
+                },
+            );
+            ask.await.unwrap().unwrap();
+            assert_eq!(stored(&site), None, "{outcome}: not before the outcome");
+
+            match outcome {
+                "connects" => {
+                    conn.state.send_replace(ConnectionState::Connected);
+                    attach.await.unwrap().unwrap();
+                    assert_eq!(stored(&site), Some("pw-connects".into()));
+                    assert!(
+                        f.vault
+                            .site(site.id.clone())
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .has_password
+                    );
+                }
+                "fails" => {
+                    let error = Error::new(ErrorKind::Auth, "Denied");
+                    conn.state
+                        .send_replace(ConnectionState::Disconnected(error));
+                    assert!(attach.await.unwrap().is_err());
+                    assert_eq!(stored(&site), None);
+                    assert!(prompter.take_pending_secrets().is_empty(), "dropped");
+                }
+                _ => {
+                    f.manager.close(id).await;
+                    assert!(prompter.take_pending_secrets().is_empty(), "dropped");
+                    // The close ends the wait: nothing is saved even if it connects now.
+                    conn.state.send_replace(ConnectionState::Connected);
+                    assert!(attach.await.unwrap().is_err());
+                    assert_eq!(stored(&site), None);
+                }
+            }
+        }
     }
 
     /// Answers every dialog: trusts host keys and certificates, refuses the rest. Returns

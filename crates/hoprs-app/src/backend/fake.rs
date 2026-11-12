@@ -20,6 +20,12 @@
 //! - `connect_batch` runs the sites concurrently and sends each result as it finishes; a
 //!   site's connect can be held back with [`FakeBackend::hold_connect`].
 //!
+//! Dialogs: [`FakeBackend::push_prompt`] remembers each request, so an answer to a
+//! password or passphrase prompt with `save: true` is held for its session like the real
+//! broker does, and stored (as `set_password` would) only when that session's connect
+//! succeeds; a failed connect or a close drops it. `known_hosts` is a scripted list
+//! ([`FakeBackend::set_known_host_entries`]); removals are recorded.
+//!
 //! `save_site` keeps the backend-owned fields of a stored site (`has_*`, and the FTPS pin
 //! by the vault's [`merged_pin`](super::vault::merged_pin) rule), and
 //! `set_password` records the password and sets `has_password`, like the vault.
@@ -41,10 +47,12 @@ use hoprs_vault::UnreadableEntry;
 use secrecy::SecretString;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+use super::broker::{PromptKind, PromptRequest};
 use super::{
     BackendApi, BrokerEvent, ConnectError, ConnectResult, Connected, ControlOp, DeleteTarget,
-    ProfileSnapshot, PromptAnswer, PromptId, SessionId, Side, TransferSnapshot,
+    KnownHostEntry, ProfileSnapshot, PromptAnswer, PromptId, SessionId, Side, TransferSnapshot,
 };
+use hoprs_vault::SecretKind;
 
 /// See the module docs.
 pub struct FakeBackend {
@@ -85,6 +93,15 @@ struct State {
     clears: u32,
     answers: Vec<(PromptId, PromptAnswer)>,
     closed: Vec<SessionId>,
+    /// The requests pushed to the UI, by id.
+    prompts: HashMap<PromptId, PromptRequest>,
+    /// Typed secrets answered with "save", waiting for their session to connect.
+    pending_secrets: HashMap<SessionId, Vec<(SecretKind, SecretString)>>,
+    /// Stored key passphrases, by site.
+    passphrases: HashMap<SiteId, SecretString>,
+    /// What `known_host_entries` returns.
+    known_hosts: Vec<KnownHostEntry>,
+    known_host_removals: Vec<(String, u16)>,
 }
 
 impl Default for FakeBackend {
@@ -173,7 +190,60 @@ impl FakeBackend {
 
     /// Sends a broker event to the UI's subscription.
     pub fn push_prompt(&self, event: BrokerEvent) {
+        if let BrokerEvent::Request(request) = &event {
+            self.state().prompts.insert(request.id, request.clone());
+        }
         let _ = self.events.send(event);
+    }
+
+    /// The stored key passphrase of `site`, if any.
+    pub fn passphrase(&self, site: &SiteId) -> Option<SecretString> {
+        self.state().passphrases.get(site).cloned()
+    }
+
+    /// What `known_host_entries` returns from now on.
+    pub fn set_known_host_entries(&self, entries: Vec<KnownHostEntry>) {
+        self.state().known_hosts = entries;
+    }
+
+    /// The `host:port` of each `remove_known_host` call.
+    pub fn known_host_removals(&self) -> Vec<(String, u16)> {
+        self.state().known_host_removals.clone()
+    }
+
+    /// The session connected: its typed secrets are stored, like the real session
+    /// manager does.
+    fn save_pending(state: &mut State, session: SessionId) {
+        let Some(secrets) = state.pending_secrets.remove(&session) else {
+            return;
+        };
+        let Some(site) = state.sessions.get(&session).cloned() else {
+            return;
+        };
+        for (kind, secret) in secrets {
+            let Some(slot) = state.sites.iter_mut().find(|s| s.id == site) else {
+                return;
+            };
+            match kind {
+                SecretKind::Password => {
+                    slot.has_password = true;
+                    state.passwords.insert(site.clone(), secret);
+                }
+                SecretKind::KeyPassphrase => {
+                    slot.has_key_passphrase = true;
+                    state.passphrases.insert(site.clone(), secret);
+                }
+            }
+        }
+    }
+
+    /// One connection attempt's end settles the session's typed secrets.
+    fn settle(state: &mut State, session: SessionId, connected: bool) {
+        if connected {
+            Self::save_pending(state, session);
+        } else {
+            state.pending_secrets.remove(&session);
+        }
     }
 
     pub fn enqueued(&self) -> Vec<TransferSpec> {
@@ -293,7 +363,9 @@ impl FakeBackend {
             let _ = held.await;
         }
         let mut state = self.state();
-        match Self::attempt(&mut state, id, site) {
+        let attempt = Self::attempt(&mut state, id, site);
+        Self::settle(&mut state, id, attempt.is_ok());
+        match attempt {
             Ok(()) => Ok(Connected {
                 session: id,
                 keyring_unavailable,
@@ -455,7 +527,9 @@ impl BackendApi for FakeBackend {
             .get(&session)
             .cloned()
             .ok_or_else(|| Self::not_found("Unknown session"))?;
-        Self::attempt(&mut state, session, &site)
+        let attempt = Self::attempt(&mut state, session, &site);
+        Self::settle(&mut state, session, attempt.is_ok());
+        attempt
     }
 
     async fn close(&self, session: SessionId) {
@@ -463,6 +537,7 @@ impl BackendApi for FakeBackend {
         if state.sessions.remove(&session).is_some() {
             state.connected.remove(&session);
             state.keyring_unavailable.remove(&session);
+            state.pending_secrets.remove(&session);
             state.closed.push(session);
         }
     }
@@ -553,8 +628,38 @@ impl BackendApi for FakeBackend {
         Ok(finished.len())
     }
 
+    async fn known_host_entries(&self, host: String, port: u16) -> Result<Vec<KnownHostEntry>> {
+        let _ = (host, port);
+        Ok(self.state().known_hosts.clone())
+    }
+
+    async fn remove_known_host(&self, host: String, port: u16) -> Result<usize> {
+        let mut state = self.state();
+        state.known_host_removals.push((host, port));
+        Ok(std::mem::take(&mut state.known_hosts).len())
+    }
+
     async fn answer_prompt(&self, id: PromptId, answer: PromptAnswer) {
-        self.state().answers.push((id, answer));
+        let mut state = self.state();
+        // Like the broker: a typed secret is held for its session, if the user asked to
+        // save it (an answer without "save" drops an earlier one of the same kind).
+        if let (Some(request), PromptAnswer::Secret { secret, save }) =
+            (state.prompts.get(&id).cloned(), &answer)
+        {
+            let kind = match request.kind {
+                PromptKind::Password { .. } => Some(SecretKind::Password),
+                PromptKind::Passphrase { .. } => Some(SecretKind::KeyPassphrase),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                let pending = state.pending_secrets.entry(request.session).or_default();
+                pending.retain(|(k, _)| *k != kind);
+                if *save {
+                    pending.push((kind, secret.clone()));
+                }
+            }
+        }
+        state.answers.push((id, answer));
     }
 
     fn prompt_events(&self) -> Option<mpsc::UnboundedReceiver<BrokerEvent>> {
@@ -653,6 +758,44 @@ mod tests {
         assert!(fake.workspaces().await.unwrap()[0].sites.is_empty());
         fake.delete_workspace(ws.id).await.unwrap();
         assert!(fake.sites().await.unwrap().is_empty());
+    }
+
+    /// Like the broker and session manager: a secret answered with "save" is stored only
+    /// when its session's connect succeeds, a passphrase as a passphrase.
+    #[tokio::test]
+    async fn fake_backend_saves_typed_secrets_after_connect() {
+        use super::super::broker::PromptRequest;
+        use secrecy::ExposeSecret;
+
+        let site = Site::new("s", "h", "u", Protocol::Ssh);
+        let fake = FakeBackend::new().with_site(site.clone());
+        fake.fail_next_connect(&site.id, Error::new(ErrorKind::Auth, "Denied"));
+        let ask = |id: u64, kind: PromptKind| {
+            fake.push_prompt(BrokerEvent::Request(PromptRequest {
+                id: PromptId(id),
+                session: SessionId(1),
+                key: "h:22".into(),
+                kind,
+            }));
+        };
+        let answer = |value: &str| PromptAnswer::Secret {
+            secret: SecretString::from(value),
+            save: true,
+        };
+        let passphrase = PromptKind::Passphrase { path: "/k".into() };
+        // The first connect fails: nothing is stored.
+        ask(1, passphrase.clone());
+        fake.answer_prompt(PromptId(1), answer("wrong")).await;
+        let failed = fake.connect(site.id.clone()).await.unwrap_err();
+        assert_eq!(failed.session, Some(SessionId(1)));
+        assert!(fake.passphrase(&site.id).is_none());
+        // The retry connects: the new answer is stored.
+        ask(2, passphrase);
+        fake.answer_prompt(PromptId(2), answer("right")).await;
+        fake.connect(site.id.clone()).await.unwrap();
+        assert_eq!(fake.passphrase(&site.id).unwrap().expose_secret(), "right");
+        assert!(fake.password(&site.id).is_none());
+        assert!(fake.sites().await.unwrap()[0].has_key_passphrase);
     }
 
     /// The fake follows the real `SessionManager` rules (see the module docs).

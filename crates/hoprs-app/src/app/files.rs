@@ -360,6 +360,8 @@ pub struct Tab {
     pub remote: Pane,
     /// The pane the keyboard drives.
     pub focus: Side,
+    /// "Remove the old entry…" after a changed host key.
+    pub known_hosts: super::KnownHostsFix,
 }
 
 impl Tab {
@@ -441,6 +443,7 @@ impl App {
             local: Pane::new(local.clone()),
             remote: Pane::new(remote),
             focus: Side::Local,
+            known_hosts: super::KnownHostsFix::Idle,
         };
         tab.local.listing = Listing::Loading;
         tab.local.request = Some(request_id);
@@ -668,6 +671,9 @@ impl App {
     /// had it already let go of the focus); the others first make sure no text field has
     /// the focus. With the pane's editor or dialog open, only Enter may matter.
     pub(super) fn key_pressed(&mut self, key: FileKey, shift: bool) -> Vec<Effect> {
+        if self.dialogs.is_open() {
+            return self.dialog_key(key);
+        }
         if self.form.is_some() {
             return Vec::new();
         }
@@ -689,7 +695,7 @@ impl App {
 
     /// A key for the active tab's focused pane (ignored while a form is open).
     pub(super) fn file_key(&mut self, key: FileKey, shift: bool) -> Vec<Effect> {
-        if self.form.is_some() {
+        if self.form.is_some() || self.dialogs.is_open() {
             return Vec::new();
         }
         let Some(index) = self.active_tab.filter(|&i| i < self.tabs.len()) else {

@@ -9,8 +9,8 @@ use hoprs_transfer::{Event, TransferId, TransferSpec};
 use hoprs_vault::UnreadableEntry;
 
 use crate::backend::{
-    ConnectError, ConnectResult, Connected, ControlOp, ProfileSnapshot, SessionId, Side,
-    TransferSnapshot,
+    BrokerEvent, ConnectError, ConnectResult, Connected, ControlOp, KnownHostEntry,
+    ProfileSnapshot, PromptAnswer, PromptId, SessionId, Side, TransferSnapshot,
 };
 use crate::ui::sidebar;
 use crate::ui::site_form::{PasswordChange, SiteForm, SiteFormMsg, SiteFormOutcome};
@@ -34,11 +34,13 @@ pub enum Form {
 }
 
 pub mod actions;
+pub mod dialogs;
 pub mod files;
 pub mod queue;
 pub mod transfers;
 
 pub use actions::FileAction;
+pub use dialogs::{Dialog, DialogMsg, Dialogs, FailureAction, KnownHostsFix, KnownHostsMsg, Typed};
 pub use files::{FileKey, Mods, PaneMsg, RequestId, Tab, TabId};
 pub use queue::{Queue, QueueMsg, QueueTab, RowAction};
 
@@ -92,6 +94,8 @@ pub struct App {
     pub pointer: Option<(TabId, Side)>,
     /// Files from the system file manager hover the window.
     pub os_drag: bool,
+    /// The security and credential dialogs: the one shown and those waiting.
+    pub dialogs: Dialogs,
     /// The last tab or listing id handed out.
     next_id: u64,
 }
@@ -198,6 +202,25 @@ pub enum Message {
     DragEnd,
     /// The pointer left the window: a drag ends without dropping.
     DragCancel,
+    /// A dialog to show or withdraw, from the prompt broker's subscription.
+    Prompt(BrokerEvent),
+    /// Something in the open dialog.
+    Dialog(DialogMsg),
+    /// "Remove the old entry…" in a tab whose host key changed.
+    KnownHosts {
+        tab: TabId,
+        msg: KnownHostsMsg,
+    },
+    /// The `known_hosts` lines that removing would delete.
+    KnownHostEntries {
+        tab: TabId,
+        result: Result<Vec<KnownHostEntry>, Error>,
+    },
+    /// The old `known_hosts` entries were removed (how many).
+    KnownHostRemoved {
+        tab: TabId,
+        result: Result<usize, Error>,
+    },
 }
 
 /// The profile change a form asked for, carried back with its result.
@@ -277,6 +300,29 @@ pub enum Effect {
     /// Takes the queue's snapshot; comes back as [`Message::QueueSnapshot`].
     SnapshotQueue(RequestId),
     ClearFinished,
+    /// The user's answer to a dialog (the only holder of a typed secret once sent).
+    AnswerPrompt {
+        id: PromptId,
+        answer: PromptAnswer,
+    },
+    /// Focuses the first field of the dialog just shown.
+    FocusDialog,
+    /// Tab in a dialog: the next field.
+    FocusNext,
+    /// Reads the `known_hosts` lines for `host:port`; back as
+    /// [`Message::KnownHostEntries`].
+    KnownHostEntries {
+        tab: TabId,
+        host: String,
+        port: u16,
+    },
+    /// Removes the `known_hosts` lines for `host:port`; back as
+    /// [`Message::KnownHostRemoved`].
+    RemoveKnownHost {
+        tab: TabId,
+        host: String,
+        port: u16,
+    },
 }
 
 impl App {
@@ -299,6 +345,7 @@ impl App {
             drag: None,
             pointer: None,
             os_drag: false,
+            dialogs: Dialogs::default(),
             next_id: 0,
         }
     }
@@ -457,6 +504,15 @@ impl App {
             Message::FilesHovered(hovered) => self.os_drag = hovered,
             Message::DragEnd => return self.drag_end(),
             Message::DragCancel => self.drag_cancel(),
+            Message::Prompt(event) => return self.prompt_event(event),
+            Message::Dialog(msg) => return self.dialog_msg(msg),
+            Message::KnownHosts { tab, msg } => return self.known_hosts_msg(tab, msg),
+            Message::KnownHostEntries { tab, result } => {
+                return self.known_host_entries(tab, result);
+            }
+            Message::KnownHostRemoved { tab, result } => {
+                return self.known_host_removed(tab, result);
+            }
         }
         Vec::new()
     }
@@ -527,16 +583,23 @@ impl App {
             };
             return session.map(Effect::CloseSession).into_iter().collect();
         };
+        self.tabs[index].known_hosts = KnownHostsFix::Idle;
         match result {
             Ok(connected) => {
                 self.queue.site_restored(&site);
+                let mut effects = self.settle_saving(connected.session, true);
                 self.tabs[index].state = TabState::Connected(connected);
                 // The remote pane lists its folder now that it can.
-                self.request_listing(index, Side::Remote)
+                effects.extend(self.request_listing(index, Side::Remote));
+                effects
             }
             Err(failure) => {
+                let effects = match failure.session {
+                    Some(session) => self.settle_saving(session, false),
+                    None => Vec::new(),
+                };
                 self.tabs[index].state = TabState::Failed(failure);
-                Vec::new()
+                effects
             }
         }
     }

@@ -15,5 +15,5 @@ pub use hoprs_core::ReconnectPolicy;
 #[cfg(feature = "testing")]
 pub use prompt::{HostKeyPrompt, PromptCalls, ScriptedPrompter};
 pub use prompt::{KbdPrompt, Prompter};
-pub use session::{SessionState, SshSession};
+pub use session::{HostKeyChange, SessionState, SshSession, host_key_change};
 pub use shell::{PtyRequest, ShellChannel, ShellOutput};

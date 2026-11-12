@@ -18,6 +18,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use hoprs_core::{Error, RemoteEntry, RemotePath, Result, Site, SiteId, Workspace, WorkspaceId};
 use hoprs_remote::RemoteFs;
+pub use hoprs_ssh::known_hosts::KnownHostEntry;
 use hoprs_transfer::{
     EngineConfig, Event, QueueStore, Resolution, TransferEngine, TransferId, TransferItem,
     TransferSpec,
@@ -145,6 +146,13 @@ pub trait BackendApi: Send + Sync {
     /// new snapshot afterwards.
     async fn clear_finished(&self) -> Result<usize>;
 
+    /// The `known_hosts` lines [`remove_known_host`](Self::remove_known_host) would delete
+    /// for `host:port`, to show before it does (a line that also covers other hosts).
+    async fn known_host_entries(&self, host: String, port: u16) -> Result<Vec<KnownHostEntry>>;
+    /// Deletes every `known_hosts` line for `host:port` (the user's "Remove the old entry"
+    /// after a changed host key); returns how many.
+    async fn remove_known_host(&self, host: String, port: u16) -> Result<usize>;
+
     /// Delivers the UI's answer to a dialog (closing it is [`PromptAnswer::Cancel`]).
     async fn answer_prompt(&self, id: PromptId, answer: PromptAnswer);
     /// The dialogs to show, for the UI's subscription. Only the first call gets it.
@@ -154,6 +162,15 @@ pub trait BackendApi: Send + Sync {
 /// A remote listing asked without a session.
 fn not_connected() -> Error {
     Error::new(hoprs_core::ErrorKind::NotFound, "Not connected")
+}
+
+/// Runs file work on the blocking pool.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    tokio::task::spawn_blocking(work).await.map_err(|e| {
+        Error::new(hoprs_core::ErrorKind::Io, "Background task failed").with_detail(e.to_string())
+    })?
 }
 
 /// Where the backend keeps its files.
@@ -385,6 +402,18 @@ impl BackendApi for Backend {
         self.engine.clear_finished().await
     }
 
+    async fn known_host_entries(&self, host: String, port: u16) -> Result<Vec<KnownHostEntry>> {
+        let path = self.sessions.known_hosts_path();
+        blocking(move || hoprs_ssh::known_hosts::entries_for(&path, &host, port)).await
+    }
+
+    async fn remove_known_host(&self, host: String, port: u16) -> Result<usize> {
+        let path = self.sessions.known_hosts_path();
+        let removed = blocking(move || hoprs_ssh::known_hosts::remove(&path, &host, port)).await?;
+        tracing::info!(removed, "removed known_hosts entries at the user's request");
+        Ok(removed)
+    }
+
     async fn answer_prompt(&self, id: PromptId, answer: PromptAnswer) {
         self.broker.answer(id, answer);
     }
@@ -611,6 +640,53 @@ mod tests {
         assert_eq!(backend.clear_finished().await.unwrap(), 1);
         let after = backend.transfer_snapshot().await;
         assert_eq!((after.seq, after.items.len()), (snapshot.seq, 0));
+    }
+
+    /// "Remove the old entry": the preview lists what removing deletes, from the
+    /// session manager's `known_hosts`.
+    #[tokio::test]
+    async fn known_host_entries_then_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let known_hosts = dir.path().join("known_hosts");
+        let config = BackendConfig {
+            profile_dir: dir.path().join("profiles"),
+            queue_path: None,
+            sessions: SessionConfig {
+                known_hosts: Some(known_hosts.clone()),
+                workers: 2,
+            },
+        };
+        let backend = Backend::open(config, Arc::new(MemoryStore::new())).unwrap();
+        let key = "AAAAC3NzaC1lZDI1NTE5AAAAIGrhflDkrs18RwIFvHFCsoXLdUL+0cVr81616Tzk8aBj";
+        std::fs::write(
+            &known_hosts,
+            format!(
+                "[h]:2222 ssh-ed25519 {key}\nother ssh-ed25519 {key}\n[h]:2222,other ssh-ed25519 {key}\n"
+            ),
+        )
+        .unwrap();
+
+        let entries = backend.known_host_entries("h".into(), 2222).await.unwrap();
+        let lines: Vec<_> = entries
+            .iter()
+            .map(|e| (e.line, e.covers_other_hosts))
+            .collect();
+        assert_eq!(lines, [(1, false), (3, true)]);
+        assert_eq!(
+            backend.remove_known_host("h".into(), 2222).await.unwrap(),
+            2
+        );
+        assert_eq!(
+            std::fs::read_to_string(&known_hosts).unwrap(),
+            format!("other ssh-ed25519 {key}\n")
+        );
+        assert!(
+            backend
+                .known_host_entries("h".into(), 2222)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

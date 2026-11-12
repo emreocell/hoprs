@@ -12,7 +12,7 @@ use iced::{Alignment, Element, Event, Length, Padding, Rectangle, window};
 
 use crate::app::actions::{EditKind, PaneAction};
 use crate::app::files::{Pane, PaneStatus, Row, SortKey};
-use crate::app::{App, FileKey, Message, Mods, PaneMsg, Tab, TabId, TabState};
+use crate::app::{App, FailureAction, FileKey, Message, Mods, PaneMsg, Tab, TabId, TabState};
 use crate::backend::Side;
 use crate::ui::theme::{self, palette};
 use crate::ui::virtual_list::{self, ROW_HEIGHT};
@@ -592,6 +592,9 @@ fn failed(error: &Error, retry: Message) -> Element<'_, Message> {
 /// The remote side without a connection: "Not connected", why, and Reconnect (the
 /// sidebar's connect path, which retries the failed session) or Edit site.
 fn not_connected<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> {
+    if tab.host_key_change().is_some() {
+        return crate::ui::dialogs::host_key_changed(app, tab);
+    }
     let p = palette();
     let failure = match &tab.state {
         TabState::Failed(failure) => Some(failure),
@@ -618,21 +621,30 @@ fn not_connected<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> {
             );
         }
     }
-    if app.site(&tab.site).is_some() {
-        body = body.push(
-            row![
-                button(text(strings::RECONNECT))
-                    .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
-                    .style(theme::button_outline)
-                    .on_press(Message::ConnectSite(tab.site.clone())),
-                button(text(strings::EDIT_SITE))
-                    .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
-                    .style(theme::button_text)
-                    .on_press(Message::EditSite(tab.site.clone())),
-            ]
-            .spacing(theme::SPACE_XS),
+    let mut actions = row![].spacing(theme::SPACE_XS);
+    for action in app.failure_actions(tab) {
+        let (label, style, on_press): (_, fn(&iced::Theme, _) -> _, _) = match action {
+            FailureAction::Reconnect => (
+                strings::RECONNECT,
+                theme::button_outline,
+                Message::ConnectSite(tab.site.clone()),
+            ),
+            FailureAction::EditSite => (
+                strings::EDIT_SITE,
+                theme::button_text,
+                Message::EditSite(tab.site.clone()),
+            ),
+            // Drawn by the changed host key view above.
+            FailureAction::RemoveOldEntry => continue,
+        };
+        actions = actions.push(
+            button(text(label))
+                .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
+                .style(style)
+                .on_press(on_press),
         );
     }
+    body = body.push(actions);
     centered(body.into())
 }
 

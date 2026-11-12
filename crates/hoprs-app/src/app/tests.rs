@@ -1244,5 +1244,6 @@ async fn switching_tabs_restores_scroll_offsets() {
     assert!(app.update(Message::SelectTab(1)).is_empty());
 }
 
+mod dialogs;
 mod file_actions;
 mod transfers;

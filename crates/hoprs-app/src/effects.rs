@@ -10,9 +10,9 @@ use hoprs_transfer::{Event, TransferSpec};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::app::{Effect, FileAction, Message, ProfileOp, RequestId, TabId};
-use crate::backend::{BackendApi, SessionId, Side};
-use crate::ui::files;
+use crate::backend::{BackendApi, PromptAnswer, PromptId, SessionId, Side};
 use crate::ui::site_form::PasswordChange;
+use crate::ui::{dialogs, files};
 
 /// Runs one effect against the backend.
 pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> {
@@ -116,7 +116,57 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
             async move { backend.clear_finished().await },
             Message::Cleared,
         ),
+        Effect::AnswerPrompt { id, answer } => {
+            Task::future(answer_prompt(backend, id, answer)).discard()
+        }
+        Effect::FocusDialog => iced::widget::operation::focus(dialogs::field_id(0)),
+        Effect::FocusNext => iced::widget::operation::focus_next(),
+        Effect::KnownHostEntries { tab, host, port } => {
+            Task::future(known_host_entries(backend, tab, host, port))
+        }
+        Effect::RemoveKnownHost { tab, host, port } => {
+            Task::future(remove_known_host(backend, tab, host, port))
+        }
     }
+}
+
+/// Delivers a dialog's answer (the effect's secret goes straight to the backend).
+pub async fn answer_prompt(backend: Arc<dyn BackendApi>, id: PromptId, answer: PromptAnswer) {
+    backend.answer_prompt(id, answer).await;
+}
+
+/// Reads the `known_hosts` lines "Remove the old entry" would delete.
+pub async fn known_host_entries(
+    backend: Arc<dyn BackendApi>,
+    tab: TabId,
+    host: String,
+    port: u16,
+) -> Message {
+    let result = backend.known_host_entries(host, port).await;
+    Message::KnownHostEntries { tab, result }
+}
+
+/// Removes the `known_hosts` lines of `host:port`.
+pub async fn remove_known_host(
+    backend: Arc<dyn BackendApi>,
+    tab: TabId,
+    host: String,
+    port: u16,
+) -> Message {
+    let result = backend.remove_known_host(host, port).await;
+    Message::KnownHostRemoved { tab, result }
+}
+
+/// The broker's dialogs for the UI's subscription: each request or withdrawal as
+/// [`Message::Prompt`]. The backend hands its channel out once; without it (a second
+/// subscription) the stream is empty.
+pub fn prompt_feed(backend: &dyn BackendApi) -> impl Stream<Item = Message> + Send + use<> {
+    let events = backend.prompt_events();
+    stream::unfold(events, |events| async move {
+        let mut events = events?;
+        let event = events.recv().await?;
+        Some((Message::Prompt(event), Some(events)))
+    })
 }
 
 /// Queues each transfer in order; stops at the first failure.
