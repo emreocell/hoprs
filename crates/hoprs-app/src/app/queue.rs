@@ -315,6 +315,12 @@ impl Queue {
         self.session_policy
     }
 
+    /// Sets (or, with `None`, clears) the policy shown as "this session": the settings
+    /// page clears it when it gives the engine a new default policy.
+    pub fn set_session_policy(&mut self, policy: Option<ConflictPolicy>) {
+        self.session_policy = policy;
+    }
+
     /// The buttons of a row, by its state (a dismissed failure keeps Retry).
     pub fn actions(&self, row: &QueueRow) -> Vec<RowAction> {
         use RowAction::*;

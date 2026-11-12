@@ -7,13 +7,16 @@ use std::path::PathBuf;
 use hoprs_core::{
     ConnectionState, Error, RemoteEntry, RemotePath, SavedTab, Site, SiteId, Workspace, WorkspaceId,
 };
-use hoprs_transfer::{Event, TransferId, TransferSpec};
-use hoprs_vault::UnreadableEntry;
+use hoprs_import::ImportReport;
+use hoprs_transfer::{ConflictPolicy, Event, TransferId, TransferSpec};
+use hoprs_vault::{BackupImportReport, ExportReport, ImportMode, UnreadableEntry};
+use secrecy::SecretString;
 
 use crate::backend::{
     AuthMethod, BrokerEvent, ConnectError, ConnectResult, Connected, ControlOp, KnownHostEntry,
     ProfileSnapshot, PromptAnswer, PromptId, SessionId, Side, TransferSnapshot, WorkspaceTabs,
 };
+use crate::settings::{Settings, SettingsLoad};
 use crate::ui::sidebar;
 use crate::ui::site_form::{PasswordChange, SiteForm, SiteFormMsg, SiteFormOutcome};
 use crate::ui::workspace_form::{WorkspaceForm, WorkspaceFormMsg, WorkspaceFormOutcome};
@@ -33,13 +36,31 @@ pub enum Load {
 pub enum Form {
     Site(SiteForm),
     Workspace(WorkspaceForm),
+    /// "Import from FileZilla" ([`App::import`] holds its state, which outlives the view
+    /// while an import runs).
+    Import,
+    /// The settings page ([`App::settings`], [`App::backup`]).
+    Settings,
+}
+
+/// What a system file dialog is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickTarget {
+    /// The `sitemanager.xml` to import (open).
+    Sitemanager,
+    /// Where to write a backup (save).
+    ExportBackup,
+    /// The backup to restore (open).
+    RestoreBackup,
 }
 
 pub mod actions;
 pub mod dialogs;
 pub mod files;
+pub mod import;
 pub mod lifecycle;
 pub mod queue;
+pub mod settings;
 pub mod transfers;
 
 pub use actions::FileAction;
@@ -105,6 +126,19 @@ pub struct App {
     pub open_workspace: Option<WorkspaceId>,
     /// The window asked to close: the backend is shutting down.
     pub closing: bool,
+    /// FileZilla's usual `sitemanager.xml`, where the import starts.
+    pub filezilla_default: Option<PathBuf>,
+    pub import: import::ImportFlow,
+    /// The settings in force (the engine and the sessions follow them).
+    pub settings: Settings,
+    /// `settings.toml` was unusable at start: the defaults apply and nothing is saved.
+    pub settings_load_error: Option<Error>,
+    /// The last save of `settings.toml` failed.
+    pub settings_save_error: Option<Error>,
+    pub backup: settings::Backup,
+    /// Advances while something runs without a known end (import, backup): drives the
+    /// indeterminate progress bar.
+    pub busy_phase: u32,
     /// The last tab or listing id handed out.
     next_id: u64,
 }
@@ -254,6 +288,26 @@ pub enum Message {
     CloseRequested(iced::window::Id),
     /// The backend is shut down (or ran out of time): the window may close.
     ShutdownDone(iced::window::Id),
+    /// The sidebar's "Import from FileZilla".
+    OpenImport,
+    Import(import::ImportMsg),
+    /// The import finished: its report, or why the file could not be read.
+    Imported(Result<ImportReport, Error>),
+    SitemanagerDeleted(Result<(), Error>),
+    /// The sidebar's "Settings".
+    OpenSettings,
+    Settings(settings::SettingsMsg),
+    SettingsLoaded(SettingsLoad),
+    SettingsSaved(Result<(), Error>),
+    BackupExported(Result<ExportReport, Error>),
+    BackupRestored(Result<BackupImportReport, Error>),
+    /// A system file dialog closed: the path chosen, `None` if cancelled.
+    FilePicked {
+        target: PickTarget,
+        path: Option<PathBuf>,
+    },
+    /// A frame of the indeterminate progress bar.
+    BusyTick,
 }
 
 /// The profile change a form asked for, carried back with its result.
@@ -382,6 +436,36 @@ pub enum Effect {
     },
     /// Closes the window, which ends the app.
     ExitWindow(iced::window::Id),
+    /// Reads the settings the backend started with; back as [`Message::SettingsLoaded`].
+    LoadSettings,
+    /// Writes `settings.toml`; back as [`Message::SettingsSaved`].
+    SaveSettings(Settings),
+    /// The engine's conflict policy from now on.
+    SetPolicy(ConflictPolicy),
+    /// Workers per site for the next connections.
+    SetWorkers(usize),
+    /// Opens the system file dialog; back as [`Message::FilePicked`].
+    PickFile(PickTarget),
+    /// Imports a `sitemanager.xml`, off the UI thread; back as [`Message::Imported`].
+    ImportFilezilla {
+        path: PathBuf,
+        folders_as_workspaces: bool,
+    },
+    /// Deletes the imported file; back as [`Message::SitemanagerDeleted`].
+    DeleteSitemanager(PathBuf),
+    /// Writes an encrypted backup; back as [`Message::BackupExported`]. The only holder
+    /// of the password once emitted (its `Debug` is redacted).
+    ExportBackup {
+        path: PathBuf,
+        password: SecretString,
+    },
+    /// Restores a backup; back as [`Message::BackupRestored`]. The only holder of the
+    /// password once emitted.
+    RestoreBackup {
+        path: PathBuf,
+        password: SecretString,
+        mode: ImportMode,
+    },
 }
 
 impl App {
@@ -407,13 +491,23 @@ impl App {
             dialogs: Dialogs::default(),
             open_workspace: None,
             closing: false,
+            filezilla_default: hoprs_import::default_sitemanager_path(),
+            import: import::ImportFlow::new(None),
+            settings: Settings::default(),
+            settings_load_error: None,
+            settings_save_error: None,
+            backup: settings::Backup::default(),
+            busy_phase: 0,
             next_id: 0,
         }
     }
 
     /// The app and the effects to run at startup.
     pub fn boot() -> (Self, Vec<Effect>) {
-        (Self::new(), vec![Effect::LoadProfiles])
+        (
+            Self::new(),
+            vec![Effect::LoadProfiles, Effect::LoadSettings],
+        )
     }
 
     pub fn site(&self, id: &SiteId) -> Option<&Site> {
@@ -598,6 +692,18 @@ impl App {
             Message::TabsSaved(result) => return self.tabs_saved(result),
             Message::CloseRequested(window) => return self.close_requested(window),
             Message::ShutdownDone(window) => return vec![Effect::ExitWindow(window)],
+            Message::OpenImport => return self.open_import(),
+            Message::Import(msg) => return self.import_msg(msg),
+            Message::Imported(result) => return self.imported(result),
+            Message::SitemanagerDeleted(result) => self.sitemanager_deleted(result),
+            Message::OpenSettings => return self.open_settings(),
+            Message::Settings(msg) => return self.settings_msg(msg),
+            Message::SettingsLoaded(loaded) => self.settings_loaded(loaded),
+            Message::SettingsSaved(result) => self.settings_saved(result),
+            Message::BackupExported(result) => self.backup_exported(result),
+            Message::BackupRestored(result) => return self.backup_restored(result),
+            Message::FilePicked { target, path } => self.file_picked(target, path),
+            Message::BusyTick => self.busy_phase = self.busy_phase.wrapping_add(1),
         }
         Vec::new()
     }
@@ -777,7 +883,7 @@ impl App {
                 (None, _) => self.form = None,
                 (Some(error), Some(Form::Site(form))) => form.finished(Some(error.clone())),
                 (Some(error), Some(Form::Workspace(form))) => form.finished(Some(error.clone())),
-                (Some(_), None) => {}
+                (Some(_), None | Some(Form::Import | Form::Settings)) => {}
             }
         }
         if error.is_some() {

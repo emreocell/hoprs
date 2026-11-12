@@ -49,18 +49,23 @@ impl VaultHandle {
         .map_err(|e| Error::new(ErrorKind::Io, "Vault task failed").with_detail(e.to_string()))?
     }
 
+    // Test convenience: the app reads through `snapshot`.
+    #[cfg(test)]
     pub async fn sites(&self) -> Result<Vec<Site>> {
         self.call(|v| Ok(v.sites().to_vec())).await
     }
 
+    #[cfg(test)]
     pub async fn site(&self, id: SiteId) -> Result<Option<Site>> {
         self.call(move |v| Ok(v.site(&id).cloned())).await
     }
 
+    #[cfg(test)]
     pub async fn workspaces(&self) -> Result<Vec<Workspace>> {
         self.call(|v| Ok(v.workspaces().to_vec())).await
     }
 
+    #[cfg(test)]
     pub async fn upsert_site(&self, site: Site) -> Result<()> {
         self.call(move |v| v.upsert_site(site)).await
     }

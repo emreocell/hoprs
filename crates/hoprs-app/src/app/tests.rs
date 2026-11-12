@@ -33,7 +33,10 @@ fn workspace(name: &str, sites: &[&SiteId]) -> Workspace {
 /// An app that loaded what `fake` holds.
 async fn loaded(fake: &FakeBackend) -> App {
     let (mut app, effects) = App::boot();
-    assert!(matches!(effects[..], [Effect::LoadProfiles]));
+    assert!(matches!(
+        effects[..],
+        [Effect::LoadProfiles, Effect::LoadSettings]
+    ));
     assert!(
         app.update(Message::ProfilesLoaded(fake.profiles().await))
             .is_empty()
@@ -1246,5 +1249,6 @@ async fn switching_tabs_restores_scroll_offsets() {
 
 mod dialogs;
 mod file_actions;
+mod import_settings;
 mod status;
 mod transfers;

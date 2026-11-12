@@ -2,10 +2,6 @@
 //! styles. Neutral near-black surfaces, a white accent, 4 px corners,
 //! 1 px rules and no shadows.
 
-// The full style set lands now; the views that use each one (tabs,
-// file rows, dialogs) arrive in later tasks.
-#![allow(dead_code)]
-
 use std::sync::LazyLock;
 
 use iced::border::Radius;
@@ -621,6 +617,51 @@ pub fn checkbox(_: &Theme, status: iced_checkbox::Status) -> iced_checkbox::Styl
             radius: radius(),
         },
         text_color: Some(if disabled { p.muted } else { p.ink_2 }),
+    }
+}
+
+/// One choice of a segmented control (Merge / Replace): the chosen one on `paper_3`
+/// with ink text, the other muted; 1 px outline.
+pub fn segment(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let p = palette();
+        let (background, text_color, border) = match (active, status) {
+            (true, _) => (Some(p.paper_3), p.ink, p.rule_2),
+            (false, button::Status::Hovered | button::Status::Pressed) => (None, p.ink, p.rule_2),
+            (false, _) => (None, p.muted, p.rule),
+        };
+        button::Style {
+            border: Border {
+                color: border,
+                width: HAIRLINE,
+                radius: radius(),
+            },
+            ..flat_button(background, text_color)
+        }
+    }
+}
+
+/// The track of the indeterminate progress bar (as [`progress`]'s).
+pub fn track(_: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(palette().rule)),
+        border: Border {
+            radius: Radius::from(2.0),
+            ..Border::default()
+        },
+        ..container::Style::default()
+    }
+}
+
+/// The moving part of the indeterminate progress bar: the accent.
+pub fn track_fill(_: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(palette().accent)),
+        border: Border {
+            radius: Radius::from(2.0),
+            ..Border::default()
+        },
+        ..container::Style::default()
     }
 }
 

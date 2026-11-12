@@ -317,7 +317,11 @@ impl App {
             | Message::KnownHosts { .. }
             | Message::RestartSession(_)
             | Message::ReconnectSession(_)
-            | Message::CloseWorkspace(_) => Some(Vec::new()),
+            | Message::CloseWorkspace(_)
+            | Message::OpenImport
+            | Message::Import(_)
+            | Message::OpenSettings
+            | Message::Settings(_) => Some(Vec::new()),
             _ => None,
         }
     }

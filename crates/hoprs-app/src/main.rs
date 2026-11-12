@@ -6,6 +6,7 @@
 mod app;
 mod backend;
 mod effects;
+mod settings;
 mod ui;
 
 use std::borrow::Cow;
@@ -22,6 +23,8 @@ use crate::backend::{Backend, BackendApi, BackendConfig, LazyKeyringStore};
 /// Smallest window that still fits the sidebar and two file panes.
 const MIN_WINDOW: iced::Size = iced::Size::new(960.0, 640.0);
 const INITIAL_WINDOW: iced::Size = iced::Size::new(1280.0, 800.0);
+/// A frame of the indeterminate progress bar.
+const BUSY_FRAME: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// The default filter, used when `RUST_LOG` is unset or empty.
 const DEFAULT_LOG_FILTER: &str = "info,suppaftp=warn";
@@ -130,6 +133,11 @@ fn subscription(state: &Hoprs) -> iced::Subscription<Message> {
         }),
         iced::window::close_requests().map(Message::CloseRequested),
     ];
+    // The indeterminate progress bar moves only while an import or a backup runs.
+    let busy = state
+        .app
+        .busy()
+        .then(|| iced::time::every(BUSY_FRAME).map(|_| Message::BusyTick));
     // One feed per session, keyed by its id: it starts when a tab connects and stops when
     // the tab closes or fails (a new session is a new feed).
     let sessions = state.app.watched_sessions().into_iter().map(|session| {
@@ -137,7 +145,7 @@ fn subscription(state: &Hoprs) -> iced::Subscription<Message> {
             effects::session_feed(Arc::clone(&feed.1), feed.0)
         })
     });
-    iced::Subscription::batch(fixed.into_iter().chain(sessions))
+    iced::Subscription::batch(fixed.into_iter().chain(busy).chain(sessions))
 }
 
 /// A session, as the identity of its state feed (the backend rides along).

@@ -10,12 +10,17 @@ use hoprs_core::{Error, ErrorKind, RemotePath, Site, SiteId, WorkspaceId};
 use hoprs_transfer::{Event, TransferSpec};
 use tokio::sync::{broadcast, mpsc};
 
-use crate::app::{Effect, FileAction, Message, ProfileOp, RequestId, TabId};
+use hoprs_import::ImportOptions;
+use hoprs_vault::ImportMode;
+use secrecy::SecretString;
+
+use crate::app::{Effect, FileAction, Message, PickTarget, ProfileOp, RequestId, TabId};
 use crate::backend::{
     BackendApi, KnownHostEntry, PromptAnswer, PromptId, SessionId, Side, WorkspaceTabs,
 };
+use crate::settings::Settings;
 use crate::ui::site_form::PasswordChange;
-use crate::ui::{dialogs, files};
+use crate::ui::{dialogs, files, strings};
 
 /// Runs one effect against the backend.
 pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> {
@@ -147,7 +152,108 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
             exit_watchdog();
             iced::window::close(window)
         }
+        Effect::LoadSettings => Task::done(Message::SettingsLoaded(backend.settings())),
+        Effect::SaveSettings(settings) => Task::future(save_settings(backend, settings)),
+        Effect::SetPolicy(policy) => {
+            Task::future(async move { backend.set_policy(policy).await }).discard()
+        }
+        Effect::SetWorkers(workers) => {
+            backend.set_workers(workers);
+            Task::none()
+        }
+        Effect::PickFile(target) => Task::perform(pick_file(target), move |path| {
+            Message::FilePicked { target, path }
+        }),
+        Effect::ImportFilezilla {
+            path,
+            folders_as_workspaces,
+        } => Task::future(import_filezilla(backend, path, folders_as_workspaces)),
+        Effect::DeleteSitemanager(path) => Task::future(delete_sitemanager(backend, path)),
+        Effect::ExportBackup { path, password } => {
+            Task::future(export_backup(backend, path, password))
+        }
+        Effect::RestoreBackup {
+            path,
+            password,
+            mode,
+        } => Task::future(restore_backup(backend, path, password, mode)),
     }
+}
+
+/// "Import from FileZilla": the backend reads, parses and applies the file on the
+/// blocking pool.
+pub async fn import_filezilla(
+    backend: Arc<dyn BackendApi>,
+    path: PathBuf,
+    folders_as_workspaces: bool,
+) -> Message {
+    let options = ImportOptions {
+        folders_as_workspaces,
+    };
+    Message::Imported(backend.import_filezilla(path, options).await)
+}
+
+pub async fn delete_sitemanager(backend: Arc<dyn BackendApi>, path: PathBuf) -> Message {
+    Message::SitemanagerDeleted(backend.delete_sitemanager(path).await)
+}
+
+/// Writes a backup; the password goes straight from the effect to the vault.
+pub async fn export_backup(
+    backend: Arc<dyn BackendApi>,
+    path: PathBuf,
+    password: SecretString,
+) -> Message {
+    Message::BackupExported(backend.export_backup(path, password).await)
+}
+
+pub async fn restore_backup(
+    backend: Arc<dyn BackendApi>,
+    path: PathBuf,
+    password: SecretString,
+    mode: ImportMode,
+) -> Message {
+    Message::BackupRestored(backend.restore_backup(path, password, mode).await)
+}
+
+pub async fn save_settings(backend: Arc<dyn BackendApi>, settings: Settings) -> Message {
+    Message::SettingsSaved(backend.save_settings(settings).await)
+}
+
+/// The system file dialog (on Linux the XDG desktop portal, else zenity), on its own
+/// thread: the UI keeps running. `None` if cancelled or no dialog is available.
+async fn pick_file(target: PickTarget) -> Option<PathBuf> {
+    let home = dirs::home_dir();
+    let dialog = rfd::AsyncFileDialog::new();
+    let dialog = match &home {
+        Some(home) => dialog.set_directory(home),
+        None => dialog,
+    };
+    let handle = match target {
+        PickTarget::Sitemanager => {
+            let dialog = match hoprs_import::default_sitemanager_path()
+                .as_deref()
+                .and_then(Path::parent)
+                .filter(|dir| dir.is_dir())
+            {
+                Some(dir) => dialog.set_directory(dir),
+                None => dialog,
+            };
+            dialog
+                .set_title(strings::PICK_SITEMANAGER)
+                .add_filter(strings::PICK_FILTER_XML, &["xml"])
+                .pick_file()
+                .await
+        }
+        PickTarget::ExportBackup => {
+            dialog
+                .set_title(strings::PICK_EXPORT)
+                .set_file_name(strings::BACKUP_FILE_NAME)
+                .save_file()
+                .await
+        }
+        PickTarget::RestoreBackup => dialog.set_title(strings::PICK_RESTORE).pick_file().await,
+    };
+    handle.map(|handle| handle.path().to_path_buf())
 }
 
 /// The longest the window waits for the backend to shut down once asked to close.

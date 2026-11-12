@@ -1,9 +1,6 @@
 //! The backend the effects run against: the vault, the transfer engine, the session
 //! manager and the prompt broker, behind [`BackendApi`].
 
-// The effects that call most of this arrive in Tasks 5–11; the tests use all of it.
-#![cfg_attr(not(test), allow(dead_code))]
-
 pub mod broker;
 #[cfg(test)]
 pub mod fake;
@@ -20,14 +17,15 @@ use hoprs_core::{
     ConnectionState, Error, RemoteEntry, RemotePath, Result, SavedTab, Site, SiteId, Workspace,
     WorkspaceId,
 };
+use hoprs_import::{ImportOptions, ImportReport};
 use hoprs_remote::RemoteFs;
 pub use hoprs_ssh::AuthMethod;
 pub use hoprs_ssh::known_hosts::KnownHostEntry;
 use hoprs_transfer::{
-    EngineConfig, Event, QueueStore, Resolution, TransferEngine, TransferId, TransferItem,
-    TransferSpec,
+    ConflictPolicy, EngineConfig, Event, QueueStore, Resolution, TransferEngine, TransferId,
+    TransferItem, TransferSpec,
 };
-use hoprs_vault::{SecretStore, Vault};
+use hoprs_vault::{BackupImportReport, ExportParams, ExportReport, ImportMode, SecretStore, Vault};
 use secrecy::SecretString;
 use tokio::sync::{broadcast, mpsc, watch};
 
@@ -37,6 +35,8 @@ pub use sessions::{
     ConnectError, ConnectResult, Connected, SessionConfig, SessionId, SessionManager,
 };
 pub use vault::{LazyKeyringStore, ProfileSnapshot, VaultHandle};
+
+use crate::settings::{self, Settings, SettingsLoad};
 
 /// Which pane of a files tab.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -73,7 +73,10 @@ pub type WorkspaceTabs = Vec<(SiteId, Vec<SavedTab>)>;
 /// What `effects::run` may call. Each later task adds the methods its effects need.
 #[async_trait]
 pub trait BackendApi: Send + Sync {
+    // Test convenience: the app reads through `profiles` and `connect_batch`.
+    #[cfg(test)]
     async fn sites(&self) -> Result<Vec<Site>>;
+    #[cfg(test)]
     async fn workspaces(&self) -> Result<Vec<Workspace>>;
     /// Sites, workspaces and unreadable entries, read together.
     async fn profiles(&self) -> Result<ProfileSnapshot>;
@@ -96,6 +99,7 @@ pub trait BackendApi: Send + Sync {
     async fn save_workspace_tabs(&self, workspace: WorkspaceId, tabs: WorkspaceTabs) -> Result<()>;
 
     /// Connects a saved site; see [`SessionManager::connect`].
+    #[cfg(test)]
     async fn connect(&self, site: SiteId) -> std::result::Result<Connected, ConnectError>;
     /// Open workspace: connects `sites` in parallel, reading their secrets as one batch
     /// (at most one keyring unlock prompt), and sends each site's result on `results` as
@@ -182,6 +186,35 @@ pub trait BackendApi: Send + Sync {
     async fn answer_prompt(&self, id: PromptId, answer: PromptAnswer);
     /// The dialogs to show, for the UI's subscription. Only the first call gets it.
     fn prompt_events(&self) -> Option<mpsc::UnboundedReceiver<BrokerEvent>>;
+
+    /// "Import from FileZilla": reads and parses the `sitemanager.xml` at `path`, then
+    /// applies it to the vault (sites, passwords to the keyring, optionally folders as
+    /// workspaces). An unreadable or invalid file is an `Err` and changes nothing.
+    async fn import_filezilla(&self, path: PathBuf, options: ImportOptions)
+    -> Result<ImportReport>;
+    /// Deletes the imported `sitemanager.xml` (see [`hoprs_import::delete_source`]: only a
+    /// regular file that still looks like FileZilla's).
+    async fn delete_sitemanager(&self, path: PathBuf) -> Result<()>;
+    /// Writes the encrypted backup of every site, workspace and secret to `path`. Slow on
+    /// purpose (Argon2id).
+    async fn export_backup(&self, path: PathBuf, password: SecretString) -> Result<ExportReport>;
+    /// Restores a backup made by [`export_backup`](Self::export_backup).
+    async fn restore_backup(
+        &self,
+        path: PathBuf,
+        password: SecretString,
+        mode: ImportMode,
+    ) -> Result<BackupImportReport>;
+
+    /// The settings read when the backend opened (the engine and the sessions started
+    /// with them), with the error if the file was unusable.
+    fn settings(&self) -> SettingsLoad;
+    /// Writes `settings.toml` (atomically). Does not apply anything.
+    async fn save_settings(&self, settings: Settings) -> Result<()>;
+    /// The conflict policy of the transfers dispatched from now on.
+    async fn set_policy(&self, policy: ConflictPolicy);
+    /// Transfer workers per site for the connections made from now on (`1..=16`).
+    fn set_workers(&self, workers: usize);
 }
 
 /// A remote listing asked without a session.
@@ -205,7 +238,10 @@ pub struct BackendConfig {
     pub profile_dir: PathBuf,
     /// The persistent transfer queue; `None` keeps it in memory.
     pub queue_path: Option<PathBuf>,
+    /// The workers here are replaced by `settings.toml`'s.
     pub sessions: SessionConfig,
+    /// Argon2id costs of the backups this backend writes.
+    pub backup_params: ExportParams,
 }
 
 impl BackendConfig {
@@ -216,6 +252,7 @@ impl BackendConfig {
             profile_dir: hoprs_vault::default_dir()?,
             queue_path: dirs::data_dir().map(|dir| dir.join("hoprs").join("queue.db")),
             sessions: SessionConfig::default(),
+            backup_params: ExportParams::default(),
         })
     }
 }
@@ -223,8 +260,11 @@ impl BackendConfig {
 /// The real backend.
 pub struct Backend {
     profile_dir: PathBuf,
-    /// Transfer workers per site (shown by the queue).
-    workers: usize,
+    /// `settings.toml`, beside the profiles.
+    settings_path: PathBuf,
+    /// What `settings.toml` held when the backend opened.
+    settings: SettingsLoad,
+    backup_params: ExportParams,
     vault: VaultHandle,
     engine: TransferEngine,
     sessions: SessionManager,
@@ -239,10 +279,25 @@ impl Backend {
     ///
     /// A queue that cannot be opened or read is logged and replaced by an in-memory one,
     /// so the app still starts (the old file is left untouched).
-    pub fn open(config: BackendConfig, secrets: Arc<dyn SecretStore>) -> Result<Backend> {
+    ///
+    /// `settings.toml` (beside the profiles, also read here) gives the engine its conflict
+    /// policy and the sessions their workers; an unusable file means the defaults (it is
+    /// logged, kept as is, and [`BackendApi::settings`] reports it).
+    pub fn open(mut config: BackendConfig, secrets: Arc<dyn SecretStore>) -> Result<Backend> {
         let vault = VaultHandle::new(Vault::open(&config.profile_dir, secrets)?);
-        let engine = start_engine(config.queue_path.as_deref());
-        let workers = config.sessions.workers;
+        let settings_path = config.profile_dir.join(settings::FILE_NAME);
+        let loaded = settings::load(&settings_path);
+        if let Some(error) = &loaded.error {
+            tracing::warn!(%error, "settings.toml is unusable; this run uses the defaults");
+        }
+        let engine = start_engine(
+            config.queue_path.as_deref(),
+            EngineConfig {
+                default_policy: loaded.settings.default_policy,
+                ..EngineConfig::default()
+            },
+        );
+        config.sessions.workers = loaded.settings.workers_per_site;
         let broker = PromptBroker::new(vault.clone());
         let sessions = SessionManager::new(
             engine.clone(),
@@ -252,7 +307,9 @@ impl Backend {
         );
         Ok(Backend {
             profile_dir: config.profile_dir,
-            workers,
+            settings_path,
+            settings: loaded,
+            backup_params: config.backup_params,
             vault,
             engine,
             sessions,
@@ -274,12 +331,12 @@ impl Backend {
 }
 
 /// The engine over the queue at `path`, or over an in-memory queue if that fails.
-fn start_engine(path: Option<&Path>) -> TransferEngine {
+fn start_engine(path: Option<&Path>, config: EngineConfig) -> TransferEngine {
     let persistent = path.map(|path| {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(Error::from)?;
         }
-        TransferEngine::start(QueueStore::open(path)?, EngineConfig::default())
+        TransferEngine::start(QueueStore::open(path)?, config.clone())
     });
     match persistent {
         Some(Ok(engine)) => return engine,
@@ -289,15 +346,17 @@ fn start_engine(path: Option<&Path>) -> TransferEngine {
         None => {}
     }
     let store = QueueStore::open_in_memory().expect("an in-memory queue always opens");
-    TransferEngine::start(store, EngineConfig::default()).expect("an empty queue always starts")
+    TransferEngine::start(store, config).expect("an empty queue always starts")
 }
 
 #[async_trait]
 impl BackendApi for Backend {
+    #[cfg(test)]
     async fn sites(&self) -> Result<Vec<Site>> {
         self.vault.sites().await
     }
 
+    #[cfg(test)]
     async fn workspaces(&self) -> Result<Vec<Workspace>> {
         self.vault.workspaces().await
     }
@@ -334,6 +393,7 @@ impl BackendApi for Backend {
         self.vault.save_workspace_tabs(workspace, tabs).await
     }
 
+    #[cfg(test)]
     async fn connect(&self, site: SiteId) -> std::result::Result<Connected, ConnectError> {
         self.sessions.connect(site).await
     }
@@ -440,7 +500,7 @@ impl BackendApi for Backend {
             seq,
             items,
             // As the engine clamps it.
-            workers: self.workers.clamp(1, 16),
+            workers: self.sessions.workers().clamp(1, 16),
         }
     }
 
@@ -474,6 +534,67 @@ impl BackendApi for Backend {
     fn prompt_events(&self) -> Option<mpsc::UnboundedReceiver<BrokerEvent>> {
         self.broker.take_events()
     }
+
+    async fn import_filezilla(
+        &self,
+        path: PathBuf,
+        options: ImportOptions,
+    ) -> Result<ImportReport> {
+        // Parsed before the vault is locked: a bad file never holds up the vault.
+        let parsed = blocking(move || hoprs_import::read_sitemanager(&path)).await?;
+        let report = self
+            .vault
+            .call(move |vault| hoprs_import::apply(vault, parsed, &options))
+            .await?;
+        tracing::info!(
+            imported = report.imported.len(),
+            skipped = report.skipped.len(),
+            failures = report.failures.len(),
+            "imported FileZilla sites"
+        );
+        Ok(report)
+    }
+
+    async fn delete_sitemanager(&self, path: PathBuf) -> Result<()> {
+        blocking(move || hoprs_import::delete_source(&path)).await?;
+        tracing::info!("deleted the imported sitemanager.xml at the user's request");
+        Ok(())
+    }
+
+    async fn export_backup(&self, path: PathBuf, password: SecretString) -> Result<ExportReport> {
+        let params = self.backup_params;
+        self.vault
+            .call(move |vault| vault.export(&path, &password, params))
+            .await
+    }
+
+    async fn restore_backup(
+        &self,
+        path: PathBuf,
+        password: SecretString,
+        mode: ImportMode,
+    ) -> Result<BackupImportReport> {
+        self.vault
+            .call(move |vault| vault.import_backup(&path, &password, mode))
+            .await
+    }
+
+    fn settings(&self) -> SettingsLoad {
+        self.settings.clone()
+    }
+
+    async fn save_settings(&self, settings: Settings) -> Result<()> {
+        let path = self.settings_path.clone();
+        blocking(move || settings::save(&path, &settings)).await
+    }
+
+    async fn set_policy(&self, policy: ConflictPolicy) {
+        self.engine.set_policy(policy).await;
+    }
+
+    fn set_workers(&self, workers: usize) {
+        self.sessions.set_workers(settings::clamp_workers(workers));
+    }
 }
 
 #[cfg(test)]
@@ -484,11 +605,25 @@ mod tests {
 
     use super::*;
 
+    /// Argon2id at its cheapest: the tests check the plumbing, not the cost.
+    const CHEAP_BACKUP: ExportParams = ExportParams {
+        m_cost: 8,
+        t_cost: 1,
+        p_cost: 1,
+    };
+
+    fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../hoprs-import/tests/fixtures")
+            .join(name)
+    }
+
     fn open(dir: &Path) -> Backend {
         let config = BackendConfig {
             profile_dir: dir.join("profiles"),
             queue_path: Some(dir.join("data").join("queue.db")),
             sessions: SessionConfig::default(),
+            backup_params: CHEAP_BACKUP,
         };
         Backend::open(config, Arc::new(MemoryStore::new())).unwrap()
     }
@@ -708,6 +843,7 @@ mod tests {
                 known_hosts: Some(known_hosts.clone()),
                 workers: 2,
             },
+            backup_params: CHEAP_BACKUP,
         };
         let backend = Backend::open(config, Arc::new(MemoryStore::new())).unwrap();
         let key = "AAAAC3NzaC1lZDI1NTE5AAAAIGrhflDkrs18RwIFvHFCsoXLdUL+0cVr81616Tzk8aBj";
@@ -864,10 +1000,242 @@ mod tests {
             profile_dir: dir.path().join("profiles"),
             queue_path: Some(queue.clone()),
             sessions: SessionConfig::default(),
+            backup_params: CHEAP_BACKUP,
         };
         let backend = Backend::open(config, Arc::new(MemoryStore::new())).unwrap();
         assert!(backend.engine.snapshot().await.is_empty());
         // The broken file is left as it was.
         assert_eq!(std::fs::read(&queue).unwrap(), b"not a database");
+    }
+
+    /// A real import of hoprs-import's FileZilla fixture into a temporary profile, with
+    /// folders as workspaces; then the delete of the source file.
+    #[tokio::test]
+    async fn filezilla_import_into_a_temp_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = open(dir.path());
+        let options = ImportOptions {
+            folders_as_workspaces: true,
+        };
+
+        // A file that is not there: an error, nothing written.
+        let err = backend
+            .import_filezilla(dir.path().join("missing.xml"), options)
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::NotFound);
+        let err = backend
+            .import_filezilla(fixture("sitemanager-broken.xml"), options)
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Protocol);
+        assert!(backend.sites().await.unwrap().is_empty());
+
+        // A copy, so the delete below has something of its own to remove.
+        let source = dir.path().join("sitemanager.xml");
+        std::fs::copy(fixture("sitemanager-3.40-folders.xml"), &source).unwrap();
+        let report = backend
+            .import_filezilla(source.clone(), options)
+            .await
+            .unwrap();
+        let names: Vec<_> = report.imported.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["Alpha", "Beta", "Gamma", "Top level"]);
+        assert_eq!(
+            report.workspaces_created,
+            [
+                "Work",
+                "Work/Clientes de Produção",
+                "Work/Clientes de Produção/Deep"
+            ]
+        );
+        assert!(report.failures.is_empty());
+        let profiles = backend.profiles().await.unwrap();
+        assert_eq!(profiles.sites.len(), 4);
+        assert_eq!(profiles.workspaces.len(), 3);
+        // The password went to the keyring, not to sites.toml.
+        let alpha = profiles.sites.iter().find(|s| s.name == "Alpha").unwrap();
+        assert!(alpha.has_password);
+        let toml = std::fs::read_to_string(dir.path().join("profiles/sites.toml")).unwrap();
+        assert!(!toml.contains("hunter2"));
+
+        // Again: everything is already there.
+        let again = backend
+            .import_filezilla(source.clone(), options)
+            .await
+            .unwrap();
+        assert!(again.imported.is_empty());
+        assert_eq!(again.skipped.len(), 4);
+        assert_eq!(backend.sites().await.unwrap().len(), 4);
+
+        // Deleting the source: refused for a file that is not FileZilla's.
+        let other = dir.path().join("notes.xml");
+        std::fs::write(&other, "<?xml version=\"1.0\"?><notes/>").unwrap();
+        let err = backend.delete_sitemanager(other.clone()).await.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Protocol);
+        assert!(other.exists());
+        backend.delete_sitemanager(source.clone()).await.unwrap();
+        assert!(!source.exists());
+    }
+
+    /// Export, then restore (merge and replace), through the vault on the blocking pool.
+    #[tokio::test]
+    async fn backup_export_and_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = open(dir.path());
+        let site = Site::new("prod", "h", "u", Protocol::Ssh);
+        backend.save_site(site.clone()).await.unwrap();
+        backend
+            .set_password(site.id.clone(), Some(SecretString::from("s3cret")))
+            .await
+            .unwrap();
+        let path = dir.path().join("out").join("hoprs.backup");
+
+        let err = backend
+            .export_backup(path.clone(), SecretString::from(""))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Protocol);
+        assert!(!path.exists());
+        let report = backend
+            .export_backup(path.clone(), SecretString::from("pw"))
+            .await
+            .unwrap();
+        assert_eq!((report.sites, report.workspaces, report.secrets), (1, 0, 1));
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(!bytes.windows(6).any(|w| w == b"s3cret"));
+
+        // A wrong password changes nothing.
+        backend.delete_site(site.id.clone()).await.unwrap();
+        assert!(
+            backend
+                .restore_backup(path.clone(), SecretString::from("nope"), ImportMode::Merge)
+                .await
+                .is_err()
+        );
+        assert!(backend.sites().await.unwrap().is_empty());
+
+        let restored = backend
+            .restore_backup(path.clone(), SecretString::from("pw"), ImportMode::Merge)
+            .await
+            .unwrap();
+        assert_eq!((restored.added_sites, restored.secrets_restored), (1, 1));
+        assert!(restored.secret_errors.is_empty());
+        let sites = backend.sites().await.unwrap();
+        assert_eq!(sites.len(), 1);
+        assert!(sites[0].has_password);
+
+        // Replace: a site made since is gone.
+        backend
+            .save_site(Site::new("later", "h2", "u", Protocol::Ftp))
+            .await
+            .unwrap();
+        backend
+            .restore_backup(path, SecretString::from("pw"), ImportMode::Replace)
+            .await
+            .unwrap();
+        let names: Vec<_> = backend
+            .sites()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(names, ["prod"]);
+    }
+
+    /// `settings.toml` is read at open (workers for the sessions, the policy for the
+    /// engine), saved on request, and an unusable file is reported and left alone.
+    #[tokio::test]
+    async fn settings_apply_at_open_and_change() {
+        use hoprs_remote::MemFs;
+        use hoprs_transfer::{Direction, EventKind, SiteEndpoints, TransferState};
+
+        let dir = tempfile::tempdir().unwrap();
+        let profiles = dir.path().join("profiles");
+        std::fs::create_dir_all(&profiles).unwrap();
+        let file = profiles.join(settings::FILE_NAME);
+        std::fs::write(&file, "workers_per_site = 3\ndefault_policy = \"skip\"\n").unwrap();
+        let backend = open(dir.path());
+        let loaded = backend.settings();
+        assert_eq!(loaded.error, None);
+        assert_eq!(
+            loaded.settings,
+            Settings {
+                workers_per_site: 3,
+                default_policy: ConflictPolicy::Skip,
+            }
+        );
+        assert_eq!(backend.transfer_snapshot().await.workers, 3);
+        assert_eq!(backend.sessions.workers(), 3);
+
+        // The saved policy is the engine's from the start: an existing file is skipped,
+        // never asked about.
+        let site = SiteId::new();
+        let local = MemFs::new();
+        let remote = MemFs::new();
+        let now = std::time::SystemTime::now();
+        local.add_file("/l/a.txt", b"local", now);
+        remote.add_file("/r/a.txt", b"remote", now);
+        backend
+            .engine
+            .register_site(
+                site.clone(),
+                SiteEndpoints {
+                    local: Arc::new(local),
+                    remote: Arc::new(remote),
+                    workers: 1,
+                },
+            )
+            .await;
+        let mut events = backend.transfer_events();
+        let id = backend
+            .enqueue(TransferSpec {
+                site,
+                direction: Direction::Download,
+                local: RemotePath::new("/l/a.txt").unwrap(),
+                remote: RemotePath::new("/r/a.txt").unwrap(),
+            })
+            .await
+            .unwrap();
+        let state = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let EventKind::StateChanged { id: changed, state } =
+                    events.recv().await.unwrap().kind
+                    && changed == id
+                    && !matches!(state, TransferState::Queued | TransferState::Active)
+                {
+                    return state;
+                }
+            }
+        })
+        .await
+        .expect("the transfer settles");
+        assert!(matches!(state, TransferState::Skipped(_)), "{state:?}");
+
+        // Workers change for the next connections, clamped.
+        backend.set_workers(40);
+        assert_eq!(backend.sessions.workers(), 16);
+        backend.set_workers(0);
+        assert_eq!(backend.transfer_snapshot().await.workers, 1);
+
+        let saved = Settings {
+            workers_per_site: 9,
+            default_policy: ConflictPolicy::Resume,
+        };
+        backend.save_settings(saved).await.unwrap();
+        assert_eq!(settings::load(&file).settings, saved);
+        drop(backend);
+
+        // An unusable file: the defaults, the error, and the file as it was.
+        std::fs::write(&file, "workers_per_site = [").unwrap();
+        let backend = open(dir.path());
+        let loaded = backend.settings();
+        assert_eq!(loaded.settings, Settings::default());
+        assert!(loaded.error.is_some());
+        assert_eq!(backend.sessions.workers(), 4);
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "workers_per_site = ["
+        );
     }
 }

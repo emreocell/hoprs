@@ -8,7 +8,9 @@ use iced::{Alignment, Element, Length, Padding};
 use crate::app::{App, Form, Message};
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
-use crate::ui::{dialogs, files, queue, sidebar, site_form, status, tabs, workspace_form};
+use crate::ui::{
+    dialogs, files, import, queue, settings, sidebar, site_form, status, tabs, workspace_form,
+};
 
 pub const SIDEBAR_WIDTH: f32 = sidebar::WIDTH;
 /// 4 px above the 36 px tabs.
@@ -95,6 +97,8 @@ fn center(app: &App) -> Element<'_, Message> {
     match &app.form {
         Some(Form::Site(form)) => return site_form::view(form),
         Some(Form::Workspace(form)) => return workspace_form::view(form, &app.sites),
+        Some(Form::Import) => return import::view(app),
+        Some(Form::Settings) => return settings::view(app),
         None => {}
     }
     if let Some(tab) = app.active_tab.and_then(|i| app.tabs.get(i)) {

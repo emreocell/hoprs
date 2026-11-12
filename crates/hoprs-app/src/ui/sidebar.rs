@@ -47,14 +47,15 @@ pub fn view(app: &App) -> Element<'_, Message> {
     )
     .padding(theme::SPACE_SM);
 
-    // Import and Settings are wired in Task 11.
     let footer = row![
         button(text(strings::IMPORT_FILEZILLA).size(theme::TEXT_XS))
             .padding(0)
-            .style(theme::button_text),
+            .style(theme::button_text)
+            .on_press(Message::OpenImport),
         button(text(strings::SETTINGS).size(theme::TEXT_XS))
             .padding(0)
-            .style(theme::button_text),
+            .style(theme::button_text)
+            .on_press(Message::OpenSettings),
     ]
     .spacing(theme::SPACE_MD);
 

@@ -38,6 +38,10 @@
 //! `save_site` keeps the backend-owned fields of a stored site (`has_*`, and the FTPS pin
 //! by the vault's [`merged_pin`](super::vault::merged_pin) rule), and
 //! `set_password` records the password and sets `has_password`, like the vault.
+//!
+//! The FileZilla import, the delete of its file, the backup export and restore and the
+//! settings calls are recorded in order ([`FakeBackend::backup_calls`]) and succeed with
+//! empty reports.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -51,10 +55,11 @@ use hoprs_core::{
     ConnectionState, Error, ErrorKind, RemoteEntry, RemotePath, Result, Site, SiteId, Workspace,
     WorkspaceId,
 };
+use hoprs_import::{ImportOptions, ImportReport};
 use hoprs_remote::{MemFs, RemoteFs};
-use hoprs_transfer::{Event, TransferId, TransferItem, TransferSpec};
-use hoprs_vault::UnreadableEntry;
-use secrecy::SecretString;
+use hoprs_transfer::{ConflictPolicy, Event, TransferId, TransferItem, TransferSpec};
+use hoprs_vault::{BackupImportReport, ExportReport, ImportMode, UnreadableEntry};
+use secrecy::{ExposeSecret, SecretString};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use super::broker::{PromptKind, PromptRequest};
@@ -63,7 +68,31 @@ use super::{
     DeleteTarget, KnownHostEntry, ProfileSnapshot, PromptAnswer, PromptId, SessionId, Side,
     TransferSnapshot, WorkspaceTabs,
 };
+use crate::settings::{Settings, SettingsLoad};
 use hoprs_vault::SecretKind;
+
+/// An import, backup or settings call, in [`FakeBackend::backup_calls`]. The test
+/// fake keeps passwords in clear, to check what reached it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BackupCall {
+    Import {
+        path: PathBuf,
+        folders_as_workspaces: bool,
+    },
+    DeleteSitemanager(PathBuf),
+    Export {
+        path: PathBuf,
+        password: String,
+    },
+    Restore {
+        path: PathBuf,
+        password: String,
+        mode: ImportMode,
+    },
+    SaveSettings(Settings),
+    SetPolicy(ConflictPolicy),
+    SetWorkers(usize),
+}
 
 /// A recorded backend call, in [`FakeBackend::calls`].
 #[derive(Clone, Debug, PartialEq)]
@@ -132,6 +161,9 @@ struct State {
     hang_shutdown: bool,
     hang_save_tabs: bool,
     panic_shutdown: bool,
+    backup_calls: Vec<BackupCall>,
+    /// What `settings` returns.
+    settings: SettingsLoad,
 }
 
 impl Default for FakeBackend {
@@ -155,6 +187,15 @@ impl FakeBackend {
 
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The import, backup and settings calls, in order.
+    pub fn backup_calls(&self) -> Vec<BackupCall> {
+        self.state().backup_calls.clone()
+    }
+
+    fn record(&self, call: BackupCall) {
+        self.state().backup_calls.push(call);
     }
 
     pub fn with_site(self, site: Site) -> Self {
@@ -815,6 +856,69 @@ impl BackendApi for FakeBackend {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take()
+    }
+
+    async fn import_filezilla(
+        &self,
+        path: PathBuf,
+        options: ImportOptions,
+    ) -> Result<ImportReport> {
+        self.record(BackupCall::Import {
+            path,
+            folders_as_workspaces: options.folders_as_workspaces,
+        });
+        Ok(ImportReport::default())
+    }
+
+    async fn delete_sitemanager(&self, path: PathBuf) -> Result<()> {
+        self.record(BackupCall::DeleteSitemanager(path));
+        Ok(())
+    }
+
+    async fn export_backup(&self, path: PathBuf, password: SecretString) -> Result<ExportReport> {
+        self.record(BackupCall::Export {
+            path,
+            password: password.expose_secret().to_owned(),
+        });
+        let state = self.state();
+        Ok(ExportReport {
+            sites: state.sites.len(),
+            workspaces: state.workspaces.len(),
+            secrets: 0,
+            skipped_unreadable: Vec::new(),
+            missing_secrets: Vec::new(),
+        })
+    }
+
+    async fn restore_backup(
+        &self,
+        path: PathBuf,
+        password: SecretString,
+        mode: ImportMode,
+    ) -> Result<BackupImportReport> {
+        self.record(BackupCall::Restore {
+            path,
+            password: password.expose_secret().to_owned(),
+            mode,
+        });
+        Ok(BackupImportReport::default())
+    }
+
+    fn settings(&self) -> SettingsLoad {
+        self.state().settings.clone()
+    }
+
+    async fn save_settings(&self, settings: Settings) -> Result<()> {
+        self.record(BackupCall::SaveSettings(settings));
+        Ok(())
+    }
+
+    async fn set_policy(&self, policy: ConflictPolicy) {
+        self.record(BackupCall::SetPolicy(policy));
+    }
+
+    fn set_workers(&self, workers: usize) {
+        self.record(BackupCall::SetWorkers(workers));
     }
 }
 

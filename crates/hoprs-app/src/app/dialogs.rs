@@ -338,7 +338,11 @@ impl App {
             | Message::Queue(_)
             | Message::FileDropped(_)
             | Message::KnownHosts { .. }
-            | Message::RestartSession(_) => true,
+            | Message::RestartSession(_)
+            | Message::OpenImport
+            | Message::Import(_)
+            | Message::OpenSettings
+            | Message::Settings(_) => true,
             _ => false,
         }
     }

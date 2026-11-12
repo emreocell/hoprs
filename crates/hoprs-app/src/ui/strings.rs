@@ -467,3 +467,123 @@ pub fn also_covers_other_hosts(lines: &[usize]) -> String {
         ),
     }
 }
+
+// Import from FileZilla.
+pub const IMPORT_TITLE: &str = "Import from FileZilla";
+pub const IMPORT_STEP_FILE: &str = "1  File";
+pub const IMPORT_STEP_FOLDERS: &str = "2  Folders";
+pub const IMPORT_STEP_REPORT: &str = "3  Report";
+pub const IMPORT_FILE_LABEL: &str = "FileZilla's site manager file";
+pub const IMPORT_FILE_HINT: &str = "Usually sitemanager.xml in FileZilla's configuration folder. Passwords go to the system keyring.";
+pub const IMPORT_PATH_REQUIRED: &str = "Choose the sitemanager.xml file";
+pub const CHOOSE_FILE: &str = "Choose…";
+pub const NEXT: &str = "Next";
+pub const BACK: &str = "Back";
+pub const IMPORT_FOLDERS_QUESTION: &str = "Turn FileZilla folders into workspaces?";
+pub const IMPORT_FOLDERS_HINT: &str = "Yes: one workspace per folder, named by its path, with the folder's sites. No: the folder path goes in front of each site name (\"Work/Alpha\").";
+pub const IMPORT_FOLDERS_YES: &str = "Yes, make workspaces";
+pub const IMPORT_FOLDERS_NO: &str = "No, keep them in the names";
+pub const IMPORT_RUNNING: &str = "Importing…";
+pub const IMPORT_IMPORTED: &str = "Imported";
+pub const IMPORT_SKIPPED: &str = "Skipped";
+pub const IMPORT_WORKSPACES_CREATED: &str = "Workspaces created";
+pub const IMPORT_WORKSPACES_NOT_CREATED: &str = "Workspaces not created";
+pub const IMPORT_FAILURES: &str = "Failures";
+pub const IMPORT_NONE: &str = "None";
+pub const IMPORT_FAILED_KEEP_SOURCE: &str =
+    "Some entries could not be saved: keep sitemanager.xml and import again once fixed.";
+pub const DELETE_SITEMANAGER: &str = "Delete sitemanager.xml";
+pub const DELETE_SITEMANAGER_CONFIRM: &str =
+    "Delete FileZilla's sitemanager.xml? FileZilla will no longer have these sites.";
+pub const DELETING_SITEMANAGER: &str = "Deleting…";
+pub const SITEMANAGER_DELETED: &str = "sitemanager.xml deleted";
+pub const DONE: &str = "Done";
+pub const PICK_SITEMANAGER: &str = "Choose FileZilla's sitemanager.xml";
+pub const PICK_FILTER_XML: &str = "XML files";
+
+// Settings.
+pub const SETTINGS_TITLE: &str = "Settings";
+pub const SETTINGS_TRANSFERS: &str = "Transfers";
+pub const SETTINGS_WORKERS: &str = "Workers per site";
+pub const SETTINGS_WORKERS_HINT: &str =
+    "Parallel transfers per site, 1 to 16. Applies to the next connections.";
+pub const SETTINGS_POLICY: &str = "When a file already exists";
+pub const SETTINGS_POLICY_HINT: &str =
+    "Applies to the next transfers. Ask shows the choice in the queue.";
+pub const SETTINGS_UNREADABLE: &str = "settings.toml can't be read, so the defaults apply. Changes last until hoprs closes and are not saved, to keep the file as it is: fix or delete it to save settings.";
+pub const SETTINGS_SAVE_FAILED: &str = "Can't save settings.toml";
+pub const POLICY_ASK: &str = "Ask";
+pub const POLICY_OVERWRITE: &str = "Overwrite";
+pub const POLICY_SKIP: &str = "Skip";
+pub const POLICY_OVERWRITE_IF_NEWER: &str = "Overwrite if newer";
+pub const POLICY_RESUME: &str = "Resume";
+pub const DECREASE: &str = "−";
+pub const INCREASE: &str = "+";
+
+// Backup.
+pub const BACKUP: &str = "Backup";
+pub const BACKUP_HINT: &str = "One encrypted file with every site, workspace and saved password. Keep the password: without it the backup can't be opened.";
+pub const EXPORT_BACKUP: &str = "Export backup…";
+pub const RESTORE_BACKUP: &str = "Restore backup…";
+pub const BACKUP_FILE: &str = "File";
+pub const BACKUP_PASSWORD: &str = "Password";
+pub const BACKUP_PASSWORD_CONFIRM: &str = "Password again";
+pub const BACKUP_PATH_REQUIRED: &str = "Choose a file";
+pub const BACKUP_PASSWORD_REQUIRED: &str = "Enter a password";
+pub const BACKUP_PASSWORDS_DIFFER: &str = "The passwords don't match";
+pub const EXPORT: &str = "Export";
+pub const RESTORE: &str = "Restore";
+pub const EXPORTING: &str = "Encrypting the backup… this takes a few seconds";
+pub const RESTORING: &str = "Decrypting the backup… this takes a few seconds";
+pub const RESTORE_MODE: &str = "Mode";
+pub const RESTORE_MERGE: &str = "Merge";
+pub const RESTORE_MERGE_HINT: &str = "Adds what is new; sites and workspaces you have stay.";
+pub const RESTORE_REPLACE: &str = "Replace";
+pub const RESTORE_REPLACE_HINT: &str =
+    "Everything becomes the backup: sites, workspaces and passwords not in it are removed.";
+pub const RESTORE_REPLACE_CONFIRM: &str =
+    "Replace every site, workspace and saved password with the backup's?";
+pub const REPLACE: &str = "Replace";
+pub const EXPORT_FAILED: &str = "The backup was not written";
+pub const RESTORE_FAILED: &str = "Nothing was restored";
+pub const BACKUP_SECRET_ERRORS: &str = "Passwords not restored";
+pub const BACKUP_MISSING_SECRETS: &str = "Saved without their password (not in the keyring)";
+pub const BACKUP_SKIPPED_UNREADABLE: &str = "Not exported (unreadable entries)";
+pub const BACKUP_SKIPPED_SITES: &str = "Sites already here (kept)";
+pub const BACKUP_SKIPPED_WORKSPACES: &str = "Workspaces already here (kept)";
+pub const BACKUP_FILE_NAME: &str = "hoprs-backup.hoprs";
+pub const PICK_EXPORT: &str = "Save the hoprs backup";
+pub const PICK_RESTORE: &str = "Choose a hoprs backup";
+
+/// "Exported 12 sites, 3 workspaces and 9 passwords."
+pub fn export_done(sites: usize, workspaces: usize, secrets: usize) -> String {
+    format!(
+        "Exported {}, {} and {}.",
+        count(sites, "site", "sites"),
+        count(workspaces, "workspace", "workspaces"),
+        count(secrets, "password", "passwords")
+    )
+}
+
+/// "Restored 2 sites, 1 workspace and 2 passwords."
+pub fn restore_done(sites: usize, workspaces: usize, secrets: usize) -> String {
+    format!(
+        "Restored {}, {} and {}.",
+        count(sites, "site", "sites"),
+        count(workspaces, "workspace", "workspaces"),
+        count(secrets, "password", "passwords")
+    )
+}
+
+/// A report section's head: "Imported  4".
+pub fn section_count(title: &str, count: usize) -> String {
+    format!("{title}  {count}")
+}
+
+fn count(n: usize, one: &str, many: &str) -> String {
+    if n == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{n} {many}")
+    }
+}

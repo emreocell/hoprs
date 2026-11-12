@@ -21,7 +21,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use futures_util::future::BoxFuture;
@@ -82,7 +82,8 @@ pub struct SessionConfig {
     /// Replaces `~/.ssh/known_hosts` (tests).
     pub known_hosts: Option<PathBuf>,
     /// Transfer workers per site; also the SFTP stream channels and FTP transfer
-    /// connections (both clamped to `1..=8`).
+    /// connections (both clamped to `1..=8`). The starting value: see
+    /// [`SessionManager::set_workers`].
     pub workers: usize,
 }
 
@@ -127,6 +128,8 @@ struct Inner {
     vault: VaultHandle,
     broker: PromptBroker,
     config: SessionConfig,
+    /// Transfer workers per site for the next connections (Settings).
+    workers: AtomicUsize,
     local: Arc<dyn RemoteFs>,
     next_id: AtomicU64,
     sessions: Mutex<HashMap<SessionId, Entry>>,
@@ -197,6 +200,7 @@ impl SessionManager {
                 engine,
                 vault,
                 broker,
+                workers: AtomicUsize::new(config.workers),
                 config,
                 local: Arc::new(LocalFs::new("/")),
                 next_id: AtomicU64::new(1),
@@ -209,7 +213,20 @@ impl SessionManager {
         }
     }
 
-    /// Connects the saved site `site` (see the module docs).
+    /// Transfer workers per site for the connections made from now on.
+    pub fn workers(&self) -> usize {
+        self.inner.workers.load(Ordering::Relaxed)
+    }
+
+    /// Sets the workers per site (Settings). Sessions already registered keep theirs;
+    /// the next connection of a site (a new session) uses this value.
+    pub fn set_workers(&self, workers: usize) {
+        self.inner.workers.store(workers, Ordering::Relaxed);
+    }
+
+    /// Connects the saved site `site` (see the module docs). The app connects through
+    /// [`connect_batch`](Self::connect_batch); this is for the tests.
+    #[cfg(test)]
     pub async fn connect(&self, site: SiteId) -> ConnectResult {
         let (_, result) = self
             .connect_many(vec![site])
@@ -223,6 +240,7 @@ impl SessionManager {
     /// read with one [`SecretBatch`](super::vault::SecretBatch): a locked keyring raises at
     /// most one unlock prompt, and the sites after it ask for their passwords instead.
     /// Results come in the order of `sites`; a site missing from the vault is `NotFound`.
+    #[cfg(test)]
     pub async fn connect_many(&self, sites: Vec<SiteId>) -> Vec<(SiteId, ConnectResult)> {
         futures_util::future::join_all(self.site_connects(sites).await).await
     }
@@ -325,7 +343,7 @@ impl SessionManager {
             }
             Protocol::Ftp | Protocol::FtpsExplicit | Protocol::FtpsImplicit => {
                 let mut ftp = ftp_config(site, secrets);
-                ftp.transfer_connections = config.workers.clamp(1, 8);
+                ftp.transfer_connections = self.workers().clamp(1, 8);
                 Link::Ftp(FtpFs::start(ftp, Arc::new(prompter.clone())))
             }
         };
@@ -400,7 +418,7 @@ impl SessionManager {
             return Ok(());
         }
 
-        let workers = self.inner.config.workers;
+        let workers = self.workers();
         let remote: Arc<dyn RemoteFs> = match &link {
             Link::Ssh(session) => {
                 let sftp = SftpConfig {

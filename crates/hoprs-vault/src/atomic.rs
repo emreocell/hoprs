@@ -25,7 +25,7 @@ const MAX_SYMLINKS: usize = 40;
 /// created file is `0o600` on Unix. A symlinked `path` keeps its link: the
 /// final target is replaced instead, keeping that file's permissions. On
 /// error the temporary file is removed and the destination is left untouched.
-pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let (target, via_link) = resolve_target(path)?;
     let file_name = target
         .file_name()
