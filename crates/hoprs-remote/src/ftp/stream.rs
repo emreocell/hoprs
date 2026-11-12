@@ -6,8 +6,16 @@
 //! After an error, or when the stream is dropped before its end, the connection is closed, so
 //! a connection with a reply still pending is never reused. A stream dropped mid-transfer
 //! sends a best-effort `ABOR` from a background task first, without waiting for it.
+//!
+//! A data connection that keeps a stream waiting for [`FtpConfig::data_timeout`] in a row (no
+//! byte received, or none accepted) fails the stream with `Network` and closes its
+//! connection at once, without asking the server anything: a peer that vanished without a
+//! FIN or RST would otherwise hang the transfer, and hold its pool slot, forever.
+//!
+//! [`FtpConfig::data_timeout`]: super::FtpConfig::data_timeout
 
 use std::fmt::Display;
+use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
@@ -18,6 +26,7 @@ use hoprs_core::{Error, ErrorKind};
 use suppaftp::FtpError;
 use suppaftp::tokio::{AsyncRustlsStream, TransferStream};
 use tokio::io::{AsyncRead, AsyncWrite, BufWriter, ReadBuf};
+use tokio::time::{Instant, Sleep};
 
 use super::errors::{data_channel_lost, map_ftp_error, map_reply, reply_parts};
 use super::session::PooledConn;
@@ -37,6 +46,70 @@ pub(crate) struct Timeouts {
     /// Bounds a reply that should come at once: a `NOOP`, an `ABOR`
     /// ([`super::FtpConfig::connect_timeout`]).
     pub(crate) reply: Duration,
+    /// Bounds the silence of the data connection ([`super::FtpConfig::data_timeout`]).
+    pub(crate) data: Duration,
+}
+
+/// The inactivity deadline of a data connection. Only time spent waiting on the connection
+/// counts: the deadline starts when an I/O call returns `Pending` after one that did not, so a
+/// consumer that is slow to poll never trips it.
+struct Idle {
+    timeout: Duration,
+    /// Created at the first wait, then reset for each new one.
+    deadline: Option<Pin<Box<Sleep>>>,
+    /// The last I/O call returned `Pending`.
+    waiting: bool,
+}
+
+impl Idle {
+    fn new(timeout: Duration) -> Self {
+        Self {
+            timeout,
+            deadline: None,
+            waiting: false,
+        }
+    }
+
+    /// Passes an I/O call's outcome through; `None` when the connection has kept the stream
+    /// waiting for the whole timeout (the caller then fails the stream).
+    fn check<T>(&mut self, cx: &mut Context<'_>, io: Poll<T>) -> Option<Poll<T>> {
+        if io.is_ready() {
+            self.waiting = false;
+            return Some(io);
+        }
+        if !self.waiting {
+            self.waiting = true;
+            let at = Instant::now() + self.timeout;
+            match &mut self.deadline {
+                Some(deadline) => deadline.as_mut().reset(at),
+                None => self.deadline = Some(Box::pin(tokio::time::sleep_until(at))),
+            }
+        }
+        let deadline = self.deadline.as_mut().expect("armed above");
+        match deadline.as_mut().poll(cx) {
+            Poll::Ready(()) => None,
+            Poll::Pending => Some(Poll::Pending),
+        }
+    }
+
+    /// The error of a connection that stayed silent too long.
+    fn error(&self, context: &str) -> Error {
+        Error::new(
+            ErrorKind::Network,
+            format!("Connection lost: no data for {} s", self.timeout.as_secs()),
+        )
+        .with_detail(context.to_owned())
+    }
+}
+
+/// Fails a stream whose data connection stayed silent: the connection is closed at once (no
+/// `ABOR`, the peer is not answering), which frees its pool slot, and the session is told.
+fn silent(conn: PooledConn, transfer: Transfer, idle: &Idle, context: &str) -> Error {
+    drop(transfer);
+    let e = idle.error(context);
+    conn.report(&e);
+    drop(conn);
+    e
 }
 
 /// The connection that carried the transfer is lost (or the server is gone).
@@ -130,6 +203,7 @@ pub(crate) struct FtpReader {
     /// The path, for errors.
     context: String,
     timeouts: Timeouts,
+    idle: Idle,
 }
 
 // Streams live boxed, almost always in the large variant: boxing it would only add an
@@ -154,6 +228,7 @@ impl FtpReader {
             state: ReadState::Reading(conn, transfer),
             context,
             timeouts,
+            idle: Idle::new(timeouts.data),
         }
     }
 }
@@ -173,7 +248,17 @@ impl AsyncRead for FtpReader {
                         return Poll::Ready(Ok(()));
                     }
                     let before = buf.filled().len();
-                    let failure = match ready!(Pin::new(transfer).poll_read(cx, buf)) {
+                    let polled = Pin::new(transfer).poll_read(cx, buf);
+                    let Some(polled) = this.idle.check(cx, polled) else {
+                        if let ReadState::Reading(conn, transfer) =
+                            std::mem::replace(&mut this.state, ReadState::Done)
+                        {
+                            let e = silent(conn, transfer, &this.idle, &this.context);
+                            this.state = ReadState::Failed(e);
+                        }
+                        continue;
+                    };
+                    let failure = match ready!(polled) {
                         Ok(()) if buf.filled().len() > before => return Poll::Ready(Ok(())),
                         Ok(()) => None,
                         Err(e) if data_ended(&e) => None,
@@ -231,6 +316,7 @@ pub(crate) struct FtpWriter {
     /// The path, for errors.
     context: String,
     timeouts: Timeouts,
+    idle: Idle,
 }
 
 // Streams live boxed, almost always in the large variant: boxing it would only add an
@@ -255,6 +341,7 @@ impl FtpWriter {
             state: WriteState::Open(conn, BufWriter::with_capacity(WRITE_BUFFER, transfer)),
             context,
             timeouts,
+            idle: Idle::new(timeouts.data),
         }
     }
 
@@ -266,6 +353,32 @@ impl FtpWriter {
                 Err(upload_failed(conn, data.into_inner(), err, context, timeouts).await)
             }));
         }
+    }
+
+    /// The data connection stayed silent for the whole timeout: fails the stream at once.
+    fn fail_silent(&mut self) {
+        if let WriteState::Open(conn, data) = std::mem::replace(&mut self.state, WriteState::Done) {
+            let e = silent(conn, data.into_inner(), &self.idle, &self.context);
+            self.state = WriteState::Failed(e);
+        }
+    }
+
+    /// Polls the data connection with `io`, under the inactivity deadline. `None` once the
+    /// stream is no longer `Open`, or the deadline fired (then the stream has failed).
+    fn poll_open<T>(
+        &mut self,
+        cx: &mut Context<'_>,
+        io: impl FnOnce(Pin<&mut BufWriter<Transfer>>, &mut Context<'_>) -> Poll<io::Result<T>>,
+    ) -> Option<Poll<io::Result<T>>> {
+        let WriteState::Open(_, data) = &mut self.state else {
+            return None;
+        };
+        let polled = io(Pin::new(data), cx);
+        let checked = self.idle.check(cx, polled);
+        if checked.is_none() {
+            self.fail_silent();
+        }
+        checked
     }
 
     /// Drives `Closing` to `Done` or `Failed`; `Ready` with the state's outcome otherwise.
@@ -293,8 +406,8 @@ impl AsyncWrite for FtpWriter {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        if let WriteState::Open(_, data) = &mut this.state {
-            match ready!(Pin::new(data).poll_write(cx, buf)) {
+        if let Some(polled) = this.poll_open(cx, |data, cx| data.poll_write(cx, buf)) {
+            match ready!(polled) {
                 Ok(n) => return Poll::Ready(Ok(n)),
                 Err(e) => this.fail(e),
             }
@@ -308,8 +421,8 @@ impl AsyncWrite for FtpWriter {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        if let WriteState::Open(_, data) = &mut this.state {
-            match ready!(Pin::new(data).poll_flush(cx)) {
+        if let Some(polled) = this.poll_open(cx, |data, cx| data.poll_flush(cx)) {
+            match ready!(polled) {
                 Ok(()) => return Poll::Ready(Ok(())),
                 Err(e) => this.fail(e),
             }
@@ -320,8 +433,8 @@ impl AsyncWrite for FtpWriter {
     /// Flushes the buffer, closes the data connection and reads the final reply.
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        if let WriteState::Open(_, data) = &mut this.state {
-            match ready!(Pin::new(data).poll_flush(cx)) {
+        if let Some(polled) = this.poll_open(cx, |data, cx| data.poll_flush(cx)) {
+            match ready!(polled) {
                 Ok(()) => {
                     if let WriteState::Open(conn, data) =
                         std::mem::replace(&mut this.state, WriteState::Done)
@@ -360,6 +473,29 @@ fn data_ended(e: &io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only continuous waiting counts: time between a `Ready` and the next poll (a slow
+    /// consumer) never trips the deadline, and every `Ready` starts it over.
+    #[tokio::test(start_paused = true)]
+    async fn idle_deadline_counts_only_waiting() {
+        let mut cx = Context::from_waker(futures_util::task::noop_waker_ref());
+        let mut idle = Idle::new(Duration::from_secs(10));
+        let pending = Poll::<()>::Pending;
+        assert_eq!(idle.check(&mut cx, pending), Some(Poll::Pending));
+        tokio::time::advance(Duration::from_secs(9)).await;
+        assert_eq!(idle.check(&mut cx, pending), Some(Poll::Pending));
+        assert_eq!(idle.check(&mut cx, Poll::Ready(())), Some(Poll::Ready(())));
+        // A consumer that takes its time before polling again.
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert_eq!(idle.check(&mut cx, pending), Some(Poll::Pending));
+        tokio::time::advance(Duration::from_secs(9)).await;
+        assert_eq!(idle.check(&mut cx, pending), Some(Poll::Pending));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(idle.check(&mut cx, pending), None);
+        let e = idle.error("/f");
+        assert_eq!(e.kind, ErrorKind::Network);
+        assert_eq!(e.message, "Connection lost: no data for 10 s");
+    }
 
     #[test]
     fn missing_close_notify_is_the_end_of_the_data() {

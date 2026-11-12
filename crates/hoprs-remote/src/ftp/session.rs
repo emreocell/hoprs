@@ -172,10 +172,12 @@ async fn connect_and_login(
     };
 
     // Bounded, and marked so that a failure is a data channel error (see `data_connect_failed`).
-    let data_timeout = cfg.connect_timeout;
+    let data_connect_timeout = cfg.connect_timeout;
     let mut stream = stream.passive_stream_builder(move |addr| {
         Box::pin(async move {
-            match tokio::time::timeout(data_timeout, tokio::net::TcpStream::connect(addr)).await {
+            match tokio::time::timeout(data_connect_timeout, tokio::net::TcpStream::connect(addr))
+                .await
+            {
                 Ok(Ok(socket)) => Ok(socket),
                 Ok(Err(e)) => Err(data_connect_failed(addr, e)),
                 Err(_) => Err(data_connect_failed(
@@ -297,6 +299,8 @@ struct Shared {
     reply_timeout: Duration,
     /// Bounds every `with_control` command (see [`FtpConfig::command_timeout`]).
     command_timeout: Duration,
+    /// Bounds the silence of a transfer's data connection (see [`FtpConfig::data_timeout`]).
+    data_timeout: Duration,
     /// The control connection and its generation; `None` once lost or closed.
     control: Mutex<Option<(Control, u64)>>,
     /// When the control connection last finished a command.
@@ -442,6 +446,7 @@ impl FtpSession {
             keepalive_interval: cfg.keepalive_interval,
             reply_timeout: cfg.connect_timeout,
             command_timeout: cfg.command_timeout,
+            data_timeout: cfg.data_timeout,
             permits: Arc::new(Semaphore::new(cfg.transfer_connections)),
             transfer_connections: cfg.transfer_connections,
             peak_checked_out: AtomicUsize::new(0),
@@ -608,6 +613,11 @@ impl FtpSession {
     /// included.
     pub(crate) fn command_timeout(&self) -> Duration {
         self.inner.shared.command_timeout
+    }
+
+    /// [`FtpConfig::data_timeout`]: bounds the silence of a transfer's data connection.
+    pub(crate) fn data_timeout(&self) -> Duration {
+        self.inner.shared.data_timeout
     }
 
     /// [`FtpConfig::connect_timeout`]: bounds a reply that should come at once (a `NOOP`).

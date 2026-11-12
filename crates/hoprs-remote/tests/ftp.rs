@@ -8,10 +8,10 @@ use hoprs_core::{
     ConnectionState, EntryKind, Error, ErrorKind, ReconnectPolicy, RemoteEntry, RemotePath,
 };
 use hoprs_remote::testing::{
-    FTPS_IMPLICIT_PORT, FtpSession, OtherCertificate, TestControl, ftp_config, ftp_listings,
-    ftp_peak_transfer_connections, ftps_fixture, kill_ftp_sessions, open_test_control,
-    pooled_quote, server_fingerprint, session_command, session_disconnect_inside_command,
-    session_fail, session_quote,
+    FTPS_IMPLICIT_PORT, FtpSession, OtherCertificate, StoppedFtpSessions, TestControl, ftp_config,
+    ftp_listings, ftp_peak_transfer_connections, ftps_fixture, kill_ftp_sessions,
+    open_test_control, pooled_quote, server_fingerprint, session_command,
+    session_disconnect_inside_command, session_fail, session_quote,
 };
 use hoprs_remote::{
     CertProblem, Connection, FtpConfig, FtpFs, FtpPrompter, FtpSecurity, RemoteFs,
@@ -1844,8 +1844,9 @@ async fn opens_do_not_list_the_directory() {
 
 /// A fake FTP server for transfers. `SIZE` answers `payload.len()`; `RETR` sends `payload`,
 /// closes the data connection and replies `retr_final` (`550 Permission denied.` for a path
-/// ending in `denied`); `STOR` reads the data to its end and replies `stor_final`. Also
-/// returns how many connections it accepted.
+/// ending in `denied`); `STOR` reads the data to its end and replies `stor_final`. For a path
+/// ending in `stall`, `RETR` sends half the payload and `STOR` reads nothing, and then the
+/// connection goes silent for good. Also returns how many connections it accepted.
 async fn transfer_server(
     payload: Vec<u8>,
     retr_final: &'static str,
@@ -1887,6 +1888,24 @@ async fn transfer_server(
                                 p % 256
                             )
                         }
+                        // Sends part of the payload, then goes silent with the data
+                        // connection open: a peer that vanished.
+                        "RETR" if arg.ends_with("stall") => {
+                            let l = data.take().unwrap();
+                            let _ = write.write_all(b"150 Here it comes.\r\n").await;
+                            let (mut d, _) = l.accept().await.unwrap();
+                            let _ = d.write_all(&payload[..payload.len() / 2]).await;
+                            std::future::pending::<()>().await;
+                            unreachable!()
+                        }
+                        // Accepts the data connection and never reads it.
+                        "STOR" if arg.ends_with("stall") => {
+                            let l = data.take().unwrap();
+                            let _ = write.write_all(b"150 Go ahead.\r\n").await;
+                            let (_d, _) = l.accept().await.unwrap();
+                            std::future::pending::<()>().await;
+                            unreachable!()
+                        }
                         "RETR" if arg.ends_with("denied") => {
                             data = None;
                             "550 Permission denied.\r\n".to_owned()
@@ -1920,7 +1939,12 @@ async fn transfer_server(
 }
 
 async fn transfer_fs(port: u16, transfer_connections: usize) -> FtpFs {
+    transfer_fs_with(port, transfer_connections, Duration::from_secs(10)).await
+}
+
+async fn transfer_fs_with(port: u16, transfer_connections: usize, data_timeout: Duration) -> FtpFs {
     let mut cfg = session_config();
+    cfg.data_timeout = data_timeout;
     cfg.port = port;
     cfg.keepalive_interval = Duration::from_secs(60);
     cfg.transfer_connections = transfer_connections;
@@ -2024,6 +2048,169 @@ async fn refused_resumed_read_closes_the_transfer_connection() {
     // The control connection, the closed transfer connection and a new one.
     assert_eq!(accepted.load(Ordering::SeqCst), 3);
     fs.disconnect().await;
+}
+
+/// Asserts that `e` is the data connection's inactivity timeout of `secs` seconds.
+fn assert_no_data(e: &Error, secs: u64) {
+    assert_eq!(e.kind, ErrorKind::Network, "{e:?}");
+    assert_eq!(
+        e.message,
+        format!("Connection lost: no data for {secs} s"),
+        "{e:?}"
+    );
+}
+
+/// Ruling R11: a download whose data connection goes silent fails with `Network` after
+/// `data_timeout`, and its transfer connection is closed, which frees its pool slot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stalled_download_times_out_and_frees_its_slot() {
+    let src = data(200_000, 6);
+    let (port, accepted) =
+        transfer_server(src.clone(), "226 Transfer complete.\r\n", "226 ok\r\n").await;
+    let fs = transfer_fs_with(port, 1, Duration::from_secs(1)).await;
+    let mut r = fs.open_read(&path("/stall"), 0).await.unwrap();
+    let mut out = Vec::new();
+    let start = Instant::now();
+    let e = tokio::time::timeout(Duration::from_secs(5), r.read_to_end(&mut out))
+        .await
+        .expect("a silent data connection hung the download")
+        .expect_err("a stalled download ended like a complete one");
+    assert!(
+        start.elapsed() >= Duration::from_secs(1),
+        "{:?}",
+        start.elapsed()
+    );
+    assert_no_data(&Error::from(e), 1);
+    assert_eq!(out.len(), src.len() / 2);
+    // The only pool slot is free again (the failed stream still alive): a new transfer gets
+    // a new connection.
+    let back = tokio::time::timeout(Duration::from_secs(5), download(&fs, &path("/f"), 0))
+        .await
+        .expect("the pool slot of the stalled download was not freed");
+    assert!(back == src);
+    assert_eq!(accepted.load(Ordering::SeqCst), 3);
+    drop(r);
+    fs.disconnect().await;
+}
+
+/// Ruling R11: an upload whose bytes the server stops taking fails with `Network` after
+/// `data_timeout`, without waiting for a reply, and frees its pool slot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stalled_upload_times_out_and_frees_its_slot() {
+    let src = data(50_000, 7);
+    let (port, _) = transfer_server(src.clone(), "226 Transfer complete.\r\n", "226 ok\r\n").await;
+    let fs = transfer_fs_with(port, 1, Duration::from_secs(1)).await;
+    let mut w = fs.open_write(&path("/stall"), 0).await.unwrap();
+    let chunk = vec![0u8; 1024 * 1024];
+    let start = Instant::now();
+    let e = tokio::time::timeout(Duration::from_secs(5), async {
+        // Socket buffers hold a few MiB at most; then the writes wait.
+        for _ in 0..256 {
+            w.write_all(&chunk).await?;
+        }
+        w.shutdown().await
+    })
+    .await
+    .expect("a silent data connection hung the upload")
+    .expect_err("a stalled upload succeeded");
+    assert!(
+        start.elapsed() >= Duration::from_secs(1),
+        "{:?}",
+        start.elapsed()
+    );
+    assert_no_data(&Error::from(e), 1);
+    let back = tokio::time::timeout(Duration::from_secs(5), download(&fs, &path("/f"), 0))
+        .await
+        .expect("the pool slot of the stalled upload was not freed");
+    assert!(back == src);
+    drop(w);
+    fs.disconnect().await;
+}
+
+/// Ruling R11, against vsftpd: the session processes are stopped (`SIGSTOP`) in the middle of
+/// a download; the read fails with `Network` within `data_timeout` (plus slack), and the only
+/// pool slot is free afterwards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn silent_server_mid_download_times_out() {
+    let mut cfg = ftp_config(FtpSecurity::Plain);
+    cfg.transfer_connections = 1;
+    cfg.data_timeout = Duration::from_secs(3);
+    let c = setup_on(cfg).await;
+    c.sh("head -c 64M /dev/zero > big && printf small > small");
+    let mut r = c.fs.open_read(&c.at("big"), 0).await.unwrap();
+    let mut part = vec![0u8; MIB];
+    r.read_exact(&mut part).await.unwrap();
+
+    let stopped = StoppedFtpSessions::stop();
+    let start = Instant::now();
+    let mut sink = Vec::new();
+    let e = tokio::time::timeout(Duration::from_secs(3 + 7), r.read_to_end(&mut sink))
+        .await
+        .expect("the download hung on a silent server")
+        .expect_err("the download ended while the server was stopped");
+    let elapsed = start.elapsed();
+    assert_no_data(&Error::from(e), 3);
+    assert!(elapsed >= Duration::from_secs(2), "{elapsed:?}");
+    assert!(sink.len() < 63 * MIB, "{} bytes read", sink.len());
+    drop(stopped);
+
+    wait_connected(&c.fs).await;
+    let back = tokio::time::timeout(Duration::from_secs(20), download(&c.fs, &c.at("small"), 0))
+        .await
+        .expect("the pool slot of the stalled download was not freed");
+    assert_eq!(back, b"small");
+    drop(r);
+}
+
+/// [`silent_server_mid_download_times_out`] for an upload.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn silent_server_mid_upload_times_out() {
+    let mut cfg = ftp_config(FtpSecurity::Plain);
+    cfg.transfer_connections = 1;
+    cfg.data_timeout = Duration::from_secs(3);
+    let c = setup_on(cfg).await;
+    c.sh("printf small > small");
+    let mut w = c.fs.open_write(&c.at("up"), 0).await.unwrap();
+    let chunk = vec![0u8; MIB];
+    w.write_all(&chunk).await.unwrap();
+    w.flush().await.unwrap();
+
+    let stopped = StoppedFtpSessions::stop();
+    let start = Instant::now();
+    let e = tokio::time::timeout(Duration::from_secs(3 + 7), async {
+        for _ in 0..256 {
+            w.write_all(&chunk).await?;
+        }
+        w.shutdown().await
+    })
+    .await
+    .expect("the upload hung on a silent server")
+    .expect_err("the upload succeeded while the server was stopped");
+    let elapsed = start.elapsed();
+    assert_no_data(&Error::from(e), 3);
+    assert!(elapsed >= Duration::from_secs(2), "{elapsed:?}");
+    drop(stopped);
+
+    wait_connected(&c.fs).await;
+    let back = tokio::time::timeout(Duration::from_secs(20), download(&c.fs, &c.at("small"), 0))
+        .await
+        .expect("the pool slot of the stalled upload was not freed");
+    assert_eq!(back, b"small");
+    drop(w);
+}
+
+/// Waits until `fs` is `Connected` (it may be reconnecting after a stall); panics after 20 s.
+async fn wait_connected(fs: &FtpFs) {
+    let mut rx = Connection::state(fs);
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        rx.wait_for(|st| *st == ConnectionState::Connected),
+    )
+    .await
+    .expect("not connected again")
+    .unwrap();
 }
 
 /// Rulings R9/R10: `stat` of a regular file or of a symlink to one is `SIZE` + `STAT <path>`

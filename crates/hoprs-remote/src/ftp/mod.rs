@@ -77,6 +77,9 @@ use stream::{FtpReader, FtpWriter, Timeouts, Transfer};
 ///   `PORT`/`EPRT` with the control connection's local address.
 /// - FTPS data connections resume the control connection's TLS session (rustls' session
 ///   cache), as vsftpd's default `require_ssl_reuse=YES` demands.
+/// - A data connection that keeps a stream waiting for `data_timeout` (no byte received or
+///   accepted) fails it with `Network`, "Connection lost: no data for N s", and closes its
+///   connection, which frees its pool slot.
 /// - A stream dropped before its end closes its connection after a best-effort `ABOR`; only a
 ///   transfer that ended with a positive reply returns its connection to the pool.
 ///
@@ -332,6 +335,7 @@ impl FtpFs {
         Timeouts {
             command: self.session.command_timeout(),
             reply: self.session.reply_timeout(),
+            data: self.session.data_timeout(),
         }
     }
 

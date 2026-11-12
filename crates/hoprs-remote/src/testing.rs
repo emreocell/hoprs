@@ -17,7 +17,8 @@ pub const FTPS_IMPLICIT_PORT: u16 = 2990;
 
 /// Config for `frank` on the test containers: the `ftps-implicit` service for
 /// [`FtpSecurity::ImplicitTls`], the `ftp` service otherwise. No extra roots, no pin.
-/// Keepalive every 2 s, well under vsftpd's `idle_session_timeout=8`; command timeout 10 s.
+/// Keepalive every 2 s, well under vsftpd's `idle_session_timeout=8`; command and data
+/// timeouts 10 s.
 pub fn ftp_config(security: FtpSecurity) -> FtpConfig {
     let port = match security {
         FtpSecurity::ImplicitTls => FTPS_IMPLICIT_PORT,
@@ -27,6 +28,7 @@ pub fn ftp_config(security: FtpSecurity) -> FtpConfig {
     cfg.password = Some(SecretString::from("frank-pass"));
     cfg.keepalive_interval = Duration::from_secs(2);
     cfg.command_timeout = Duration::from_secs(10);
+    cfg.data_timeout = Duration::from_secs(10);
     cfg
 }
 
@@ -78,6 +80,38 @@ pub fn kill_ftp_sessions() {
                           [ \"$p\" = \"$l\" ] || kill -9 \"$p\" 2>/dev/null; done; true";
     for service in ["ftp", "ftps-implicit"] {
         docker(&["exec", "-T", service, "sh", "-c", SCRIPT]);
+    }
+}
+
+/// Sends `signal` to every vsftpd session process of the `ftp` service (the listener, the
+/// oldest vsftpd process, is spared).
+fn signal_ftp_sessions(signal: &str) {
+    let script = format!(
+        "l=$(pgrep -o -x vsftpd); for p in $(pgrep -x vsftpd); do \
+         [ \"$p\" = \"$l\" ] || kill -{signal} \"$p\" 2>/dev/null; done; true"
+    );
+    docker(&["exec", "-T", "ftp", "sh", "-c", &script]);
+}
+
+/// While alive, every vsftpd session process of the `ftp` service is stopped (`SIGSTOP`): the
+/// server goes silent without closing anything, like a peer that vanished. New connections
+/// are still accepted (by fresh processes). Dropping it sends `SIGCONT`.
+pub struct StoppedFtpSessions(());
+
+impl StoppedFtpSessions {
+    pub fn stop() -> Self {
+        // The guard exists first, so a failed stop is still undone.
+        let guard = Self(());
+        signal_ftp_sessions("STOP");
+        guard
+    }
+}
+
+impl Drop for StoppedFtpSessions {
+    fn drop(&mut self) {
+        if std::panic::catch_unwind(|| signal_ftp_sessions("CONT")).is_err() {
+            eprintln!("could not resume the vsftpd sessions");
+        }
     }
 }
 
