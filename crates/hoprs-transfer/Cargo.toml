@@ -19,6 +19,8 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync
 tempfile = { workspace = true }
 async-trait = { workspace = true }
 hoprs-remote = { path = "../hoprs-remote", features = ["testing"] }
+hoprs-ssh = { path = "../hoprs-ssh", features = ["testing"] }
+sha2 = { workspace = true }
 criterion = { workspace = true }
 
 [[bench]]
