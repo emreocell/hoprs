@@ -1,4 +1,8 @@
 //! `sites.toml` and `workspaces.toml`: loading, validation and saving.
+//!
+//! Saving re-serializes the whole file from the parsed data: keys, values
+//! and key order survive (including unknown fields and unreadable entries),
+//! but comments and hand formatting are lost on the first save.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -200,7 +204,8 @@ fn load_file<T: DeserializeOwned + Serialize>(dir: &Path, kind: &Kind<T>) -> Res
             return Err(cannot_read(file, format!("unsupported version {v}")));
         }
         Some(_) => return Err(cannot_read(file, "`version` is not an integer")),
-        None => return Err(cannot_read(file, "missing `version`")),
+        // Hand-written or empty file: hoprs always writes `version`.
+        None => {}
     }
 
     let raw_entries = match doc.remove(kind.key) {
@@ -327,27 +332,55 @@ fn save_file<T: Serialize>(
 }
 
 /// Keys of `raw` that the typed entry does not produce, recursing into
-/// sub-tables present on both sides.
+/// sub-tables present on both sides and, element by element, into arrays of
+/// tables of the same length on both sides (e.g. `[[workspace.sites]]`).
+///
+/// Arrays whose lengths differ are not recursed into: elements can no longer
+/// be paired up by position, so their unknown keys are not preserved. This
+/// cannot happen on load (the typed value comes from the same table) and is
+/// handled the same way on save, see [`merge_unknown`].
 fn unknown_keys(raw: &Table, typed: &Table) -> Table {
     let mut out = Table::new();
     for (key, value) in raw {
-        match (value, typed.get(key)) {
-            (_, None) => {
-                out.insert(key.clone(), value.clone());
-            }
+        let extra = match (value, typed.get(key)) {
+            (_, None) => Some(value.clone()),
             (Value::Table(r), Some(Value::Table(t))) => {
-                let nested = unknown_keys(r, t);
-                if !nested.is_empty() {
-                    out.insert(key.clone(), Value::Table(nested));
-                }
+                Some(Value::Table(unknown_keys(r, t))).filter(|v| !is_empty_extra(v))
             }
-            _ => {}
+            (Value::Array(r), Some(Value::Array(t))) if r.len() == t.len() => {
+                let nested: Option<Vec<Value>> = r
+                    .iter()
+                    .zip(t)
+                    .map(|pair| match pair {
+                        (Value::Table(r), Value::Table(t)) => {
+                            Some(Value::Table(unknown_keys(r, t)))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                nested.map(Value::Array).filter(|v| !is_empty_extra(v))
+            }
+            _ => None,
+        };
+        if let Some(extra) = extra {
+            out.insert(key.clone(), extra);
         }
     }
     out
 }
 
-/// Puts `extras` back into `typed`; typed values win on conflict.
+/// Whether an extras value carries no unknown key at all.
+fn is_empty_extra(value: &Value) -> bool {
+    match value {
+        Value::Table(t) => t.values().all(is_empty_extra),
+        Value::Array(a) => a.iter().all(is_empty_extra),
+        _ => false,
+    }
+}
+
+/// Puts `extras` back into `typed`; typed values win on conflict. Extras for
+/// an array whose length changed since load are dropped (see
+/// [`unknown_keys`]).
 fn merge_unknown(typed: &mut Table, extras: &Table) {
     for (key, value) in extras {
         match (typed.get_mut(key), value) {
@@ -355,6 +388,13 @@ fn merge_unknown(typed: &mut Table, extras: &Table) {
                 typed.insert(key.clone(), value.clone());
             }
             (Some(Value::Table(t)), Value::Table(e)) => merge_unknown(t, e),
+            (Some(Value::Array(t)), Value::Array(e)) if t.len() == e.len() => {
+                for pair in t.iter_mut().zip(e) {
+                    if let (Value::Table(t), Value::Table(e)) = pair {
+                        merge_unknown(t, e);
+                    }
+                }
+            }
             _ => {}
         }
     }

@@ -272,9 +272,26 @@ mod tests {
     }
 
     #[test]
-    fn missing_version_is_protocol() {
+    fn missing_version_or_empty_file_is_version_1() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::write(tmp.path().join("sites.toml"), "[[site]]\nname = \"x\"\n").unwrap();
+        fs::write(tmp.path().join("sites.toml"), "").unwrap();
+        fs::write(
+            tmp.path().join("workspaces.toml"),
+            "[[workspace]]\nid = \"w\"\nname = \"Hand\"\n",
+        )
+        .unwrap();
+        let mut vault = Vault::open_profiles_only(tmp.path()).unwrap();
+        assert!(vault.sites().is_empty());
+        assert_eq!(vault.workspaces()[0].name, "Hand");
+        vault.upsert_site(ssh_site("A")).unwrap();
+        let sites = fs::read_to_string(tmp.path().join("sites.toml")).unwrap();
+        assert!(sites.starts_with("version = 1\n"), "{sites}");
+    }
+
+    #[test]
+    fn non_integer_version_is_protocol() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("sites.toml"), "version = \"1\"\n").unwrap();
         let err = Vault::open_profiles_only(tmp.path()).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Protocol);
     }
@@ -336,6 +353,60 @@ future_nested = 7
 
         let reopened = Vault::open_profiles_only(tmp.path()).unwrap();
         assert_eq!(reopened.sites(), vault.sites());
+    }
+
+    #[test]
+    fn unknown_fields_inside_arrays_of_tables_survive() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("sites.toml"),
+            "version = 1\n\n[[site]]\nid = \"s\"\nname = \"n\"\nhost = \"h\"\nport = 22\nuser = \"u\"\nprotocol = \"ssh\"\n",
+        )
+        .unwrap();
+        let path = tmp.path().join("workspaces.toml");
+        fs::write(
+            &path,
+            r#"version = 1
+
+[[workspace]]
+id = "w"
+name = "Prod"
+
+[[workspace.sites]]
+site = "s"
+future_site_key = 1
+
+[[workspace.sites.tabs]]
+kind = "terminal"
+
+[[workspace.sites.tabs]]
+kind = "files"
+remote_dir = "/srv"
+future_tab_key = "split"
+"#,
+        )
+        .unwrap();
+        let mut vault = Vault::open_profiles_only(tmp.path()).unwrap();
+        let mut ws = vault.workspaces()[0].clone();
+        ws.name = "Renamed".into();
+        vault.upsert_workspace(ws.clone()).unwrap();
+
+        let doc = read_table(&path);
+        let site = &doc["workspace"][0]["sites"][0];
+        assert_eq!(site["future_site_key"].as_integer(), Some(1));
+        assert_eq!(site["tabs"][1]["future_tab_key"].as_str(), Some("split"));
+        assert_eq!(site["tabs"][1]["remote_dir"].as_str(), Some("/srv"));
+        assert!(site["tabs"][0].get("future_tab_key").is_none());
+
+        // Removing a tab shifts positions: the tabs' unknown keys are dropped
+        // rather than attached to the wrong tab; the site's are kept.
+        ws.sites[0].tabs.remove(0);
+        vault.upsert_workspace(ws).unwrap();
+        let doc = read_table(&path);
+        let site = &doc["workspace"][0]["sites"][0];
+        assert_eq!(site["future_site_key"].as_integer(), Some(1));
+        assert!(site["tabs"][0].get("future_tab_key").is_none());
+        assert_eq!(site["tabs"][0]["kind"].as_str(), Some("files"));
     }
 
     #[test]
