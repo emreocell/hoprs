@@ -18,6 +18,26 @@ CREATE TABLE transfers (
 CREATE INDEX transfers_parent ON transfers(parent_id);
 ";
 
+/// Adds `next_policy`: the conflict policy the next run of an unfinished
+/// item must use. Moves the pending overrides that schema v1 kept in
+/// `state_detail` there, and gives files that v1 would have continued on
+/// resume (`active`, or paused from `active`) a `resume` policy.
+const MIGRATION_V2: &str = "
+ALTER TABLE transfers ADD COLUMN next_policy TEXT;
+UPDATE transfers SET next_policy = substr(state_detail, 10), state_detail = NULL
+  WHERE state = 'queued' AND state_detail LIKE 'override:%';
+UPDATE transfers
+  SET next_policy = substr(state_detail, instr(state_detail, ';override:') + 10),
+      state_detail = substr(state_detail, 1, instr(state_detail, ';override:') - 1)
+  WHERE state = 'paused' AND instr(state_detail, ';override:') > 0;
+UPDATE transfers SET next_policy = 'resume'
+  WHERE next_policy IS NULL AND is_dir IS NOT 1
+    AND (state = 'active' OR (state = 'paused' AND state_detail = 'active'));
+";
+
+/// The schema version this code reads and writes (`PRAGMA user_version`).
+const SCHEMA_VERSION: i64 = 2;
+
 const SELECT: &str = "SELECT id, parent_id, site, direction, local_path, remote_path, is_dir, size, \
     bytes_done, state, state_detail, error_kind, error_message, error_detail, conflict_json \
     FROM transfers";
@@ -49,9 +69,6 @@ impl PausedFrom {
     }
 }
 
-/// Prefix of a pending override in `state_detail`.
-const OVERRIDE: &str = "override:";
-
 fn policy_name(policy: ConflictPolicy) -> &'static str {
     match policy {
         ConflictPolicy::Ask => "ask",
@@ -73,26 +90,12 @@ fn parse_policy(s: &str) -> Option<ConflictPolicy> {
     }
 }
 
-/// Decodes `state_detail` of a `queued` row (`override:<policy>`) or a
-/// `paused` row (`<origin>` or `<origin>;override:<policy>`) into the pause
-/// origin and the pending override. Other rows have neither.
-fn decode_detail(
-    state: &str,
-    detail: Option<&str>,
-) -> (Option<PausedFrom>, Option<ConflictPolicy>) {
-    let pending = |s: &str| s.strip_prefix(OVERRIDE).and_then(parse_policy);
+/// The pause origin recorded in `state_detail` of a `paused` row.
+fn paused_origin(state: &str, detail: Option<&str>) -> Option<PausedFrom> {
     match (state, detail) {
-        ("queued", Some(d)) => (None, pending(d)),
-        ("paused", Some(d)) => match d.split_once(';') {
-            Some((origin, rest)) => (PausedFrom::parse(origin), pending(rest)),
-            None => (PausedFrom::parse(d), None),
-        },
-        _ => (None, None),
+        ("paused", Some(d)) => PausedFrom::parse(d),
+        _ => None,
     }
-}
-
-fn override_detail(policy: ConflictPolicy) -> String {
-    format!("{OVERRIDE}{}", policy_name(policy))
 }
 
 /// A child item for `QueueStore::insert_children`.
@@ -289,29 +292,26 @@ fn current_state(conn: &Connection, id: TransferId) -> Result<Option<(String, Op
 }
 
 /// Persists a new state. Moving to `Paused` records the state it was paused
-/// from. A pending override is kept while the item moves between `Queued`
-/// and `Paused`, and cleared by any other state.
+/// from. `next_policy` is kept while the item is `Queued`, `Active` or
+/// `Paused`, and cleared by any other state.
 fn write_state(conn: &Connection, id: TransferId, state: &TransferState) -> Result<()> {
     let mut detail: Option<String> = None;
     let (mut kind, mut message, mut err_detail, mut conflict) = (None, None, None, None);
+    let mut keep_policy = false;
     let name = match state {
         TransferState::Queued => {
-            if let Some((s, d)) = current_state(conn, id)? {
-                detail = decode_detail(&s, d.as_deref()).1.map(override_detail);
-            }
+            keep_policy = true;
             "queued"
         }
-        TransferState::Active => "active",
+        TransferState::Active => {
+            keep_policy = true;
+            "active"
+        }
         TransferState::Paused => {
+            keep_policy = true;
             if let Some((s, d)) = current_state(conn, id)? {
-                let (origin, pending) = match PausedFrom::parse(&s) {
-                    Some(origin) => (Some(origin), decode_detail(&s, d.as_deref()).1),
-                    None => decode_detail(&s, d.as_deref()),
-                };
-                detail = origin.map(|o| match pending {
-                    Some(p) => format!("{};{}", o.as_str(), override_detail(p)),
-                    None => o.as_str().to_owned(),
-                });
+                let origin = PausedFrom::parse(&s).or_else(|| paused_origin(&s, d.as_deref()));
+                detail = origin.map(|o| o.as_str().to_owned());
             }
             "paused"
         }
@@ -334,8 +334,18 @@ fn write_state(conn: &Connection, id: TransferId, state: &TransferState) -> Resu
     };
     conn.execute(
         "UPDATE transfers SET state = ?2, state_detail = ?3, error_kind = ?4, error_message = ?5, \
-         error_detail = ?6, conflict_json = ?7 WHERE id = ?1",
-        params![id.0, name, detail, kind, message, err_detail, conflict],
+         error_detail = ?6, conflict_json = ?7, \
+         next_policy = CASE WHEN ?8 THEN next_policy ELSE NULL END WHERE id = ?1",
+        params![
+            id.0,
+            name,
+            detail,
+            kind,
+            message,
+            err_detail,
+            conflict,
+            keep_policy
+        ],
     )
     .db()?;
     Ok(())
@@ -354,16 +364,29 @@ impl QueueStore {
         Self::init(Connection::open_in_memory().db()?)
     }
 
+    /// Migrates the schema up to `SCHEMA_VERSION`, one transaction per
+    /// version. Refuses a database written by a newer version.
     fn init(conn: Connection) -> Result<QueueStore> {
         conn.pragma_update(None, "foreign_keys", "ON").db()?;
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .db()?;
-        if version < 1 {
-            let tx = conn.unchecked_transaction().db()?;
-            tx.execute_batch(MIGRATION_V1).db()?;
-            tx.pragma_update(None, "user_version", 1).db()?;
-            tx.commit().db()?;
+        if version > SCHEMA_VERSION {
+            return Err(Error::new(
+                ErrorKind::Io,
+                "The transfer queue was saved by a newer version of hoprs",
+            )
+            .with_detail(format!(
+                "queue schema version {version}, this version understands up to {SCHEMA_VERSION}"
+            )));
+        }
+        for (target, migration) in [(1, MIGRATION_V1), (2, MIGRATION_V2)] {
+            if version < target {
+                let tx = conn.unchecked_transaction().db()?;
+                tx.execute_batch(migration).db()?;
+                tx.pragma_update(None, "user_version", target).db()?;
+                tx.commit().db()?;
+            }
         }
         Ok(QueueStore { conn })
     }
@@ -409,26 +432,47 @@ impl QueueStore {
 
     /// Returns what a `Paused` item was paused from, or `None` if it is not paused.
     pub fn paused_from(&self, id: TransferId) -> Result<Option<PausedFrom>> {
-        Ok(current_state(&self.conn, id)?.and_then(|(s, d)| decode_detail(&s, d.as_deref()).0))
+        Ok(current_state(&self.conn, id)?.and_then(|(s, d)| paused_origin(&s, d.as_deref())))
     }
 
-    /// Records the one-shot policy override for the next run of a `Queued`
-    /// item. It is kept while the item moves between `Queued` and `Paused`
-    /// (including recovery) and cleared by any other state.
-    /// Does nothing if the item is not `Queued`.
-    pub fn set_pending_override(&mut self, id: TransferId, policy: ConflictPolicy) -> Result<()> {
+    /// The conflict policy the next run of the item must use, if any (see
+    /// `set_next_policy`).
+    pub fn next_policy(&self, id: TransferId) -> Result<Option<ConflictPolicy>> {
+        let stored: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT next_policy FROM transfers WHERE id = ?1",
+                [id.0],
+                |r| r.get(0),
+            )
+            .optional()
+            .db()?;
+        match stored.flatten() {
+            None => Ok(None),
+            Some(name) => parse_policy(&name)
+                .map(Some)
+                .ok_or_else(|| corrupt("next_policy")),
+        }
+    }
+
+    /// Records the conflict policy the next run of an unfinished item must
+    /// use instead of the global one (`None`: the global one). It is kept
+    /// while the item is `Queued`, `Active` or `Paused` (including across
+    /// recovery) and cleared by any other state. Does nothing if the item is
+    /// in another state.
+    pub fn set_next_policy(
+        &mut self,
+        id: TransferId,
+        policy: Option<ConflictPolicy>,
+    ) -> Result<()> {
         self.conn
             .execute(
-                "UPDATE transfers SET state_detail = ?2 WHERE id = ?1 AND state = 'queued'",
-                params![id.0, override_detail(policy)],
+                "UPDATE transfers SET next_policy = ?2 \
+                 WHERE id = ?1 AND state IN ('queued', 'active', 'paused')",
+                params![id.0, policy.map(policy_name)],
             )
             .db()?;
         Ok(())
-    }
-
-    /// The override recorded by `set_pending_override`, if still pending.
-    pub fn pending_override(&self, id: TransferId) -> Result<Option<ConflictPolicy>> {
-        Ok(current_state(&self.conn, id)?.and_then(|(s, d)| decode_detail(&s, d.as_deref()).1))
     }
 
     pub fn set_meta(&mut self, id: TransferId, is_dir: bool, size: Option<u64>) -> Result<()> {
@@ -792,69 +836,138 @@ mod tests {
     }
 
     #[test]
-    fn pending_override_survives_pause_resume_and_recovery_until_run() {
+    fn next_policy_is_kept_while_unfinished_and_cleared_when_finished() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("queue.db");
         let mut s = QueueStore::open(&path).unwrap();
         let id = new_item(&mut s);
-        assert_eq!(s.pending_override(id).unwrap(), None);
-        s.set_state(id, &TransferState::Active).unwrap();
-        s.set_state(id, &TransferState::Queued).unwrap();
-        s.set_pending_override(id, ConflictPolicy::Resume).unwrap();
+        assert_eq!(s.next_policy(id).unwrap(), None);
+        s.set_next_policy(id, Some(ConflictPolicy::Resume)).unwrap();
         assert_eq!(s.get(id).unwrap().unwrap().state, TransferState::Queued);
-        assert_eq!(
-            s.pending_override(id).unwrap(),
-            Some(ConflictPolicy::Resume)
-        );
+        assert_eq!(s.next_policy(id).unwrap(), Some(ConflictPolicy::Resume));
 
-        // Pause keeps it, alongside the pause origin.
-        s.set_state(id, &TransferState::Paused).unwrap();
-        assert_eq!(s.paused_from(id).unwrap(), Some(PausedFrom::Queued));
-        assert_eq!(
-            s.pending_override(id).unwrap(),
-            Some(ConflictPolicy::Resume)
-        );
-        s.set_state(id, &TransferState::Paused).unwrap();
-        assert_eq!(s.paused_from(id).unwrap(), Some(PausedFrom::Queued));
-        // Resume keeps it.
+        // Kept through every non-terminal state but `AwaitingDecision`,
+        // alongside the pause origin.
+        for st in [
+            TransferState::Paused,
+            TransferState::Queued,
+            TransferState::Active,
+            TransferState::Paused,
+        ] {
+            s.set_state(id, &st).unwrap();
+            assert_eq!(s.next_policy(id).unwrap(), Some(ConflictPolicy::Resume));
+        }
+        assert_eq!(s.paused_from(id).unwrap(), Some(PausedFrom::Active));
         s.set_state(id, &TransferState::Queued).unwrap();
-        assert_eq!(
-            s.pending_override(id).unwrap(),
-            Some(ConflictPolicy::Resume)
-        );
+        s.set_state(id, &TransferState::Active).unwrap();
+        s.set_next_policy(id, Some(ConflictPolicy::Overwrite))
+            .unwrap();
 
         // Recovery after a restart keeps it.
         drop(s);
         let mut s = QueueStore::open(&path).unwrap();
         s.recover().unwrap();
-        s.set_state(id, &TransferState::Paused).unwrap();
-        assert_eq!(s.paused_from(id).unwrap(), Some(PausedFrom::Queued));
-        assert_eq!(
-            s.pending_override(id).unwrap(),
-            Some(ConflictPolicy::Resume)
-        );
-        assert_eq!(s.get(id).unwrap().unwrap().state, TransferState::Paused);
-
-        // Running consumes it.
-        s.set_state(id, &TransferState::Queued).unwrap();
-        s.set_state(id, &TransferState::Active).unwrap();
-        assert_eq!(s.pending_override(id).unwrap(), None);
-        s.set_state(id, &TransferState::Paused).unwrap();
         assert_eq!(s.paused_from(id).unwrap(), Some(PausedFrom::Active));
-        assert_eq!(s.pending_override(id).unwrap(), None);
+        assert_eq!(s.next_policy(id).unwrap(), Some(ConflictPolicy::Overwrite));
+        s.set_next_policy(id, None).unwrap();
+        assert_eq!(s.next_policy(id).unwrap(), None);
+        assert_eq!(s.paused_from(id).unwrap(), Some(PausedFrom::Active));
 
-        // Any other state clears it too.
-        let other = new_item(&mut s);
-        s.set_pending_override(other, ConflictPolicy::Overwrite)
+        // Any other state clears it.
+        let conflict = ConflictInfo {
+            src_size: 1,
+            dst_size: 2,
+            src_modified: None,
+            dst_modified: None,
+        };
+        for st in [
+            TransferState::AwaitingDecision(conflict),
+            TransferState::Done,
+            TransferState::Skipped("exists".to_string()),
+            TransferState::Failed(Error::new(ErrorKind::Io, "x")),
+            TransferState::Cancelled,
+        ] {
+            let other = new_item(&mut s);
+            s.set_next_policy(other, Some(ConflictPolicy::Resume))
+                .unwrap();
+            s.set_state(other, &st).unwrap();
+            assert_eq!(s.next_policy(other).unwrap(), None, "{st:?}");
+            s.set_state(other, &TransferState::Queued).unwrap();
+            assert_eq!(s.next_policy(other).unwrap(), None, "{st:?}");
+        }
+    }
+
+    /// Creates a schema-v1 queue file with the given rows
+    /// `(state, state_detail, is_dir)`.
+    fn write_v1(path: &Path, rows: &[(&str, Option<&str>, Option<bool>)]) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(MIGRATION_V1).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        for (state, detail, is_dir) in rows {
+            conn.execute(
+                "INSERT INTO transfers (site, direction, local_path, remote_path, is_dir, \
+                 state, state_detail, created_at) VALUES ('site', 'upload', '/a', '/b', ?1, ?2, ?3, 0)",
+                params![is_dir, state, detail],
+            )
             .unwrap();
-        assert_eq!(
-            s.pending_override(other).unwrap(),
-            Some(ConflictPolicy::Overwrite)
+        }
+    }
+
+    #[test]
+    fn opening_a_v1_database_migrates_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queue.db");
+        write_v1(
+            &path,
+            &[
+                ("queued", Some("override:resume"), None),
+                ("paused", Some("queued;override:overwrite"), Some(false)),
+                ("paused", Some("active"), Some(false)),
+                ("paused", Some("active"), Some(true)),
+                ("paused", Some("awaiting_decision"), Some(false)),
+                ("active", None, Some(false)),
+                ("queued", None, None),
+            ],
         );
-        s.set_state(other, &TransferState::Cancelled).unwrap();
-        assert_eq!(s.pending_override(other).unwrap(), None);
-        s.set_state(other, &TransferState::Queued).unwrap();
-        assert_eq!(s.pending_override(other).unwrap(), None);
+        let expected = [
+            (Some(ConflictPolicy::Resume), None),
+            (Some(ConflictPolicy::Overwrite), Some(PausedFrom::Queued)),
+            // Schema v1 continued every copy paused while active.
+            (Some(ConflictPolicy::Resume), Some(PausedFrom::Active)),
+            (None, Some(PausedFrom::Active)),
+            (None, Some(PausedFrom::AwaitingDecision)),
+            (Some(ConflictPolicy::Resume), None),
+            (None, None),
+        ];
+        // Opening again leaves the migrated file as it is.
+        for _ in 0..2 {
+            let s = QueueStore::open(&path).unwrap();
+            let version: i64 = s
+                .conn
+                .pragma_query_value(None, "user_version", |r| r.get(0))
+                .unwrap();
+            assert_eq!(version, 2);
+            let items = s.list_all().unwrap();
+            assert_eq!(items.len(), expected.len());
+            for (item, (policy, origin)) in items.iter().zip(expected) {
+                assert_eq!(s.next_policy(item.id).unwrap(), policy, "{item:?}");
+                assert_eq!(s.paused_from(item.id).unwrap(), origin, "{item:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_newer_schema_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queue.db");
+        QueueStore::open(&path).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+            .unwrap();
+        drop(conn);
+        let err = QueueStore::open(&path).err().expect("newer schema refused");
+        assert_eq!(err.kind, ErrorKind::Io);
+        assert!(err.message.contains("newer"), "{err:?}");
     }
 
     #[test]

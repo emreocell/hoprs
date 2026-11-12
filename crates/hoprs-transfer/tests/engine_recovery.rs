@@ -636,3 +636,170 @@ async fn site_pauses_again_after_resume() {
     assert_eq!(wait_terminal(&mut rx, id).await, TransferState::Done);
     assert_eq!(remote_mem.read_file("/srv/a").unwrap(), bytes);
 }
+
+/// Waits until `id` reaches exactly `state`.
+async fn wait_state(rx: &mut Receiver<Event>, id: TransferId, state: TransferState) {
+    wait_for(
+        rx,
+        |e| matches!(e, Event::StateChanged { id: i, state: s } if *i == id && *s == state),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn overwrite_stopped_while_preparing_overwrites_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("queue.db");
+    let local = MemFs::new();
+    let remote = MemFs::new();
+    let new = data(300_000);
+    let old = vec![0x11; 100_000];
+    local.add_file("/w/a", &new, mtime());
+    remote.add_file("/srv/a", &old, mtime());
+    let config = EngineConfig {
+        default_policy: hoprs_transfer::ConflictPolicy::Overwrite,
+        ..EngineConfig::default()
+    };
+
+    // Every call on the source is slow: the item is still preparing (it has
+    // not opened the destination) when the engine stops.
+    let slow = FaultFs::new(local.clone());
+    slow.set_latency(Duration::from_millis(500));
+    let (engine, mut rx) =
+        engine_on_file(&db, Arc::new(slow), remote.clone(), 1, config.clone()).await;
+    let id = engine
+        .enqueue(spec(Direction::Upload, "/w/a", "/srv/a"))
+        .await
+        .unwrap();
+    wait_state(&mut rx, id, TransferState::Active).await;
+    engine.shutdown().await;
+    assert!(remote.read_file("/srv/a").unwrap() == old, "not opened yet");
+
+    let (engine, mut rx) = engine_on_file(
+        &db,
+        Arc::new(FaultFs::new(local.clone())),
+        remote.clone(),
+        1,
+        config,
+    )
+    .await;
+    assert_eq!(
+        find(&engine.snapshot().await, id).state,
+        TransferState::Paused
+    );
+    engine.resume(id).await.unwrap();
+    assert_eq!(wait_terminal(&mut rx, id).await, TransferState::Done);
+    let got = remote.read_file("/srv/a").unwrap();
+    assert!(
+        got == new,
+        "{} bytes, head replaced: {}",
+        got.len(),
+        got[..16] == new[..16]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn network_override_survives_pause_while_preparing() {
+    let local = MemFs::new();
+    let remote_mem = MemFs::new();
+    let remote = FaultFs::new(remote_mem.clone());
+    let (engine, mut rx) = engine_with(
+        Arc::new(local.clone()),
+        Arc::new(remote.clone()),
+        1,
+        EngineConfig::default(),
+    )
+    .await;
+    remote_mem.add_dir("/srv");
+    let bytes = data(MIB);
+    local.add_file("/w/a", &bytes, mtime());
+    remote.fail_io_after(200_000, ErrorKind::Network);
+
+    let id = engine
+        .enqueue(spec(Direction::Upload, "/w/a", "/srv/a"))
+        .await
+        .unwrap();
+    wait_for(&mut rx, |e| matches!(e, Event::SitePaused { .. })).await;
+    assert_eq!(
+        remote_mem.read_file("/srv/a").map(|f| f.len()),
+        Some(200_000)
+    );
+
+    // Under `Skip` the partial destination would be skipped as existing.
+    engine
+        .set_policy(hoprs_transfer::ConflictPolicy::Skip)
+        .await;
+    remote.set_latency(Duration::from_millis(500));
+    engine.resume_site(site()).await;
+    wait_state(&mut rx, id, TransferState::Active).await;
+    // Paused while preparing (the destination stat is slow).
+    engine.pause(id).await.unwrap();
+    wait_state(&mut rx, id, TransferState::Paused).await;
+    remote.set_latency(Duration::ZERO);
+
+    engine.resume(id).await.unwrap();
+    assert_eq!(wait_terminal(&mut rx, id).await, TransferState::Done);
+    assert!(remote_mem.read_file("/srv/a").unwrap() == bytes);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn requeued_folder_child_resumes_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("queue.db");
+    let local = MemFs::new();
+    let remote = MemFs::new();
+    remote.add_dir("/srv");
+    let bytes = data(4 * MIB);
+    local.add_file("/w/d/big.bin", &bytes, mtime());
+    let config = EngineConfig {
+        buf_size: 64 * 1024,
+        ..EngineConfig::default()
+    };
+
+    let slow = FaultFs::new(local.clone());
+    slow.set_stream_latency(Duration::from_millis(50));
+    let (engine, mut rx) =
+        engine_on_file(&db, Arc::new(slow), remote.clone(), 1, config.clone()).await;
+    let root = engine
+        .enqueue(spec(Direction::Upload, "/w/d", "/srv/d"))
+        .await
+        .unwrap();
+    let child = match wait_for(
+        &mut rx,
+        |e| matches!(e, Event::Progress(us) if us.iter().any(|u| u.id != root && u.bytes_done > 0)),
+    )
+    .await
+    {
+        Event::Progress(us) => us.iter().find(|u| u.id != root).unwrap().id,
+        _ => unreachable!(),
+    };
+    // Paused, then resumed before the copy stopped: the child is requeued,
+    // but nothing is dispatched on the paused site.
+    engine.pause_site(site()).await;
+    engine.pause(root).await.unwrap();
+    engine.resume(root).await.unwrap();
+    wait_state(&mut rx, child, TransferState::Queued).await;
+    engine.shutdown().await;
+    let partial = remote.read_file("/srv/d/big.bin").map_or(0, |f| f.len());
+    assert!(partial > 0 && partial < bytes.len(), "partial: {partial}");
+
+    let config = EngineConfig {
+        default_policy: hoprs_transfer::ConflictPolicy::Skip,
+        ..config
+    };
+    let (engine, mut rx) = engine_on_file(
+        &db,
+        Arc::new(FaultFs::new(local.clone())),
+        remote.clone(),
+        1,
+        config,
+    )
+    .await;
+    assert_eq!(
+        find(&engine.snapshot().await, child).state,
+        TransferState::Paused
+    );
+    engine.resume(root).await.unwrap();
+    assert_eq!(wait_terminal(&mut rx, child).await, TransferState::Done);
+    assert!(remote.read_file("/srv/d/big.bin").unwrap() == bytes);
+}

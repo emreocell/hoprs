@@ -137,7 +137,9 @@ impl TransferEngine {
     }
 
     /// Resumes a paused transfer (a folder: with its paused descendants). A
-    /// file paused while copying continues from its partial destination.
+    /// file paused while copying continues from its partial destination (one
+    /// that was replacing an existing file starts over); one paused before
+    /// its copy started runs under the global policy.
     pub async fn resume(&self, id: TransferId) -> Result<()> {
         self.control(id, Control::Resume).await
     }

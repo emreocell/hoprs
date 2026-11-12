@@ -20,6 +20,14 @@
 //!
 //! At start, items left unfinished by a previous run are loaded as `Paused`
 //! (see `recover`); nothing resumes automatically.
+//!
+//! The conflict policy an item's next run needs (its *continuation*) is
+//! persisted as the item's `next_policy` while it is unfinished: the
+//! override a run consumed at dispatch, replaced by the policy that
+//! continues its copy once the copy is decided (`Resume`, or `Overwrite`
+//! when it replaces an existing file). Pausing, requeueing or recovering an
+//! item carries it forward; an item with none runs under the global policy
+//! (its destination was never opened for writing).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -37,7 +45,7 @@ use crate::model::{
     ConflictInfo, ConflictPolicy, TransferId, TransferItem, TransferSpec, TransferState,
 };
 use crate::progress::ProgressTracker;
-use crate::store::{NewChild, PausedFrom, QueueStore};
+use crate::store::{NewChild, QueueStore};
 
 const MAX_WORKERS: usize = 16;
 const SYMLINK_SKIP: &str = "symlinks are not followed";
@@ -124,9 +132,9 @@ enum Intent {
 struct Running {
     cancel: CancellationToken,
     intent: Option<Intent>,
-    /// Policy override for the item's next run if this one is interrupted
-    /// by a network error: the override this run consumed, until the copy
-    /// starts; then the policy that continues that copy.
+    /// Policy for the item's next run if this one is interrupted: the
+    /// override this run consumed, until the copy is decided; then the
+    /// policy that continues that copy. Mirrors the stored `next_policy`.
     retry: Option<ConflictPolicy>,
 }
 
@@ -191,8 +199,9 @@ struct Actor {
     dirs: HashMap<TransferId, DirProgress>,
     /// Items holding a worker slot.
     running: HashMap<TransferId, Running>,
-    /// One-shot conflict policy for an item's next run (from `resolve` or
-    /// `resume`); consumed at dispatch, never persisted.
+    /// One-shot conflict policy for a `Queued` item's next run, consumed at
+    /// dispatch. Equal to its stored `next_policy`, except that a `resolve`
+    /// answer is only stored once the item is dispatched.
     overrides: HashMap<TransferId, ConflictPolicy>,
     tracker: ProgressTracker,
     worker_tx: mpsc::UnboundedSender<WorkerMsg>,
@@ -525,18 +534,9 @@ impl Actor {
             if !restartable(&item.state) {
                 continue;
             }
-            // The continuation of an interrupted copy forces `Resume`; an
-            // item requeued by a network error gets its stored override
-            // back; anything else runs under the global policy again.
-            let resume_copy = item.state == TransferState::Paused
-                && item.is_dir != Some(true)
-                && matches!(self.store.paused_from(i), Ok(Some(PausedFrom::Active)));
-            let policy = if resume_copy {
-                Some(ConflictPolicy::Resume)
-            } else {
-                self.store.pending_override(i).ok().flatten()
-            };
-            match policy {
+            // An interrupted run continues under its stored continuation;
+            // anything else runs under the global policy again.
+            match self.store.next_policy(i).ok().flatten() {
                 Some(policy) => self.overrides.insert(i, policy),
                 None => self.overrides.remove(&i),
             };
@@ -747,6 +747,14 @@ impl Actor {
                     site.busy += 1;
                 }
                 let policy_override = self.overrides.remove(&id);
+                // Stored with the `Active` row, so that it survives an
+                // interruption before the copy is decided.
+                if policy_override.is_some()
+                    && let Err(e) = self.store.set_next_policy(id, policy_override)
+                {
+                    self.transition(id, TransferState::Failed(e));
+                    continue;
+                }
                 self.running.insert(
                     id,
                     Running {
@@ -779,24 +787,12 @@ impl Actor {
         self.dispatch();
     }
 
-    /// Puts an item whose worker hit a network error back in the queue, with
-    /// `retry` as the policy override of its next run, and pauses its site.
-    /// `SitePaused` is emitted only if the site was not paused already.
-    ///
-    /// The override is also stored, so that it survives a pause and resume
-    /// of the item or a restart: without it, the partial destination could
-    /// be skipped as an existing file.
-    fn network_requeue(&mut self, id: TransferId, error: Error, retry: Option<ConflictPolicy>) {
+    /// Puts an item whose worker hit a network error back in the queue,
+    /// under its continuation, and pauses its site. `SitePaused` is emitted
+    /// only if the site was not paused already.
+    fn network_requeue(&mut self, id: TransferId, error: Error) {
         let site_id = self.items.get(&id).map(|i| i.spec.site.clone());
-        let requeued = self.transition(id, TransferState::Queued);
-        if let Some(policy) = retry
-            && requeued
-        {
-            self.overrides.insert(id, policy);
-            if let Err(e) = self.store.set_pending_override(id, policy) {
-                self.transition(id, TransferState::Failed(e));
-            }
-        }
+        self.requeue(id);
         self.free_slot(id);
         if let Some(site_id) = site_id
             && let Some(site) = self.sites.get_mut(&site_id)
@@ -811,15 +807,30 @@ impl Actor {
         self.dispatch();
     }
 
-    /// The state of a copy stopped by the control `intent`.
-    fn stopped_copy(&mut self, id: TransferId, intent: Option<Intent>) -> TransferState {
+    /// Moves an item that holds a worker slot back to `Queued`, with its
+    /// continuation (still stored, as `Active` keeps it) as the override of
+    /// its next run. Does not free the slot.
+    fn requeue(&mut self, id: TransferId) {
+        let retry = self.running.get(&id).and_then(|r| r.retry);
+        if self.transition(id, TransferState::Queued)
+            && let Some(policy) = retry
+        {
+            self.overrides.insert(id, policy);
+        }
+    }
+
+    /// Moves an item whose run was stopped by the control `intent` (or
+    /// cancelled without one) to its next state, frees its slot and
+    /// dispatches. A pause or requeue keeps its stored continuation.
+    fn release_stopped(&mut self, id: TransferId, intent: Option<Intent>) {
         match intent {
-            Some(Intent::Pause) => TransferState::Paused,
+            Some(Intent::Pause) => self.release(id, TransferState::Paused),
             Some(Intent::Requeue) => {
-                self.overrides.insert(id, ConflictPolicy::Resume);
-                TransferState::Queued
+                self.requeue(id);
+                self.free_slot(id);
+                self.dispatch();
             }
-            Some(Intent::Cancel) | None => TransferState::Cancelled,
+            Some(Intent::Cancel) | None => self.release(id, TransferState::Cancelled),
         }
     }
 
@@ -839,27 +850,16 @@ impl Actor {
                         self.dispatch();
                     }
                     // Stopped before copying anything: the prepare result is
-                    // dropped and the item runs from scratch when restarted.
-                    (_, Some(Intent::Pause)) => {
-                        // Recorded as paused from `Queued`, so a resume
-                        // applies the global policy (no copy to continue).
-                        match self.store.set_state(id, &TransferState::Queued) {
-                            Ok(()) => self.release(id, TransferState::Paused),
-                            Err(e) => self.release(id, TransferState::Failed(e)),
-                        }
-                    }
-                    (_, Some(Intent::Cancel)) => self.release(id, TransferState::Cancelled),
-                    (_, Some(Intent::Requeue)) => self.release(id, TransferState::Queued),
+                    // dropped and the next run prepares again, under the
+                    // override this run consumed.
+                    (_, Some(intent)) => self.release_stopped(id, Some(intent)),
                     (Ok(Prepared::File { src, dst, decision }), None) => {
                         self.on_file_prepared(id, route, src, dst, decision)
                     }
                     (Ok(Prepared::Symlink), None) => {
                         self.release(id, TransferState::Skipped(SYMLINK_SKIP.to_string()))
                     }
-                    (Err(e), None) if e.kind == ErrorKind::Network => {
-                        let retry = self.running.get(&id).and_then(|r| r.retry);
-                        self.network_requeue(id, e, retry);
-                    }
+                    (Err(e), None) if e.kind == ErrorKind::Network => self.network_requeue(id, e),
                     (Err(e), None) => self.release(id, TransferState::Failed(e)),
                 }
             }
@@ -871,14 +871,17 @@ impl Actor {
                 }
                 let state = match (result, self.store.set_bytes_done(id, bytes)) {
                     (Ok(CopyOutcome::Completed), Ok(())) => TransferState::Done,
-                    (Ok(CopyOutcome::Cancelled), Ok(())) => self.stopped_copy(id, intent),
+                    (Ok(CopyOutcome::Cancelled), Ok(())) => {
+                        self.release_stopped(id, intent);
+                        return;
+                    }
                     // A pending control command wins over the network error.
                     (Err(e), Ok(())) if e.kind == ErrorKind::Network && intent.is_some() => {
-                        self.stopped_copy(id, intent)
+                        self.release_stopped(id, intent);
+                        return;
                     }
                     (Err(e), Ok(())) if e.kind == ErrorKind::Network => {
-                        let retry = self.running.get(&id).and_then(|r| r.retry);
-                        self.network_requeue(id, e, retry);
+                        self.network_requeue(id, e);
                         return;
                     }
                     (Ok(_), Err(store_err)) => TransferState::Failed(store_err),
@@ -988,15 +991,21 @@ impl Actor {
         };
         match decision {
             Decision::Write { offset } => {
-                // After a network error, the next run continues this copy
-                // from the partial destination; but replacing an existing
-                // file starts over, as the error may have come before the
-                // destination was truncated.
+                // The continuation of this copy, stored before the copy can
+                // open the destination: the next run (after a pause, a
+                // network error or a restart) continues from the partial
+                // destination; but replacing an existing file starts over,
+                // as the interruption may have come before the destination
+                // was truncated.
                 let retry = if offset == 0 && dst.is_some() {
                     ConflictPolicy::Overwrite
                 } else {
                     ConflictPolicy::Resume
                 };
+                if let Err(e) = self.store.set_next_policy(id, Some(retry)) {
+                    self.release(id, TransferState::Failed(e));
+                    return;
+                }
                 let cancel = match self.running.get_mut(&id) {
                     Some(running) => {
                         running.retry = Some(retry);
