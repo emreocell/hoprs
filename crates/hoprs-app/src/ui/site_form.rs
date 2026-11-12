@@ -17,6 +17,7 @@ use secrecy::SecretString;
 use crate::app::Message;
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
+use crate::ui::widgets::{confirm, failure, field};
 
 /// A password as typed. Its `Debug` never shows it.
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -158,6 +159,10 @@ impl SiteForm {
             busy: false,
             failure: None,
         }
+    }
+
+    pub fn site_id(&self) -> &SiteId {
+        &self.base.id
     }
 
     /// The saved site has a password in the keyring.
@@ -573,47 +578,6 @@ fn actions(form: &SiteForm) -> Element<'_, Message> {
     buttons.into()
 }
 
-/// The in-place delete confirmation (shared with the workspace form).
-pub fn confirm<'a>(question: &'a str, yes: Message, no: Message) -> Element<'a, Message> {
-    container(
-        row![
-            text(question).size(theme::TEXT_SM).width(Length::Fill),
-            button(text(strings::DELETE).font(theme::INTER_SEMIBOLD))
-                .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_MD]))
-                .style(theme::button_primary)
-                .on_press(yes),
-            button(text(strings::KEEP))
-                .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
-                .style(theme::button_text)
-                .on_press(no),
-        ]
-        .spacing(theme::SPACE_XS)
-        .align_y(Alignment::Center),
-    )
-    .padding(theme::SPACE_SM)
-    .style(theme::outline_box)
-    .into()
-}
-
-/// The backend's error, inline.
-pub fn failure(error: Option<&Error>) -> Element<'_, Message> {
-    match error {
-        None => space().into(),
-        Some(error) => {
-            let mut lines = column![text(&error.message).color(palette().error)];
-            if let Some(detail) = &error.detail {
-                lines = lines.push(
-                    text(detail)
-                        .font(theme::MONO)
-                        .size(theme::TEXT_MONO)
-                        .color(palette().muted),
-                );
-            }
-            lines.spacing(theme::SPACE_3XS).into()
-        }
-    }
-}
-
 fn input<'a>(
     placeholder: &'a str,
     value: &'a str,
@@ -629,19 +593,6 @@ fn input<'a>(
     } else {
         input.size(theme::TEXT_SM).into()
     }
-}
-
-/// A label above its control, with the inline error below.
-pub fn field<'a>(
-    label: &'a str,
-    control: Element<'a, Message>,
-    error: Option<&'a str>,
-) -> Element<'a, Message> {
-    let mut col = column![muted(label), control].spacing(theme::SPACE_2XS);
-    if let Some(error) = error {
-        col = col.push(text(error).size(theme::TEXT_XS).color(palette().error));
-    }
-    col.width(Length::Fill).into()
 }
 
 /// A titled group of fields under a 1 px rule.

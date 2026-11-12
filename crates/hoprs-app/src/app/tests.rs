@@ -156,6 +156,7 @@ async fn new_site_validation() {
     );
     assert_eq!(site.port, 2222);
     assert!(matches!(password, PasswordChange::Keep));
+    let saving = ProfileOp::SaveSite(site.id.clone());
     assert!(site_form(&mut app).busy);
     // A second click while saving does nothing.
     assert!(type_site(&mut app, SiteFormMsg::Save).is_empty());
@@ -163,8 +164,11 @@ async fn new_site_validation() {
     // A refused save keeps the form, with the backend's error.
     let refused = Error::new(ErrorKind::Io, "Disk full");
     assert!(
-        app.update(Message::FormDone(Err(refused.clone())))
-            .is_empty()
+        app.update(Message::FormDone {
+            op: saving,
+            result: Err(refused.clone())
+        })
+        .is_empty()
     );
     assert_eq!(site_form(&mut app).failure, Some(refused));
     assert!(!site_form(&mut app).busy);
@@ -234,7 +238,10 @@ async fn save_site_with_password_emits_set_secret() {
         fake.password(&id).map(|p| p.expose_secret().to_owned()),
         Some("hunter2".into())
     );
-    let effects = app.update(Message::FormDone(Ok(())));
+    let effects = app.update(Message::FormDone {
+        op: ProfileOp::SaveSite(id.clone()),
+        result: Ok(()),
+    });
     assert!(app.form.is_none(), "a successful save closes the form");
     assert!(matches!(effects[..], [Effect::LoadProfiles]));
     app.update(Message::ProfilesLoaded(fake.profiles().await));
@@ -266,6 +273,13 @@ async fn delete_site_needs_confirmation() {
     assert!(type_site(&mut app, SiteFormMsg::Delete).is_empty());
     assert!(!site_form(&mut app).confirm_delete);
 
+    // It has an open tab, connected.
+    let sites = connect_effect(app.update(Message::ConnectSite(doomed.id.clone())));
+    drive(&mut app, &fake, sites).await;
+    let TabState::Connected(connected) = tab_state(&app, &doomed.id).clone() else {
+        panic!("{:?}", app.tabs);
+    };
+
     app.update(Message::EditSite(doomed.id.clone()));
     assert!(type_site(&mut app, SiteFormMsg::Delete).is_empty());
     assert!(site_form(&mut app).confirm_delete, "asks first");
@@ -281,9 +295,18 @@ async fn delete_site_needs_confirmation() {
     };
     assert_eq!(id, &doomed.id);
     fake.delete_site(id.clone()).await.unwrap();
-    let effects = app.update(Message::FormDone(Ok(())));
+    let effects = app.update(Message::FormDone {
+        op: ProfileOp::DeleteSite(id.clone()),
+        result: Ok(()),
+    });
     assert!(app.form.is_none());
-    assert!(matches!(effects[..], [Effect::LoadProfiles]));
+    // Its tab goes, and so does its session.
+    assert!(matches!(
+        effects[..],
+        [Effect::LoadProfiles, Effect::CloseSession(s)] if s == connected.session
+    ));
+    assert!(app.tabs.is_empty());
+    assert_eq!(app.active_tab, None);
     app.update(Message::ProfilesLoaded(fake.profiles().await));
     assert!(app.sites.is_empty());
 }
@@ -364,6 +387,9 @@ async fn open_workspace_tolerates_missing_site() {
     assert!(matches!(rows[0], WorkspaceRow::Site(s) if s.id == a.id));
     assert!(matches!(&rows[1], WorkspaceRow::Missing(id) if *id == gone));
     assert!(matches!(rows[2], WorkspaceRow::Site(s) if s.id == b.id));
+
+    assert_eq!(strings::workspace_site_count(2, 3), "2 of 3 sites");
+    assert_eq!(strings::workspace_site_count(1, 1), "1 site");
 
     // It is skipped; the others connect.
     let sites = connect_effect(app.update(Message::OpenWorkspace(ws.id.clone())));
@@ -587,7 +613,11 @@ async fn workspace_form_keeps_file_order_and_unknown_entries() {
     assert_eq!(saved.sites[0].tabs, ws.sites[0].tabs);
 
     // Deleting asks first.
-    app.update(Message::FormDone(Ok(())));
+    app.update(Message::FormDone {
+        op: ProfileOp::SaveWorkspace(ws.id.clone()),
+        result: Ok(()),
+    });
+    assert!(app.form.is_none());
     app.update(Message::EditWorkspace(ws.id.clone()));
     assert!(app.update(form(WorkspaceFormMsg::Delete)).is_empty());
     let effects = app.update(form(WorkspaceFormMsg::ConfirmDelete));
@@ -608,4 +638,117 @@ async fn result_without_tab_closes_the_session() {
     });
     assert!(matches!(effects[..], [Effect::CloseSession(SessionId(7))]));
     assert!(app.tabs.is_empty());
+}
+
+/// Editing a site after a failed connect: saving closes the kept session, so Retry
+/// connects with the new settings on a new session instead of retrying the old one.
+#[tokio::test]
+async fn edit_after_failure_retries_with_a_new_session() {
+    let a = site("a", "wrong.example", "u", Protocol::Ftp);
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    fake.fail_next_connect(&a.id, Error::new(ErrorKind::Network, "No such host"));
+    let mut app = loaded(&fake).await;
+    let sites = connect_effect(app.update(Message::ConnectSite(a.id.clone())));
+    drive(&mut app, &fake, sites).await;
+    let TabState::Failed(failure) = tab_state(&app, &a.id) else {
+        panic!("{:?}", app.tabs);
+    };
+    let kept = failure.session.unwrap();
+
+    app.update(Message::EditSite(a.id.clone()));
+    type_site(&mut app, SiteFormMsg::Host("right.example".into()));
+    let effects = type_site(&mut app, SiteFormMsg::Save);
+    let Ok([Effect::SaveSite { site, password }]) = <[Effect; 1]>::try_from(effects) else {
+        panic!("one SaveSite effect");
+    };
+    effects::save_site(fake.clone(), site, password)
+        .await
+        .unwrap();
+    let effects = app.update(Message::FormDone {
+        op: ProfileOp::SaveSite(a.id.clone()),
+        result: Ok(()),
+    });
+    assert!(matches!(
+        effects[..],
+        [Effect::LoadProfiles, Effect::CloseSession(s)] if s == kept
+    ));
+    let TabState::Failed(failure) = tab_state(&app, &a.id) else {
+        panic!("{:?}", app.tabs);
+    };
+    assert_eq!(failure.session, None, "the tab forgets the closed session");
+    fake.close(kept).await;
+    app.update(Message::ProfilesLoaded(fake.profiles().await));
+
+    let sites = connect_effect(app.update(Message::ConnectSite(a.id.clone())));
+    drive(&mut app, &fake, sites).await;
+    let TabState::Connected(connected) = tab_state(&app, &a.id) else {
+        panic!("{:?}", app.tabs);
+    };
+    assert_ne!(
+        connected.session, kept,
+        "a new session, from the saved site"
+    );
+    assert_eq!(fake.closed(), vec![kept]);
+
+    // A connected session is left alone by a later save.
+    app.update(Message::EditSite(a.id.clone()));
+    type_site(&mut app, SiteFormMsg::Save);
+    let effects = app.update(Message::FormDone {
+        op: ProfileOp::SaveSite(a.id.clone()),
+        result: Ok(()),
+    });
+    assert!(matches!(effects[..], [Effect::LoadProfiles]));
+}
+
+/// The sidebar's "Edit" opens the form without connecting.
+#[tokio::test]
+async fn edit_site_from_sidebar_does_not_connect() {
+    let a = site("a", "h", "u", Protocol::Ssh);
+    let fake = FakeBackend::new().with_site(a.clone());
+    let mut app = loaded(&fake).await;
+    assert!(app.update(Message::EditSite(a.id.clone())).is_empty());
+    assert!(app.tabs.is_empty());
+    assert!(site_form(&mut app).editing);
+    assert_eq!(site_form(&mut app).site_id(), &a.id);
+}
+
+/// A save result that arrives after its form was replaced never touches the new form.
+#[tokio::test]
+async fn late_form_result_leaves_other_form_untouched() {
+    let a = site("a", "h", "u", Protocol::Ssh);
+    let fake = FakeBackend::new().with_site(a.clone());
+    let mut app = loaded(&fake).await;
+    app.update(Message::EditSite(a.id.clone()));
+    assert_eq!(type_site(&mut app, SiteFormMsg::Save).len(), 1);
+    let op = ProfileOp::SaveSite(a.id.clone());
+
+    app.update(Message::NewWorkspace);
+    app.update(Message::WorkspaceForm(WorkspaceFormMsg::Name(
+        "Draft".into(),
+    )));
+    let workspace_form = |app: &App| match &app.form {
+        Some(Form::Workspace(form)) => (form.name.clone(), form.busy, form.failure.clone()),
+        other => panic!("the workspace form was replaced: {other:?}"),
+    };
+
+    let effects = app.update(Message::FormDone {
+        op: op.clone(),
+        result: Err(Error::new(ErrorKind::Io, "Disk full")),
+    });
+    assert!(effects.is_empty());
+    assert_eq!(workspace_form(&app), ("Draft".into(), false, None));
+    let effects = app.update(Message::FormDone {
+        op: op.clone(),
+        result: Ok(()),
+    });
+    assert!(
+        matches!(effects[..], [Effect::LoadProfiles]),
+        "the data still reloads"
+    );
+    assert_eq!(workspace_form(&app), ("Draft".into(), false, None));
+
+    // Nor does it close the same site's form opened again (not waiting for anything).
+    app.update(Message::EditSite(a.id.clone()));
+    app.update(Message::FormDone { op, result: Ok(()) });
+    assert!(site_form(&mut app).editing);
 }

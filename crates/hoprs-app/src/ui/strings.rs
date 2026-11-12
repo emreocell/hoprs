@@ -25,7 +25,6 @@ pub const NO_MATCHES: &str = "No matching sites";
 pub const OPEN_WORKSPACE: &str = "Open workspace";
 pub const EDIT: &str = "Edit";
 pub const SITE_MISSING: &str = "Site missing";
-pub const LOADING: &str = "Loading…";
 pub const CANNOT_LOAD_SITES: &str = "Can't load the saved sites";
 pub const RETRY: &str = "Retry";
 pub const UNREADABLE_ENTRY: &str = "Can't read this entry (written by a newer hoprs?)";
@@ -41,6 +40,15 @@ pub fn site_count(n: usize) -> String {
         "1 site".to_owned()
     } else {
         format!("{n} sites")
+    }
+}
+
+/// A workspace's count: "3 sites", or "2 of 3 sites" when some are missing.
+pub fn workspace_site_count(present: usize, total: usize) -> String {
+    if present == total {
+        site_count(total)
+    } else {
+        format!("{present} of {}", site_count(total))
     }
 }
 

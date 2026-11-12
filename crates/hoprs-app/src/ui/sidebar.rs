@@ -59,7 +59,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     .spacing(theme::SPACE_MD);
 
     let body: Element<'_, Message> = match &app.load {
-        Load::Loading => column![group_rule(), note(strings::LOADING)].into(),
+        Load::Loading => skeleton(),
         Load::Failed(error) => column![
             group_rule(),
             container(
@@ -141,9 +141,10 @@ fn group<'a>(title: &'a str, on_new: Message, body: Element<'a, Message>) -> Ele
     .into()
 }
 
-/// A site row: name on the left, protocol tag in mono on the right.
-fn site_row(site: &Site) -> Element<'_, Message> {
-    button(
+/// A site row: name on the left, protocol tag in mono on the right; a click connects.
+/// With `edit`, a muted "Edit" after it opens the site form without connecting.
+fn site_row(site: &Site, edit: bool) -> Element<'_, Message> {
+    let open = button(
         row![
             text(&site.name).size(theme::TEXT_SM),
             space::horizontal(),
@@ -158,7 +159,36 @@ fn site_row(site: &Site) -> Element<'_, Message> {
     .width(Length::Fill)
     .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
     .style(theme::row)
-    .on_press(Message::ConnectSite(site.id.clone()))
+    .on_press(Message::ConnectSite(site.id.clone()));
+    if !edit {
+        return open.into();
+    }
+    row![
+        open,
+        button(text(strings::EDIT).size(theme::TEXT_XS))
+            .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_2XS]))
+            .style(theme::button_text)
+            .on_press(Message::EditSite(site.id.clone())),
+    ]
+    .spacing(theme::SPACE_3XS)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+/// The loading state: grey bars where the groups' rows will be.
+fn skeleton<'a>() -> Element<'a, Message> {
+    let bar = |width: f32| {
+        container(space())
+            .width(width)
+            .height(theme::TEXT_SM)
+            .style(theme::skeleton)
+    };
+    let rows = [120.0, 168.0, 96.0, 144.0, 112.0];
+    column![
+        group_rule(),
+        container(column(rows.into_iter().map(|w| bar(w).into())).spacing(theme::SPACE_SM))
+            .padding(Padding::from([theme::SPACE_SM, theme::SPACE_MD])),
+    ]
     .into()
 }
 
@@ -199,9 +229,15 @@ fn workspace<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
                 .font(theme::INTER_MEDIUM)
                 .color(if open { p.ink } else { p.ink_2 }),
             space::horizontal(),
-            text(strings::site_count(ws.sites.len()))
-                .size(theme::TEXT_XS)
-                .color(p.muted),
+            text(strings::workspace_site_count(
+                ws.sites
+                    .iter()
+                    .filter(|entry| app.site(&entry.site).is_some())
+                    .count(),
+                ws.sites.len(),
+            ))
+            .size(theme::TEXT_XS)
+            .color(p.muted),
         ]
         .align_y(Alignment::Center),
     )
@@ -220,7 +256,7 @@ fn workspace<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
 
     let sites = column(ws.sites.iter().map(|entry| {
         match app.site(&entry.site) {
-            Some(site) => site_row(site),
+            Some(site) => site_row(site, false),
             None => container(
                 text(strings::SITE_MISSING)
                     .size(theme::TEXT_SM)
@@ -290,7 +326,7 @@ fn all_sites(app: &App) -> Element<'_, Message> {
     } else if visible.is_empty() {
         note(strings::NO_MATCHES)
     } else {
-        container(column(visible.into_iter().map(site_row)))
+        container(column(visible.into_iter().map(|site| site_row(site, true))))
             .padding(Padding::from([0.0, theme::SPACE_XS]))
             .into()
     };

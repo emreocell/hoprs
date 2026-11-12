@@ -8,7 +8,7 @@ use futures_util::{Stream, StreamExt, stream};
 use hoprs_core::{Error, ErrorKind, Site, SiteId};
 use tokio::sync::mpsc;
 
-use crate::app::{Effect, Message};
+use crate::app::{Effect, Message, ProfileOp};
 use crate::backend::BackendApi;
 use crate::ui::site_form::PasswordChange;
 
@@ -21,20 +21,32 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
             Message::ProfilesLoaded,
         ),
         Effect::SaveSite { site, password } => {
-            Task::perform(save_site(backend, site, password), Message::FormDone)
+            let op = ProfileOp::SaveSite(site.id.clone());
+            Task::perform(save_site(backend, site, password), move |result| {
+                Message::FormDone { op, result }
+            })
         }
-        Effect::DeleteSite(id) => Task::perform(
-            async move { backend.delete_site(id).await },
-            Message::FormDone,
-        ),
-        Effect::SaveWorkspace(workspace) => Task::perform(
-            async move { backend.save_workspace(workspace).await },
-            Message::FormDone,
-        ),
-        Effect::DeleteWorkspace(id) => Task::perform(
-            async move { backend.delete_workspace(id).await },
-            Message::FormDone,
-        ),
+        Effect::DeleteSite(id) => {
+            let op = ProfileOp::DeleteSite(id.clone());
+            Task::perform(
+                async move { backend.delete_site(id).await },
+                move |result| Message::FormDone { op, result },
+            )
+        }
+        Effect::SaveWorkspace(workspace) => {
+            let op = ProfileOp::SaveWorkspace(workspace.id.clone());
+            Task::perform(
+                async move { backend.save_workspace(workspace).await },
+                move |result| Message::FormDone { op, result },
+            )
+        }
+        Effect::DeleteWorkspace(id) => {
+            let op = ProfileOp::DeleteWorkspace(id.clone());
+            Task::perform(
+                async move { backend.delete_workspace(id).await },
+                move |result| Message::FormDone { op, result },
+            )
+        }
         Effect::ConnectSites(sites) => Task::run(connect_sites(backend, sites), |m| m),
         Effect::CloseSession(session) => {
             Task::future(async move { backend.close(session).await }).discard()

@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use hoprs_core::{Error, ErrorKind, Result, Site, SiteId, Workspace, WorkspaceId};
+use hoprs_core::{Error, ErrorKind, Protocol, Result, Site, SiteId, Workspace, WorkspaceId};
 use hoprs_vault::{
     KeyringStore, SecretKind, SecretStore, UnreadableEntry, Vault, is_keyring_unavailable,
 };
@@ -76,15 +76,13 @@ impl VaultHandle {
         .await
     }
 
-    /// Saves a site edited in the UI without overwriting what the backend owns: the
-    /// FTPS pin (written by the prompt broker, maybe while the form was open) is taken
-    /// from the vault's current copy, and `has_password`/`has_key_passphrase` are kept by
-    /// [`Vault::upsert_site`] itself. A new site keeps the pin it brings (none from the UI).
+    /// Saves a site edited in the UI without overwriting what the backend owns.
+    /// `has_password`/`has_key_passphrase` are kept by [`Vault::upsert_site`] itself. The
+    /// FTPS pin is the vault's (the prompt broker may have written it while the form was
+    /// open), see [`merged_pin`]: the UI's copy of it is never used.
     pub async fn save_site(&self, mut site: Site) -> Result<()> {
         self.call(move |v| {
-            if let Some(current) = v.site(&site.id) {
-                site.ftp.pinned_fingerprint = current.ftp.pinned_fingerprint.clone();
-            }
+            site.ftp.pinned_fingerprint = merged_pin(v.site(&site.id), &site);
             v.upsert_site(site)
         })
         .await
@@ -154,6 +152,23 @@ impl VaultHandle {
                 .collect())
         })
         .await
+    }
+}
+
+/// The FTPS pin a saved site keeps: the stored one, only while the edit leaves the same
+/// endpoint (host and port) and the protocol is still FTPS. A pin certifies one server: a
+/// new host or port, or a protocol without certificates, drops it.
+pub fn merged_pin(stored: Option<&Site>, edited: &Site) -> Option<String> {
+    let stored = stored?;
+    let ftps = matches!(
+        edited.protocol,
+        Protocol::FtpsExplicit | Protocol::FtpsImplicit
+    );
+    let same_endpoint = stored.host == edited.host && stored.port == edited.port;
+    if ftps && same_endpoint {
+        stored.ftp.pinned_fingerprint.clone()
+    } else {
+        None
     }
 }
 
@@ -340,27 +355,89 @@ pub(crate) mod tests {
     }
 
     /// The site form's copy is older than the vault's: the pin the broker wrote meanwhile
-    /// and the secret flags survive the save; the edited fields are taken.
+    /// and the secret flags survive a save that keeps the endpoint; a new host or port,
+    /// or leaving FTPS, drops the pin.
     #[tokio::test]
     async fn save_site_keeps_backend_owned_fields() {
         let dir = tempfile::tempdir().unwrap();
         let (vault, sites) = vault_with_sites(dir.path(), Arc::new(MemoryStore::new()), 1);
         let handle = VaultHandle::new(vault);
         let mut form_copy = sites[0].clone();
+        form_copy.protocol = Protocol::FtpsExplicit;
+        form_copy.port = 21;
+        handle.save_site(form_copy.clone()).await.unwrap();
         handle
             .set_ftps_pin(form_copy.id.clone(), "SHA256:PIN".into())
             .await
             .unwrap();
+        let pin = |handle: &VaultHandle, id: SiteId| {
+            let handle = handle.clone();
+            async move {
+                handle
+                    .site(id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .ftp
+                    .pinned_fingerprint
+            }
+        };
 
-        form_copy.host = "new-host".into();
+        // Same endpoint: the stale form copy (no pin, no password flag) changes the user
+        // only; the pin and the flag stay.
+        form_copy.user = "someone".into();
         form_copy.has_password = false;
         form_copy.ftp.pinned_fingerprint = None;
         handle.save_site(form_copy.clone()).await.unwrap();
-
         let saved = handle.site(form_copy.id.clone()).await.unwrap().unwrap();
-        assert_eq!(saved.host, "new-host");
+        assert_eq!(saved.user, "someone");
         assert_eq!(saved.ftp.pinned_fingerprint.as_deref(), Some("SHA256:PIN"));
         assert!(saved.has_password);
+        // Explicit to implicit on the same host and port is still FTPS.
+        form_copy.protocol = Protocol::FtpsImplicit;
+        handle.save_site(form_copy.clone()).await.unwrap();
+        assert_eq!(
+            pin(&handle, form_copy.id.clone()).await.as_deref(),
+            Some("SHA256:PIN")
+        );
+        // The UI can't set a pin either.
+        form_copy.ftp.pinned_fingerprint = Some("SHA256:FORGED".into());
+        handle.save_site(form_copy.clone()).await.unwrap();
+        assert_eq!(
+            pin(&handle, form_copy.id.clone()).await.as_deref(),
+            Some("SHA256:PIN")
+        );
+        form_copy.ftp.pinned_fingerprint = None;
+
+        // A new host drops the pin; so does a new port; so does leaving FTPS.
+        for change in 0..3 {
+            handle
+                .set_ftps_pin(form_copy.id.clone(), "SHA256:PIN".into())
+                .await
+                .unwrap();
+            let mut edited = form_copy.clone();
+            match change {
+                0 => edited.host = "new-host".into(),
+                1 => edited.port = 2121,
+                _ => edited.protocol = Protocol::Ftp,
+            }
+            handle.save_site(edited.clone()).await.unwrap();
+            assert_eq!(
+                pin(&handle, edited.id.clone()).await,
+                None,
+                "change {change}"
+            );
+            assert!(
+                handle
+                    .site(edited.id.clone())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .has_password
+            );
+            handle.save_site(form_copy.clone()).await.unwrap();
+        }
+        let saved = handle.site(form_copy.id.clone()).await.unwrap().unwrap();
 
         // The password itself: set, then forgotten.
         let id = saved.id.clone();

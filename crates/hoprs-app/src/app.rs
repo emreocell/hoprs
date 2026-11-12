@@ -99,10 +99,23 @@ pub enum Message {
     EditWorkspace(WorkspaceId),
     SiteForm(SiteFormMsg),
     WorkspaceForm(WorkspaceFormMsg),
-    /// The open form's save or delete finished.
-    FormDone(Result<(), Error>),
+    /// A form's save or delete finished. `op` says which; a result whose form is no
+    /// longer the one open still updates the profiles and tabs, never the open form.
+    FormDone {
+        op: ProfileOp,
+        result: Result<(), Error>,
+    },
     OpenProfileFolder,
     ProfileFolderOpened(Result<(), Error>),
+}
+
+/// The profile change a form asked for, carried back with its result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProfileOp {
+    SaveSite(SiteId),
+    DeleteSite(SiteId),
+    SaveWorkspace(WorkspaceId),
+    DeleteWorkspace(WorkspaceId),
 }
 
 /// Work for the backend.
@@ -229,7 +242,7 @@ impl App {
             }
             Message::SiteForm(m) => return self.site_form(m),
             Message::WorkspaceForm(m) => return self.workspace_form(m),
-            Message::FormDone(result) => return self.form_done(result),
+            Message::FormDone { op, result } => return self.form_done(op, result),
             Message::OpenProfileFolder => return vec![Effect::OpenProfileFolder],
             Message::ProfileFolderOpened(result) => self.sidebar_error = result.err(),
         }
@@ -339,23 +352,77 @@ impl App {
         }
     }
 
-    /// A form's save or delete finished: success closes it and reloads the profiles (the
-    /// backend may have changed more than the form knows); failure shows in the form.
-    fn form_done(&mut self, result: Result<(), Error>) -> Vec<Effect> {
-        match result {
-            Ok(()) => {
-                self.form = None;
-                vec![Effect::LoadProfiles]
+    /// A form's save or delete finished.
+    ///
+    /// Whatever form is open now, a success reloads the profiles and fixes up the tabs:
+    /// - a saved site's session that is not connected is closed, so a retry starts over
+    ///   with the new settings instead of retrying the old connection;
+    /// - a deleted site's tabs and session go away.
+    ///
+    /// The form itself is closed (success) or shows the error (failure) only if it is the
+    /// one that asked: same target, still waiting for this result.
+    fn form_done(&mut self, op: ProfileOp, result: Result<(), Error>) -> Vec<Effect> {
+        let waiting = match (&mut self.form, &op) {
+            (Some(Form::Site(form)), ProfileOp::SaveSite(id) | ProfileOp::DeleteSite(id)) => {
+                form.busy && form.site_id() == id
             }
-            Err(error) => {
-                match &mut self.form {
-                    Some(Form::Site(form)) => form.finished(Some(error)),
-                    Some(Form::Workspace(form)) => form.finished(Some(error)),
-                    None => {}
-                }
-                Vec::new()
+            (
+                Some(Form::Workspace(form)),
+                ProfileOp::SaveWorkspace(id) | ProfileOp::DeleteWorkspace(id),
+            ) => form.busy && form.workspace_id() == id,
+            _ => false,
+        };
+        let error = result.err();
+        if waiting {
+            match (&error, &mut self.form) {
+                (None, _) => self.form = None,
+                (Some(error), Some(Form::Site(form))) => form.finished(Some(error.clone())),
+                (Some(error), Some(Form::Workspace(form))) => form.finished(Some(error.clone())),
+                (Some(_), None) => {}
             }
         }
+        if error.is_some() {
+            return Vec::new();
+        }
+        let mut effects = vec![Effect::LoadProfiles];
+        match op {
+            ProfileOp::SaveSite(site) => effects.extend(self.drop_stale_session(&site)),
+            ProfileOp::DeleteSite(site) => effects.extend(self.close_site_tabs(&site)),
+            ProfileOp::SaveWorkspace(_) | ProfileOp::DeleteWorkspace(_) => {}
+        }
+        effects
+    }
+
+    /// The site's settings changed: a failed tab forgets its session (closed here), so
+    /// the next connect builds a new one from the saved site. A connected session keeps
+    /// running; the new settings apply to its next connection.
+    fn drop_stale_session(&mut self, site: &SiteId) -> Option<Effect> {
+        let index = self.tab_of(site)?;
+        let tab = &mut self.tabs[index];
+        let TabState::Failed(failure) = &mut tab.state else {
+            return None;
+        };
+        failure.session.take().map(Effect::CloseSession)
+    }
+
+    /// Removes the site's tab and closes its session, if any.
+    fn close_site_tabs(&mut self, site: &SiteId) -> Vec<Effect> {
+        let Some(index) = self.tab_of(site) else {
+            return Vec::new();
+        };
+        let tab = self.tabs.remove(index);
+        self.active_tab = match self.active_tab {
+            _ if self.tabs.is_empty() => None,
+            Some(active) if active > index => Some(active - 1),
+            Some(active) => Some(active.min(self.tabs.len() - 1)),
+            None => None,
+        };
+        let session = match tab.state {
+            TabState::Connected(connected) => Some(connected.session),
+            TabState::Failed(failure) => failure.session,
+            TabState::Connecting => None,
+        };
+        session.map(Effect::CloseSession).into_iter().collect()
     }
 }
 

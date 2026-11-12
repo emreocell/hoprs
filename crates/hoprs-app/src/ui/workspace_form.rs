@@ -12,9 +12,9 @@ use iced::widget::{button, checkbox, column, container, row, scrollable, space, 
 use iced::{Alignment, Element, Length, Padding};
 
 use crate::app::Message;
-use crate::ui::site_form::{confirm, failure, field};
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
+use crate::ui::widgets::{confirm, failure, field};
 
 #[derive(Debug, Clone)]
 pub enum WorkspaceFormMsg {
@@ -70,6 +70,10 @@ impl WorkspaceForm {
             busy: false,
             failure: None,
         }
+    }
+
+    pub fn workspace_id(&self) -> &WorkspaceId {
+        &self.base.id
     }
 
     /// The workspace to save, given the readable sites in file order.

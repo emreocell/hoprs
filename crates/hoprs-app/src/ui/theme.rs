@@ -368,6 +368,17 @@ pub fn search(_: &Theme, status: text_input::Status) -> text_input::Style {
     }
 }
 
+/// A loading placeholder bar: `paper_3`, rounded.
+pub fn skeleton(_: &Theme) -> container::Style {
+    container::Style {
+        border: Border {
+            radius: radius(),
+            ..Border::default()
+        },
+        ..surface(palette().paper_3)
+    }
+}
+
 /// A drop-down (protocol, open as, transfer mode): like the text fields.
 pub fn pick_list(_: &Theme, status: iced_pick_list::Status) -> iced_pick_list::Style {
     let p = palette();

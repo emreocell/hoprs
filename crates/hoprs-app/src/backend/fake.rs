@@ -20,7 +20,8 @@
 //! - `connect_batch` runs the sites concurrently and sends each result as it finishes; a
 //!   site's connect can be held back with [`FakeBackend::hold_connect`].
 //!
-//! `save_site` keeps the backend-owned fields of a stored site (FTPS pin, `has_*`), and
+//! `save_site` keeps the backend-owned fields of a stored site (`has_*`, and the FTPS pin
+//! by the vault's [`merged_pin`](super::vault::merged_pin) rule), and
 //! `set_password` records the password and sets `has_password`, like the vault.
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -316,12 +317,13 @@ impl BackendApi for FakeBackend {
         let mut state = self.state();
         match state.sites.iter_mut().find(|s| s.id == site.id) {
             Some(slot) => {
-                site.ftp.pinned_fingerprint = slot.ftp.pinned_fingerprint.clone();
+                site.ftp.pinned_fingerprint = super::vault::merged_pin(Some(slot), &site);
                 site.has_password = slot.has_password;
                 site.has_key_passphrase = slot.has_key_passphrase;
                 *slot = site;
             }
             None => {
+                site.ftp.pinned_fingerprint = None;
                 site.has_password = false;
                 site.has_key_passphrase = false;
                 state.sites.push(site);

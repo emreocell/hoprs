@@ -239,8 +239,10 @@ impl SessionManager {
         let mut pending: FuturesUnordered<_> =
             self.site_connects(sites).await.into_iter().collect();
         while let Some(result) = pending.next().await {
-            // A closed receiver means nobody waits for the rest; finishing the connects
-            // keeps their sessions consistent all the same.
+            // A send fails only once the receiver is gone. In the app the receiver and this
+            // future live in the same stream, so they are dropped together: the remaining
+            // connects are then cancelled with it (not finished). A session already started
+            // stays registered, `Disconnected` or connecting, for the next connect or close.
             let _ = results.send(result);
         }
     }
