@@ -7,6 +7,7 @@ use hoprs_core::{RemoteEntry, RemotePath, Result};
 
 #[cfg(feature = "testing")]
 mod fault;
+mod io_err;
 mod local;
 #[cfg(feature = "testing")]
 mod mem;
@@ -14,6 +15,9 @@ mod mem;
 pub use fault::{FaultFs, Op};
 #[cfg(feature = "testing")]
 pub use mem::MemFs;
+mod sftp;
+
+pub use sftp::{SftpConfig, SftpFs};
 
 pub use local::LocalFs;
 

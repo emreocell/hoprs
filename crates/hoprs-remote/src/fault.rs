@@ -2,7 +2,8 @@
 //!
 //! Wraps any `RemoteFs` and can fail a chosen operation once, fail the byte
 //! stream once after a cumulative number of bytes, delay every call and every
-//! stream chunk, and record the offsets passed to `open_read`.
+//! stream chunk, lose a written chunk whose error only surfaces at shutdown
+//! (like a pipelined writer), and record the offsets passed to `open_read`.
 
 use std::collections::HashMap;
 use std::io;
@@ -16,6 +17,7 @@ use hoprs_core::{Error, ErrorKind, RemoteEntry, RemotePath, Result};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::time::Sleep;
 
+use crate::io_err::io_kind_for;
 use crate::{BoxAsyncRead, BoxAsyncWrite, RemoteFs};
 
 /// Operations that `FaultFs::fail_next` can target.
@@ -41,25 +43,16 @@ struct State {
     stream_latency: Duration,
     /// Offset of every `open_read` call, in call order.
     read_offsets: Vec<u64>,
+    /// One-shot deferred write failure: (threshold, kind).
+    lose_write_after: Option<(u64, ErrorKind)>,
+    /// Error the next write-stream shutdown reports (set when a chunk is lost).
+    shutdown_error: Option<ErrorKind>,
 }
 
 type Shared = Arc<Mutex<State>>;
 
 fn lock(s: &Shared) -> MutexGuard<'_, State> {
     s.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// Maps a core error kind to an `io::ErrorKind` such that
-/// `Error::from(io::Error::new(io_kind_for(kind), ..))` recovers `kind` for
-/// `Network`, `NotFound`, `Permission` and `Io`. Every other kind maps to
-/// `Other`, which converts back to `Io`.
-fn io_kind_for(kind: ErrorKind) -> io::ErrorKind {
-    match kind {
-        ErrorKind::Network => io::ErrorKind::ConnectionReset,
-        ErrorKind::NotFound => io::ErrorKind::NotFound,
-        ErrorKind::Permission => io::ErrorKind::PermissionDenied,
-        _ => io::ErrorKind::Other,
-    }
 }
 
 /// A `RemoteFs` that forwards to `inner` while injecting faults.
@@ -93,6 +86,19 @@ impl<F: RemoteFs> FaultFs<F> {
         let mut st = lock(&self.state);
         st.bytes = 0;
         st.fail_after = Some((bytes, kind));
+    }
+
+    /// Deferred write failure, as a pipelined writer reports it: the first
+    /// chunk written that would take the cumulative stream bytes (counted
+    /// from this call) past `bytes` is reported as written but silently
+    /// dropped; later chunks land normally (so the destination ends up
+    /// shorter than what was written, with misplaced data), and the next
+    /// write-stream shutdown fails once with an `io::Error` that
+    /// `Error::from` maps back to `kind`.
+    pub fn lose_write_after(&self, bytes: u64, kind: ErrorKind) {
+        let mut st = lock(&self.state);
+        st.bytes = 0;
+        st.lose_write_after = Some((bytes, kind));
     }
 
     /// The next call of `op` fails once with `kind`.
@@ -299,6 +305,10 @@ impl AsyncWrite for FaultWrite {
         if poll_stream_delay(&this.state, &mut this.delay, cx).is_pending() {
             return Poll::Pending;
         }
+        if lose_chunk(&self.state, buf.len()) {
+            self.delay = None;
+            return Poll::Ready(Ok(buf.len()));
+        }
         let cap = match allowance(&self.state, buf.len()) {
             Ok(n) => n,
             Err(e) => return Poll::Ready(Err(e)),
@@ -321,8 +331,32 @@ impl AsyncWrite for FaultWrite {
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
+        std::task::ready!(Pin::new(&mut self.inner).poll_shutdown(cx))?;
+        match lock(&self.state).shutdown_error.take() {
+            Some(kind) => Poll::Ready(Err(io::Error::new(
+                io_kind_for(kind),
+                "injected deferred write failure",
+            ))),
+            None => Poll::Ready(Ok(())),
+        }
     }
+}
+
+/// Whether the armed `lose_write_after` fires on a chunk of `len` bytes. If
+/// it does, the chunk is counted as written and the stream's shutdown error
+/// is armed.
+fn lose_chunk(state: &Shared, len: usize) -> bool {
+    let mut st = lock(state);
+    let Some((limit, kind)) = st.lose_write_after else {
+        return false;
+    };
+    if st.bytes + len as u64 <= limit {
+        return false;
+    }
+    st.lose_write_after = None;
+    st.shutdown_error = Some(kind);
+    st.bytes += len as u64;
+    true
 }
 
 #[cfg(test)]
@@ -387,6 +421,25 @@ mod tests {
         let io_err = r.read_to_end(&mut out).await.unwrap_err();
         assert_eq!(out, b"hel");
         assert_eq!(Error::from(io_err).kind, ErrorKind::Network);
+    }
+
+    #[tokio::test]
+    async fn lose_write_after_drops_a_chunk_and_fails_shutdown_once() {
+        let fs = fs_with_hello();
+        fs.lose_write_after(3, ErrorKind::Io);
+
+        let mut w = fs.open_write(&p("/g"), 0).await.unwrap();
+        w.write_all(b"ab").await.unwrap();
+        w.write_all(b"cd").await.unwrap();
+        w.write_all(b"ef").await.unwrap();
+        let io_err = w.shutdown().await.unwrap_err();
+        assert_eq!(Error::from(io_err).kind, ErrorKind::Io);
+        assert_eq!(fs.inner.read_file("/g").unwrap(), b"abef");
+
+        let mut w = fs.open_write(&p("/h"), 0).await.unwrap();
+        w.write_all(b"abcdef").await.unwrap();
+        w.shutdown().await.unwrap();
+        assert_eq!(fs.inner.read_file("/h").unwrap(), b"abcdef");
     }
 
     #[tokio::test]

@@ -5,6 +5,8 @@
 //! policy) and `copy` (stream the bytes). The actor holds the worker slot
 //! across both. For a directory, `prepare` creates the destination and lists
 //! the source; the actor frees the slot as soon as the listing arrives.
+//! Both phases watch the item's cancellation token: `prepare` stops at once
+//! (`Prepared::Stopped`), `copy` before its next block.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -61,6 +63,9 @@ pub(super) enum Prepared {
     Dir { entries: Vec<RemoteEntry> },
     /// A symlink, which is never followed.
     Symlink,
+    /// Stopped by the item's cancellation token before the destination was
+    /// opened for writing.
+    Stopped,
 }
 
 /// Messages from worker tasks to the actor.
@@ -96,17 +101,24 @@ where
     });
 }
 
+/// Runs `prepare` until it finishes or `cancel` fires (then: `Stopped`).
 pub(super) fn spawn_prepare(
     id: TransferId,
     route: Route,
     policy: ConflictPolicy,
+    cancel: CancellationToken,
     tx: mpsc::UnboundedSender<WorkerMsg>,
 ) {
     let route_on_panic = route.clone();
     spawn_phase(
         tx,
         async move {
-            let result = prepare(&route, policy).await.map(Box::new);
+            let result = tokio::select! {
+                biased;
+                () = cancel.cancelled() => Ok(Prepared::Stopped),
+                result = prepare(&route, policy) => result,
+            }
+            .map(Box::new);
             WorkerMsg::Prepared { id, route, result }
         },
         move || WorkerMsg::Prepared {
@@ -129,6 +141,12 @@ async fn prepare(route: &Route, policy: ConflictPolicy) -> Result<Prepared> {
         Err(e) if e.kind == ErrorKind::NotFound => None,
         Err(e) => return Err(e),
     };
+    if dst.as_ref().is_some_and(|d| d.kind != EntryKind::File) {
+        return Err(
+            Error::new(ErrorKind::Io, "Destination is not a regular file")
+                .with_detail(route.dst_path.to_string()),
+        );
+    }
     let decision = decide(policy, &src, dst.as_ref());
     Ok(Prepared::File { src, dst, decision })
 }

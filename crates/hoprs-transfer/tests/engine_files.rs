@@ -531,3 +531,50 @@ async fn uploads_zero_byte_file() {
     let snap = engine.snapshot().await;
     assert_eq!((snap[0].size, snap[0].bytes_done), (Some(0), 0));
 }
+
+const NOT_A_FILE: &str = "Destination is not a regular file";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn destination_directory_fails_item() {
+    let (engine, local, remote, mut rx) = engine_with_memfs(1).await;
+    engine.set_policy(ConflictPolicy::Overwrite).await;
+    local.add_file("/w/a.bin", &data(1_000), mtime());
+    remote.add_file("/srv/a.bin/keep.txt", b"keep", mtime());
+
+    let id = engine
+        .enqueue(spec(Direction::Upload, "/w/a.bin", "/srv/a.bin"))
+        .await
+        .unwrap();
+    match wait_terminal(&mut rx, id).await {
+        TransferState::Failed(e) => {
+            assert_eq!((e.kind, e.message.as_str()), (ErrorKind::Io, NOT_A_FILE));
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    let dir = remote.stat(&path("/srv/a.bin")).await.unwrap();
+    assert_eq!(dir.kind, hoprs_core::EntryKind::Dir);
+    assert_eq!(remote.read_file("/srv/a.bin/keep.txt").unwrap(), b"keep");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn destination_symlink_fails_item() {
+    let (engine, local, remote, mut rx) = engine_with_memfs(1).await;
+    engine.set_policy(ConflictPolicy::Overwrite).await;
+    local.add_file("/w/a.bin", &data(1_000), mtime());
+    remote.add_file("/srv/target", b"target", mtime());
+    remote.add_symlink("/srv/a.bin", "/srv/target");
+
+    let id = engine
+        .enqueue(spec(Direction::Upload, "/w/a.bin", "/srv/a.bin"))
+        .await
+        .unwrap();
+    match wait_terminal(&mut rx, id).await {
+        TransferState::Failed(e) => {
+            assert_eq!((e.kind, e.message.as_str()), (ErrorKind::Io, NOT_A_FILE));
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    let link = remote.stat(&path("/srv/a.bin")).await.unwrap();
+    assert_eq!(link.kind, hoprs_core::EntryKind::Symlink);
+    assert_eq!(remote.read_file("/srv/target").unwrap(), b"target");
+}

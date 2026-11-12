@@ -155,7 +155,19 @@ impl TransferEngine {
     }
 
     /// Requeues a failed or cancelled transfer (a folder: with its failed or
-    /// cancelled descendants).
+    /// cancelled descendants). Each item runs under its stored continuation
+    /// when it has one, never skipped because of its partial destination:
+    /// - a cancelled item keeps the continuation of the run it stopped:
+    ///   `Resume` (it continues its partial destination), or `Overwrite`
+    ///   when that run was replacing an existing file (it starts over);
+    /// - a failed item whose run held any continuation (its copy had been
+    ///   decided, or it ran under an override such as a user `resolve`)
+    ///   gets `Overwrite`: it starts over;
+    /// - any other item runs under the global policy.
+    ///
+    /// A child that failed because its name repeats an earlier entry of
+    /// its folder's listing is never retried: retrying it returns
+    /// `Conflict`, and retrying the folder leaves it failed.
     pub async fn retry(&self, id: TransferId) -> Result<()> {
         self.control(id, Control::Retry).await
     }
@@ -180,17 +192,44 @@ impl TransferEngine {
             .await;
     }
 
-    /// Stops dispatching the items of `site`; transfers already running
-    /// continue. Has no effect on an unknown or already paused site.
+    /// Stops dispatching the items of `site` (a user pause); transfers
+    /// already running continue. Has no effect on an unknown site. A network
+    /// failure on a user-paused site still emits `SitePaused`.
     pub async fn pause_site(&self, site: SiteId) {
         self.request(|reply| Command::PauseSite { site, reply })
             .await;
     }
 
-    /// Dispatches the items of a paused `site` again (after a manual pause or
-    /// a network failure). Has no effect on an unknown or unpaused site.
+    /// Dispatches the items of `site` again: clears both its user pause and
+    /// its network pause (an explicit "go" from the user; during a real
+    /// outage the next network error pauses the site again). Has no effect
+    /// on an unknown site.
     pub async fn resume_site(&self, site: SiteId) {
         self.request(|reply| Command::ResumeSite { site, reply })
+            .await;
+    }
+
+    /// Clears the network pause of `site` (set by a network error, announced
+    /// by `Event::SitePaused`). The site dispatches again unless the user
+    /// also paused it (`pause_site`). Has no effect on an unknown site.
+    ///
+    /// Integration pattern (the app wires one task per connected site):
+    /// the task watches `SshSession::state()` and
+    /// - when the state returns to `Connected` with a new
+    ///   `SshSession::generation()` (a reconnection), calls
+    ///   `network_restored(site)`;
+    /// - when a `SitePaused` for the site arrives while the state is still
+    ///   `Connected` (a request failed, e.g. timed out, but the connection
+    ///   never dropped, so no reconnection will follow), waits 2 s and, if
+    ///   the state is still `Connected`, calls `network_restored(site)`;
+    /// - when its event receiver reports `RecvError::Lagged` (a `SitePaused`
+    ///   may have been lost) and the state is `Connected`, calls
+    ///   `network_restored(site)`.
+    ///
+    /// Calling it when the site is not network-paused does nothing, so the
+    /// task never needs to know whether the site is paused.
+    pub async fn network_restored(&self, site: SiteId) {
+        self.request(|reply| Command::NetworkRestored { site, reply })
             .await;
     }
 

@@ -292,8 +292,9 @@ fn current_state(conn: &Connection, id: TransferId) -> Result<Option<(String, Op
 }
 
 /// Persists a new state. Moving to `Paused` records the state it was paused
-/// from. `next_policy` is kept while the item is `Queued`, `Active` or
-/// `Paused`, and cleared by any other state.
+/// from. `next_policy` is kept while the item is `Queued`, `Active`,
+/// `Paused`, `Failed` or `Cancelled` (a stopped copy keeps its continuation
+/// for a retry), and cleared by any other state.
 fn write_state(conn: &Connection, id: TransferId, state: &TransferState) -> Result<()> {
     let mut detail: Option<String> = None;
     let (mut kind, mut message, mut err_detail, mut conflict) = (None, None, None, None);
@@ -325,12 +326,16 @@ fn write_state(conn: &Connection, id: TransferId, state: &TransferState) -> Resu
             "skipped"
         }
         TransferState::Failed(e) => {
+            keep_policy = true;
             kind = Some(e.kind.as_str());
             message = Some(e.message.clone());
             err_detail = e.detail.clone();
             "failed"
         }
-        TransferState::Cancelled => "cancelled",
+        TransferState::Cancelled => {
+            keep_policy = true;
+            "cancelled"
+        }
     };
     conn.execute(
         "UPDATE transfers SET state = ?2, state_detail = ?3, error_kind = ?4, error_message = ?5, \
@@ -351,16 +356,32 @@ fn write_state(conn: &Connection, id: TransferId, state: &TransferState) -> Resu
     Ok(())
 }
 
+/// The `synchronous` setting for a database in `journal_mode`: `NORMAL` is
+/// only safe in WAL mode; in any other mode a power loss during a commit can
+/// corrupt the database unless every commit waits for the disk (`FULL`).
+fn sync_mode_for(journal_mode: &str) -> &'static str {
+    if journal_mode.eq_ignore_ascii_case("wal") {
+        "NORMAL"
+    } else {
+        "FULL"
+    }
+}
+
 impl QueueStore {
     /// Opens (creating if needed) the queue database at `path`, in WAL mode
     /// with `synchronous=NORMAL`: commits do not wait for an fsync, so a
     /// power loss may roll back the last few state changes, but an
     /// application crash loses nothing and the database never corrupts.
     /// (With the default `FULL`, every state change waits for the disk.)
+    /// If the file system refuses WAL mode, it stays in its journal mode with
+    /// `synchronous=FULL`.
     pub fn open(path: &Path) -> Result<QueueStore> {
         let conn = Connection::open(path).db()?;
-        conn.pragma_update(None, "journal_mode", "WAL").db()?;
-        conn.pragma_update(None, "synchronous", "NORMAL").db()?;
+        let mode: String = conn
+            .pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get(0))
+            .db()?;
+        conn.pragma_update(None, "synchronous", sync_mode_for(&mode))
+            .db()?;
         Self::init(conn)
     }
 
@@ -462,9 +483,9 @@ impl QueueStore {
 
     /// Records the conflict policy the next run of an unfinished item must
     /// use instead of the global one (`None`: the global one). It is kept
-    /// while the item is `Queued`, `Active` or `Paused` (including across
-    /// recovery) and cleared by any other state. Does nothing if the item is
-    /// in another state.
+    /// while the item is `Queued`, `Active`, `Paused`, `Failed` or
+    /// `Cancelled` (including across recovery) and cleared by any other
+    /// state. Does nothing unless the item is `Queued`, `Active` or `Paused`.
     pub fn set_next_policy(
         &mut self,
         id: TransferId,
@@ -878,7 +899,7 @@ mod tests {
         assert_eq!(s.next_policy(id).unwrap(), None);
         assert_eq!(s.paused_from(id).unwrap(), Some(PausedFrom::Active));
 
-        // Any other state clears it.
+        // Any other state but `Failed` and `Cancelled` clears it.
         let conflict = ConflictInfo {
             src_size: 1,
             dst_size: 2,
@@ -889,8 +910,6 @@ mod tests {
             TransferState::AwaitingDecision(conflict),
             TransferState::Done,
             TransferState::Skipped("exists".to_string()),
-            TransferState::Failed(Error::new(ErrorKind::Io, "x")),
-            TransferState::Cancelled,
         ] {
             let other = new_item(&mut s);
             s.set_next_policy(other, Some(ConflictPolicy::Resume))
@@ -900,6 +919,50 @@ mod tests {
             s.set_state(other, &TransferState::Queued).unwrap();
             assert_eq!(s.next_policy(other).unwrap(), None, "{st:?}");
         }
+    }
+
+    #[test]
+    fn failed_and_cancelled_keep_next_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queue.db");
+        let mut s = QueueStore::open(&path).unwrap();
+        let cases = [
+            (
+                TransferState::Failed(Error::new(ErrorKind::Io, "x")),
+                ConflictPolicy::Overwrite,
+            ),
+            (TransferState::Cancelled, ConflictPolicy::Resume),
+        ];
+        let mut ids = Vec::new();
+        for (st, policy) in &cases {
+            let id = new_item(&mut s);
+            s.set_state(id, &TransferState::Active).unwrap();
+            s.set_next_policy(id, Some(*policy)).unwrap();
+            s.set_state(id, st).unwrap();
+            assert_eq!(s.next_policy(id).unwrap(), Some(*policy), "{st:?}");
+            ids.push(id);
+        }
+        // Without a continuation they stay without one.
+        let plain = new_item(&mut s);
+        s.set_state(plain, &TransferState::Cancelled).unwrap();
+        assert_eq!(s.next_policy(plain).unwrap(), None);
+
+        // Kept across a reopen, and into the retried run.
+        drop(s);
+        let mut s = QueueStore::open(&path).unwrap();
+        s.recover().unwrap();
+        for (id, (_, policy)) in ids.iter().zip(&cases) {
+            assert_eq!(s.next_policy(*id).unwrap(), Some(*policy));
+            s.set_state(*id, &TransferState::Queued).unwrap();
+            assert_eq!(s.next_policy(*id).unwrap(), Some(*policy));
+        }
+    }
+
+    #[test]
+    fn sync_mode_follows_the_journal_mode() {
+        assert_eq!(sync_mode_for("wal"), "NORMAL");
+        assert_eq!(sync_mode_for("delete"), "FULL");
+        assert_eq!(sync_mode_for("memory"), "FULL");
     }
 
     /// Creates a schema-v1 queue file with the given rows
