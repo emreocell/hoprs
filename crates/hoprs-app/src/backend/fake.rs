@@ -434,15 +434,15 @@ impl BackendApi for FakeBackend {
 
     async fn list(
         &self,
-        session: SessionId,
+        session: Option<SessionId>,
         side: Side,
         path: RemotePath,
     ) -> Result<Vec<RemoteEntry>> {
         let fs = match side {
             Side::Local => self.local_fs(),
             Side::Remote => {
-                let site = self
-                    .session_site(session)
+                let site = session
+                    .and_then(|session| self.session_site(session))
                     .ok_or_else(|| Self::not_found("Unknown session"))?;
                 self.remote_fs(&site)
             }
@@ -513,12 +513,12 @@ mod tests {
         assert_eq!(missing.session, None);
 
         let remote = fake
-            .list(id, Side::Remote, RemotePath::new("/srv").unwrap())
+            .list(Some(id), Side::Remote, RemotePath::new("/srv").unwrap())
             .await
             .unwrap();
         assert_eq!(remote[0].name, "a.txt");
         let local = fake
-            .list(id, Side::Local, RemotePath::new("/home").unwrap())
+            .list(None, Side::Local, RemotePath::new("/home").unwrap())
             .await
             .unwrap();
         assert_eq!(local[0].name, "me");

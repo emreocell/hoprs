@@ -5,11 +5,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures_util::{Stream, StreamExt, stream};
-use hoprs_core::{Error, ErrorKind, Site, SiteId};
+use hoprs_core::{Error, ErrorKind, RemotePath, Site, SiteId};
 use tokio::sync::mpsc;
 
-use crate::app::{Effect, Message, ProfileOp};
-use crate::backend::BackendApi;
+use crate::app::{Effect, Message, ProfileOp, RequestId, TabId};
+use crate::backend::{BackendApi, SessionId, Side};
+use crate::ui::files;
 use crate::ui::site_form::PasswordChange;
 
 /// Runs one effect against the backend.
@@ -55,6 +56,26 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
             open_folder(backend.profile_dir()),
             Message::ProfileFolderOpened,
         ),
+        // Never cancelled: a listing the user moved away from finishes, and `update`
+        // drops its result by `request_id`.
+        Effect::List {
+            tab,
+            side,
+            request_id,
+            session,
+            path,
+        } => Task::future(list(backend, tab, side, request_id, session, path)),
+        Effect::ScrollPane {
+            tab,
+            side,
+            offset_y,
+        } => iced::widget::operation::scroll_to(
+            files::scroll_id(tab, side),
+            iced::widget::operation::AbsoluteOffset {
+                x: None,
+                y: Some(offset_y),
+            },
+        ),
     }
 }
 
@@ -70,6 +91,24 @@ pub async fn save_site(
         PasswordChange::Keep => Ok(()),
         PasswordChange::Set(password) => backend.set_password(id, Some(password)).await,
         PasswordChange::Forget => backend.set_password(id, None).await,
+    }
+}
+
+/// Runs one listing to its end and tags the result with its request.
+pub async fn list(
+    backend: Arc<dyn BackendApi>,
+    tab: TabId,
+    side: Side,
+    request_id: RequestId,
+    session: Option<SessionId>,
+    path: RemotePath,
+) -> Message {
+    let result = backend.list(session, side, path).await;
+    Message::Listed {
+        tab,
+        side,
+        request_id,
+        result,
     }
 }
 

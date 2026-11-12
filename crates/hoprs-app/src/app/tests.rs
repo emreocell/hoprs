@@ -42,9 +42,18 @@ async fn loaded(fake: &FakeBackend) -> App {
     app
 }
 
-/// The single `ConnectSites` effect of `effects`.
+/// `effects` without the file panes' listings and scrolls (Task 6), for the tests about
+/// connections and profiles.
+fn without_panes(effects: Vec<Effect>) -> Vec<Effect> {
+    effects
+        .into_iter()
+        .filter(|e| !matches!(e, Effect::List { .. } | Effect::ScrollPane { .. }))
+        .collect()
+}
+
+/// The single `ConnectSites` effect of `effects` (pane effects aside).
 fn connect_effect(effects: Vec<Effect>) -> Vec<SiteId> {
-    match <[Effect; 1]>::try_from(effects) {
+    match <[Effect; 1]>::try_from(without_panes(effects)) {
         Ok([Effect::ConnectSites(sites)]) => sites,
         other => panic!("expected one ConnectSites effect, got {other:?}"),
     }
@@ -60,10 +69,11 @@ async fn drive(app: &mut App, fake: &Arc<FakeBackend>, sites: Vec<SiteId>) -> Ve
     )
     .await
     .expect("the batch finishes");
-    messages
+    let effects = messages
         .into_iter()
         .flat_map(|message| app.update(message))
-        .collect()
+        .collect();
+    without_panes(effects)
 }
 
 fn tab_state<'a>(app: &'a App, site: &SiteId) -> &'a TabState {
@@ -348,7 +358,7 @@ async fn open_workspace_connects_all_in_parallel() {
             panic!("{message:?}");
         };
         early.push(site.clone());
-        assert!(app.update(message).is_empty());
+        assert!(without_panes(app.update(message)).is_empty());
     }
     early.sort_by(|x, y| x.0.cmp(&y.0));
     let mut expected = vec![b.id.clone(), c.id.clone()];
@@ -359,7 +369,7 @@ async fn open_workspace_connects_all_in_parallel() {
 
     release_a.send(()).unwrap();
     let last = stream.next().await.unwrap();
-    assert!(app.update(last).is_empty());
+    assert!(without_panes(app.update(last)).is_empty());
     assert!(stream.next().await.is_none(), "one message per site");
     assert!(matches!(tab_state(&app, &a.id), TabState::Connected(_)));
 
@@ -664,10 +674,10 @@ async fn edit_after_failure_retries_with_a_new_session() {
     effects::save_site(fake.clone(), site, password)
         .await
         .unwrap();
-    let effects = app.update(Message::FormDone {
+    let effects = without_panes(app.update(Message::FormDone {
         op: ProfileOp::SaveSite(a.id.clone()),
         result: Ok(()),
-    });
+    }));
     assert!(matches!(
         effects[..],
         [Effect::LoadProfiles, Effect::CloseSession(s)] if s == kept
@@ -693,10 +703,10 @@ async fn edit_after_failure_retries_with_a_new_session() {
     // A connected session is left alone by a later save.
     app.update(Message::EditSite(a.id.clone()));
     type_site(&mut app, SiteFormMsg::Save);
-    let effects = app.update(Message::FormDone {
+    let effects = without_panes(app.update(Message::FormDone {
         op: ProfileOp::SaveSite(a.id.clone()),
         result: Ok(()),
-    });
+    }));
     assert!(matches!(effects[..], [Effect::LoadProfiles]));
 }
 
@@ -751,4 +761,458 @@ async fn late_form_result_leaves_other_form_untouched() {
     app.update(Message::EditSite(a.id.clone()));
     app.update(Message::FormDone { op, result: Ok(()) });
     assert!(site_form(&mut app).editing);
+}
+
+// ---- Task 6: file panes ----
+
+use std::time::SystemTime;
+
+use hoprs_core::RemotePath;
+
+use crate::app::files::{Listing, PaneStatus, SortKey};
+use crate::backend::{SessionId, Side};
+
+fn rpath(s: &str) -> RemotePath {
+    RemotePath::new(s).unwrap()
+}
+
+/// The listings among `effects`, as `(side, request, session, path)`.
+fn listings(effects: &[Effect]) -> Vec<(Side, RequestId, Option<SessionId>, String)> {
+    effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::List {
+                side,
+                request_id,
+                session,
+                path,
+                ..
+            } => Some((*side, *request_id, *session, path.to_string())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Runs every listing of `effects` against `fake`, as `effects::run` would, and returns
+/// their `Listed` messages in effect order (not yet delivered).
+async fn run_listings(fake: &Arc<FakeBackend>, effects: &[Effect]) -> Vec<Message> {
+    let mut messages = Vec::new();
+    for effect in effects {
+        if let Effect::List {
+            tab,
+            side,
+            request_id,
+            session,
+            path,
+        } = effect
+        {
+            let backend: Arc<dyn BackendApi> = fake.clone();
+            messages.push(
+                effects::list(backend, *tab, *side, *request_id, *session, path.clone()).await,
+            );
+        }
+    }
+    messages
+}
+
+/// Delivers messages, running the listings they cause, until nothing is left.
+async fn settle(app: &mut App, fake: &Arc<FakeBackend>, mut pending: Vec<Message>) {
+    while !pending.is_empty() {
+        let mut next = Vec::new();
+        for message in pending {
+            let effects = app.update(message);
+            next.extend(run_listings(fake, &effects).await);
+        }
+        pending = next;
+    }
+}
+
+fn pane_msg(tab: TabId, side: Side, msg: PaneMsg) -> Message {
+    Message::Pane { tab, side, msg }
+}
+
+fn entry_names(app: &App, index: usize, side: Side) -> Vec<String> {
+    app.tabs[index]
+        .pane(side)
+        .entries
+        .iter()
+        .map(|e| e.name.clone())
+        .collect()
+}
+
+/// A connected tab for a site whose remote side starts at `/srv`, its local side at the
+/// fake home, both listed.
+async fn connected_tab(fake: &Arc<FakeBackend>, a: &Site) -> App {
+    let mut app = loaded(fake).await;
+    app.home = Some(rpath("/home/me"));
+    let effects = app.update(Message::ConnectSite(a.id.clone()));
+    settle(&mut app, fake, run_listings(fake, &effects).await).await;
+    let backend: Arc<dyn BackendApi> = fake.clone();
+    let messages: Vec<Message> = effects::connect_sites(backend, vec![a.id.clone()])
+        .collect()
+        .await;
+    settle(&mut app, fake, messages).await;
+    app
+}
+
+/// Review Focus 1: the user leaves a folder while its listing is in flight. The old
+/// listing is not cancelled; its late result never replaces the new folder.
+#[tokio::test]
+async fn stale_listing_is_ignored() {
+    let mut a = site("a", "h", "u", Protocol::Ftp);
+    a.remote_dir = Some("/srv".into());
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    let remote = fake.remote_fs(&a.id);
+    remote.add_file("/srv/old/stale.txt", b"x", SystemTime::UNIX_EPOCH);
+    remote.add_file("/srv/new/fresh.txt", b"y", SystemTime::UNIX_EPOCH);
+    fake.local_fs().add_dir("/home/me/work");
+
+    let mut app = loaded(&fake).await;
+    app.home = Some(rpath("/home/me"));
+
+    // A new tab lists its local start folder (home) at once; the remote side waits for
+    // the connection, then lists the site's folder on its session.
+    let effects = app.update(Message::ConnectSite(a.id.clone()));
+    let local = listings(&effects);
+    assert_eq!(local.len(), 1);
+    assert_eq!(local[0].0, Side::Local);
+    assert_eq!((local[0].2, local[0].3.as_str()), (None, "/home/me"));
+    let tab = app.tabs[0].id;
+    let backend: Arc<dyn BackendApi> = fake.clone();
+    let mut connected = Vec::new();
+    for message in effects::connect_sites(backend, vec![a.id.clone()])
+        .collect::<Vec<_>>()
+        .await
+    {
+        connected.extend(app.update(message));
+    }
+    let remote_list = listings(&connected);
+    assert_eq!(remote_list.len(), 1);
+    assert_eq!(remote_list[0].0, Side::Remote);
+    assert!(
+        remote_list[0].2.is_some(),
+        "the remote side lists on the session"
+    );
+    assert_eq!(remote_list[0].3, "/srv");
+    settle(&mut app, &fake, run_listings(&fake, &connected).await).await;
+    settle(&mut app, &fake, run_listings(&fake, &effects).await).await;
+    assert_eq!(entry_names(&app, 0, Side::Remote), ["new", "old"]);
+    assert_eq!(entry_names(&app, 0, Side::Local), ["work"]);
+
+    // Into "old"; before it answers, back up with ".." (row 0, the only row while it
+    // loads), then into "new" from the breadcrumb: three listings in flight.
+    let to_old = app.update(pane_msg(tab, Side::Remote, PaneMsg::Open(2)));
+    assert_eq!(app.tabs[0].remote.path, rpath("/srv/old"));
+    assert_eq!(app.tabs[0].pane_status(Side::Remote), PaneStatus::Loading);
+    let to_up = app.update(pane_msg(tab, Side::Remote, PaneMsg::Open(0)));
+    assert_eq!(app.tabs[0].remote.path, rpath("/srv"));
+    let to_new = app.update(pane_msg(
+        tab,
+        Side::Remote,
+        PaneMsg::Navigate(rpath("/srv/new")),
+    ));
+    assert_eq!(app.tabs[0].remote.path, rpath("/srv/new"));
+    let (old_id, up_id, new_id) = (
+        listings(&to_old)[0].1,
+        listings(&to_up)[0].1,
+        listings(&to_new)[0].1,
+    );
+    assert!(
+        old_id < up_id && up_id < new_id,
+        "each request has a new id"
+    );
+    // Navigating scrolls the new folder to the top.
+    assert!(to_new.iter().any(|e| matches!(
+        e,
+        Effect::ScrollPane { side: Side::Remote, offset_y, .. } if *offset_y == 0.0
+    )));
+
+    // All three listings run to their end (none is cancelled)...
+    let old = run_listings(&fake, &to_old).await;
+    let up = run_listings(&fake, &to_up).await;
+    let new = run_listings(&fake, &to_new).await;
+    assert!(matches!(&old[0], Message::Listed { result: Ok(e), .. } if e[0].name == "stale.txt"));
+
+    // ...and the late ones, arriving before or after the latest, change nothing.
+    assert!(app.update(old.into_iter().next().unwrap()).is_empty());
+    assert_eq!(app.tabs[0].pane_status(Side::Remote), PaneStatus::Loading);
+    assert!(app.tabs[0].remote.entries.is_empty());
+    assert!(app.update(new.into_iter().next().unwrap()).is_empty());
+    assert_eq!(entry_names(&app, 0, Side::Remote), ["fresh.txt"]);
+    assert!(app.update(up.into_iter().next().unwrap()).is_empty());
+    assert_eq!(app.tabs[0].remote.path, rpath("/srv/new"));
+    assert_eq!(entry_names(&app, 0, Side::Remote), ["fresh.txt"]);
+    assert_eq!(app.tabs[0].remote.request, None, "nothing in flight");
+
+    // The same id for the other pane, or for a closed tab, is not applied either.
+    let again = app.update(pane_msg(tab, Side::Remote, PaneMsg::Retry));
+    let id = listings(&again)[0].1;
+    let stray = Message::Listed {
+        tab,
+        side: Side::Local,
+        request_id: id,
+        result: Ok(Vec::new()),
+    };
+    assert!(app.update(stray).is_empty());
+    assert_eq!(entry_names(&app, 0, Side::Local), ["work"]);
+    let closed = app.update(Message::CloseTab(tab));
+    assert!(matches!(closed[..], [Effect::CloseSession(_)]));
+    let late = run_listings(&fake, &again).await;
+    assert!(app.update(late.into_iter().next().unwrap()).is_empty());
+    assert!(app.tabs.is_empty());
+}
+
+/// A pane goes loading -> error (with Retry) -> loading -> full, and shows empty folders
+/// and a failed connection as their own states.
+#[tokio::test]
+async fn panel_states() {
+    let mut a = site("a", "h", "u", Protocol::Ssh);
+    a.remote_dir = Some("/srv".into());
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    fake.local_fs().add_dir("/home/me/empty");
+
+    let mut app = loaded(&fake).await;
+    app.home = Some(rpath("/home/me"));
+    let effects = app.update(Message::ConnectSite(a.id.clone()));
+    let tab = app.tabs[0].id;
+    // Connecting: both panes load (the remote one waits for its session).
+    assert_eq!(app.tabs[0].pane_status(Side::Local), PaneStatus::Loading);
+    assert_eq!(app.tabs[0].pane_status(Side::Remote), PaneStatus::Loading);
+    assert_eq!(app.tabs[0].remote.listing, Listing::Idle);
+    settle(&mut app, &fake, run_listings(&fake, &effects).await).await;
+    assert_eq!(app.tabs[0].pane_status(Side::Local), PaneStatus::Full);
+
+    // Connected, but "/srv" does not exist yet: loading, then the error.
+    let backend: Arc<dyn BackendApi> = fake.clone();
+    let mut listing = Vec::new();
+    for message in effects::connect_sites(backend, vec![a.id.clone()])
+        .collect::<Vec<_>>()
+        .await
+    {
+        listing.extend(app.update(message));
+    }
+    assert_eq!(app.tabs[0].pane_status(Side::Remote), PaneStatus::Loading);
+    settle(&mut app, &fake, run_listings(&fake, &listing).await).await;
+    let PaneStatus::Failed(error) = app.tabs[0].pane_status(Side::Remote) else {
+        panic!("{:?}", app.tabs[0].remote.listing);
+    };
+    assert_eq!(error.kind, ErrorKind::NotFound);
+    assert_eq!(app.tabs[0].remote.path, rpath("/srv"), "the path is kept");
+
+    // The folder appears; Retry lists it again: loading, then full.
+    fake.remote_fs(&a.id)
+        .add_file("/srv/a.txt", b"abc", SystemTime::UNIX_EPOCH);
+    let retry = app.update(pane_msg(tab, Side::Remote, PaneMsg::Retry));
+    assert_eq!(listings(&retry).len(), 1);
+    assert_eq!(listings(&retry)[0].3, "/srv");
+    assert_eq!(app.tabs[0].pane_status(Side::Remote), PaneStatus::Loading);
+    settle(&mut app, &fake, run_listings(&fake, &retry).await).await;
+    assert_eq!(app.tabs[0].pane_status(Side::Remote), PaneStatus::Full);
+    assert_eq!(entry_names(&app, 0, Side::Remote), ["a.txt"]);
+
+    // An empty folder is its own state, with ".." still there.
+    let empty = app.update(pane_msg(tab, Side::Local, PaneMsg::Open(1)));
+    assert_eq!(app.tabs[0].local.path, rpath("/home/me/empty"));
+    settle(&mut app, &fake, run_listings(&fake, &empty).await).await;
+    assert_eq!(app.tabs[0].pane_status(Side::Local), PaneStatus::Empty);
+    assert_eq!(app.tabs[0].local.row_count(), 1, "just ..");
+
+    // A failed connection: the remote side is "Not connected"; the local side works.
+    let b = site("b", "h", "u", Protocol::Ftp);
+    let fake = Arc::new(FakeBackend::new().with_site(b.clone()));
+    fake.fail_next_connect(&b.id, Error::new(ErrorKind::Auth, "Denied"));
+    fake.local_fs().add_dir("/home/me/x");
+    let mut app = loaded(&fake).await;
+    app.home = Some(rpath("/home/me"));
+    let effects = app.update(Message::ConnectSite(b.id.clone()));
+    settle(&mut app, &fake, run_listings(&fake, &effects).await).await;
+    drive(&mut app, &fake, vec![b.id.clone()]).await;
+    assert_eq!(
+        app.tabs[0].pane_status(Side::Remote),
+        PaneStatus::NotConnected
+    );
+    assert_eq!(app.tabs[0].pane_status(Side::Local), PaneStatus::Full);
+    // Reconnect goes through the sidebar's connect path: the remote side loads, then
+    // lists once connected.
+    let sites = connect_effect(app.update(Message::ConnectSite(b.id.clone())));
+    assert_eq!(app.tabs[0].pane_status(Side::Remote), PaneStatus::Loading);
+    let backend: Arc<dyn BackendApi> = fake.clone();
+    let messages: Vec<Message> = effects::connect_sites(backend, sites).collect().await;
+    settle(&mut app, &fake, messages).await;
+    assert_eq!(app.tabs[0].pane_status(Side::Remote), PaneStatus::Empty);
+}
+
+/// Arrows move the cursor (Shift extends), Enter enters the folder, Backspace goes up,
+/// Tab switches panes; clicks read the held modifiers; a header click sorts.
+#[tokio::test]
+async fn keyboard_and_clicks_drive_the_focused_pane() {
+    let mut a = site("a", "h", "u", Protocol::Ftp);
+    a.remote_dir = Some("/srv".into());
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    let remote = fake.remote_fs(&a.id);
+    remote.add_file("/srv/b.txt", b"bb", SystemTime::UNIX_EPOCH);
+    remote.add_file("/srv/c.txt", b"c", SystemTime::UNIX_EPOCH);
+    remote.add_file("/srv/docs/readme", b"r", SystemTime::UNIX_EPOCH);
+    fake.local_fs().add_dir("/home/me");
+    let mut app = connected_tab(&fake, &a).await;
+    let tab = app.tabs[0].id;
+    assert_eq!(
+        entry_names(&app, 0, Side::Remote),
+        ["docs", "b.txt", "c.txt"]
+    );
+
+    // The local pane has the focus first; Tab moves it.
+    assert_eq!(app.tabs[0].focus, Side::Local);
+    let key = |key| Message::Key { key, shift: false };
+    app.update(key(FileKey::SwitchPane));
+    assert_eq!(app.tabs[0].focus, Side::Remote);
+
+    // Rows: 0 "..", 1 docs, 2 b.txt, 3 c.txt.
+    app.update(key(FileKey::Down));
+    app.update(key(FileKey::Down));
+    app.update(Message::Key {
+        key: FileKey::Down,
+        shift: true,
+    });
+    let sel = |app: &App| {
+        app.tabs[0]
+            .remote
+            .selection
+            .rows
+            .iter()
+            .copied()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(sel(&app), [1, 2]);
+    app.update(key(FileKey::End));
+    assert_eq!(sel(&app), [3]);
+    app.update(key(FileKey::Home));
+    assert_eq!(sel(&app), [0]);
+
+    // A Ctrl+click adds; the modifiers come from the keyboard subscription.
+    app.update(Message::Modifiers(Mods {
+        ctrl: true,
+        shift: false,
+    }));
+    app.update(pane_msg(tab, Side::Remote, PaneMsg::Click(3)));
+    assert_eq!(sel(&app), [0, 3]);
+    app.update(Message::Modifiers(Mods::default()));
+
+    // A header click sorts (once) and keeps the selection: by size, c.txt before b.txt.
+    app.update(pane_msg(tab, Side::Remote, PaneMsg::Sort(SortKey::Size)));
+    assert_eq!(
+        entry_names(&app, 0, Side::Remote),
+        ["docs", "c.txt", "b.txt"]
+    );
+    assert_eq!(sel(&app), [0, 2], "still .. and c.txt");
+    // Again: descending.
+    app.update(pane_msg(tab, Side::Remote, PaneMsg::Sort(SortKey::Size)));
+    assert_eq!(
+        entry_names(&app, 0, Side::Remote),
+        ["docs", "b.txt", "c.txt"]
+    );
+
+    // Enter on a folder enters it; on a file, nothing happens.
+    app.update(pane_msg(tab, Side::Remote, PaneMsg::Click(1)));
+    let enter = app.update(key(FileKey::Enter));
+    assert_eq!(listings(&enter)[0].3, "/srv/docs");
+    settle(&mut app, &fake, run_listings(&fake, &enter).await).await;
+    assert_eq!(entry_names(&app, 0, Side::Remote), ["readme"]);
+    app.update(key(FileKey::End));
+    assert!(
+        app.update(key(FileKey::Enter)).is_empty(),
+        "a file is not entered"
+    );
+    // Backspace goes up.
+    let back = app.update(key(FileKey::Back));
+    assert_eq!(listings(&back)[0].3, "/srv");
+
+    // A cursor moved below the visible rows scrolls the list to show it.
+    settle(&mut app, &fake, run_listings(&fake, &back).await).await;
+    app.update(pane_msg(
+        tab,
+        Side::Remote,
+        PaneMsg::Scrolled {
+            offset_y: 0.0,
+            viewport_h: 60.0,
+        },
+    ));
+    app.update(key(FileKey::Home));
+    assert!(
+        app.update(key(FileKey::Down)).is_empty(),
+        "row 1 is in view"
+    );
+    let scrolled = app.update(key(FileKey::Down));
+    assert!(matches!(
+        scrolled[..],
+        [Effect::ScrollPane { side: Side::Remote, offset_y, .. }] if offset_y == 30.0
+    ));
+
+    // A form open in the center takes no file keys.
+    app.update(Message::NewSite);
+    assert!(app.update(key(FileKey::Home)).is_empty());
+    assert_eq!(sel(&app), [2]);
+}
+
+/// The × closes the tab and its session; the neighbours keep their places.
+#[tokio::test]
+async fn close_tab_closes_its_session() {
+    let a = site("a", "h", "u", Protocol::Ssh);
+    let b = site("b", "h", "u", Protocol::Ftp);
+    let ws = workspace("w", &[&a.id, &b.id]);
+    let fake = Arc::new(
+        FakeBackend::new()
+            .with_site(a.clone())
+            .with_site(b.clone())
+            .with_workspace(ws.clone()),
+    );
+    let mut app = loaded(&fake).await;
+    let sites = connect_effect(app.update(Message::OpenWorkspace(ws.id.clone())));
+    drive(&mut app, &fake, sites).await;
+    app.update(Message::SelectTab(1));
+    let (first, second) = (app.tabs[0].id, app.tabs[1].id);
+    let TabState::Connected(connected) = tab_state(&app, &a.id).clone() else {
+        panic!("{:?}", app.tabs);
+    };
+
+    let effects = app.update(Message::CloseTab(first));
+    assert!(matches!(
+        without_panes(effects)[..],
+        [Effect::CloseSession(s)] if s == connected.session
+    ));
+    assert_eq!(app.tabs.len(), 1);
+    assert_eq!(app.tabs[0].id, second);
+    assert_eq!(
+        app.active_tab,
+        Some(0),
+        "the active tab moved with its index"
+    );
+    // A stale id does nothing.
+    assert!(app.update(Message::CloseTab(first)).is_empty());
+}
+
+/// Showing another tab resyncs its lists' scroll offsets.
+#[tokio::test]
+async fn switching_tabs_restores_scroll_offsets() {
+    let a = site("a", "h", "u", Protocol::Ssh);
+    let b = site("b", "h", "u", Protocol::Ftp);
+    let ws = workspace("w", &[&a.id, &b.id]);
+    let fake = Arc::new(
+        FakeBackend::new()
+            .with_site(a.clone())
+            .with_site(b.clone())
+            .with_workspace(ws.clone()),
+    );
+    let mut app = loaded(&fake).await;
+    let sites = connect_effect(app.update(Message::OpenWorkspace(ws.id.clone())));
+    drive(&mut app, &fake, sites).await;
+    let second = app.tabs[1].id;
+    app.tabs[1].local.offset_y = 300.0;
+    let effects = app.update(Message::SelectTab(1));
+    assert!(effects.iter().any(|e| matches!(
+        e,
+        Effect::ScrollPane { tab, side: Side::Local, offset_y } if *tab == second && *offset_y == 300.0
+    )));
+    // Selecting the tab already shown changes nothing.
+    assert!(app.update(Message::SelectTab(1)).is_empty());
 }

@@ -42,5 +42,6 @@ quick-xml = "0.42"
 # GUI (hoprs-app only).
 iced = { version = "0.14.0", features = ["tokio", "advanced", "wgpu", "tiny-skia"] }
 fs4 = "1.1"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

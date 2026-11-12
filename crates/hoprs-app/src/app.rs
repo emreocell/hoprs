@@ -3,10 +3,10 @@
 
 use std::collections::HashSet;
 
-use hoprs_core::{Error, Site, SiteId, Workspace, WorkspaceId};
+use hoprs_core::{Error, RemoteEntry, RemotePath, Site, SiteId, Workspace, WorkspaceId};
 use hoprs_vault::UnreadableEntry;
 
-use crate::backend::{ConnectError, ConnectResult, Connected, ProfileSnapshot, SessionId};
+use crate::backend::{ConnectError, ConnectResult, Connected, ProfileSnapshot, SessionId, Side};
 use crate::ui::sidebar;
 use crate::ui::site_form::{PasswordChange, SiteForm, SiteFormMsg, SiteFormOutcome};
 use crate::ui::workspace_form::{WorkspaceForm, WorkspaceFormMsg, WorkspaceFormOutcome};
@@ -28,13 +28,9 @@ pub enum Form {
     Workspace(WorkspaceForm),
 }
 
-/// One tab per site, created by "Open workspace" or a click on a site. This task only
-/// tracks its connection; Task 6 gives it file panes.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Tab {
-    pub site: SiteId,
-    pub state: TabState,
-}
+pub mod files;
+
+pub use files::{FileKey, Mods, PaneMsg, RequestId, Tab, TabId};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TabState {
@@ -69,10 +65,17 @@ pub struct App {
     /// Workspaces expanded in the sidebar.
     pub expanded: HashSet<WorkspaceId>,
     pub form: Option<Form>,
+    /// One tab per site, created by "Open workspace" or a click on a site.
     pub tabs: Vec<Tab>,
     pub active_tab: Option<usize>,
     /// A sidebar action failed (opening the profile folder).
     pub sidebar_error: Option<Error>,
+    /// Where a local pane starts when its site names no folder.
+    pub home: Option<RemotePath>,
+    /// The modifiers held now, for clicks in the file lists.
+    pub mods: Mods,
+    /// The last tab or listing id handed out.
+    next_id: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +110,27 @@ pub enum Message {
     },
     OpenProfileFolder,
     ProfileFolderOpened(Result<(), Error>),
+    /// The × of a tab: closes it and its session.
+    CloseTab(TabId),
+    /// Something in one pane of a file tab.
+    Pane {
+        tab: TabId,
+        side: Side,
+        msg: PaneMsg,
+    },
+    /// A listing finished; dropped unless `request_id` is the pane's latest request.
+    Listed {
+        tab: TabId,
+        side: Side,
+        request_id: RequestId,
+        result: Result<Vec<RemoteEntry>, Error>,
+    },
+    /// A key no widget took, for the focused pane.
+    Key {
+        key: FileKey,
+        shift: bool,
+    },
+    Modifiers(Mods),
 }
 
 /// The profile change a form asked for, carried back with its result.
@@ -137,6 +161,22 @@ pub enum Effect {
     CloseSession(SessionId),
     /// Opens the directory of `sites.toml` with the system file manager.
     OpenProfileFolder,
+    /// Lists a pane's folder; the result comes back as [`Message::Listed`]. The remote
+    /// side needs `session`; the local side has none.
+    List {
+        tab: TabId,
+        side: Side,
+        request_id: RequestId,
+        session: Option<SessionId>,
+        path: RemotePath,
+    },
+    /// Scrolls a pane's list to `offset_y` (a new folder, the keyboard cursor, a tab
+    /// shown again).
+    ScrollPane {
+        tab: TabId,
+        side: Side,
+        offset_y: f32,
+    },
 }
 
 impl App {
@@ -153,6 +193,9 @@ impl App {
             tabs: Vec::new(),
             active_tab: None,
             sidebar_error: None,
+            home: dirs::home_dir().as_deref().and_then(files::local_path),
+            mods: Mods::default(),
+            next_id: 0,
         }
     }
 
@@ -195,6 +238,27 @@ impl App {
 
     /// Applies `msg`; returns the effects to run. Never blocks.
     pub fn update(&mut self, msg: Message) -> Vec<Effect> {
+        let shown = self.shown_tab();
+        let mut effects = self.apply(msg);
+        // The center now shows another tab (or a tab instead of a form): its lists'
+        // scrollables must match the offsets the panes remember.
+        if self.shown_tab() != shown && self.shown_tab().is_some() {
+            effects.extend(self.sync_scroll());
+        }
+        effects
+    }
+
+    /// The tab the center shows, if any.
+    fn shown_tab(&self) -> Option<TabId> {
+        if self.form.is_some() {
+            return None;
+        }
+        self.active_tab
+            .and_then(|i| self.tabs.get(i))
+            .map(|tab| tab.id)
+    }
+
+    fn apply(&mut self, msg: Message) -> Vec<Effect> {
         match msg {
             Message::ToggleQueue => self.queue_open = !self.queue_open,
             Message::FilterSites(filter) => self.site_filter = filter,
@@ -245,6 +309,20 @@ impl App {
             Message::FormDone { op, result } => return self.form_done(op, result),
             Message::OpenProfileFolder => return vec![Effect::OpenProfileFolder],
             Message::ProfileFolderOpened(result) => self.sidebar_error = result.err(),
+            Message::CloseTab(id) => {
+                if let Some(index) = self.tab_index(id) {
+                    return self.close_tab(index);
+                }
+            }
+            Message::Pane { tab, side, msg } => return self.pane_msg(tab, side, msg),
+            Message::Listed {
+                tab,
+                side,
+                request_id,
+                result,
+            } => return self.listed(tab, side, request_id, result),
+            Message::Key { key, shift } => return self.file_key(key, shift),
+            Message::Modifiers(mods) => self.mods = mods,
         }
         Vec::new()
     }
@@ -269,9 +347,11 @@ impl App {
 
     /// Makes sure each site has a tab, focuses the first, and connects the sites that are
     /// neither connected nor already connecting (a failed tab is retried), as one batch.
+    /// A new tab also lists its local folder.
     fn open_tabs(&mut self, sites: Vec<SiteId>) -> Vec<Effect> {
         let mut first = None;
         let mut connect = Vec::new();
+        let mut listings = Vec::new();
         for site in sites {
             let index = match self.tab_of(&site) {
                 Some(index) => {
@@ -283,10 +363,9 @@ impl App {
                     index
                 }
                 None => {
-                    self.tabs.push(Tab {
-                        site: site.clone(),
-                        state: TabState::Connecting,
-                    });
+                    let (tab, listing) = self.new_tab(site.clone());
+                    self.tabs.push(tab);
+                    listings.push(listing);
                     connect.push(site);
                     self.tabs.len() - 1
                 }
@@ -296,10 +375,12 @@ impl App {
         if first.is_some() {
             self.active_tab = first;
         }
-        if connect.is_empty() {
-            return Vec::new();
+        let mut effects = Vec::new();
+        if !connect.is_empty() {
+            effects.push(Effect::ConnectSites(connect));
         }
-        vec![Effect::ConnectSites(connect)]
+        effects.extend(listings);
+        effects
     }
 
     /// One site's result lands in its own tab, whatever the other sites do.
@@ -312,11 +393,17 @@ impl App {
             };
             return session.map(Effect::CloseSession).into_iter().collect();
         };
-        self.tabs[index].state = match result {
-            Ok(connected) => TabState::Connected(connected),
-            Err(failure) => TabState::Failed(failure),
-        };
-        Vec::new()
+        match result {
+            Ok(connected) => {
+                self.tabs[index].state = TabState::Connected(connected);
+                // The remote pane lists its folder now that it can.
+                self.request_listing(index, Side::Remote)
+            }
+            Err(failure) => {
+                self.tabs[index].state = TabState::Failed(failure);
+                Vec::new()
+            }
+        }
     }
 
     fn site_form(&mut self, msg: SiteFormMsg) -> Vec<Effect> {
@@ -407,9 +494,15 @@ impl App {
 
     /// Removes the site's tab and closes its session, if any.
     fn close_site_tabs(&mut self, site: &SiteId) -> Vec<Effect> {
-        let Some(index) = self.tab_of(site) else {
-            return Vec::new();
-        };
+        match self.tab_of(site) {
+            Some(index) => self.close_tab(index),
+            None => Vec::new(),
+        }
+    }
+
+    /// Removes the tab at `index` and closes its session, if any. A listing still in
+    /// flight for it finds no tab and is dropped.
+    fn close_tab(&mut self, index: usize) -> Vec<Effect> {
         let tab = self.tabs.remove(index);
         self.active_tab = match self.active_tab {
             _ if self.tabs.is_empty() => None,

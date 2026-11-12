@@ -48,6 +48,7 @@ fn main() -> iced::Result {
     };
 
     iced::application(boot, update, view)
+        .subscription(subscription)
         .title(ui::strings::APP_TITLE)
         .theme(|_: &Hoprs| ui::theme::theme())
         .settings(iced::Settings {
@@ -110,6 +111,11 @@ fn run_effects(backend: &Arc<dyn BackendApi>, effects: Vec<app::Effect>) -> Task
 
 fn view(state: &Hoprs) -> iced::Element<'_, Message> {
     ui::layout::view(&state.app)
+}
+
+/// The keyboard for the file panes.
+fn subscription(_: &Hoprs) -> iced::Subscription<Message> {
+    iced::event::listen_with(ui::files::key_message)
 }
 
 /// Where the lock may live, in order: `$XDG_RUNTIME_DIR/hoprs/`, the

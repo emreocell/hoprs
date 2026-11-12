@@ -82,10 +82,11 @@ pub trait BackendApi: Send + Sync {
     async fn reconnect(&self, session: SessionId) -> Result<()>;
     async fn close(&self, session: SessionId);
 
-    /// Lists `path` on the local disk or on the session's remote side.
+    /// Lists `path` on the local disk, or on the remote side of `session` (an error
+    /// without one).
     async fn list(
         &self,
-        session: SessionId,
+        session: Option<SessionId>,
         side: Side,
         path: RemotePath,
     ) -> Result<Vec<RemoteEntry>>;
@@ -97,6 +98,11 @@ pub trait BackendApi: Send + Sync {
     async fn answer_prompt(&self, id: PromptId, answer: PromptAnswer);
     /// The dialogs to show, for the UI's subscription. Only the first call gets it.
     fn prompt_events(&self) -> Option<mpsc::UnboundedReceiver<BrokerEvent>>;
+}
+
+/// A remote listing asked without a session.
+fn not_connected() -> Error {
+    Error::new(hoprs_core::ErrorKind::NotFound, "Not connected")
 }
 
 /// Where the backend keeps its files.
@@ -237,13 +243,14 @@ impl BackendApi for Backend {
 
     async fn list(
         &self,
-        session: SessionId,
+        session: Option<SessionId>,
         side: Side,
         path: RemotePath,
     ) -> Result<Vec<RemoteEntry>> {
-        let fs = match side {
-            Side::Local => self.sessions.local(),
-            Side::Remote => self.sessions.remote(session)?,
+        let fs = match (side, session) {
+            (Side::Local, _) => self.sessions.local(),
+            (Side::Remote, Some(session)) => self.sessions.remote(session)?,
+            (Side::Remote, None) => return Err(not_connected()),
         };
         fs.list(&path).await
     }
@@ -331,7 +338,12 @@ mod tests {
 
         // The remote side of an unknown session is an error, not a panic.
         let err = backend
-            .list(SessionId(0), Side::Remote, RemotePath::root())
+            .list(Some(SessionId(0)), Side::Remote, RemotePath::root())
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::NotFound);
+        let err = backend
+            .list(None, Side::Remote, RemotePath::root())
             .await
             .unwrap_err();
         assert_eq!(err.kind, ErrorKind::NotFound);
@@ -378,7 +390,7 @@ mod tests {
         let local = tempfile::tempdir().unwrap();
         std::fs::write(local.path().join("a.txt"), b"x").unwrap();
         let path = RemotePath::new(local.path().to_str().unwrap()).unwrap();
-        let listed = backend.list(SessionId(0), Side::Local, path).await.unwrap();
+        let listed = backend.list(None, Side::Local, path).await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].name, "a.txt");
     }

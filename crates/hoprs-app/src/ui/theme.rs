@@ -11,7 +11,8 @@ use std::sync::LazyLock;
 use iced::border::Radius;
 use iced::widget::overlay::menu;
 use iced::widget::{
-    button, checkbox as iced_checkbox, container, pick_list as iced_pick_list, rule, text_input,
+    button, checkbox as iced_checkbox, container, pick_list as iced_pick_list, rule, scrollable,
+    text_input,
 };
 use iced::{Background, Border, Color, Font, Shadow, Theme, font};
 
@@ -376,6 +377,92 @@ pub fn skeleton(_: &Theme) -> container::Style {
             ..Border::default()
         },
         ..surface(palette().paper_3)
+    }
+}
+
+/// A breadcrumb segment: `ink_2`, ink on hover, no fill.
+pub fn crumb(_: &Theme, status: button::Status) -> button::Style {
+    let p = palette();
+    let text_color = match status {
+        button::Status::Hovered | button::Status::Pressed => p.ink,
+        button::Status::Active | button::Status::Disabled => p.ink_2,
+    };
+    button::Style {
+        border: Border::default(),
+        ..flat_button(None, text_color)
+    }
+}
+
+/// A sortable column header (mockup `th`): muted on the ground, ink on hover.
+pub fn header_cell(_: &Theme, status: button::Status) -> button::Style {
+    let p = palette();
+    let text_color = match status {
+        button::Status::Hovered | button::Status::Pressed => p.ink,
+        button::Status::Active | button::Status::Disabled => p.muted,
+    };
+    button::Style {
+        border: Border::default(),
+        ..flat_button(None, text_color)
+    }
+}
+
+/// A file row: hovered on `paper_2`, selected on the accent wash (mockup `tbody tr`).
+pub fn file_row(selected: bool, hovered: bool) -> impl Fn(&Theme) -> container::Style {
+    move |_| {
+        let p = palette();
+        let (background, text_color) = match (selected, hovered) {
+            (true, _) => (Some(p.accent_wash), p.ink),
+            (false, true) => (Some(p.paper_2), p.ink),
+            (false, false) => (None, p.ink_2),
+        };
+        container::Style {
+            text_color: Some(text_color),
+            background: background.map(Background::Color),
+            ..container::Style::default()
+        }
+    }
+}
+
+/// The scrollbar of the file lists: a `rule_2` thumb on the ground, no rail.
+pub fn scrollbar(_: &Theme, status: scrollable::Status) -> scrollable::Style {
+    let p = palette();
+    let thumb = match status {
+        scrollable::Status::Hovered {
+            is_vertical_scrollbar_hovered: true,
+            ..
+        }
+        | scrollable::Status::Dragged {
+            is_vertical_scrollbar_dragged: true,
+            ..
+        } => p.muted,
+        _ => p.rule_2,
+    };
+    let rail = scrollable::Rail {
+        background: None,
+        border: Border::default(),
+        scroller: scrollable::Scroller {
+            background: Background::Color(thumb),
+            border: Border {
+                radius: radius(),
+                ..Border::default()
+            },
+        },
+    };
+    scrollable::Style {
+        container: container::Style::default(),
+        vertical_rail: rail,
+        horizontal_rail: rail,
+        gap: None,
+        auto_scroll: scrollable::AutoScroll {
+            background: Background::Color(p.paper_3),
+            border: Border {
+                color: p.rule_2,
+                width: HAIRLINE,
+                radius: radius(),
+            },
+            shadow: Shadow::default(),
+            icon: p.ink_2,
+        },
     }
 }
 

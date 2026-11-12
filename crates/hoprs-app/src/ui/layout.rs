@@ -5,10 +5,10 @@
 use iced::widget::{button, column, container, row, rule, space, text};
 use iced::{Alignment, Element, Length, Padding};
 
-use crate::app::{App, Form, Message, Tab, TabState};
+use crate::app::{App, Form, Message};
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
-use crate::ui::{sidebar, site_form, workspace_form};
+use crate::ui::{files, sidebar, site_form, tabs, workspace_form};
 
 pub const SIDEBAR_WIDTH: f32 = sidebar::WIDTH;
 /// 4 px above the 36 px tabs.
@@ -62,27 +62,7 @@ fn top_bar(app: &App) -> Element<'_, Message> {
     .padding(Padding::ZERO.left(theme::SPACE_MD).right(theme::SPACE_MD))
     .align_y(Alignment::Center);
 
-    let tabs: Element<'_, Message> = if app.tabs.is_empty() {
-        container(muted(strings::NO_SESSIONS, theme::TEXT_XS))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .padding(Padding::ZERO.left(theme::SPACE_MD))
-            .align_y(Alignment::Center)
-            .into()
-    } else {
-        container(
-            row(app
-                .tabs
-                .iter()
-                .enumerate()
-                .map(|(i, tab)| session_tab(app, i, tab)))
-            .spacing(theme::SPACE_3XS),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .padding(Padding::ZERO.top(theme::SPACE_2XS).left(theme::SPACE_XS))
-        .into()
-    };
+    let tabs = tabs::view(app);
 
     // A slot for the Ctrl+K palette (Plan 6).
     let palette_slot = container(
@@ -117,7 +97,7 @@ fn center(app: &App) -> Element<'_, Message> {
         None => {}
     }
     if let Some(tab) = app.active_tab.and_then(|i| app.tabs.get(i)) {
-        return tab_placeholder(app, tab);
+        return files::view(app, tab);
     }
     container(
         column![
@@ -213,105 +193,4 @@ fn status_bar<'a>() -> Element<'a, Message> {
             .style(theme::status_bar),
     ]
     .into()
-}
-
-/// A session tab: site name and protocol tag (Task 6 adds closing and the panes).
-fn session_tab<'a>(app: &'a App, index: usize, tab: &'a Tab) -> Element<'a, Message> {
-    let active = app.active_tab == Some(index);
-    let (name, tag) = match app.site(&tab.site) {
-        Some(site) => (site.name.as_str(), sidebar::protocol_tag(site)),
-        None => (strings::SITE_MISSING, ""),
-    };
-    let p = palette();
-    let label = row![
-        text(name),
-        text(tag)
-            .font(theme::MONO)
-            .size(theme::TEXT_TAG)
-            .color(if active { p.ink_2 } else { p.muted }),
-    ]
-    .spacing(theme::SPACE_XS)
-    .align_y(Alignment::Center);
-    let button = button(
-        container(label)
-            .height(Length::Fill)
-            .align_y(Alignment::Center),
-    )
-    .height(Length::Fill)
-    .padding(Padding::ZERO.left(theme::SPACE_MD).right(theme::SPACE_MD))
-    .style(theme::tab(active))
-    .on_press(Message::SelectTab(index));
-    let underline = container(space()).width(Length::Fill).height(UNDERLINE);
-    let underline = if active {
-        underline.style(theme::underline)
-    } else {
-        underline
-    };
-    column![button, underline].width(Length::Shrink).into()
-}
-
-/// The tab's center until Task 6 brings the file panes: its connection state.
-fn tab_placeholder<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> {
-    let p = palette();
-    let site = app.site(&tab.site);
-    let address = site
-        .map(|s| format!("{}@{}:{}", s.user, s.host, s.port))
-        .unwrap_or_default();
-    let mut body = column![
-        text(site.map_or(strings::SITE_MISSING, |s| s.name.as_str())).font(theme::INTER_SEMIBOLD),
-        text(address)
-            .font(theme::MONO)
-            .size(theme::TEXT_MONO)
-            .color(p.muted),
-    ]
-    .spacing(theme::SPACE_2XS)
-    .align_x(Alignment::Center);
-    let keyring_note = |unavailable: bool| {
-        unavailable.then(|| muted(strings::KEYRING_UNAVAILABLE, theme::TEXT_XS))
-    };
-    match &tab.state {
-        TabState::Connecting => body = body.push(muted(strings::CONNECTING, theme::TEXT_SM)),
-        TabState::Connected(connected) => {
-            body = body
-                .push(text(strings::CONNECTED).size(theme::TEXT_SM))
-                .push(muted(strings::FILES_ARRIVE, theme::TEXT_SM))
-                .push(keyring_note(connected.keyring_unavailable));
-        }
-        TabState::Failed(failure) => {
-            body = body
-                .push(text(strings::CANNOT_CONNECT).color(p.error))
-                .push(text(&failure.error.message).size(theme::TEXT_SM))
-                .push(failure.error.detail.as_ref().map(|detail| {
-                    text(detail)
-                        .font(theme::MONO)
-                        .size(theme::TEXT_MONO)
-                        .color(p.muted)
-                }))
-                .push(keyring_note(failure.keyring_unavailable));
-            if site.is_some() {
-                body = body.push(
-                    row![
-                        button(text(strings::RETRY))
-                            .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
-                            .style(theme::button_outline)
-                            .on_press(Message::ConnectSite(tab.site.clone())),
-                        button(text(strings::EDIT_SITE))
-                            .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
-                            .style(theme::button_text)
-                            .on_press(Message::EditSite(tab.site.clone())),
-                    ]
-                    .spacing(theme::SPACE_XS),
-                );
-            }
-        }
-    }
-    if site.is_some() && !matches!(tab.state, TabState::Failed(_)) {
-        body = body.push(
-            button(text(strings::EDIT_SITE).size(theme::TEXT_XS))
-                .padding(0)
-                .style(theme::button_text)
-                .on_press(Message::EditSite(tab.site.clone())),
-        );
-    }
-    container(body).center(Length::Fill).into()
 }

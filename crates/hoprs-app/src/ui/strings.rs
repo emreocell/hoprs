@@ -113,13 +113,37 @@ pub const DELETE_WORKSPACE_CONFIRM: &str = "Delete this workspace? Its sites are
 // Center.
 pub const NO_SESSION_TITLE: &str = "No session open";
 pub const NO_SESSION_HINT: &str = "Pick a site in the sidebar to connect.";
-pub const CONNECTING: &str = "Connecting…";
-pub const CONNECTED: &str = "Connected";
-pub const FILES_ARRIVE: &str = "File panes open here.";
-pub const CANNOT_CONNECT: &str = "Can't connect";
 pub const KEYRING_UNAVAILABLE: &str =
     "The system keyring was unavailable, so the saved password was not used.";
 pub const EDIT_SITE: &str = "Edit site";
+
+// Tabs.
+pub const CLOSE_TAB: &str = "×";
+
+// File panes.
+pub const LOCAL: &str = "Local";
+pub const COL_NAME: &str = "Name";
+pub const COL_SIZE: &str = "Size";
+pub const COL_MODIFIED: &str = "Modified";
+pub const COL_PERMISSIONS: &str = "Permissions";
+pub const SORT_ASCENDING: &str = "↑";
+pub const SORT_DESCENDING: &str = "↓";
+/// The row that goes up one folder.
+pub const PARENT_DIR: &str = "..";
+/// After a folder name, and between breadcrumb segments.
+pub const PATH_SEPARATOR: &str = "/";
+/// The breadcrumb's first segment for the home folder.
+pub const HOME_DIR: &str = "~";
+/// The size column of a folder.
+pub const NO_SIZE: &str = "-";
+pub const EMPTY_FOLDER: &str = "This folder is empty";
+pub const RECONNECT: &str = "Reconnect";
+/// Units of [`crate::ui::format::size`], base 1024.
+pub const SIZE_UNITS: [&str; 7] = ["B", "KB", "MB", "GB", "TB", "PB", "EB"];
+/// Short month names for file dates.
+pub const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
 
 // Queue.
 pub const TRANSFERS: &str = "Transfers";
