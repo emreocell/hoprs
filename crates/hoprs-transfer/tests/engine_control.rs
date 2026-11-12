@@ -897,3 +897,72 @@ async fn retry_after_cancel_resumes_partial_destination() {
     assert!(remote.read_file("/srv/a.bin").unwrap() == bytes);
     assert_eq!(fault.read_offsets(), vec![0, partial]);
 }
+
+/// A write error that only surfaces when the destination is shut down (as
+/// with a pipelined writer) fails a paused copy instead of pausing it: the
+/// destination may hold misplaced data below its size, so it must never be
+/// continued. A retry under `Skip` rewrites it from the start.
+#[tokio::test(flavor = "multi_thread")]
+async fn pause_with_deferred_write_error_fails_and_retry_overwrites() {
+    let local = MemFs::new();
+    let local_fault = FaultFs::new(local.clone());
+    local_fault.set_stream_latency(Duration::from_millis(20));
+    let remote_mem = MemFs::new();
+    let remote = FaultFs::new(remote_mem.clone());
+    let config = EngineConfig {
+        buf_size: 64 * 1024,
+        ..EngineConfig::default()
+    };
+    let (engine, mut rx) = engine_with(
+        Arc::new(local_fault.clone()),
+        Arc::new(remote.clone()),
+        1,
+        config,
+    )
+    .await;
+    let bytes = data(4 * MIB);
+    local.add_file("/w/a.bin", &bytes, mtime());
+    remote_mem.add_dir("/srv");
+    remote.lose_write_after(100_000, ErrorKind::Io);
+
+    let id = engine
+        .enqueue(spec(Direction::Upload, "/w/a.bin", "/srv/a.bin"))
+        .await
+        .unwrap();
+    // Wait until a chunk written after the lost one has landed.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while remote_mem
+            .read_file("/srv/a.bin")
+            .is_none_or(|f| f.len() < 100_000)
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("chunks after the lost one land");
+    engine.pause(id).await.unwrap();
+    let stopped = wait_for(&mut rx, |e| {
+        matches!(e, Event::StateChanged { id: i, state } if *i == id
+            && (state.is_terminal() || *state == TransferState::Paused))
+    })
+    .await;
+    match stopped {
+        Event::StateChanged {
+            state: TransferState::Failed(e),
+            ..
+        } => assert_eq!(e.kind, ErrorKind::Io),
+        other => panic!("expected Failed, got {other:?}"),
+    }
+
+    engine
+        .set_policy(hoprs_transfer::ConflictPolicy::Skip)
+        .await;
+    engine.retry(id).await.unwrap();
+    assert_eq!(wait_terminal(&mut rx, id).await, TransferState::Done);
+    assert!(remote_mem.read_file("/srv/a.bin").unwrap() == bytes);
+    assert_eq!(
+        local_fault.read_offsets(),
+        vec![0, 0],
+        "the retry starts over"
+    );
+}

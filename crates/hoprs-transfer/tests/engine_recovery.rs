@@ -1033,3 +1033,71 @@ async fn failed_and_cancelled_continuations_survive_restart() {
     assert_eq!(offsets[0], 0, "a.bin starts over");
     assert!(offsets[1] > 0, "b.bin continues: {offsets:?}");
 }
+
+/// A copy stopped by the engine shutting down whose write error only
+/// surfaces when its destination is shut down is never continued from that
+/// destination after a restart, even under `Skip`: it is rewritten.
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_with_deferred_write_error_overwrites_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("queue.db");
+    let local = MemFs::new();
+    let remote_mem = MemFs::new();
+    remote_mem.add_dir("/srv");
+    let bytes = data(4 * MIB);
+    local.add_file("/w/a.bin", &bytes, mtime());
+    let config = EngineConfig {
+        buf_size: 64 * 1024,
+        ..EngineConfig::default()
+    };
+
+    let slow = FaultFs::new(local.clone());
+    slow.set_stream_latency(Duration::from_millis(20));
+    let remote = FaultFs::new(remote_mem.clone());
+    remote.lose_write_after(100_000, ErrorKind::Io);
+    let engine = TransferEngine::start(QueueStore::open(&db).unwrap(), config.clone());
+    engine
+        .register_site(site(), endpoints_fault(slow, remote, 1))
+        .await;
+    let id = engine
+        .enqueue(spec(Direction::Upload, "/w/a.bin", "/srv/a.bin"))
+        .await
+        .unwrap();
+    // Wait until a chunk written after the lost one has landed.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while remote_mem
+            .read_file("/srv/a.bin")
+            .is_none_or(|f| f.len() < 100_000)
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("chunks after the lost one land");
+    engine.shutdown().await;
+
+    let fault = FaultFs::new(local.clone());
+    let engine = TransferEngine::start(QueueStore::open(&db).unwrap(), config);
+    let mut rx = engine.subscribe();
+    engine
+        .register_site(
+            site(),
+            endpoints_fault(fault.clone(), FaultFs::new(remote_mem.clone()), 1),
+        )
+        .await;
+    engine
+        .set_policy(hoprs_transfer::ConflictPolicy::Skip)
+        .await;
+    engine.resume(id).await.unwrap();
+    assert_eq!(wait_terminal(&mut rx, id).await, TransferState::Done);
+    assert!(remote_mem.read_file("/srv/a.bin").unwrap() == bytes);
+    assert_eq!(fault.read_offsets(), vec![0], "the resume starts over");
+}
+
+fn endpoints_fault(local: FaultFs<MemFs>, remote: FaultFs<MemFs>, workers: usize) -> SiteEndpoints {
+    SiteEndpoints {
+        local: Arc::new(local),
+        remote: Arc::new(remote),
+        workers,
+    }
+}

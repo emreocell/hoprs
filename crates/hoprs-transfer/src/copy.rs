@@ -18,6 +18,12 @@ pub enum CopyOutcome {
 ///
 /// `progress` holds the absolute byte position (`offset` + bytes copied).
 /// Cancellation is checked before each block read.
+///
+/// A cancelled copy still shuts its writer down, and a non-network error
+/// from that shutdown is returned instead of `Cancelled`: a pipelined writer
+/// may only report there that an earlier block failed while later ones
+/// landed, so the destination's size can no longer be trusted as a resume
+/// point. A network error there keeps `Cancelled` (the stop wins).
 #[allow(clippy::too_many_arguments)]
 pub async fn copy_file(
     src: &dyn RemoteFs,
@@ -37,8 +43,10 @@ pub async fn copy_file(
 
     loop {
         if cancel.is_cancelled() {
-            let _ = writer.shutdown().await;
-            return Ok(CopyOutcome::Cancelled);
+            return match writer.shutdown().await.map_err(Error::from) {
+                Err(e) if e.kind != ErrorKind::Network => Err(e),
+                _ => Ok(CopyOutcome::Cancelled),
+            };
         }
         let n = reader.read(&mut buf).await?;
         if n == 0 {
@@ -216,5 +224,52 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.kind, ErrorKind::Network);
+    }
+
+    /// Copies with a destination whose lost write surfaces only at shutdown
+    /// (armed with `kind`), cancelling after the first chunks.
+    async fn stop_with_deferred_write_error(kind: ErrorKind) -> Result<CopyOutcome> {
+        let src = MemFs::new();
+        src.add_file("/a.bin", &data(1 << 20), mtime());
+        let dst = FaultFs::new(MemFs::new());
+        dst.lose_write_after(1_000, kind);
+        let entry = src.stat(&p("/a.bin")).await.unwrap();
+        let progress = AtomicU64::new(0);
+        let cancel = CancellationToken::new();
+        // A slow source (20 ms per 16 KiB chunk) cancelled after a few chunks.
+        let src_fault = FaultFs::new(src);
+        src_fault.set_stream_latency(Duration::from_millis(20));
+        let stop = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(90)).await;
+            stop.cancel();
+        });
+        copy_file(
+            &src_fault,
+            &entry,
+            &dst,
+            &p("/b.bin"),
+            0,
+            16 * 1024,
+            &progress,
+            &cancel,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn stop_surfaces_deferred_write_error() {
+        let err = stop_with_deferred_write_error(ErrorKind::Io)
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Io);
+    }
+
+    #[tokio::test]
+    async fn stop_keeps_network_shutdown_error_as_cancelled() {
+        let out = stop_with_deferred_write_error(ErrorKind::Network)
+            .await
+            .unwrap();
+        assert_eq!(out, CopyOutcome::Cancelled);
     }
 }

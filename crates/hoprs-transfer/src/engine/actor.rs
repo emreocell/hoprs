@@ -341,9 +341,12 @@ impl Actor {
 
     /// Cancels every running worker and waits (at most `SHUTDOWN_GRACE`)
     /// until each has reported back, so that no cancelled copy is still
-    /// writing its partial destination once the engine has stopped. What
-    /// they report is ignored: stored states are left as they are, for the
-    /// next start to recover.
+    /// writing its partial destination once the engine has stopped. Stored
+    /// states are left as they are, for the next start to recover; but a
+    /// copy that reports a non-network error stores `Overwrite` as its
+    /// continuation (as `release` does for a failed item), so the recovered
+    /// item never continues a destination that a failed write left with
+    /// stale data below its size.
     async fn stop_workers(&mut self, worker_rx: &mut mpsc::UnboundedReceiver<WorkerMsg>) {
         for running in self.running.values() {
             running.cancel.cancel();
@@ -353,7 +356,15 @@ impl Actor {
                 let Some(msg) = worker_rx.recv().await else {
                     break;
                 };
-                let (WorkerMsg::Prepared { id, .. } | WorkerMsg::Copied { id, .. }) = msg;
+                let id = match msg {
+                    WorkerMsg::Copied {
+                        id, result: Err(e), ..
+                    } if e.kind != ErrorKind::Network => {
+                        let _ = self.overwrite_on_retry(id, e);
+                        id
+                    }
+                    WorkerMsg::Prepared { id, .. } | WorkerMsg::Copied { id, .. } => id,
+                };
                 self.running.remove(&id);
             }
         };
