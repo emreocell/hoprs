@@ -352,10 +352,15 @@ fn write_state(conn: &Connection, id: TransferId, state: &TransferState) -> Resu
 }
 
 impl QueueStore {
-    /// Opens (creating if needed) the queue database at `path`, in WAL mode.
+    /// Opens (creating if needed) the queue database at `path`, in WAL mode
+    /// with `synchronous=NORMAL`: commits do not wait for an fsync, so a
+    /// power loss may roll back the last few state changes, but an
+    /// application crash loses nothing and the database never corrupts.
+    /// (With the default `FULL`, every state change waits for the disk.)
     pub fn open(path: &Path) -> Result<QueueStore> {
         let conn = Connection::open(path).db()?;
         conn.pragma_update(None, "journal_mode", "WAL").db()?;
+        conn.pragma_update(None, "synchronous", "NORMAL").db()?;
         Self::init(conn)
     }
 
@@ -968,6 +973,21 @@ mod tests {
         let err = QueueStore::open(&path).err().expect("newer schema refused");
         assert_eq!(err.kind, ErrorKind::Io);
         assert!(err.message.contains("newer"), "{err:?}");
+    }
+
+    #[test]
+    fn file_databases_use_wal_with_normal_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = QueueStore::open(&dir.path().join("queue.db")).unwrap();
+        let mode: String = s
+            .conn
+            .pragma_query_value(None, "journal_mode", |r| r.get(0))
+            .unwrap();
+        let sync: i64 = s
+            .conn
+            .pragma_query_value(None, "synchronous", |r| r.get(0))
+            .unwrap();
+        assert_eq!((mode.as_str(), sync), ("wal", 1), "1 = NORMAL");
     }
 
     #[test]
