@@ -10,7 +10,8 @@ mod shell;
 pub mod testing;
 mod watchdog;
 
-pub use config::{AuthConfig, KeySource, ReconnectPolicy, SshConfig};
+pub use config::{AuthConfig, KeySource, SshConfig};
+pub use hoprs_core::ReconnectPolicy;
 pub use prompt::{KbdPrompt, Prompter};
 #[cfg(feature = "testing")]
 pub use prompt::{PromptCalls, ScriptedPrompter};

@@ -5,6 +5,7 @@ use std::time::SystemTime;
 use async_trait::async_trait;
 use hoprs_core::{RemoteEntry, RemotePath, Result};
 
+mod connection;
 #[cfg(feature = "testing")]
 mod fault;
 mod io_err;
@@ -17,6 +18,7 @@ pub use fault::{FaultFs, Op};
 pub use mem::MemFs;
 mod sftp;
 
+pub use connection::Connection;
 pub use sftp::{SftpConfig, SftpFs};
 
 pub use local::LocalFs;

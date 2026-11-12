@@ -15,7 +15,7 @@ tokio = { workspace = true, features = ["io-util", "time", "sync", "rt", "macros
 tokio-util = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util", "test-util"] }
 tempfile = { workspace = true }
 async-trait = { workspace = true }
 hoprs-remote = { path = "../hoprs-remote", features = ["testing"] }

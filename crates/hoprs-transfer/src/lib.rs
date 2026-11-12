@@ -4,6 +4,7 @@ mod engine;
 mod model;
 mod progress;
 mod store;
+mod watch;
 
 pub use conflict::{Decision, decide};
 pub use copy::{CopyOutcome, copy_file};
@@ -13,3 +14,4 @@ pub use model::{
 };
 pub use progress::{ProgressTracker, ProgressUpdate};
 pub use store::{NewChild, PausedFrom, QueueStore};
+pub use watch::{RESTORE_GRACE, spawn_site_watcher};

@@ -31,20 +31,8 @@ use crate::known_hosts::{self, HostKeyStatus};
 use crate::prompt::Prompter;
 use crate::watchdog::{self, WatchedPrompter};
 
-/// Observable connection state.
-#[derive(Clone, Debug, PartialEq)]
-pub enum SessionState {
-    /// First connection in progress. [`SshSession::connect`] only returns once connected,
-    /// so a session handle never reports it.
-    Connecting,
-    Connected,
-    /// Connection lost; `attempt` (from 1) is the reconnection attempt in progress.
-    Reconnecting {
-        attempt: u32,
-    },
-    /// Gave up, failed for good (host key, authentication) or closed by the user.
-    Disconnected(Error),
-}
+/// Observable connection state (the protocol-neutral [`hoprs_core::ConnectionState`]).
+pub type SessionState = hoprs_core::ConnectionState;
 
 /// An SSH session that stays connected: keepalive, disconnect detection and automatic
 /// reconnection. Cheap to clone; the connection closes when the last clone is dropped.

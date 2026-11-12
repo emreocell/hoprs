@@ -213,18 +213,10 @@ impl TransferEngine {
     /// by `Event::SitePaused`). The site dispatches again unless the user
     /// also paused it (`pause_site`). Has no effect on an unknown site.
     ///
-    /// Integration pattern (the app wires one task per connected site):
-    /// the task watches `SshSession::state()` and
-    /// - when the state returns to `Connected` with a new
-    ///   `SshSession::generation()` (a reconnection), calls
-    ///   `network_restored(site)`;
-    /// - when a `SitePaused` for the site arrives while the state is still
-    ///   `Connected` (a request failed, e.g. timed out, but the connection
-    ///   never dropped, so no reconnection will follow), waits 2 s and, if
-    ///   the state is still `Connected`, calls `network_restored(site)`;
-    /// - when its event receiver reports `RecvError::Lagged` (a `SitePaused`
-    ///   may have been lost) and the state is `Connected`, calls
-    ///   `network_restored(site)`.
+    /// Integration: run [`spawn_site_watcher`](crate::spawn_site_watcher) for every connected
+    /// site (any protocol). It calls this when the connection returns with a new generation,
+    /// after a grace period when a request failed but the connection stayed up, and when the
+    /// event receiver lags.
     ///
     /// Calling it when the site is not network-paused does nothing, so the
     /// task never needs to know whether the site is paused.
