@@ -8,11 +8,12 @@
 //! keepalive_interval` / `keepalive_max`): russh gives up when more than `keepalive_max`
 //! keepalives go unanswered, i.e. `keepalive_interval x (keepalive_max + 1)` after the last
 //! data received, ending the session loop with `KeepaliveTimeout`. russh reads
-//! `keepalive_max = 0` as "never give up", so `russh_config` clamps it to at least 1. Every end of an established session (server
-//! `DISCONNECT`, EOF, I/O error, keepalive timeout) calls `Handler::disconnected`, except
-//! when shutting down the write half fails first (e.g. after a reset), which returns early.
-//! So the handler also signals when it is dropped, which happens whenever the session task
-//! ends; no polling of `Handle::is_closed` is needed.
+//! `keepalive_max = 0` as "never give up", so `russh_config` clamps it to at least 1.
+//! Every end of an established session (server `DISCONNECT`, EOF, I/O error, keepalive
+//! timeout) calls `Handler::disconnected`, except when shutting down the write half fails
+//! first (e.g. after a reset), which returns early. So the handler also signals when it is
+//! dropped, which happens whenever the session task ends; no polling of
+//! `Handle::is_closed` is needed.
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

@@ -26,7 +26,6 @@ const OUTPUT_QUEUE: usize = 256;
 /// A terminal that is not drained for that long is torn down rather than stalling the connection.
 const MAX_PENDING_OUTPUT: usize = 16 * 1024 * 1024;
 
-/// How long after an `Eof` the server may take to send `Close` before we close the channel.
 /// Largest `Data` item the pump builds by coalescing. With the 256-slot queue this bounds the
 /// output held for a consumer at 256 x 64 KiB = 16 MiB queued, plus at most `MAX_PENDING_OUTPUT`
 /// waiting behind a full queue.
