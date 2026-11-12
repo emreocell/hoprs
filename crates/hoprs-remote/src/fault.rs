@@ -1,7 +1,8 @@
 //! Fault-injecting `RemoteFs` wrapper for tests.
 //!
 //! Wraps any `RemoteFs` and can fail a chosen operation once, fail the byte
-//! stream once after a cumulative number of bytes, and delay every call.
+//! stream once after a cumulative number of bytes, delay every call and every
+//! stream chunk, and record the offsets passed to `open_read`.
 
 use std::collections::HashMap;
 use std::io;
@@ -13,6 +14,7 @@ use std::time::{Duration, SystemTime};
 use async_trait::async_trait;
 use hoprs_core::{Error, ErrorKind, RemoteEntry, RemotePath, Result};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::time::Sleep;
 
 use crate::{BoxAsyncRead, BoxAsyncWrite, RemoteFs};
 
@@ -35,6 +37,10 @@ struct State {
     bytes: u64,
     /// One-shot stream failure: (threshold, kind).
     fail_after: Option<(u64, ErrorKind)>,
+    /// Delay before each stream read/write chunk.
+    stream_latency: Duration,
+    /// Offset of every `open_read` call, in call order.
+    read_offsets: Vec<u64>,
 }
 
 type Shared = Arc<Mutex<State>>;
@@ -99,6 +105,16 @@ impl<F: RemoteFs> FaultFs<F> {
         lock(&self.state).latency = d;
     }
 
+    /// Delay applied before each chunk read from or written to a stream.
+    pub fn set_stream_latency(&self, d: Duration) {
+        lock(&self.state).stream_latency = d;
+    }
+
+    /// Offsets passed to `open_read`, in call order.
+    pub fn read_offsets(&self) -> Vec<u64> {
+        lock(&self.state).read_offsets.clone()
+    }
+
     /// Number of trait calls made so far.
     pub fn ops(&self) -> usize {
         lock(&self.state).ops
@@ -137,11 +153,13 @@ impl<F: RemoteFs> RemoteFs for FaultFs<F> {
     }
 
     async fn open_read(&self, path: &RemotePath, offset: u64) -> Result<BoxAsyncRead> {
+        lock(&self.state).read_offsets.push(offset);
         self.enter(Some(Op::OpenRead)).await?;
         let inner = self.inner.open_read(path, offset).await?;
         Ok(Box::new(FaultRead {
             inner,
             state: Arc::clone(&self.state),
+            delay: None,
         }))
     }
 
@@ -151,6 +169,7 @@ impl<F: RemoteFs> RemoteFs for FaultFs<F> {
         Ok(Box::new(FaultWrite {
             inner,
             state: Arc::clone(&self.state),
+            delay: None,
         }))
     }
 
@@ -200,9 +219,31 @@ fn allowance(state: &Shared, want: usize) -> io::Result<usize> {
     Ok(want.min(usize::try_from(remaining).unwrap_or(usize::MAX)))
 }
 
+/// Waits out the stream latency before a chunk. The completed sleep is kept
+/// in `delay` until the chunk itself completes, so an inner `Pending` does not
+/// delay the same chunk twice.
+fn poll_stream_delay(
+    state: &Shared,
+    delay: &mut Option<Pin<Box<Sleep>>>,
+    cx: &mut Context<'_>,
+) -> Poll<()> {
+    if delay.is_none() {
+        let latency = lock(state).stream_latency;
+        if latency.is_zero() {
+            return Poll::Ready(());
+        }
+        *delay = Some(Box::pin(tokio::time::sleep(latency)));
+    }
+    match delay {
+        Some(sleep) => sleep.as_mut().poll(cx),
+        None => Poll::Ready(()),
+    }
+}
+
 struct FaultRead {
     inner: BoxAsyncRead,
     state: Shared,
+    delay: Option<Pin<Box<Sleep>>>,
 }
 
 impl AsyncRead for FaultRead {
@@ -214,12 +255,20 @@ impl AsyncRead for FaultRead {
         if buf.remaining() == 0 {
             return Poll::Ready(Ok(()));
         }
+        let this = &mut *self;
+        if poll_stream_delay(&this.state, &mut this.delay, cx).is_pending() {
+            return Poll::Pending;
+        }
         let cap = match allowance(&self.state, buf.remaining()) {
             Ok(n) => n,
             Err(e) => return Poll::Ready(Err(e)),
         };
         let mut sub = ReadBuf::new(buf.initialize_unfilled_to(cap));
-        match Pin::new(&mut self.inner).poll_read(cx, &mut sub) {
+        let polled = Pin::new(&mut self.inner).poll_read(cx, &mut sub);
+        if polled.is_ready() {
+            self.delay = None;
+        }
+        match polled {
             Poll::Ready(Ok(())) => {
                 let n = sub.filled().len();
                 buf.advance(n);
@@ -234,6 +283,7 @@ impl AsyncRead for FaultRead {
 struct FaultWrite {
     inner: BoxAsyncWrite,
     state: Shared,
+    delay: Option<Pin<Box<Sleep>>>,
 }
 
 impl AsyncWrite for FaultWrite {
@@ -245,11 +295,19 @@ impl AsyncWrite for FaultWrite {
         if buf.is_empty() {
             return Poll::Ready(Ok(0));
         }
+        let this = &mut *self;
+        if poll_stream_delay(&this.state, &mut this.delay, cx).is_pending() {
+            return Poll::Pending;
+        }
         let cap = match allowance(&self.state, buf.len()) {
             Ok(n) => n,
             Err(e) => return Poll::Ready(Err(e)),
         };
-        match Pin::new(&mut self.inner).poll_write(cx, &buf[..cap]) {
+        let polled = Pin::new(&mut self.inner).poll_write(cx, &buf[..cap]);
+        if polled.is_ready() {
+            self.delay = None;
+        }
+        match polled {
             Poll::Ready(Ok(n)) => {
                 lock(&self.state).bytes += n as u64;
                 Poll::Ready(Ok(n))
@@ -348,5 +406,32 @@ mod tests {
         let start = tokio::time::Instant::now();
         fs.stat(&p("/f")).await.unwrap();
         assert!(start.elapsed() >= Duration::from_millis(50));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_latency_delays_each_chunk() {
+        let fs = fs_with_hello();
+        fs.set_stream_latency(Duration::from_millis(50));
+
+        let start = tokio::time::Instant::now();
+        let mut r = fs.open_read(&p("/f"), 0).await.unwrap();
+        assert_eq!(start.elapsed(), Duration::ZERO, "open_read is not delayed");
+        let mut buf = [0u8; 2];
+        assert_eq!(r.read(&mut buf).await.unwrap(), 2);
+        assert_eq!(r.read(&mut buf).await.unwrap(), 2);
+        assert_eq!(start.elapsed(), Duration::from_millis(100));
+
+        let mut w = fs.open_write(&p("/g"), 0).await.unwrap();
+        w.write_all(b"ab").await.unwrap();
+        assert_eq!(start.elapsed(), Duration::from_millis(150));
+    }
+
+    #[tokio::test]
+    async fn read_offsets_records_every_open_read() {
+        let fs = fs_with_hello();
+        assert!(fs.read_offsets().is_empty());
+        let _r = fs.open_read(&p("/f"), 0).await.unwrap();
+        let _r = fs.open_read(&p("/f"), 3).await.unwrap();
+        assert_eq!(fs.read_offsets(), vec![0, 3]);
     }
 }
