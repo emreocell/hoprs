@@ -1,0 +1,1273 @@
+//! Encrypted backup of the whole vault: profiles, workspaces and secrets.
+//!
+//! File layout (integers big-endian):
+//!
+//! | bytes | content                                   |
+//! |-------|-------------------------------------------|
+//! | 8     | magic `HOPRSVLT`                          |
+//! | 2     | format version, `1`                       |
+//! | 4 x 3 | Argon2id `m_cost` (KiB), `t_cost`, `p_cost` |
+//! | 16    | random salt                               |
+//! | 24    | random nonce                              |
+//! | rest  | XChaCha20-Poly1305 ciphertext + 16-byte tag |
+//!
+//! The whole header (magic to nonce) is the AEAD's associated data, so
+//! changing any byte of it fails authentication. The 32-byte key is derived
+//! from the password with Argon2id (v0x13) and the header's parameters; the
+//! parameters are checked before Argon2 runs, so a crafted file cannot make
+//! it allocate more than 1 GiB or spin for long.
+//!
+//! The plaintext is UTF-8 JSON: `{ "sites": [...], "workspaces": [...],
+//! "secrets": [{ "site": id, "kind": "password" | "key-passphrase",
+//! "value": "..." }] }`. It only ever lives in zeroized buffers.
+
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io::{self, Write};
+use std::path::Path;
+
+use argon2::{Algorithm, Argon2, Params, Version};
+use chacha20poly1305::aead::{Aead, AeadInOut, Generate, KeyInit, Payload};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use hoprs_core::{Error, ErrorKind, Result, Site, SiteId, Workspace};
+use secrecy::{ExposeSecret, SecretString};
+use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, Zeroizing};
+
+use crate::atomic::write_atomic;
+use crate::profiles::{self, Profiles};
+use crate::{SecretKind, UnreadableEntry, Vault, append_detail, describe, flag, flag_mut};
+
+const MAGIC: &[u8; 8] = b"HOPRSVLT";
+const FORMAT_VERSION: u16 = 1;
+const SALT_LEN: usize = 16;
+const NONCE_LEN: usize = 24;
+const HEADER_LEN: usize = MAGIC.len() + 2 + 3 * 4 + SALT_LEN + NONCE_LEN;
+const TAG_LEN: usize = 16;
+const KEY_LEN: usize = 32;
+
+/// Largest accepted Argon2 memory cost: 1 GiB, in KiB.
+const MAX_M_COST: u32 = 1024 * 1024;
+const MAX_T_COST: u32 = 10;
+const MAX_P_COST: u32 = 16;
+
+/// Argon2id cost parameters of a backup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExportParams {
+    /// Memory, in KiB.
+    pub m_cost: u32,
+    /// Iterations.
+    pub t_cost: u32,
+    /// Parallelism.
+    pub p_cost: u32,
+}
+
+impl Default for ExportParams {
+    fn default() -> Self {
+        Self {
+            m_cost: 65536,
+            t_cost: 3,
+            p_cost: 1,
+        }
+    }
+}
+
+/// What an export wrote.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExportReport {
+    pub sites: usize,
+    pub workspaces: usize,
+    pub secrets: usize,
+    /// Entries this version of hoprs cannot read; they are not exported.
+    pub skipped_unreadable: Vec<UnreadableEntry>,
+}
+
+/// How a backup is applied to the vault.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportMode {
+    /// Adds what is new; an id that already exists is kept and skipped.
+    Merge,
+    /// The vault becomes exactly the backup.
+    Replace,
+}
+
+/// What an import changed. Never holds a secret value.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BackupImportReport {
+    pub added_sites: usize,
+    /// Names of the backup's sites whose id already existed (merge).
+    pub skipped_sites: Vec<String>,
+    pub added_workspaces: usize,
+    /// Names of the backup's workspaces whose id already existed (merge).
+    pub skipped_workspaces: Vec<String>,
+    pub secrets_restored: usize,
+    /// One line per keyring failure: site name and reason, never the value.
+    pub secret_errors: Vec<String>,
+}
+
+fn unsupported_params() -> Error {
+    Error::new(ErrorKind::Protocol, "Unsupported backup parameters")
+}
+
+/// Checks the cost parameters against our limits and Argon2's own.
+fn argon_params(p: ExportParams) -> Result<Params> {
+    if p.m_cost > MAX_M_COST || p.t_cost > MAX_T_COST || p.p_cost > MAX_P_COST {
+        return Err(unsupported_params().with_detail(format!(
+            "m_cost {} KiB, t_cost {}, p_cost {} (limits: {MAX_M_COST}, {MAX_T_COST}, {MAX_P_COST})",
+            p.m_cost, p.t_cost, p.p_cost
+        )));
+    }
+    Params::new(p.m_cost, p.t_cost, p.p_cost, Some(KEY_LEN))
+        .map_err(|e| unsupported_params().with_detail(e.to_string()))
+}
+
+struct Header {
+    params: ExportParams,
+    salt: [u8; SALT_LEN],
+    nonce: [u8; NONCE_LEN],
+}
+
+impl Header {
+    fn encode(&self) -> [u8; HEADER_LEN] {
+        let mut out = [0u8; HEADER_LEN];
+        let fields = [
+            &MAGIC[..],
+            &FORMAT_VERSION.to_be_bytes(),
+            &self.params.m_cost.to_be_bytes(),
+            &self.params.t_cost.to_be_bytes(),
+            &self.params.p_cost.to_be_bytes(),
+            &self.salt,
+            &self.nonce,
+        ];
+        let mut at = 0;
+        for field in fields {
+            out[at..at + field.len()].copy_from_slice(field);
+            at += field.len();
+        }
+        out
+    }
+
+    /// Parses and validates the header of `file`, without any expensive
+    /// work: Argon2 only runs once this succeeds.
+    fn decode(file: &[u8]) -> Result<Header> {
+        if file.len() < MAGIC.len() || &file[..MAGIC.len()] != MAGIC {
+            return Err(Error::new(ErrorKind::Protocol, "Not a hoprs backup"));
+        }
+        if file.len() < HEADER_LEN + TAG_LEN {
+            return Err(Error::new(ErrorKind::Protocol, "Backup file is truncated")
+                .with_detail(format!("{} bytes", file.len())));
+        }
+        let header = &file[..HEADER_LEN];
+        let u16_at = |at: usize| u16::from_be_bytes([header[at], header[at + 1]]);
+        let u32_at = |at: usize| {
+            u32::from_be_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]])
+        };
+        let version = u16_at(8);
+        if version != FORMAT_VERSION {
+            return Err(
+                Error::new(ErrorKind::Protocol, "Unsupported backup version")
+                    .with_detail(format!("version {version}")),
+            );
+        }
+        let params = ExportParams {
+            m_cost: u32_at(10),
+            t_cost: u32_at(14),
+            p_cost: u32_at(18),
+        };
+        argon_params(params)?;
+        let mut salt = [0u8; SALT_LEN];
+        salt.copy_from_slice(&header[22..22 + SALT_LEN]);
+        let mut nonce = [0u8; NONCE_LEN];
+        nonce.copy_from_slice(&header[22 + SALT_LEN..HEADER_LEN]);
+        Ok(Header {
+            params,
+            salt,
+            nonce,
+        })
+    }
+}
+
+/// The AEAD keyed with Argon2id(password, salt, params).
+fn cipher(password: &SecretString, header: &Header) -> Result<XChaCha20Poly1305> {
+    let params = argon_params(header.params)?;
+    let mut key = Zeroizing::new([0u8; KEY_LEN]);
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+        .hash_password_into(
+            password.expose_secret().as_bytes(),
+            &header.salt,
+            &mut key[..],
+        )
+        .map_err(|e| unsupported_params().with_detail(e.to_string()))?;
+    XChaCha20Poly1305::new_from_slice(&key[..])
+        .map_err(|_| Error::new(ErrorKind::Protocol, "Invalid backup key length"))
+}
+
+fn random<const N: usize>() -> Result<[u8; N]> {
+    <[u8; N]>::try_generate().map_err(|e| {
+        Error::new(ErrorKind::Io, "System random generator failed").with_detail(e.to_string())
+    })
+}
+
+/// Encrypts `plaintext` into a complete backup file.
+fn seal(plaintext: &[u8], password: &SecretString, params: ExportParams) -> Result<Vec<u8>> {
+    argon_params(params)?;
+    let header = Header {
+        params,
+        salt: random()?,
+        nonce: random()?,
+    };
+    let aad = header.encode();
+    let ciphertext = cipher(password, &header)?
+        .encrypt(
+            &XNonce::from(header.nonce),
+            Payload {
+                msg: plaintext,
+                aad: &aad,
+            },
+        )
+        .map_err(|_| Error::new(ErrorKind::Protocol, "Cannot encrypt the backup"))?;
+    let mut out = Vec::with_capacity(HEADER_LEN + ciphertext.len());
+    out.extend_from_slice(&aad);
+    out.extend_from_slice(&ciphertext);
+    Ok(out)
+}
+
+/// Authenticates and decrypts a backup file.
+fn unseal(file: &[u8], password: &SecretString) -> Result<Zeroizing<Vec<u8>>> {
+    let header = Header::decode(file)?;
+    let cipher = cipher(password, &header)?;
+    let (aad, ciphertext) = file.split_at(HEADER_LEN);
+    let mut buffer = Zeroizing::new(ciphertext.to_vec());
+    cipher
+        .decrypt_in_place(&XNonce::from(header.nonce), aad, &mut *buffer)
+        .map_err(|_| Error::new(ErrorKind::Auth, "Wrong password or damaged file"))?;
+    Ok(buffer)
+}
+
+/// The encrypted JSON document. No `Debug`: it holds secret values.
+#[derive(Serialize, Deserialize)]
+struct Backup {
+    sites: Vec<Site>,
+    workspaces: Vec<Workspace>,
+    secrets: Vec<BackupSecret>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct BackupSecret {
+    site: SiteId,
+    kind: BackupKind,
+    value: String,
+}
+
+impl Drop for BackupSecret {
+    fn drop(&mut self) {
+        self.value.zeroize();
+    }
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum BackupKind {
+    Password,
+    KeyPassphrase,
+}
+
+impl From<SecretKind> for BackupKind {
+    fn from(kind: SecretKind) -> Self {
+        match kind {
+            SecretKind::Password => Self::Password,
+            SecretKind::KeyPassphrase => Self::KeyPassphrase,
+        }
+    }
+}
+
+impl From<BackupKind> for SecretKind {
+    fn from(kind: BackupKind) -> Self {
+        match kind {
+            BackupKind::Password => Self::Password,
+            BackupKind::KeyPassphrase => Self::KeyPassphrase,
+        }
+    }
+}
+
+/// Counts bytes, to size the plaintext buffer before writing into it (a
+/// growing `Vec` would leave copies of the secrets behind in freed memory).
+struct ByteCounter(usize);
+
+impl Write for ByteCounter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn to_json(backup: &Backup) -> Result<Zeroizing<Vec<u8>>> {
+    let cannot = |e: serde_json::Error| {
+        Error::new(ErrorKind::Protocol, "Cannot build the backup").with_detail(format!(
+            "{:?} error at line {} column {}",
+            e.classify(),
+            e.line(),
+            e.column()
+        ))
+    };
+    let mut counter = ByteCounter(0);
+    serde_json::to_writer(&mut counter, backup).map_err(cannot)?;
+    let mut json = Zeroizing::new(Vec::with_capacity(counter.0));
+    serde_json::to_writer(&mut *json, backup).map_err(cannot)?;
+    Ok(json)
+}
+
+fn invalid_content(detail: impl Into<String>) -> Error {
+    Error::new(ErrorKind::Protocol, "Invalid backup content").with_detail(detail)
+}
+
+/// Parses the plaintext. Error details carry positions only: serde_json's
+/// messages can quote the offending value, which may be a secret.
+fn from_json(json: &[u8]) -> Result<Backup> {
+    serde_json::from_slice(json).map_err(|e| {
+        invalid_content(format!(
+            "{:?} error at line {} column {}",
+            e.classify(),
+            e.line(),
+            e.column()
+        ))
+    })
+}
+
+/// Unique ids, workspaces and secrets referencing the backup's own sites.
+fn validate(backup: &Backup) -> Result<()> {
+    let mut sites = HashSet::new();
+    for site in &backup.sites {
+        if !sites.insert(&site.id) {
+            return Err(invalid_content(format!("duplicate site id {}", site.id)));
+        }
+    }
+    let mut workspaces = HashSet::new();
+    for ws in &backup.workspaces {
+        if !workspaces.insert(&ws.id) {
+            return Err(invalid_content(format!("duplicate workspace id {}", ws.id)));
+        }
+        if let Some(missing) = ws.sites.iter().find(|s| !sites.contains(&s.site)) {
+            return Err(invalid_content(format!(
+                "workspace {} references unknown site {}",
+                ws.id, missing.site
+            )));
+        }
+    }
+    let mut secrets = HashSet::new();
+    for secret in &backup.secrets {
+        let kind = SecretKind::from(secret.kind);
+        if !sites.contains(&secret.site) {
+            return Err(invalid_content(format!(
+                "secret for unknown site {}",
+                secret.site
+            )));
+        }
+        if !secrets.insert((&secret.site, kind)) {
+            return Err(invalid_content(format!(
+                "duplicate {} for site {}",
+                kind.account(),
+                secret.site
+            )));
+        }
+    }
+    Ok(())
+}
+
+const KINDS: [SecretKind; 2] = [SecretKind::Password, SecretKind::KeyPassphrase];
+
+impl Vault {
+    /// Writes an encrypted backup of every readable site and workspace, with
+    /// all their secrets, to `path` (atomically, `0o600` on Unix).
+    ///
+    /// Secrets are read from the store; if one cannot be read, nothing is
+    /// written. Entries this version cannot read
+    /// ([`Vault::unreadable_entries`]) are not exported: they are listed in
+    /// the report, and workspace references to such sites are dropped from
+    /// the backup.
+    pub fn export(
+        &self,
+        path: &Path,
+        password: &SecretString,
+        params: ExportParams,
+    ) -> Result<ExportReport> {
+        argon_params(params)?;
+        let mut backup = Backup {
+            sites: Vec::with_capacity(self.sites().len()),
+            workspaces: Vec::with_capacity(self.workspaces().len()),
+            secrets: Vec::new(),
+        };
+        for site in self.sites() {
+            let mut site = site.clone();
+            for kind in KINDS {
+                let value = if flag(&site, kind) {
+                    self.secrets.get(&site.id, kind).map_err(|err| {
+                        let mut out = Error::new(err.kind, "Cannot read a secret for the backup")
+                            .with_detail(format!("site {:?} ({})", site.name, site.id));
+                        append_detail(&mut out, &describe(&err));
+                        out
+                    })?
+                } else {
+                    None
+                };
+                *flag_mut(&mut site, kind) = value.is_some();
+                if let Some(value) = value {
+                    backup.secrets.push(BackupSecret {
+                        site: site.id.clone(),
+                        kind: kind.into(),
+                        value: value.expose_secret().to_owned(),
+                    });
+                }
+            }
+            backup.sites.push(site);
+        }
+        let exported: HashSet<&SiteId> = self.sites().iter().map(|s| &s.id).collect();
+        for ws in self.workspaces() {
+            let mut ws = ws.clone();
+            ws.sites.retain(|s| exported.contains(&s.site));
+            backup.workspaces.push(ws);
+        }
+
+        let report = ExportReport {
+            sites: backup.sites.len(),
+            workspaces: backup.workspaces.len(),
+            secrets: backup.secrets.len(),
+            skipped_unreadable: self.unreadable_entries().to_vec(),
+        };
+        let json = to_json(&backup)?;
+        drop(backup);
+        let file = seal(&json, password, params)?;
+        write_atomic(path, &file)?;
+        Ok(report)
+    }
+
+    /// Restores a backup written by [`Vault::export`].
+    ///
+    /// The file is authenticated, decrypted, parsed and validated before
+    /// anything changes. Then the profiles are applied (one save per file;
+    /// if `workspaces.toml` cannot be saved, `sites.toml` is put back), and
+    /// then the secrets. A secret the store refuses does not fail the
+    /// import: its site stays without the flag and the failure is listed in
+    /// `secret_errors`.
+    ///
+    /// - [`ImportMode::Merge`] adds the sites and workspaces whose id is new
+    ///   (with their secrets) and lists the others as skipped.
+    /// - [`ImportMode::Replace`] makes the vault exactly the backup: sites,
+    ///   workspaces, unknown fields and unreadable entries not in it are
+    ///   dropped, and every secret the backup does not carry is deleted from
+    ///   the store (for sites that disappear, unreadable ones included, and
+    ///   for kept ids whose backup lacks that secret).
+    pub fn import_backup(
+        &mut self,
+        path: &Path,
+        password: &SecretString,
+        mode: ImportMode,
+    ) -> Result<BackupImportReport> {
+        let file = fs::read(path)?;
+        let json = unseal(&file, password)?;
+        let backup = from_json(&json)?;
+        drop(json);
+        validate(&backup)?;
+
+        let names: HashMap<&SiteId, &str> = backup
+            .sites
+            .iter()
+            .map(|s| (&s.id, s.name.as_str()))
+            .collect();
+        let fresh = |site: &Site| {
+            let mut site = site.clone();
+            site.has_password = false;
+            site.has_key_passphrase = false;
+            site
+        };
+        let mut report = BackupImportReport::default();
+        let old = self.profiles.clone();
+        let mut imported: HashSet<SiteId> = HashSet::new();
+
+        let next = match mode {
+            ImportMode::Merge => {
+                let mut next = old.clone();
+                for site in &backup.sites {
+                    if self.site(&site.id).is_some() || old.is_unreadable_site_id(&site.id.0) {
+                        report.skipped_sites.push(site.name.clone());
+                    } else {
+                        imported.insert(site.id.clone());
+                        next.sites.push(fresh(site));
+                    }
+                }
+                for ws in &backup.workspaces {
+                    if self.workspaces().iter().any(|w| w.id == ws.id)
+                        || old.is_unreadable_workspace_id(&ws.id.0)
+                    {
+                        report.skipped_workspaces.push(ws.name.clone());
+                    } else {
+                        next.workspaces.push(ws.clone());
+                    }
+                }
+                next
+            }
+            ImportMode::Replace => {
+                imported.extend(backup.sites.iter().map(|s| s.id.clone()));
+                Profiles::from_items(
+                    backup.sites.iter().map(fresh).collect(),
+                    backup.workspaces.clone(),
+                )
+            }
+        };
+        report.added_sites = imported.len();
+        report.added_workspaces = backup.workspaces.len() - report.skipped_workspaces.len();
+        let replace = mode == ImportMode::Replace;
+        self.commit_profiles(
+            next,
+            replace || report.added_sites > 0,
+            replace || report.added_workspaces > 0,
+        )?;
+
+        if replace {
+            let wanted: HashSet<(&SiteId, SecretKind)> = backup
+                .secrets
+                .iter()
+                .map(|s| (&s.site, s.kind.into()))
+                .collect();
+            let mut previous: Vec<(SiteId, String)> = old
+                .sites
+                .iter()
+                .map(|s| (s.id.clone(), s.name.clone()))
+                .collect();
+            previous.extend(
+                old.unreadable_sites()
+                    .into_iter()
+                    .map(|(id, name)| (SiteId(id.clone()), name.unwrap_or(id))),
+            );
+            for (id, name) in &previous {
+                for kind in KINDS {
+                    if wanted.contains(&(id, kind)) {
+                        continue;
+                    }
+                    if let Err(err) = self.secrets.delete(id, kind) {
+                        report.secret_errors.push(format!(
+                            "{name}: old {} not deleted: {}",
+                            kind.account(),
+                            describe(&err)
+                        ));
+                    }
+                }
+            }
+        }
+
+        let mut restored = Vec::new();
+        for secret in &backup.secrets {
+            if !imported.contains(&secret.site) {
+                continue;
+            }
+            let kind = SecretKind::from(secret.kind);
+            let value = SecretString::from(secret.value.as_str());
+            match self.secrets.set(&secret.site, kind, &value) {
+                Ok(()) => restored.push((secret.site.clone(), kind)),
+                Err(err) => report.secret_errors.push(format!(
+                    "{}: {} not restored: {}",
+                    names.get(&secret.site).copied().unwrap_or_default(),
+                    kind.account(),
+                    describe(&err)
+                )),
+            }
+        }
+        if !restored.is_empty() {
+            let mut next = self.profiles.clone();
+            for (id, kind) in &restored {
+                if let Some(site) = next.sites.iter_mut().find(|s| &s.id == id) {
+                    *flag_mut(site, *kind) = true;
+                }
+            }
+            match profiles::save_sites(&self.dir, &next) {
+                Ok(()) => {
+                    self.profiles = next;
+                    report.secrets_restored = restored.len();
+                }
+                Err(err) => report.secret_errors.push(format!(
+                    "{} secrets were stored but sites.toml could not record them: {}",
+                    restored.len(),
+                    describe(&err)
+                )),
+            }
+        }
+        Ok(report)
+    }
+
+    /// Saves the changed files of `next` (sites first) and commits it. If
+    /// `workspaces.toml` fails after `sites.toml` was written, the previous
+    /// `sites.toml` is written back so the vault stays as it was.
+    fn commit_profiles(&mut self, next: Profiles, sites: bool, workspaces: bool) -> Result<()> {
+        if sites {
+            profiles::save_sites(&self.dir, &next)?;
+        }
+        if workspaces && let Err(mut err) = profiles::save_workspaces(&self.dir, &next) {
+            if sites && let Err(rollback) = profiles::save_sites(&self.dir, &self.profiles) {
+                append_detail(
+                    &mut err,
+                    &format!("rollback failed: {}", describe(&rollback)),
+                );
+                // Memory follows whatever the disk now holds.
+                if let Ok(current) = profiles::load(&self.dir) {
+                    self.profiles = current;
+                }
+            }
+            return Err(err);
+        }
+        self.profiles = next;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::sync::Arc;
+
+    use hoprs_core::{
+        Error, ErrorKind, Protocol, Site, SiteId, Workspace, WorkspaceId, WorkspaceSite,
+    };
+    use secrecy::ExposeSecret;
+
+    use super::*;
+    use crate::{MemoryStore, SecretKind, SecretStore};
+
+    const LOW: ExportParams = ExportParams {
+        m_cost: 1024,
+        t_cost: 1,
+        p_cost: 1,
+    };
+
+    /// Offset of the ciphertext: magic, version, 3 params, salt, nonce.
+    const HEADER: usize = 8 + 2 + 12 + 16 + 24;
+
+    fn pw(s: &str) -> SecretString {
+        SecretString::from(s)
+    }
+
+    fn ssh_site(name: &str) -> Site {
+        Site::new(
+            name,
+            format!("{}.example.com", name.to_lowercase()),
+            "deploy",
+            Protocol::Ssh,
+        )
+    }
+
+    fn workspace(name: &str, sites: &[&SiteId]) -> Workspace {
+        Workspace {
+            id: WorkspaceId::new(),
+            name: name.into(),
+            sites: sites
+                .iter()
+                .map(|&id| WorkspaceSite {
+                    site: id.clone(),
+                    tabs: vec![],
+                })
+                .collect(),
+        }
+    }
+
+    fn secret_of(vault: &Vault, id: &SiteId, kind: SecretKind) -> Option<String> {
+        vault
+            .secret(id, kind)
+            .unwrap()
+            .map(|s| s.expose_secret().to_owned())
+    }
+
+    fn stored(store: &dyn SecretStore, id: &SiteId, kind: SecretKind) -> Option<String> {
+        store
+            .get(id, kind)
+            .unwrap()
+            .map(|s| s.expose_secret().to_owned())
+    }
+
+    struct Source {
+        _tmp: tempfile::TempDir,
+        vault: Vault,
+        a: Site,
+        b: Site,
+        ws: Workspace,
+    }
+
+    /// 2 sites, 1 workspace, 2 secrets (A's password, B's key passphrase).
+    fn source() -> Source {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vault = Vault::open(tmp.path(), Arc::new(MemoryStore::new())).unwrap();
+        let a = ssh_site("Alpha");
+        let mut b = Site::new("Bravo", "ftp.bravo.example", "web", Protocol::FtpsExplicit);
+        b.remote_dir = Some("/var/www".into());
+        vault.upsert_site(a.clone()).unwrap();
+        vault.upsert_site(b.clone()).unwrap();
+        vault
+            .set_secret(&a.id, SecretKind::Password, &pw("alpha-secret-1"))
+            .unwrap();
+        vault
+            .set_secret(&b.id, SecretKind::KeyPassphrase, &pw("bravo-phrase-2"))
+            .unwrap();
+        let ws = workspace("Prod", &[&a.id, &b.id]);
+        vault.upsert_workspace(ws.clone()).unwrap();
+        let a = vault.site(&a.id).unwrap().clone();
+        let b = vault.site(&b.id).unwrap().clone();
+        Source {
+            _tmp: tmp,
+            vault,
+            a,
+            b,
+            ws,
+        }
+    }
+
+    fn export_to(vault: &Vault, dir: &Path) -> std::path::PathBuf {
+        let path = dir.join("backup.hoprs");
+        vault.export(&path, &pw("correct horse"), LOW).unwrap();
+        path
+    }
+
+    /// Bytes of both profile files, to prove nothing changed.
+    fn snapshot(dir: &Path) -> Vec<Option<Vec<u8>>> {
+        ["sites.toml", "workspaces.toml"]
+            .iter()
+            .map(|f| fs::read(dir.join(f)).ok())
+            .collect()
+    }
+
+    struct FailingStore;
+
+    fn unavailable() -> Error {
+        Error::new(ErrorKind::Io, "System keyring unavailable").with_detail("no D-Bus session")
+    }
+
+    impl SecretStore for FailingStore {
+        fn get(&self, _: &SiteId, _: SecretKind) -> Result<Option<SecretString>> {
+            Err(unavailable())
+        }
+        fn set(&self, _: &SiteId, _: SecretKind, _: &SecretString) -> Result<()> {
+            Err(unavailable())
+        }
+        fn delete(&self, _: &SiteId, _: SecretKind) -> Result<()> {
+            Err(unavailable())
+        }
+    }
+
+    #[test]
+    fn export_import_roundtrip_with_secrets() {
+        let src = source();
+        let out = tempfile::tempdir().unwrap();
+        let path = out.path().join("backup.hoprs");
+        let report = src.vault.export(&path, &pw("correct horse"), LOW).unwrap();
+        assert_eq!(
+            report,
+            ExportReport {
+                sites: 2,
+                workspaces: 1,
+                secrets: 2,
+                skipped_unreadable: vec![],
+            }
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let mut vault = Vault::open(tmp.path(), store.clone()).unwrap();
+        let report = vault
+            .import_backup(&path, &pw("correct horse"), ImportMode::Merge)
+            .unwrap();
+        assert_eq!(
+            report,
+            BackupImportReport {
+                added_sites: 2,
+                added_workspaces: 1,
+                secrets_restored: 2,
+                ..Default::default()
+            }
+        );
+        assert_eq!(vault.sites(), [src.a.clone(), src.b.clone()]);
+        assert_eq!(vault.workspaces(), std::slice::from_ref(&src.ws));
+        assert_eq!(
+            secret_of(&vault, &src.a.id, SecretKind::Password).as_deref(),
+            Some("alpha-secret-1")
+        );
+        assert_eq!(
+            secret_of(&vault, &src.a.id, SecretKind::KeyPassphrase),
+            None
+        );
+        assert_eq!(
+            secret_of(&vault, &src.b.id, SecretKind::KeyPassphrase).as_deref(),
+            Some("bravo-phrase-2")
+        );
+
+        let reopened = Vault::open(tmp.path(), store).unwrap();
+        assert_eq!(reopened.sites(), vault.sites());
+        assert_eq!(reopened.workspaces(), vault.workspaces());
+    }
+
+    #[test]
+    fn wrong_password_is_auth_and_changes_nothing() {
+        let src = source();
+        let out = tempfile::tempdir().unwrap();
+        let path = export_to(&src.vault, out.path());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let mut vault = Vault::open(tmp.path(), store.clone()).unwrap();
+        let local = ssh_site("Local");
+        vault.upsert_site(local.clone()).unwrap();
+        vault
+            .set_secret(&local.id, SecretKind::Password, &pw("local-pw"))
+            .unwrap();
+        let before = snapshot(tmp.path());
+
+        for mode in [ImportMode::Merge, ImportMode::Replace] {
+            let err = vault
+                .import_backup(&path, &pw("wrong horse"), mode)
+                .unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Auth);
+            assert_eq!(err.message, "Wrong password or damaged file");
+            assert_eq!(snapshot(tmp.path()), before);
+            assert_eq!(vault.sites().len(), 1);
+            assert_eq!(
+                stored(&*store, &local.id, SecretKind::Password).as_deref(),
+                Some("local-pw")
+            );
+            assert_eq!(stored(&*store, &src.a.id, SecretKind::Password), None);
+        }
+    }
+
+    #[test]
+    fn tampered_file_is_auth() {
+        let src = source();
+        let out = tempfile::tempdir().unwrap();
+        let path = export_to(&src.vault, out.path());
+        let original = fs::read(&path).unwrap();
+        assert!(original.len() > HEADER + 16);
+
+        // Ciphertext, tag, and every header field that keeps the file
+        // parseable: params (still in range), salt, nonce.
+        let offsets = [
+            HEADER,
+            original.len() - 1,
+            8 + 2 + 3, // low byte of m_cost: 1024 -> 1025
+            8 + 2 + 12,
+            8 + 2 + 12 + 16 + 5,
+        ];
+        for offset in offsets {
+            let mut bytes = original.clone();
+            bytes[offset] ^= 0x01;
+            fs::write(&path, &bytes).unwrap();
+            let tmp = tempfile::tempdir().unwrap();
+            let mut vault = Vault::open(tmp.path(), Arc::new(MemoryStore::new())).unwrap();
+            let err = vault
+                .import_backup(&path, &pw("correct horse"), ImportMode::Merge)
+                .unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Auth, "offset {offset}");
+            assert!(vault.sites().is_empty());
+            assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn unknown_magic_or_version_is_protocol() {
+        let src = source();
+        let out = tempfile::tempdir().unwrap();
+        let path = export_to(&src.vault, out.path());
+        let original = fs::read(&path).unwrap();
+        assert_eq!(&original[..8], b"HOPRSVLT");
+        assert_eq!(&original[8..10], &[0, 1]);
+
+        let mut magic = original.clone();
+        magic[0] = b'X';
+        let mut version = original.clone();
+        version[9] = 2;
+        let truncated = original[..HEADER - 1].to_vec();
+        let no_tag = original[..HEADER + 15].to_vec();
+        for (what, bytes) in [
+            ("magic", magic),
+            ("version", version),
+            ("truncated", truncated),
+            ("no tag", no_tag),
+            ("empty", vec![]),
+        ] {
+            fs::write(&path, &bytes).unwrap();
+            let tmp = tempfile::tempdir().unwrap();
+            let mut vault = Vault::open(tmp.path(), Arc::new(MemoryStore::new())).unwrap();
+            let err = vault
+                .import_backup(&path, &pw("correct horse"), ImportMode::Merge)
+                .unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Protocol, "{what}: {err:?}");
+            assert!(vault.sites().is_empty());
+        }
+    }
+
+    #[test]
+    fn oversized_argon_params_are_refused() {
+        let src = source();
+        let out = tempfile::tempdir().unwrap();
+        let path = export_to(&src.vault, out.path());
+        let original = fs::read(&path).unwrap();
+
+        let set = |bytes: &mut Vec<u8>, field: usize, value: u32| {
+            let at = 10 + 4 * field;
+            bytes[at..at + 4].copy_from_slice(&value.to_be_bytes());
+        };
+        let cases = [
+            (0, 1024 * 1024 + 1), // just over 1 GiB
+            (0, u32::MAX),
+            (0, 0), // below Argon2's minimum
+            (1, 11),
+            (1, 0),
+            (2, 17),
+            (2, 0),
+        ];
+        for (field, value) in cases {
+            let mut bytes = original.clone();
+            set(&mut bytes, field, value);
+            fs::write(&path, &bytes).unwrap();
+            let tmp = tempfile::tempdir().unwrap();
+            let mut vault = Vault::open(tmp.path(), Arc::new(MemoryStore::new())).unwrap();
+            let err = vault
+                .import_backup(&path, &pw("correct horse"), ImportMode::Merge)
+                .unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Protocol, "field {field} = {value}");
+            assert_eq!(err.message, "Unsupported backup parameters");
+        }
+
+        // Export refuses to write a file it could not import back.
+        let target = out.path().join("big.hoprs");
+        let err = src
+            .vault
+            .export(
+                &target,
+                &pw("correct horse"),
+                ExportParams {
+                    m_cost: 1024 * 1024 + 1,
+                    ..LOW
+                },
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Protocol);
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn default_params_match_the_spec() {
+        assert_eq!(
+            ExportParams::default(),
+            ExportParams {
+                m_cost: 65536,
+                t_cost: 3,
+                p_cost: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn merge_keeps_existing_ids() {
+        let src = source();
+        let out = tempfile::tempdir().unwrap();
+        let path = export_to(&src.vault, out.path());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let mut vault = Vault::open(tmp.path(), store.clone()).unwrap();
+        let mut mine = src.a.clone();
+        mine.name = "My Alpha".into();
+        vault.upsert_site(mine.clone()).unwrap();
+        vault
+            .set_secret(&mine.id, SecretKind::Password, &pw("mine-pw"))
+            .unwrap();
+        let mut my_ws = src.ws.clone();
+        my_ws.name = "My Prod".into();
+        my_ws.sites.truncate(1);
+        vault.upsert_workspace(my_ws.clone()).unwrap();
+        let other = ssh_site("Other");
+        vault.upsert_site(other.clone()).unwrap();
+
+        let report = vault
+            .import_backup(&path, &pw("correct horse"), ImportMode::Merge)
+            .unwrap();
+        assert_eq!(report.added_sites, 1);
+        assert_eq!(report.skipped_sites, ["Alpha"]);
+        assert_eq!(report.added_workspaces, 0);
+        assert_eq!(report.skipped_workspaces, ["Prod"]);
+        assert_eq!(report.secrets_restored, 1);
+        assert!(report.secret_errors.is_empty());
+
+        let names: Vec<_> = vault.sites().iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["My Alpha", "Other", "Bravo"]);
+        assert_eq!(vault.workspaces(), [my_ws]);
+        assert_eq!(
+            secret_of(&vault, &mine.id, SecretKind::Password).as_deref(),
+            Some("mine-pw")
+        );
+        assert_eq!(
+            secret_of(&vault, &src.b.id, SecretKind::KeyPassphrase).as_deref(),
+            Some("bravo-phrase-2")
+        );
+        let reopened = Vault::open(tmp.path(), store).unwrap();
+        assert_eq!(reopened.sites(), vault.sites());
+    }
+
+    #[test]
+    fn replace_overwrites() {
+        let src = source();
+        let out = tempfile::tempdir().unwrap();
+        let path = export_to(&src.vault, out.path());
+
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("sites.toml"),
+            "version = 1\nfuture_top = 1\n\n[[site]]\nid = \"odd\"\nname = \"Odd\"\nprotocol = \"s3\"\n",
+        )
+        .unwrap();
+        let store = Arc::new(MemoryStore::new());
+        store
+            .set(&SiteId("odd".into()), SecretKind::Password, &pw("odd-pw"))
+            .unwrap();
+        let mut vault = Vault::open(tmp.path(), store.clone()).unwrap();
+        assert_eq!(vault.unreadable_entries().len(), 1);
+        // Same id as Alpha, with a secret the backup does not have.
+        let mut mine = src.a.clone();
+        mine.name = "My Alpha".into();
+        vault.upsert_site(mine.clone()).unwrap();
+        vault
+            .set_secret(&mine.id, SecretKind::KeyPassphrase, &pw("stale-phrase"))
+            .unwrap();
+        let gone = ssh_site("Gone");
+        vault.upsert_site(gone.clone()).unwrap();
+        vault
+            .set_secret(&gone.id, SecretKind::Password, &pw("gone-pw"))
+            .unwrap();
+        vault
+            .upsert_workspace(workspace("Mine", &[&gone.id]))
+            .unwrap();
+
+        let report = vault
+            .import_backup(&path, &pw("correct horse"), ImportMode::Replace)
+            .unwrap();
+        assert_eq!(report.added_sites, 2);
+        assert_eq!(report.added_workspaces, 1);
+        assert!(report.skipped_sites.is_empty());
+        assert_eq!(report.secrets_restored, 2);
+        assert!(
+            report.secret_errors.is_empty(),
+            "{:?}",
+            report.secret_errors
+        );
+
+        assert_eq!(vault.sites(), [src.a.clone(), src.b.clone()]);
+        assert_eq!(vault.workspaces(), std::slice::from_ref(&src.ws));
+        assert!(vault.unreadable_entries().is_empty());
+        assert_eq!(stored(&*store, &gone.id, SecretKind::Password), None);
+        assert_eq!(
+            stored(&*store, &SiteId("odd".into()), SecretKind::Password),
+            None
+        );
+        assert_eq!(stored(&*store, &mine.id, SecretKind::KeyPassphrase), None);
+        assert_eq!(
+            stored(&*store, &mine.id, SecretKind::Password).as_deref(),
+            Some("alpha-secret-1")
+        );
+
+        let reopened = Vault::open(tmp.path(), store).unwrap();
+        assert_eq!(reopened.sites(), vault.sites());
+        assert_eq!(reopened.workspaces(), vault.workspaces());
+        assert!(reopened.unreadable_entries().is_empty());
+        let text = fs::read_to_string(tmp.path().join("sites.toml")).unwrap();
+        assert!(!text.contains("future_top"), "{text}");
+    }
+
+    #[test]
+    fn replace_with_keyring_down_reports_every_failure() {
+        let src = source();
+        let out = tempfile::tempdir().unwrap();
+        let path = export_to(&src.vault, out.path());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vault = Vault::open(tmp.path(), Arc::new(FailingStore)).unwrap();
+        vault.upsert_site(ssh_site("Gone")).unwrap();
+        let report = vault
+            .import_backup(&path, &pw("correct horse"), ImportMode::Replace)
+            .unwrap();
+        assert_eq!(report.added_sites, 2);
+        assert_eq!(report.secrets_restored, 0);
+        // Gone's two secrets could not be deleted, and the two backup
+        // secrets could not be stored.
+        assert_eq!(report.secret_errors.len(), 4, "{:?}", report.secret_errors);
+        assert!(report.secret_errors.iter().any(|e| e.contains("Gone")));
+        assert!(
+            vault
+                .sites()
+                .iter()
+                .all(|s| !s.has_password && !s.has_key_passphrase)
+        );
+    }
+
+    #[test]
+    fn export_has_no_plaintext() {
+        let src = source();
+        let out = tempfile::tempdir().unwrap();
+        let path = export_to(&src.vault, out.path());
+        let bytes = fs::read(&path).unwrap();
+        let contains = |needle: &str| bytes.windows(needle.len()).any(|w| w == needle.as_bytes());
+        for needle in [
+            "Alpha",
+            "alpha.example.com",
+            "Bravo",
+            "alpha-secret-1",
+            "bravo-phrase-2",
+            "Prod",
+            &src.a.id.0,
+            "sites",
+        ] {
+            assert!(!contains(needle), "{needle} found in the backup");
+        }
+        // Header: magic, version, params, all big-endian.
+        assert_eq!(&bytes[..8], b"HOPRSVLT");
+        assert_eq!(&bytes[8..10], &1u16.to_be_bytes());
+        assert_eq!(&bytes[10..14], &1024u32.to_be_bytes());
+        assert_eq!(&bytes[14..18], &1u32.to_be_bytes());
+        assert_eq!(&bytes[18..22], &1u32.to_be_bytes());
+
+        // Fresh salt and nonce every time.
+        let again = export_to(&src.vault, &out.path().join("again"));
+        let again = fs::read(again).unwrap();
+        assert_ne!(&bytes[22..HEADER], &again[22..HEADER]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_file_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let src = source();
+        let out = tempfile::tempdir().unwrap();
+        let path = export_to(&src.vault, out.path());
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn keyring_failure_during_import_is_reported_not_fatal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut source = Vault::open(tmp.path(), Arc::new(MemoryStore::new())).unwrap();
+        let a = ssh_site("Alpha");
+        source.upsert_site(a.clone()).unwrap();
+        source
+            .set_secret(&a.id, SecretKind::Password, &pw("alpha-secret-1"))
+            .unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let path = export_to(&source, out.path());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vault = Vault::open(tmp.path(), Arc::new(FailingStore)).unwrap();
+        let report = vault
+            .import_backup(&path, &pw("correct horse"), ImportMode::Merge)
+            .unwrap();
+        assert_eq!(report.added_sites, 1);
+        assert_eq!(report.secrets_restored, 0);
+        assert_eq!(report.secret_errors.len(), 1);
+        let line = &report.secret_errors[0];
+        assert!(line.contains("Alpha"), "{line}");
+        assert!(line.contains("System keyring unavailable"), "{line}");
+        assert!(!format!("{report:?}").contains("alpha-secret-1"));
+        assert!(!vault.site(&a.id).unwrap().has_password);
+        let reopened = Vault::open(tmp.path(), Arc::new(FailingStore)).unwrap();
+        assert!(!reopened.site(&a.id).unwrap().has_password);
+    }
+
+    #[test]
+    fn export_with_keyring_down_fails_and_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vault = Vault::open(tmp.path(), Arc::new(MemoryStore::new())).unwrap();
+        let a = ssh_site("Alpha");
+        vault.upsert_site(a.clone()).unwrap();
+        vault
+            .set_secret(&a.id, SecretKind::Password, &pw("alpha-secret-1"))
+            .unwrap();
+        let down = Vault::open(tmp.path(), Arc::new(FailingStore)).unwrap();
+        let path = tmp.path().join("backup.hoprs");
+        let err = down.export(&path, &pw("correct horse"), LOW).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Io);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn unreadable_entries_are_not_exported() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("sites.toml"),
+            "version = 1\n\n[[site]]\nid = \"odd\"\nname = \"Odd\"\nprotocol = \"s3\"\n",
+        )
+        .unwrap();
+        let mut vault = Vault::open(tmp.path(), Arc::new(MemoryStore::new())).unwrap();
+        let a = ssh_site("Alpha");
+        vault.upsert_site(a.clone()).unwrap();
+        let odd = SiteId("odd".into());
+        let ws = workspace("Mixed", &[&odd, &a.id]);
+        vault.upsert_workspace(ws.clone()).unwrap();
+
+        let out = tempfile::tempdir().unwrap();
+        let path = out.path().join("backup.hoprs");
+        let report = vault.export(&path, &pw("correct horse"), LOW).unwrap();
+        assert_eq!(report.sites, 1);
+        assert_eq!(report.workspaces, 1);
+        assert_eq!(report.skipped_unreadable, vault.unreadable_entries());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut target = Vault::open(tmp.path(), Arc::new(MemoryStore::new())).unwrap();
+        target
+            .import_backup(&path, &pw("correct horse"), ImportMode::Merge)
+            .unwrap();
+        // The reference to the unexported site is dropped.
+        assert_eq!(target.workspaces()[0].sites.len(), 1);
+        assert_eq!(target.workspaces()[0].sites[0].site, a.id);
+    }
+
+    fn import_plaintext(json: &str) -> (tempfile::TempDir, Vault, Result<BackupImportReport>) {
+        let out = tempfile::tempdir().unwrap();
+        let path = out.path().join("backup.hoprs");
+        let sealed = seal(json.as_bytes(), &pw("pw"), LOW).unwrap();
+        fs::write(&path, sealed).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vault = Vault::open(tmp.path(), Arc::new(MemoryStore::new())).unwrap();
+        let result = vault.import_backup(&path, &pw("pw"), ImportMode::Replace);
+        (tmp, vault, result)
+    }
+
+    #[test]
+    fn seal_and_unseal_roundtrip() {
+        let sealed = seal(b"payload", &pw("pw"), LOW).unwrap();
+        assert_eq!(&unseal(&sealed, &pw("pw")).unwrap()[..], b"payload");
+        assert_eq!(
+            unseal(&sealed, &pw("other")).unwrap_err().kind,
+            ErrorKind::Auth
+        );
+    }
+
+    #[test]
+    fn invalid_content_is_protocol_without_values() {
+        let site = r#"{"id":"s1","name":"S","host":"h","port":22,"user":"u","protocol":"ssh"}"#;
+        let cases = [
+            "not json".to_owned(),
+            r#"{"sites":[],"workspaces":[],"secrets":[{"site":"s1","kind":"pin","value":"leak-me-1"}]}"#.to_owned(),
+            format!(r#"{{"sites":[{site}],"workspaces":[],"secrets":[{{"site":"s1","kind":"password","value":7}}]}}"#),
+            format!(r#"{{"sites":[{site},{site}],"workspaces":[],"secrets":[]}}"#),
+            format!(r#"{{"sites":[{site}],"workspaces":[{{"id":"w","name":"W","sites":[{{"site":"ghost"}}]}}],"secrets":[]}}"#),
+            r#"{"sites":[],"workspaces":[],"secrets":[{"site":"ghost","kind":"password","value":"leak-me-2"}]}"#.to_owned(),
+            format!(r#"{{"sites":[{site}],"workspaces":[],"secrets":[{{"site":"s1","kind":"password","value":"a"}},{{"site":"s1","kind":"password","value":"b"}}]}}"#),
+        ];
+        for json in cases {
+            let (tmp, vault, result) = import_plaintext(&json);
+            let err = result.unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Protocol, "{json}");
+            let shown = format!("{err:?}");
+            assert!(!shown.contains("leak-me"), "{shown}");
+            assert!(vault.sites().is_empty());
+            assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 0);
+        }
+    }
+}

@@ -7,6 +7,7 @@
 //! `has_key_passphrase`).
 
 mod atomic;
+mod export;
 mod profiles;
 mod secrets;
 
@@ -17,6 +18,7 @@ use std::sync::Arc;
 use hoprs_core::{Error, ErrorKind, Result, Site, SiteId, Workspace, WorkspaceId};
 use secrecy::SecretString;
 
+pub use export::{BackupImportReport, ExportParams, ExportReport, ImportMode};
 pub use profiles::UnreadableEntry;
 pub use secrets::{KeyringStore, MemoryStore, SecretKind, SecretStore};
 
@@ -85,7 +87,12 @@ impl Vault {
     }
 
     /// Inserts `site`, or replaces the site with the same id, and saves.
-    pub fn upsert_site(&mut self, site: Site) -> Result<()> {
+    ///
+    /// `has_password` and `has_key_passphrase` are owned by the secret APIs
+    /// ([`Vault::set_secret`], [`Vault::delete_secret`]): the stored flags of
+    /// an existing site are kept, and a new site starts with both unset,
+    /// whatever `site` says.
+    pub fn upsert_site(&mut self, mut site: Site) -> Result<()> {
         if self.profiles.is_unreadable_site_id(&site.id.0) {
             return Err(Error::new(
                 ErrorKind::Protocol,
@@ -95,8 +102,16 @@ impl Vault {
         }
         let mut next = self.profiles.clone();
         match next.sites.iter_mut().find(|s| s.id == site.id) {
-            Some(slot) => *slot = site,
-            None => next.sites.push(site),
+            Some(slot) => {
+                site.has_password = slot.has_password;
+                site.has_key_passphrase = slot.has_key_passphrase;
+                *slot = site;
+            }
+            None => {
+                site.has_password = false;
+                site.has_key_passphrase = false;
+                next.sites.push(site);
+            }
         }
         profiles::save_sites(&self.dir, &next)?;
         self.profiles = next;
@@ -209,10 +224,7 @@ impl Vault {
         match failure {
             None => Ok(()),
             Some(err) => {
-                let cause = match err.detail {
-                    Some(detail) => format!("{}: {detail}", err.message),
-                    None => err.message,
-                };
+                let cause = describe(&err);
                 Err(Error::new(
                     ErrorKind::Io,
                     "Site removed, but its secrets could not be deleted from the keyring",
@@ -226,7 +238,8 @@ impl Vault {
     ///
     /// If the store fails, nothing changes. If the store succeeds but the
     /// profile cannot be saved, the secret is deleted again (best effort)
-    /// and the save error is returned.
+    /// and the save error is returned; if that delete fails too, its reason
+    /// is appended to the error's detail.
     pub fn set_secret(
         &mut self,
         site: &SiteId,
@@ -239,10 +252,16 @@ impl Vault {
             return Ok(());
         }
         let result = self.edit_site(site, |s| *flag_mut(s, kind) = true);
-        if result.is_err() {
-            let _ = self.secrets.delete(site, kind);
+        if let Err(mut err) = result {
+            if let Err(rollback) = self.secrets.delete(site, kind) {
+                append_detail(
+                    &mut err,
+                    &format!("rollback failed: {}", describe(&rollback)),
+                );
+            }
+            return Err(err);
         }
-        result
+        Ok(())
     }
 
     /// The site's secret, if it has one. A site whose flag is unset answers
@@ -277,6 +296,22 @@ impl Vault {
     pub fn clear_ftps_pin(&mut self, site: &SiteId) -> Result<()> {
         self.edit_site(site, |s| s.ftp.pinned_fingerprint = None)
     }
+}
+
+/// `message: detail`, or just the message. Errors never carry secret values.
+fn describe(err: &Error) -> String {
+    match &err.detail {
+        Some(detail) => format!("{}: {detail}", err.message),
+        None => err.message.clone(),
+    }
+}
+
+/// Appends `extra` to the error's detail.
+fn append_detail(err: &mut Error, extra: &str) {
+    err.detail = Some(match err.detail.take() {
+        Some(detail) => format!("{detail}; {extra}"),
+        None => extra.to_owned(),
+    });
 }
 
 fn flag(site: &Site, kind: SecretKind) -> bool {
@@ -358,7 +393,6 @@ mod tests {
         let mut a = ssh_site("A");
         a.ssh.key_file = Some(PathBuf::from("keys").join("id_ed25519"));
         a.remote_dir = Some("/srv".into());
-        a.has_password = true;
         let mut b = Site::new("B", "ftp.example.com", "web", Protocol::FtpsImplicit);
         b.ftp.pinned_fingerprint = Some("AB:CD".into());
         b.local_dir = Some(PathBuf::from("work"));
@@ -1186,5 +1220,83 @@ protocol = "ftp"
         assert!(!debug.contains("swordfish"), "{debug}");
         assert!(debug.contains("Visible name"), "{debug}");
         assert!(debug.contains(&a.id.0), "{debug}");
+    }
+
+    #[test]
+    fn upsert_site_keeps_secret_flags() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vault = open(tmp.path()).unwrap();
+        // A new site starts without flags, whatever the caller passed.
+        let mut a = ssh_site("A");
+        a.has_password = true;
+        a.has_key_passphrase = true;
+        vault.upsert_site(a.clone()).unwrap();
+        let stored = vault.site(&a.id).unwrap();
+        assert!(!stored.has_password && !stored.has_key_passphrase);
+
+        vault
+            .set_secret(&a.id, SecretKind::Password, &secret("hunter2"))
+            .unwrap();
+        let mut edited = vault.site(&a.id).unwrap().clone();
+        edited.name = "A2".into();
+        edited.has_password = false;
+        edited.has_key_passphrase = true;
+        vault.upsert_site(edited).unwrap();
+
+        let stored = vault.site(&a.id).unwrap();
+        assert_eq!(stored.name, "A2");
+        assert!(stored.has_password);
+        assert!(!stored.has_key_passphrase);
+        assert_eq!(
+            exposed(vault.secret(&a.id, SecretKind::Password).unwrap()).as_deref(),
+            Some("hunter2")
+        );
+        let reopened = open(tmp.path()).unwrap();
+        assert!(reopened.site(&a.id).unwrap().has_password);
+    }
+
+    /// Stores secrets, but can never delete them.
+    #[cfg(unix)]
+    struct NoDeleteStore(MemoryStore);
+
+    #[cfg(unix)]
+    impl SecretStore for NoDeleteStore {
+        fn get(&self, site: &SiteId, kind: SecretKind) -> Result<Option<SecretString>> {
+            self.0.get(site, kind)
+        }
+        fn set(&self, site: &SiteId, kind: SecretKind, value: &SecretString) -> Result<()> {
+            self.0.set(site, kind, value)
+        }
+        fn delete(&self, _: &SiteId, _: SecretKind) -> Result<()> {
+            Err(unavailable())
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_rollback_is_reported_in_detail() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("hoprs");
+        let mut vault = Vault::open(&dir, Arc::new(NoDeleteStore(MemoryStore::new()))).unwrap();
+        let a = ssh_site("A");
+        vault.upsert_site(a.clone()).unwrap();
+
+        let _guard = RestoreMode(dir.clone());
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
+        if fs::write(dir.join("probe"), b"").is_ok() {
+            // Privileged user: permissions are not enforced, nothing to test.
+            return;
+        }
+
+        let err = vault
+            .set_secret(&a.id, SecretKind::Password, &secret("hunter2"))
+            .unwrap_err();
+        let detail = err.detail.clone().unwrap_or_default();
+        assert!(detail.contains("rollback failed: "), "{detail}");
+        assert!(detail.contains("System keyring unavailable"), "{detail}");
+        assert!(!format!("{err:?}").contains("hunter2"), "{err:?}");
+        assert!(!vault.site(&a.id).unwrap().has_password);
     }
 }

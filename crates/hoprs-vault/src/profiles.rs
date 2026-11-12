@@ -81,6 +81,33 @@ impl Profiles {
         self.workspaces_rest.has_unreadable_id(id)
     }
 
+    /// Profiles holding exactly `sites` and `workspaces`: no unknown keys,
+    /// no unreadable entries.
+    pub fn from_items(sites: Vec<Site>, workspaces: Vec<Workspace>) -> Self {
+        Self {
+            sites,
+            workspaces,
+            ..Self::default()
+        }
+    }
+
+    /// Id and name of every unreadable `[[site]]` entry that has an id.
+    pub fn unreadable_sites(&self) -> Vec<(String, Option<String>)> {
+        self.sites_rest
+            .unreadable
+            .iter()
+            .filter_map(|e| {
+                let id = e.id.clone()?;
+                let name = e
+                    .table
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                Some((id, name))
+            })
+            .collect()
+    }
+
     pub fn forget_site_extras(&mut self, id: &str) {
         self.site_extras.remove(id);
     }

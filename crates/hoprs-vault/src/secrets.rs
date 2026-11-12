@@ -55,17 +55,39 @@ impl KeyringStore {
     /// Fails with `Io` "System keyring unavailable" when there is no usable
     /// backend (e.g. no Secret Service or no D-Bus session).
     ///
-    /// On Linux this opens a D-Bus connection to the Secret Service. Through
-    /// `keyring` v4 the platform store also becomes keyring-core's
-    /// process-wide default store.
+    /// On Linux and the other Secret Service platforms this opens a new
+    /// D-Bus connection on every call, so calling it again after a failure
+    /// (e.g. once the user has unlocked or started their keyring) retries
+    /// for real. It does not touch keyring-core's process-wide default store.
+    ///
+    /// On macOS and Windows it goes through `keyring` v4, which initializes
+    /// the platform store once per process (a `LazyLock`) and caches the
+    /// outcome: a failure there is final until the app restarts.
     pub fn new() -> Result<Self> {
+        Self::platform_store().map(|store| Self { store })
+    }
+
+    #[cfg(all(
+        unix,
+        not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+    ))]
+    fn platform_store() -> Result<Arc<CredentialStore>> {
+        match zbus_secret_service_keyring_store::Store::new() {
+            Ok(store) => Ok(store),
+            Err(err) => Err(unavailable(&err)),
+        }
+    }
+
+    #[cfg(not(all(
+        unix,
+        not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+    )))]
+    fn platform_store() -> Result<Arc<CredentialStore>> {
         if let Err(err) = keyring::Entry::store_status() {
             return Err(unavailable(err));
         }
-        match keyring_core::get_default_store() {
-            Some(store) => Ok(Self { store }),
-            None => Err(unavailable(&keyring_core::Error::NoDefaultStore)),
-        }
+        keyring_core::get_default_store()
+            .ok_or_else(|| unavailable(&keyring_core::Error::NoDefaultStore))
     }
 
     /// Uses `store` instead of the platform keyring (e.g. keyring-core's
