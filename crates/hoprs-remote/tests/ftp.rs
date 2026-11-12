@@ -1319,10 +1319,7 @@ async fn chmod_roundtrip() {
     let c = setup().await;
     c.sh("printf data > m");
     c.fs.chmod(&c.at("m"), 0o640).await.unwrap();
-    // A file's permissions come from a listing (`stat` of a file is `SIZE`, ruling R9).
-    let listed = c.fs.list(&c.work).await.unwrap();
-    let m = listed.iter().find(|e| e.name == "m").unwrap();
-    assert_eq!(m.mode, Some(0o640));
+    assert_eq!(c.fs.stat(&c.at("m")).await.unwrap().mode, Some(0o640));
     c.sh("test \"$(stat -c %a m)\" = 640");
     c.fs.mkdir(&c.at("d")).await.unwrap();
     c.fs.chmod(&c.at("d"), 0o700).await.unwrap();
@@ -1344,7 +1341,7 @@ async fn symlink_listed_not_followed() {
         assert_eq!(e.kind, EntryKind::Symlink, "{name}");
         assert_eq!(e.size, 0, "{name}");
     }
-    for name in ["link", "dangling"] {
+    for name in ["link", "dangling", "pw"] {
         assert_eq!(
             c.fs.stat(&c.at(name)).await.unwrap().kind,
             EntryKind::Symlink,
@@ -2029,8 +2026,9 @@ async fn refused_resumed_read_closes_the_transfer_connection() {
     fs.disconnect().await;
 }
 
-/// Ruling R9: `stat` of a regular file is `SIZE` + `MDTM`, without listing the parent, even
-/// in a big directory. Directories, special files and missing paths still list it.
+/// Rulings R9/R10: `stat` of a regular file or of a symlink to one is `SIZE` + `STAT <path>`
+/// (+ `MDTM`), without listing the parent, even in a big directory. Directories, special
+/// files and missing paths still list it.
 #[tokio::test]
 #[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
 async fn stat_file_without_listing() {
@@ -2047,14 +2045,11 @@ async fn stat_file_without_listing() {
             st.modified,
             Some(UNIX_EPOCH + Duration::from_secs(1_000_003))
         );
-        // Only a listing has permissions.
-        assert_eq!(st.mode, None);
+        assert_eq!(st.mode, Some(0o644));
     }
-    // Known edge (R9): `SIZE` follows a symlink to a file, so it is stat'ed as that file.
-    assert_eq!(
-        c.fs.stat(&c.at("link")).await.unwrap().kind,
-        EntryKind::File
-    );
+    // Ruling R10: `SIZE` follows a symlink to a file, `STAT` does not.
+    let link = c.fs.stat(&c.at("link")).await.unwrap();
+    assert_eq!((link.kind, link.size), (EntryKind::Symlink, 0));
     assert_eq!(ftp_listings(&c.fs), before);
 
     assert_eq!(c.fs.stat(&c.at("d")).await.unwrap().kind, EntryKind::Dir);

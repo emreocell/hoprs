@@ -49,6 +49,28 @@ pub(crate) fn is_dot_line(line: &str, now: SystemTime) -> bool {
     parse_list_fields(line, now).is_some_and(|(name, ..)| name == ".")
 }
 
+/// The single entry named `name` in the text of a `STAT <path>` reply (an `ls -l` of the path
+/// on the control connection: `Status follows:`, the lines, `End of status`). `None` when the
+/// reply lists nothing, more than one entry, an entry with another name, or a directory's
+/// `.` entry (the path is a directory).
+pub(crate) fn parse_stat_reply(text: &str, name: &str, now: SystemTime) -> Option<ListedEntry> {
+    let mut found = None;
+    // The first line is the reply's own text; the closing line has a code.
+    for line in text.lines().skip(1) {
+        if is_dot_line(line, now) {
+            return None;
+        }
+        let Some(entry) = parse_list_line(line, now) else {
+            continue;
+        };
+        if found.is_some() {
+            return None;
+        }
+        found = Some(entry);
+    }
+    found.filter(|e| e.name == name)
+}
+
 type ListFields = (
     String,
     Option<EntryKind>,
@@ -313,6 +335,32 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stat_reply_file_symlink_and_others() {
+        let file = "Status follows:\n-rw-r--r--    1 1101     1101            5 Nov 12 15:06 a b\n213 End of status";
+        let e = parse_stat_reply(file, "a b", now()).unwrap();
+        assert_eq!(
+            (e.kind, e.size, e.mode),
+            (Some(EntryKind::File), 5, Some(0o644))
+        );
+        assert!(e.modified.is_some());
+        let link = "Status follows:\nlrwxrwxrwx    1 1101     1101            3 Nov 12 15:06 link -> a b\n213 End of status";
+        let e = parse_stat_reply(link, "link", now()).unwrap();
+        assert_eq!(e.kind, Some(EntryKind::Symlink));
+        let fifo = "Status follows:\nprw-r--r--    1 1101     1101            0 Nov 12 15:06 fifo\n213 End of status";
+        assert_eq!(parse_stat_reply(fifo, "fifo", now()).unwrap().kind, None);
+        // Nothing, another name, two entries, a directory (its `.`, even with one child of
+        // the same name).
+        assert!(parse_stat_reply("Status follows:\n213 End of status", "a", now()).is_none());
+        assert!(parse_stat_reply(file, "other", now()).is_none());
+        let two = "Status follows:\n-rw-r--r-- 1 u g 5 Nov 12 15:06 a\n-rw-r--r-- 1 u g 5 Nov 12 15:06 b\n213 End of status";
+        assert!(parse_stat_reply(two, "a", now()).is_none());
+        let dir = "Status follows:\ndrwxr-xr-x 2 u g 4096 Nov 12 15:06 .\ndrwxr-xr-x 3 u g 4096 Nov 12 15:06 ..\n-rw-r--r-- 1 u g 0 Nov 12 15:06 d\n213 End of status";
+        assert!(parse_stat_reply(dir, "d", now()).is_none());
+        // A reply without the "Status follows" line still parses.
+        assert!(parse_stat_reply("", "a", now()).is_none());
+    }
 
     /// 2026-11-12 13:56:00 UTC.
     fn now() -> SystemTime {

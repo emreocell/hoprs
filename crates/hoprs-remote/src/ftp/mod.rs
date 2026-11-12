@@ -25,7 +25,8 @@ pub use tls::fingerprint;
 use crate::{BoxAsyncRead, BoxAsyncWrite, Connection, RemoteFs};
 use errors::{is_control_loss, map_ftp_error, map_reply};
 use list::{
-    ListedEntry, format_timeval, is_dot_line, parse_list_line, parse_mlsd_line, parse_timeval,
+    ListedEntry, format_timeval, is_dot_line, parse_list_line, parse_mlsd_line, parse_stat_reply,
+    parse_timeval,
 };
 use session::{FtpSession, PooledConn};
 use stream::{FtpReader, FtpWriter, Timeouts, Transfer};
@@ -37,13 +38,15 @@ use stream::{FtpReader, FtpWriter, Timeouts, Transfer};
 ///
 /// - `list` uses `MLSD` when `FEAT` announces it, `LIST -a` otherwise (unix `ls -l` format).
 ///   `.`, `..`, FIFOs, sockets and devices are left out; symlinks are reported, not followed.
-/// - `stat` asks `SIZE` first (ruling R9): a `213` means a regular file, whose exact
-///   modification time comes from `MDTM` (`None` when that fails), with no listing. Its `mode`
-///   is `None`: only a listing has permissions. Otherwise (`550`, or no `SIZE` support:
-///   `500`/`502`) it lists the parent directory and looks the name up: directories, symlinks,
-///   special files, missing paths, unreadable parents. `/` is a directory without asking.
-///   Known edge: `SIZE` follows symlinks, so `stat` of a symlink to a file reports the file
-///   (`list` still reports the symlink).
+/// - `stat` never lists a directory for a file (rulings R9, R10): `SIZE` first, and on a `213`
+///   `STAT <path>`, which lists the path itself on the control connection (no data
+///   connection; `SIZE` follows symlinks, `STAT` does not). A symlink is reported as such; a
+///   regular file gets the size from `SIZE`, permissions from the `STAT` line and its exact
+///   modification time from `MDTM` (the line's date when `MDTM` fails). Otherwise (`SIZE`
+///   says `550`, or is not supported: `500`/`502`; `STAT` refused or not one entry with that
+///   name; a directory or special file) it lists the parent directory and looks the name up:
+///   directories, special files, missing paths, unreadable parents. `/` is a directory without
+///   asking.
 /// - Servers answer most failures with a bare `550` (vsftpd: "Delete operation failed."), so
 ///   an ambiguous failure is explained with a `stat`: a missing path is `NotFound`, the wrong
 ///   kind of entry `Io`.
@@ -63,7 +66,8 @@ use stream::{FtpReader, FtpWriter, Timeouts, Transfer};
 ///   it.
 /// - Known edge (R8): `SIZE` and `STOR` follow symlinks on the server, so a symlink to a file
 ///   is read or written like the file. Writing to a FIFO is left to the server (vsftpd
-///   refuses it with `553`; a server that opens it would block that transfer).
+///   refuses it with `553`; a server that opens it would block that transfer). The transfer
+///   engine never gets there: `stat` reports the symlink and it refuses the destination.
 /// - A write stream's `shutdown` flushes the 256 KiB buffer, closes the data connection and
 ///   returns `Ok` only after the `226`. A refusal from the server (`451`, `452`, `552`: a full
 ///   disk) is `Io`; a lost connection is `Network`. A `STOR` refused (`550`, `553`) for a
@@ -228,7 +232,7 @@ impl FtpFs {
     async fn file_size(&self, path: &RemotePath) -> Result<u64> {
         let (code, text) = self.reply(format!("SIZE {}", arg(path)?), path).await?;
         if code == 213 {
-            return parse_size(code, &text, path);
+            return parse_size(code, &text, path.as_str());
         }
         if matches!(code, 500 | 502) {
             let st = self.stat_listed(path).await?;
@@ -380,8 +384,18 @@ fn root_entry() -> RemoteEntry {
     }
 }
 
+/// What `stat`'s commands on the control connection found out.
+enum Probe {
+    /// A regular file or a symlink, from `STAT <path>`.
+    Found(ListedEntry),
+    /// Only a listing of the parent can tell.
+    List,
+    /// `SIZE` was refused with this reply.
+    Refused(u32, String),
+}
+
 /// The size in a `213` reply to `SIZE`.
-fn parse_size(code: u32, text: &str, path: &RemotePath) -> Result<u64> {
+fn parse_size(code: u32, text: &str, path: &str) -> Result<u64> {
     text.trim().parse().map_err(|_| {
         Error::new(ErrorKind::Protocol, format!("Unexpected FTP reply: {path}"))
             .with_detail(format!("{code} {text}"))
@@ -546,39 +560,59 @@ impl RemoteFs for FtpFs {
     }
 
     async fn stat(&self, path: &RemotePath) -> Result<RemoteEntry> {
-        if path.parent().is_none() {
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
             return Ok(root_entry());
-        }
+        };
         let size = format!("SIZE {}", arg(path)?);
+        let stat = format!("STAT {path}");
         let mdtm = format!("MDTM {path}");
-        let context = path.to_string();
-        let (code, text, modified) = self
+        let (context, name) = (path.to_string(), name.to_owned());
+        let probe = self
             .session
             .with_control(move |c| {
                 Box::pin(async move {
                     let (code, text) = session::quote(&mut c.stream, &size, &context).await?;
-                    if code != 213 {
-                        return Ok((code, text, None));
+                    if matches!(code, 500 | 502 | 550) {
+                        return Ok(Probe::List);
                     }
-                    let (mdtm_code, stamp) = session::quote(&mut c.stream, &mdtm, &context).await?;
-                    let modified = (mdtm_code == 213)
-                        .then(|| parse_timeval(stamp.trim()))
+                    if code != 213 {
+                        return Ok(Probe::Refused(code, text));
+                    }
+                    // `SIZE` follows symlinks; `STAT <path>` lists the path itself (ruling R10).
+                    let (stat_code, listing) =
+                        session::quote(&mut c.stream, &stat, &context).await?;
+                    let listed = (211..=213)
+                        .contains(&stat_code)
+                        .then(|| parse_stat_reply(&listing, &name, SystemTime::now()))
                         .flatten();
-                    Ok((code, text, modified))
+                    let Some(mut listed) = listed else {
+                        return Ok(Probe::List);
+                    };
+                    match listed.kind {
+                        Some(EntryKind::Symlink) => {}
+                        Some(EntryKind::File) => {
+                            listed.size = parse_size(code, &text, &context)?;
+                            let (mdtm_code, stamp) =
+                                session::quote(&mut c.stream, &mdtm, &context).await?;
+                            if let Some(t) = (mdtm_code == 213)
+                                .then(|| parse_timeval(stamp.trim()))
+                                .flatten()
+                            {
+                                listed.modified = Some(t);
+                            }
+                        }
+                        _ => return Ok(Probe::List),
+                    }
+                    Ok(Probe::Found(listed))
                 })
             })
             .await?;
-        match code {
-            213 => Ok(RemoteEntry {
-                name: path.file_name().unwrap_or_default().to_owned(),
-                path: path.clone(),
-                kind: EntryKind::File,
-                size: parse_size(code, &text, path)?,
-                modified,
-                mode: None,
+        match probe {
+            Probe::Found(listed) => to_entry(&parent, listed).ok_or_else(|| {
+                Error::new(ErrorKind::Protocol, format!("Unexpected FTP reply: {path}"))
             }),
-            500 | 502 | 550 => self.stat_listed(path).await,
-            _ => Err(map_reply(code, &text, path.as_str())),
+            Probe::List => self.stat_listed(path).await,
+            Probe::Refused(code, text) => Err(map_reply(code, &text, path.as_str())),
         }
     }
 

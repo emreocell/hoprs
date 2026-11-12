@@ -212,25 +212,6 @@ async fn run_until_terminal(
     }
 }
 
-/// Receives events until `id` has copied some bytes; returns the events received.
-async fn until_first_progress(rx: &mut Receiver<Event>, id: TransferId) -> Vec<Event> {
-    let mut events = Vec::new();
-    let first_progress = async {
-        loop {
-            let ev = rx.recv().await.unwrap();
-            let progressed = matches!(&ev, Event::Progress(us) if us.iter().any(|u| u.id == id && u.bytes_done > 0));
-            events.push(ev);
-            if progressed {
-                break;
-            }
-        }
-    };
-    tokio::time::timeout(Duration::from_secs(30), first_progress)
-        .await
-        .expect("no progress");
-    events
-}
-
 fn site_paused_count(events: &[Event]) -> usize {
     events
         .iter()
@@ -259,6 +240,9 @@ struct Gate {
     after: u64,
     released: AtomicBool,
     notify: Notify,
+    /// A stream is waiting at the gate.
+    holding: AtomicBool,
+    held: Notify,
 }
 
 impl Gate {
@@ -267,7 +251,27 @@ impl Gate {
             after,
             released: AtomicBool::new(false),
             notify: Notify::new(),
+            holding: AtomicBool::new(false),
+            held: Notify::new(),
         })
+    }
+
+    /// Returns once a stream is waiting at the gate. Panics after 30 s.
+    async fn held(&self) {
+        let wait = async {
+            loop {
+                let notified = self.held.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if self.holding.load(Ordering::SeqCst) {
+                    return;
+                }
+                notified.await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(30), wait)
+            .await
+            .expect("no stream reached the gate");
     }
 
     /// Lets every held and future stream through.
@@ -305,6 +309,9 @@ fn poll_gate(
     cx: &mut Context<'_>,
 ) -> Poll<()> {
     if gate.holds(passed) {
+        if !gate.holding.swap(true, Ordering::SeqCst) {
+            gate.held.notify_waiters();
+        }
         let gate = Arc::clone(gate);
         let w = waiting.get_or_insert_with(|| Box::pin(gate.wait()));
         ready!(w.as_mut().poll(cx));
@@ -549,18 +556,18 @@ async fn network_drop_pauses_and_resumes() {
         .enqueue(transfer(Direction::Upload, "/big.bin", &target))
         .await
         .unwrap();
-    let mut events = until_first_progress(&mut rx, id).await;
+    // Killed only once the copy is held at 8 MiB, so the destination has bytes to continue.
+    gate.held().await;
     kill_ftp_sessions();
     // The held stream now writes on the dead connection and fails.
     gate.release();
 
-    let (rest, state) = run_until_terminal(&mut rx, id, Duration::from_secs(120)).await;
-    events.extend(rest);
+    let (events, state) = run_until_terminal(&mut rx, id, Duration::from_secs(120)).await;
     watcher.abort();
     assert_eq!(state, TransferState::Done, "{events:?}");
     assert_eq!(site_paused_count(&events), 1, "{events:?}");
     assert!(failed(&events).is_empty(), "{:?}", failed(&events));
-    assert!(Connection::generation(&remote.fs) >= 2);
+    assert_eq!(Connection::generation(&remote.fs), 2);
     let offsets = write_offsets.lock().unwrap().clone();
     assert!(
         offsets.first() == Some(&0) && offsets.iter().any(|&o| o > 0),
@@ -597,18 +604,18 @@ async fn download_drop_resumes() {
         .enqueue(transfer(Direction::Download, "/big.bin", &source))
         .await
         .unwrap();
-    let mut events = until_first_progress(&mut rx, id).await;
+    // Killed only once the copy is held at 8 MiB, so the destination has bytes to continue.
+    gate.held().await;
     kill_ftp_sessions();
     // The held stream now reads from the dead connection and fails.
     gate.release();
 
-    let (rest, state) = run_until_terminal(&mut rx, id, Duration::from_secs(120)).await;
-    events.extend(rest);
+    let (events, state) = run_until_terminal(&mut rx, id, Duration::from_secs(120)).await;
     watcher.abort();
     assert_eq!(state, TransferState::Done, "{events:?}");
     assert_eq!(site_paused_count(&events), 1, "{events:?}");
     assert!(failed(&events).is_empty(), "{:?}", failed(&events));
-    assert!(Connection::generation(&remote.fs) >= 2);
+    assert_eq!(Connection::generation(&remote.fs), 2);
     let offsets = read_offsets.lock().unwrap().clone();
     assert!(
         offsets.first() == Some(&0) && offsets.iter().any(|&o| o > 0),
@@ -721,4 +728,50 @@ async fn copies_into_big_dir_do_not_list_per_file() {
     for i in 0..FILES {
         assert!(remote.read(&remote.at(&format!("u{i}"))).await == data(1000, 500 + i));
     }
+}
+
+/// Ruling R10: `stat` never follows a symlink, so the engine refuses to upload onto a remote
+/// symlink (it would write through it) and leaves the link's target untouched.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn upload_onto_symlink_fails() {
+    let remote = connect_in("/home/frank").await;
+    remote.sh("printf original > real && ln -s real link");
+    let local = TempDir::new().unwrap();
+    write_local(local.path(), "f", b"replacement");
+    let config = EngineConfig {
+        default_policy: ConflictPolicy::Overwrite,
+        ..EngineConfig::default()
+    };
+    let (engine, mut rx) =
+        start_engine_with(config, local.path(), Arc::new(remote.fs.clone())).await;
+    let id = engine
+        .enqueue(transfer(Direction::Upload, "/f", &remote.at("link")))
+        .await
+        .unwrap();
+    let (_, state) = run_until_terminal(&mut rx, id, Duration::from_secs(60)).await;
+    match &state {
+        TransferState::Failed(e) => {
+            assert_eq!(e.message, "Destination is not a regular file", "{e:?}")
+        }
+        other => panic!("the upload ended {other:?}"),
+    }
+    assert_eq!(remote.read(&remote.at("real")).await, b"original");
+}
+
+/// Ruling R10: a single-file download of a remote symlink is skipped, as on every backend.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn download_of_symlink_is_skipped() {
+    let remote = connect_in("/home/frank").await;
+    remote.sh("printf data > real && ln -s real link");
+    let local = TempDir::new().unwrap();
+    let (engine, mut rx) = start_engine(local.path(), Arc::new(remote.fs.clone())).await;
+    let id = engine
+        .enqueue(transfer(Direction::Download, "/link", &remote.at("link")))
+        .await
+        .unwrap();
+    let (_, state) = run_until_terminal(&mut rx, id, Duration::from_secs(60)).await;
+    assert!(matches!(state, TransferState::Skipped(_)), "{state:?}");
+    assert!(!local.path().join("link").exists());
 }
