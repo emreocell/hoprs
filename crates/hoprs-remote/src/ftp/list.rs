@@ -91,6 +91,40 @@ pub(crate) fn parse_stat_reply(text: &str, name: &str, now: SystemTime) -> Optio
     found.filter(|e| e.name == name)
 }
 
+/// What a `STAT <path>` reply says about the path named `name`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum StatReply {
+    /// A multi-line `213` reply with nothing between its first and last lines: the server
+    /// listed nothing, so the path does not exist (vsftpd: `213-Status follows:` /
+    /// `213 End of status`, also under a missing parent). Never `211` (a server status).
+    Missing,
+    /// The single entry named `name` (see [`parse_stat_reply`]).
+    Entry(ListedEntry),
+    /// Anything else: a directory's `.`, another name, several entries, unparseable lines, a
+    /// single-line or refused reply. Only a listing can tell.
+    Unknown,
+}
+
+/// Classifies the reply (`code`, `text` as [`super::errors::reply_parts`] returns it) to a
+/// `STAT <path>` for the path named `name`.
+pub(crate) fn classify_stat_reply(code: u32, text: &str, name: &str, now: SystemTime) -> StatReply {
+    if !(211..=213).contains(&code) {
+        return StatReply::Unknown;
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    if let [_, body @ .., last] = lines.as_slice()
+        && code == 213
+        && last.starts_with("213 ")
+        && body.iter().all(|l| l.trim().is_empty())
+    {
+        return StatReply::Missing;
+    }
+    match parse_stat_reply(text, name, now) {
+        Some(entry) => StatReply::Entry(entry),
+        None => StatReply::Unknown,
+    }
+}
+
 type ListFields = (
     String,
     Option<EntryKind>,
@@ -355,6 +389,77 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stat_reply_classification() {
+        let name = "f";
+        // vsftpd, missing path or missing parent.
+        let missing = "Status follows:\r\n213 End of status";
+        assert_eq!(
+            classify_stat_reply(213, missing, name, now()),
+            StatReply::Missing
+        );
+        assert_eq!(
+            classify_stat_reply(213, "Status follows:\n\n213 End of status", name, now()),
+            StatReply::Missing
+        );
+        // Never from 211 (a server status), nor a single-line reply, nor a refusal.
+        assert_eq!(
+            classify_stat_reply(211, missing, name, now()),
+            StatReply::Unknown
+        );
+        assert_eq!(
+            classify_stat_reply(213, "End of status", name, now()),
+            StatReply::Unknown
+        );
+        assert_eq!(
+            classify_stat_reply(213, "", name, now()),
+            StatReply::Unknown
+        );
+        assert_eq!(
+            classify_stat_reply(502, "Not implemented.", name, now()),
+            StatReply::Unknown
+        );
+        assert_eq!(
+            classify_stat_reply(550, missing, name, now()),
+            StatReply::Unknown
+        );
+        // A file, a symlink, a special file: the entry.
+        let file = "Status follows:\n-rw-r--r-- 1 u g 5 Nov 12 15:06 f\n213 End of status";
+        let StatReply::Entry(e) = classify_stat_reply(213, file, name, now()) else {
+            panic!("no entry");
+        };
+        assert_eq!((e.kind, e.size), (Some(EntryKind::File), 5));
+        let link = "Status follows:\nlrwxrwxrwx 1 u g 1 Nov 12 15:06 f -> g\n213 End of status";
+        assert!(matches!(
+            classify_stat_reply(213, link, name, now()),
+            StatReply::Entry(ListedEntry {
+                kind: Some(EntryKind::Symlink),
+                ..
+            })
+        ));
+        let fifo = "Status follows:\nprw-r--r-- 1 u g 0 Nov 12 15:06 f\n213 End of status";
+        assert!(matches!(
+            classify_stat_reply(213, fifo, name, now()),
+            StatReply::Entry(ListedEntry { kind: None, .. })
+        ));
+        // A directory, another name, an unreadable line: unknown.
+        let dir = "Status follows:\ndrwxr-xr-x 2 u g 4096 Nov 12 15:06 .\n213 End of status";
+        assert_eq!(
+            classify_stat_reply(213, dir, name, now()),
+            StatReply::Unknown
+        );
+        let other = "Status follows:\n-rw-r--r-- 1 u g 5 Nov 12 15:06 g\n213 End of status";
+        assert_eq!(
+            classify_stat_reply(213, other, name, now()),
+            StatReply::Unknown
+        );
+        let dos = "Status follows:\n11-12-26  03:04PM  5 f\n213 End of status";
+        assert_eq!(
+            classify_stat_reply(213, dos, name, now()),
+            StatReply::Unknown
+        );
+    }
 
     fn lines(text: &str) -> Vec<String> {
         text.lines().map(str::to_owned).collect()

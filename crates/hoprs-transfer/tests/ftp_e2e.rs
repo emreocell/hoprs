@@ -673,8 +673,8 @@ async fn disk_full_fails_item_not_site() {
 }
 
 /// Ruling R9 (spec §9, many small files): the engine's `stat` of a file it has just copied,
-/// or is about to overwrite, does not list the directory, even a 2k-entry one. Only the
-/// check that a new file's destination is missing lists it.
+/// or is about to overwrite, does not list the directory, even a 2k-entry one; since ruling
+/// R11 neither does the check that a new file's destination is missing.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
 async fn copies_into_big_dir_do_not_list_per_file() {
@@ -721,8 +721,8 @@ async fn copies_into_big_dir_do_not_list_per_file() {
             .expect("uploads not finished");
         ftp_listings(&remote.fs) - before
     };
-    // New files: one listing each, to learn that the destination is missing.
-    assert_eq!(upload_all(&mut rx).await, FILES);
+    // New files: none either (`SIZE` `550` + an empty `STAT` reply say it is missing).
+    assert_eq!(upload_all(&mut rx).await, 0);
     // Existing files: none.
     assert_eq!(upload_all(&mut rx).await, 0);
     for i in 0..FILES {

@@ -25,8 +25,8 @@ pub use tls::fingerprint;
 use crate::{BoxAsyncRead, BoxAsyncWrite, Connection, RemoteFs};
 use errors::{is_control_loss, map_ftp_error, map_reply};
 use list::{
-    ListedEntry, format_timeval, is_dot_line, parse_list_line, parse_mlsd_line, parse_stat_reply,
-    parse_timeval, unreadable_listing,
+    ListedEntry, StatReply, classify_stat_reply, format_timeval, is_dot_line, parse_list_line,
+    parse_mlsd_line, parse_timeval, unreadable_listing,
 };
 use session::{FtpSession, PooledConn};
 use stream::{FtpReader, FtpWriter, Timeouts, Transfer};
@@ -38,15 +38,20 @@ use stream::{FtpReader, FtpWriter, Timeouts, Transfer};
 ///
 /// - `list` uses `MLSD` when `FEAT` announces it, `LIST -a` otherwise (unix `ls -l` format).
 ///   `.`, `..`, FIFOs, sockets and devices are left out; symlinks are reported, not followed.
-/// - `stat` never lists a directory for a file (rulings R9, R10): `SIZE` first, and on a `213`
+/// - `stat` never lists a directory for a file (rulings R9, R10): `SIZE` first, then
 ///   `STAT <path>`, which lists the path itself on the control connection (no data
 ///   connection; `SIZE` follows symlinks, `STAT` does not). A symlink is reported as such; a
 ///   regular file gets the size from `SIZE`, permissions from the `STAT` line and its exact
-///   modification time from `MDTM` (the line's date when `MDTM` fails). Otherwise (`SIZE`
-///   says `550`, or is not supported: `500`/`502`; `STAT` refused or not one entry with that
-///   name; a directory or special file) it lists the parent directory and looks the name up:
-///   directories, special files, missing paths, unreadable parents. `/` is a directory without
-///   asking.
+///   modification time from `MDTM` (the line's date when `MDTM` fails).
+/// - A missing path costs no listing either (ruling R11): `SIZE` says `550` and `STAT` sends
+///   a multi-line `213` with nothing in it (vsftpd, under a missing parent too): `NotFound`.
+///   Trade-off: under a parent the server cannot search, `STAT` lists nothing as well, so the
+///   result is `NotFound` rather than `Permission`. Nothing is overwritten because of it: the
+///   `STOR` that follows fails, and is reported as `Permission`. Failures are explained with
+///   a `stat` that confirms a missing path with a listing, so they keep `Permission`.
+/// - Otherwise (`SIZE` not supported: `500`/`502`; `STAT` refused, or not one entry with that
+///   name; a directory or special file) `stat` lists the parent directory and looks the name
+///   up: directories, special files, unreadable parents. `/` is a directory without asking.
 /// - A `LIST` reply this parser cannot read (an MS-DOS style listing, IIS's default) is a
 ///   `Protocol` error, "Cannot read the server's listing format", and so is a `stat` whose
 ///   `SIZE` found the file when the listing does not show it: a listing that cannot be read
@@ -191,7 +196,7 @@ impl FtpFs {
         if !matches!(err.kind, ErrorKind::Io | ErrorKind::NotFound) {
             return err;
         }
-        match self.stat(path).await {
+        match self.stat_exact(path).await {
             Err(e) if e.kind == ErrorKind::NotFound => not_found(path, &err),
             Err(e) if is_definite(&e) => e,
             _ => err,
@@ -213,7 +218,7 @@ impl FtpFs {
         let Some(parent) = path.parent() else {
             return err;
         };
-        match self.stat(&parent).await {
+        match self.stat_exact(&parent).await {
             Ok(st) if st.kind == EntryKind::Dir => {
                 let e = Error::new(ErrorKind::Permission, format!("Permission denied: {path}"));
                 match err.detail {
@@ -288,7 +293,7 @@ impl FtpFs {
             && let [only] = entries.as_slice()
             && Some(only.name.as_str()) == parent.file_name()
         {
-            let up = self.stat(&parent).await?;
+            let up = self.stat_exact(&parent).await?;
             match up.kind {
                 // The same check as `list`: the directory's own entry, so it is unreadable.
                 EntryKind::Dir
@@ -339,6 +344,94 @@ impl FtpFs {
         Ok(entry)
     }
 
+    /// [`RemoteFs::stat`] for the error paths: a missing path is confirmed with a listing of
+    /// the parent, so an unsearchable parent is `Permission` rather than `NotFound`.
+    /// Boxed: `stat_with` and `stat_listed` call each other.
+    fn stat_exact<'a>(
+        &'a self,
+        path: &'a RemotePath,
+    ) -> futures_util::future::BoxFuture<'a, Result<RemoteEntry>> {
+        Box::pin(self.stat_with(path, true))
+    }
+
+    /// `stat`. With `confirm_missing`, a path `SIZE` and `STAT` say is missing is looked up in
+    /// a listing of its parent too (see the type's docs for the trade-off without it).
+    async fn stat_with(&self, path: &RemotePath, confirm_missing: bool) -> Result<RemoteEntry> {
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+            return Ok(root_entry());
+        };
+        let size = format!("SIZE {}", arg(path)?);
+        let stat = format!("STAT {path}");
+        let mdtm = format!("MDTM {path}");
+        let (context, name) = (path.to_string(), name.to_owned());
+        let probe = self
+            .session
+            .with_control(move |c| {
+                Box::pin(async move {
+                    let (code, text) = session::quote(&mut c.stream, &size, &context).await?;
+                    if matches!(code, 500 | 502) {
+                        return Ok(Probe::List { sized: false });
+                    }
+                    if code != 213 && code != 550 {
+                        return Ok(Probe::Refused(code, text));
+                    }
+                    // `SIZE` follows symlinks; `STAT <path>` lists the path itself (ruling R10).
+                    let (stat_code, listing) =
+                        session::quote(&mut c.stream, &stat, &context).await?;
+                    let reply = classify_stat_reply(stat_code, &listing, &name, SystemTime::now());
+                    if code == 550 {
+                        // Not a regular file (ruling R11): missing, a symlink, or for the
+                        // listing to tell.
+                        return Ok(match reply {
+                            StatReply::Missing => Probe::Missing,
+                            StatReply::Entry(e) if e.kind == Some(EntryKind::Symlink) => {
+                                Probe::Found(e)
+                            }
+                            _ => Probe::List { sized: false },
+                        });
+                    }
+                    let StatReply::Entry(mut listed) = reply else {
+                        return Ok(Probe::List { sized: true });
+                    };
+                    match listed.kind {
+                        Some(EntryKind::Symlink) => {}
+                        Some(EntryKind::File) => {
+                            listed.size = parse_size(code, &text, &context)?;
+                            let (mdtm_code, stamp) =
+                                session::quote(&mut c.stream, &mdtm, &context).await?;
+                            if let Some(t) = (mdtm_code == 213)
+                                .then(|| parse_timeval(stamp.trim()))
+                                .flatten()
+                            {
+                                listed.modified = Some(t);
+                            }
+                        }
+                        _ => return Ok(Probe::List { sized: true }),
+                    }
+                    Ok(Probe::Found(listed))
+                })
+            })
+            .await?;
+        match probe {
+            Probe::Found(listed) => to_entry(&parent, listed).ok_or_else(|| {
+                Error::new(ErrorKind::Protocol, format!("Unexpected FTP reply: {path}"))
+            }),
+            Probe::List { sized } => match self.stat_listed(path).await {
+                Err(e) if sized && e.kind == ErrorKind::NotFound => Err(unreadable_listing_error(
+                    path,
+                    "SIZE found the file, the listing did not",
+                )),
+                other => other,
+            },
+            Probe::Missing if confirm_missing => self.stat_listed(path).await,
+            Probe::Missing => Err(Error::new(
+                ErrorKind::NotFound,
+                format!("No such file or directory: {path}"),
+            )),
+            Probe::Refused(code, text) => Err(map_reply(code, &text, path.as_str())),
+        }
+    }
+
     fn timeouts(&self) -> Timeouts {
         Timeouts {
             command: self.session.command_timeout(),
@@ -349,7 +442,7 @@ impl FtpFs {
 
     /// Whether `path` is missing (`stat` says `NotFound`). Other `stat` errors are returned.
     async fn missing(&self, path: &RemotePath) -> Result<bool> {
-        match self.stat(path).await {
+        match self.stat_exact(path).await {
             Ok(_) => Ok(false),
             Err(e) if e.kind == ErrorKind::NotFound => Ok(true),
             Err(e) => Err(e),
@@ -403,6 +496,8 @@ enum Probe {
     /// Only a listing of the parent can tell. `sized`: `SIZE` answered `213`, so the path
     /// exists, and a listing that does not show it cannot be read.
     List { sized: bool },
+    /// `SIZE` said `550` and `STAT <path>` listed nothing: the path does not exist.
+    Missing,
     /// `SIZE` was refused with this reply.
     Refused(u32, String),
 }
@@ -541,7 +636,7 @@ impl RemoteFs for FtpFs {
             Ok(listing) => listing,
             Err(e) if matches!(e.kind, ErrorKind::Io | ErrorKind::NotFound) => {
                 // `MLSD` on a file or a missing path, or a server that refuses `LIST` there.
-                return Err(match self.stat(path).await {
+                return Err(match self.stat_exact(path).await {
                     Err(st) if st.kind == ErrorKind::NotFound => not_found(path, &e),
                     Err(st) if is_definite(&st) => st,
                     Ok(st) if !matches!(st.kind, EntryKind::Dir | EntryKind::Symlink) => {
@@ -554,7 +649,7 @@ impl RemoteFs for FtpFs {
         };
         if !is_dir {
             // Empty, a file's own entry, or an unreadable directory's own entry.
-            let st = self.stat(path).await?;
+            let st = self.stat_exact(path).await?;
             match st.kind {
                 EntryKind::Dir => {
                     if let [only] = entries.as_slice()
@@ -588,66 +683,7 @@ impl RemoteFs for FtpFs {
     }
 
     async fn stat(&self, path: &RemotePath) -> Result<RemoteEntry> {
-        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
-            return Ok(root_entry());
-        };
-        let size = format!("SIZE {}", arg(path)?);
-        let stat = format!("STAT {path}");
-        let mdtm = format!("MDTM {path}");
-        let (context, name) = (path.to_string(), name.to_owned());
-        let probe = self
-            .session
-            .with_control(move |c| {
-                Box::pin(async move {
-                    let (code, text) = session::quote(&mut c.stream, &size, &context).await?;
-                    if matches!(code, 500 | 502 | 550) {
-                        return Ok(Probe::List { sized: false });
-                    }
-                    if code != 213 {
-                        return Ok(Probe::Refused(code, text));
-                    }
-                    // `SIZE` follows symlinks; `STAT <path>` lists the path itself (ruling R10).
-                    let (stat_code, listing) =
-                        session::quote(&mut c.stream, &stat, &context).await?;
-                    let listed = (211..=213)
-                        .contains(&stat_code)
-                        .then(|| parse_stat_reply(&listing, &name, SystemTime::now()))
-                        .flatten();
-                    let Some(mut listed) = listed else {
-                        return Ok(Probe::List { sized: true });
-                    };
-                    match listed.kind {
-                        Some(EntryKind::Symlink) => {}
-                        Some(EntryKind::File) => {
-                            listed.size = parse_size(code, &text, &context)?;
-                            let (mdtm_code, stamp) =
-                                session::quote(&mut c.stream, &mdtm, &context).await?;
-                            if let Some(t) = (mdtm_code == 213)
-                                .then(|| parse_timeval(stamp.trim()))
-                                .flatten()
-                            {
-                                listed.modified = Some(t);
-                            }
-                        }
-                        _ => return Ok(Probe::List { sized: true }),
-                    }
-                    Ok(Probe::Found(listed))
-                })
-            })
-            .await?;
-        match probe {
-            Probe::Found(listed) => to_entry(&parent, listed).ok_or_else(|| {
-                Error::new(ErrorKind::Protocol, format!("Unexpected FTP reply: {path}"))
-            }),
-            Probe::List { sized } => match self.stat_listed(path).await {
-                Err(e) if sized && e.kind == ErrorKind::NotFound => Err(unreadable_listing_error(
-                    path,
-                    "SIZE found the file, the listing did not",
-                )),
-                other => other,
-            },
-            Probe::Refused(code, text) => Err(map_reply(code, &text, path.as_str())),
-        }
+        self.stat_with(path, false).await
     }
 
     async fn open_read(&self, path: &RemotePath, offset: u64) -> Result<BoxAsyncRead> {
@@ -732,7 +768,7 @@ impl RemoteFs for FtpFs {
             return Ok(());
         }
         let err = map_reply(code, &text, path.as_str());
-        match self.stat(path).await {
+        match self.stat_exact(path).await {
             Ok(st) if st.kind == EntryKind::Dir => return Ok(()),
             Ok(_) => return Err(err),
             Err(e) if e.kind != ErrorKind::NotFound => return Err(e),
@@ -787,7 +823,7 @@ impl RemoteFs for FtpFs {
         if !matches!(err.kind, ErrorKind::Io | ErrorKind::NotFound) {
             return Err(err);
         }
-        match self.stat(path).await {
+        match self.stat_exact(path).await {
             Err(e) if e.kind == ErrorKind::NotFound => Err(not_found(path, &err)),
             Err(e) if is_definite(&e) => Err(e),
             Ok(st) if st.kind == EntryKind::Dir => {
@@ -807,7 +843,7 @@ impl RemoteFs for FtpFs {
         if !matches!(err.kind, ErrorKind::Io | ErrorKind::NotFound) {
             return Err(err);
         }
-        match self.stat(path).await {
+        match self.stat_exact(path).await {
             Err(e) if e.kind == ErrorKind::NotFound => Err(not_found(path, &err)),
             Err(e) if is_definite(&e) => Err(e),
             Ok(st) if st.kind != EntryKind::Dir => Err(not_a_dir(path)),

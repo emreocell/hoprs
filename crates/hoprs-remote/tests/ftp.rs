@@ -1413,14 +1413,20 @@ async fn unreadable_dir_is_permission() {
     c.fs.chmod(&c.at("nr"), 0o000).await.unwrap();
     let e = c.fs.list(&c.at("nr")).await.unwrap_err();
     assert_eq!(e.kind, ErrorKind::Permission, "{e:?}");
-    // Children of an unreadable directory cannot be looked up: Permission, never NotFound
-    // (the transfer engine would take NotFound as "absent") nor the parent's own entry.
+    // Children of an unreadable directory cannot be looked up. Ruling R11 trade-off: `stat`
+    // answers a missing path from `SIZE` and `STAT` alone, and vsftpd's `STAT` lists nothing
+    // under an unsearchable parent, so `stat` says NotFound there (never the parent's own
+    // entry). Nothing is overwritten because of it: the `STOR` that follows fails as
+    // Permission (below).
     c.sh("chmod 700 nr && : > nr/x && mkdir nr/nr && chmod 000 nr");
     for child in ["nr/x", "nr/nr", "nr/missing"] {
         let e = c.fs.stat(&c.at(child)).await.unwrap_err();
-        assert_eq!(e.kind, ErrorKind::Permission, "{child}: {e:?}");
+        assert_eq!(e.kind, ErrorKind::NotFound, "{child}: {e:?}");
     }
+    // Failures are explained with a listing: Permission, never NotFound.
     for e in [
+        c.fs.open_write(&c.at("nr/x"), 0).await.err().unwrap(),
+        c.fs.open_write(&c.at("nr/missing"), 0).await.err().unwrap(),
         c.fs.remove_file(&c.at("nr/x")).await.unwrap_err(),
         c.fs.chmod(&c.at("nr/x"), 0o600).await.unwrap_err(),
         c.fs.rename(&c.at("nr/x"), &c.at("y")).await.unwrap_err(),
@@ -2345,8 +2351,8 @@ async fn sized_file_missing_from_listing_is_protocol() {
 }
 
 /// Rulings R9/R10: `stat` of a regular file or of a symlink to one is `SIZE` + `STAT <path>`
-/// (+ `MDTM`), without listing the parent, even in a big directory. Directories, special
-/// files and missing paths still list it.
+/// (+ `MDTM`), without listing the parent, even in a big directory. Directories and special
+/// files still list it; a missing path does not (ruling R11).
 #[tokio::test]
 #[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
 async fn stat_file_without_listing() {
@@ -2379,12 +2385,18 @@ async fn stat_file_without_listing() {
         c.fs.stat(&c.at("fifo")).await.unwrap_err().kind,
         ErrorKind::Io
     );
-    assert_eq!(ftp_listings(&c.fs), before + 3);
+    // A missing path (missing parent too) is `SIZE` `550` + an empty `STAT`: no listing.
+    assert_eq!(ftp_listings(&c.fs), before + 2);
+    assert_eq!(
+        c.fs.stat(&c.at("nope/deeper")).await.unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+    assert_eq!(ftp_listings(&c.fs), before + 2);
     assert_eq!(
         c.fs.stat(&RemotePath::root()).await.unwrap().kind,
         EntryKind::Dir
     );
-    assert_eq!(ftp_listings(&c.fs), before + 3);
+    assert_eq!(ftp_listings(&c.fs), before + 2);
 }
 
 /// vsftpd refuses a `STOR` into a directory it cannot write with `553`: `Permission`, not
