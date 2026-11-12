@@ -15,8 +15,7 @@ Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI), open source (MIT OR Apa
 
 ## Current status (2026-11-12)
 
-- Plans 1 (hoprs-core, hoprs-remote, hoprs-transfer) and 2 (hoprs-ssh, `SftpFs`, Docker OpenSSH test env) merged to `main`.
-- Plan 3 (FTP + FTPS: `FtpFs`, `FtpSession` pool/keepalive/reconnect, explicit and implicit FTPS with certificate pinning, protocol-neutral `Connection` + `spawn_site_watcher`, Docker vsftpd test env) implemented on branch `plan-3-ftp-ftps`; every task reviewed, whole-branch review pending.
+- Plans 1 (hoprs-core, hoprs-remote, hoprs-transfer), 2 (hoprs-ssh, `SftpFs`, Docker OpenSSH test env) and 3 (FTP + FTPS: `FtpFs`, `FtpSession` pool/keepalive/reconnect, certificate pinning, protocol-neutral `Connection` + `spawn_site_watcher`, Docker vsftpd test env) merged to `main`.
 - Deferred follow-ups for later plans: `docs/superpowers/plans/2026-11-12-01-followups.md` (per plan: before Plan 5/6, perf, Windows, Later).
 - Plan 4 (hoprs-vault: profiles TOML, keyring secrets, encrypted export/import; hoprs-import: FileZilla `sitemanager.xml` parser and `apply`) implemented on branch `plan-4-vault-import`; every task reviewed, whole-branch review pending.
 - **Next step:** merge Plan 4, then write Plan 5 (iced app) from the real signatures (`Vault`, `SshSession`, `SftpFs`, `FtpFs`, `TransferEngine`, `spawn_site_watcher`).
