@@ -116,6 +116,35 @@ fn disconnected_error(states: &[SessionState]) -> Error {
     }
 }
 
+/// Asserts a refused host key rotation. The attempt count is deliberately not asserted:
+/// sshd re-execs on SIGHUP and can drop the session before the listener is back, so early
+/// attempts may fail with a network error first. What matters is that the session ends in
+/// `Disconnected(HostKey)`, never reconnects and never prompts.
+fn assert_host_key_refused(states: &[SessionState], host_prompts: u32, prompts_before: u32) {
+    let tries = attempts(states);
+    assert!(!tries.is_empty(), "{states:?}");
+    let expected: Vec<u32> = (1..=tries.len() as u32).collect();
+    assert_eq!(tries, expected, "attempts must increase from 1: {states:?}");
+    assert!(
+        !states.iter().any(|s| matches!(s, SessionState::Connected)),
+        "must not reconnect: {states:?}"
+    );
+    let (last, earlier) = states.split_last().expect("no states recorded");
+    assert!(
+        earlier
+            .iter()
+            .all(|s| matches!(s, SessionState::Reconnecting { .. })),
+        "only Reconnecting may precede the final state: {states:?}"
+    );
+    let e = disconnected_error(std::slice::from_ref(last));
+    assert_eq!(e.kind, ErrorKind::HostKey, "{e:?}");
+    assert_eq!(e.message, "Host key for 127.0.0.1 has changed", "{e:?}");
+    assert_eq!(
+        host_prompts, prompts_before,
+        "a changed key must never prompt"
+    );
+}
+
 fn assert_not_connected(result: Result<russh::Channel<russh::client::Msg>, Error>) {
     let Err(e) = result else {
         panic!("expected Not connected, got a channel");
@@ -276,6 +305,7 @@ fn wait_for_rotated_listener(old: &str) {
 #[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
 async fn host_key_rotated_blocks_reconnect() {
     let (s, p, _dir) = connected().await;
+    let prompts_before = p.calls().host;
     let rec = record_until_disconnected(s.state());
 
     let _restore = restore(&[&["down", "-v"], &["up", "-d", "--build", "--wait"]]);
@@ -292,10 +322,7 @@ async fn host_key_rotated_blocks_reconnect() {
     kill_ssh_sessions();
     let states = recorded(rec).await;
 
-    assert_eq!(attempts(&states), vec![1], "{states:?}");
-    let e = disconnected_error(&states);
-    assert_eq!(e.kind, ErrorKind::HostKey, "{e:?}");
-    assert_eq!(p.calls().host, 1, "a changed key must never prompt");
+    assert_host_key_refused(&states, p.calls().host, prompts_before);
     assert_eq!(s.generation(), 1);
 }
 
@@ -306,6 +333,7 @@ async fn host_key_rotated_blocks_reconnect() {
 #[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
 async fn host_key_algorithm_change_blocks_reconnect() {
     let (s, p, _dir) = connected().await;
+    let prompts_before = p.calls().host;
     let rec = record_until_disconnected(s.state());
 
     let _restore = restore(&[&["down", "-v"], &["up", "-d", "--build", "--wait"]]);
@@ -323,11 +351,7 @@ async fn host_key_algorithm_change_blocks_reconnect() {
     kill_ssh_sessions();
     let states = recorded(rec).await;
 
-    assert_eq!(attempts(&states), vec![1], "{states:?}");
-    let e = disconnected_error(&states);
-    assert_eq!(e.kind, ErrorKind::HostKey, "{e:?}");
-    assert_eq!(e.message, "Host key for 127.0.0.1 has changed", "{e:?}");
-    assert_eq!(p.calls().host, 1, "a changed key must never prompt");
+    assert_host_key_refused(&states, p.calls().host, prompts_before);
     assert_eq!(s.generation(), 1);
 }
 
