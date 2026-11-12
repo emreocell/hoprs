@@ -8,14 +8,17 @@ Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI), open source (MIT OR Apa
 - Approved UI mockup (open in a browser): `docs/superpowers/specs/assets/2026-11-11-hoprs-mockup-v2.html`
 - Plan roadmap (6 plans, one per subsystem): `docs/superpowers/plans/2026-11-11-00-roadmap.md`
 - Plan 1 (foundation + transfer engine): `docs/superpowers/plans/2026-11-11-01-foundation-transfer-engine.md`
+- Plan 2 (SSH + SFTP): `docs/superpowers/plans/2026-11-12-02-ssh-sftp.md`
+- Plan 3 (FTP + FTPS): `docs/superpowers/plans/2026-11-12-03-ftp-ftps.md`
+- Deferred follow-ups: `docs/superpowers/plans/2026-11-12-01-followups.md`
 
 ## Current status (2026-11-12)
 
-- Plan 1 (hoprs-core, hoprs-remote, hoprs-transfer) merged to `main`.
-- Plan 2 (hoprs-ssh, `SftpFs`, engine hardening, Docker OpenSSH test env) implemented on branch `plan-2-ssh-sftp`; every task reviewed plus a whole-branch review.
-- Deferred follow-ups for later plans: `docs/superpowers/plans/2026-11-12-01-followups.md` (sections "Before Plan 3/5/6", perf, Windows, Later).
-- **Next step:** merge Plan 2, then write Plan 3 (FTP + FTPS) from the real signatures (`RemoteFs` contract in `crates/hoprs-remote/src/lib.rs`, `TransferEngine::network_restored`, the Docker test env in `docker/`).
-- Plans 3–6 are written only after the previous plan is done, using the real signatures it produced.
+- Plans 1 (hoprs-core, hoprs-remote, hoprs-transfer) and 2 (hoprs-ssh, `SftpFs`, Docker OpenSSH test env) merged to `main`.
+- Plan 3 (FTP + FTPS: `FtpFs`, `FtpSession` pool/keepalive/reconnect, explicit and implicit FTPS with certificate pinning, protocol-neutral `Connection` + `spawn_site_watcher`, Docker vsftpd test env) implemented on branch `plan-3-ftp-ftps`; every task reviewed, whole-branch review pending.
+- Deferred follow-ups for later plans: `docs/superpowers/plans/2026-11-12-01-followups.md` (per plan: before Plan 5/6, perf, Windows, Later).
+- **Next step:** merge Plan 3, then write Plan 4 (vault + FileZilla import) from the real signatures; it implements `FtpPrompter::store_pin` by saving the pin into the site profile (`crates/hoprs-remote/src/ftp/prompt.rs`).
+- Plans 4–6 are written only after the previous plan is done, using the real signatures it produced.
 - Docker integration tests: `docker compose -f docker/compose.yml up -d --build --wait`, then `cargo test --workspace --all-features -- --ignored --test-threads=1`.
 
 ## Decisions already made (do not re-litigate)

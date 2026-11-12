@@ -5,18 +5,29 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-testing = []
+testing = ["hoprs-ssh/testing"]
 
 [dependencies]
 hoprs-core = { path = "../hoprs-core" }
 hoprs-ssh = { path = "../hoprs-ssh" }
 russh.workspace = true
 russh-sftp.workspace = true
-tokio = { workspace = true, features = ["io-util", "fs", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "fs", "net", "rt", "sync", "time"] }
 async-trait.workspace = true
 futures-util.workspace = true
+secrecy.workspace = true
+# `deprecated` enables `connect_secure_implicit` (implicit FTPS).
+suppaftp = { workspace = true, features = ["deprecated"] }
+rustls.workspace = true
+rustls-native-certs.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["io-util", "fs", "macros", "rt", "time", "test-util"] }
+tokio = { workspace = true, features = ["io-util", "fs", "macros", "net", "rt", "time", "test-util"] }
 tempfile.workspace = true
+rustls.workspace = true
 hoprs-ssh = { path = "../hoprs-ssh", features = ["testing"] }
+
+[[test]]
+name = "ftp"
+required-features = ["testing"]

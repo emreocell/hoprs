@@ -17,7 +17,7 @@ use hoprs_ssh::testing::{docker, fixture, kill_ssh_sessions, test_config};
 use hoprs_ssh::{KeySource, Prompter, ScriptedPrompter, SessionState, SshSession};
 use hoprs_transfer::{
     Direction, EngineConfig, Event, QueueStore, SiteEndpoints, TransferEngine, TransferId,
-    TransferSpec, TransferState,
+    TransferSpec, TransferState, spawn_site_watcher,
 };
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -25,7 +25,6 @@ use tokio::io::{AsyncReadExt, AsyncWrite};
 use tokio::sync::Notify;
 use tokio::sync::broadcast::Receiver;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::task::JoinHandle;
 
 const MIB: usize = 1 << 20;
 const KIB: usize = 1 << 10;
@@ -221,67 +220,6 @@ fn failed(events: &[Event]) -> Vec<&Event> {
             )
         })
         .collect()
-}
-
-/// Watches `session` and tells `engine` when the network of `site` is back. Plan 5's app
-/// wires the same pattern for every connected site:
-///
-/// - the state returns to `Connected` with a new generation (a reconnection): call
-///   `network_restored` at once;
-/// - a `SitePaused` for `site` arrives while the state is still `Connected` (a request
-///   failed, e.g. timed out, but the connection never dropped, so no reconnection will
-///   follow): after a 2 s grace, if the state is still `Connected`, call `network_restored`;
-/// - the event receiver lagged (a `SitePaused` may have been lost): if the state is
-///   `Connected`, call `network_restored` (it does nothing when the site is not paused).
-///
-/// Abort the returned task to stop watching.
-fn spawn_network_watcher(
-    engine: TransferEngine,
-    site: SiteId,
-    session: SshSession,
-) -> JoinHandle<()> {
-    const GRACE: Duration = Duration::from_secs(2);
-    tokio::spawn(async move {
-        let mut state = session.state();
-        let mut events = engine.subscribe();
-        let mut generation = session.generation();
-        loop {
-            tokio::select! {
-                changed = state.changed() => {
-                    if changed.is_err() {
-                        break;
-                    }
-                    let connected = *state.borrow_and_update() == SessionState::Connected;
-                    let current = session.generation();
-                    if connected && current != generation {
-                        generation = current;
-                        engine.network_restored(site.clone()).await;
-                    }
-                }
-                event = events.recv() => match event {
-                    Ok(Event::SitePaused { site: paused, .. }) if paused == site => {
-                        if *session.state().borrow() == SessionState::Connected {
-                            let (engine, site, session) =
-                                (engine.clone(), site.clone(), session.clone());
-                            tokio::spawn(async move {
-                                tokio::time::sleep(GRACE).await;
-                                if *session.state().borrow() == SessionState::Connected {
-                                    engine.network_restored(site).await;
-                                }
-                            });
-                        }
-                    }
-                    Err(RecvError::Lagged(_)) => {
-                        if *session.state().borrow() == SessionState::Connected {
-                            engine.network_restored(site.clone()).await;
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(RecvError::Closed) => break,
-                },
-            }
-        }
-    })
 }
 
 /// Holds every write stream that has passed `after` bytes until `release` is called, so
@@ -507,7 +445,7 @@ async fn network_drop_pauses_and_resumes() {
         gate: Arc::clone(&gate),
     };
     let (engine, mut rx) = start_engine(local.path(), Arc::new(recording)).await;
-    let watcher = spawn_network_watcher(engine.clone(), site(), remote.session.clone());
+    let watcher = spawn_site_watcher(engine.clone(), site(), Arc::new(remote.session.clone()));
     assert_eq!(remote.session.generation(), 1);
 
     let target = remote.at("big.bin");

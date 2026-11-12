@@ -1,6 +1,6 @@
 //! Fault-injecting `RemoteFs` wrapper for tests.
 //!
-//! Wraps any `RemoteFs` and can fail a chosen operation once, fail the byte
+//! Wraps any `RemoteFs` and can fail a chosen operation once or always, fail the byte
 //! stream once after a cumulative number of bytes, delay every call and every
 //! stream chunk, lose a written chunk whose error only surfaces at shutdown
 //! (like a pipelined writer), and record the offsets passed to `open_read`.
@@ -35,6 +35,8 @@ struct State {
     ops: usize,
     latency: Duration,
     fail_next: HashMap<Op, ErrorKind>,
+    /// Operations that fail on every call.
+    fail_always: HashMap<Op, ErrorKind>,
     /// Cumulative bytes read from and written to streams.
     bytes: u64,
     /// One-shot stream failure: (threshold, kind).
@@ -106,6 +108,11 @@ impl<F: RemoteFs> FaultFs<F> {
         lock(&self.state).fail_next.insert(op, kind);
     }
 
+    /// Every later call of `op` fails with `kind` (after a pending `fail_next`).
+    pub fn fail_always(&self, op: Op, kind: ErrorKind) {
+        lock(&self.state).fail_always.insert(op, kind);
+    }
+
     /// Delay applied before every trait operation.
     pub fn set_latency(&self, d: Duration) {
         lock(&self.state).latency = d;
@@ -137,7 +144,12 @@ impl<F: RemoteFs> FaultFs<F> {
             tokio::time::sleep(latency).await;
         }
         if let Some(op) = op {
-            let kind = lock(&self.state).fail_next.remove(&op);
+            let kind = {
+                let mut st = lock(&self.state);
+                st.fail_next
+                    .remove(&op)
+                    .or_else(|| st.fail_always.get(&op).copied())
+            };
             if let Some(kind) = kind {
                 return Err(Error::new(kind, format!("injected failure: {op:?}")));
             }
@@ -440,6 +452,17 @@ mod tests {
         w.write_all(b"abcdef").await.unwrap();
         w.shutdown().await.unwrap();
         assert_eq!(fs.inner.read_file("/h").unwrap(), b"abcdef");
+    }
+
+    #[tokio::test]
+    async fn fail_always_fails_every_call() {
+        let fs = FaultFs::new(MemFs::new());
+        fs.fail_always(Op::Stat, ErrorKind::Network);
+        for _ in 0..3 {
+            let e = fs.stat(&RemotePath::root()).await.unwrap_err();
+            assert_eq!(e.kind, ErrorKind::Network);
+        }
+        assert!(fs.list(&RemotePath::root()).await.is_ok());
     }
 
     #[tokio::test]

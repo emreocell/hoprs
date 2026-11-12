@@ -4,6 +4,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use hoprs_core::ReconnectPolicy;
 use secrecy::SecretString;
 
 /// Where the private key comes from.
@@ -74,38 +75,6 @@ impl fmt::Debug for AuthConfig {
     }
 }
 
-/// Exponential backoff for reconnection.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReconnectPolicy {
-    pub max_attempts: u32,
-    pub base_delay: Duration,
-    pub max_delay: Duration,
-}
-
-impl Default for ReconnectPolicy {
-    fn default() -> Self {
-        Self {
-            max_attempts: 5,
-            base_delay: Duration::from_secs(1),
-            max_delay: Duration::from_secs(16),
-        }
-    }
-}
-
-impl ReconnectPolicy {
-    /// Delay before each attempt: doubles from `base_delay`, capped at `max_delay`.
-    pub fn delays(&self) -> Vec<Duration> {
-        let mut delay = self.base_delay;
-        (0..self.max_attempts)
-            .map(|_| {
-                let current = delay.min(self.max_delay);
-                delay = delay.saturating_mul(2).min(self.max_delay);
-                current
-            })
-            .collect()
-    }
-}
-
 /// Everything needed to open an SSH connection.
 #[derive(Clone)]
 pub struct SshConfig {
@@ -163,27 +132,6 @@ impl fmt::Debug for SshConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn default_backoff() {
-        let d: Vec<u64> = ReconnectPolicy::default()
-            .delays()
-            .iter()
-            .map(|d| d.as_secs())
-            .collect();
-        assert_eq!(d, vec![1, 2, 4, 8, 16]);
-    }
-
-    #[test]
-    fn backoff_saturates() {
-        let p = ReconnectPolicy {
-            max_attempts: 7,
-            base_delay: Duration::from_secs(1),
-            max_delay: Duration::from_secs(10),
-        };
-        assert_eq!(p.delays().last(), Some(&Duration::from_secs(10)));
-        assert_eq!(p.delays().len(), 7);
-    }
 
     #[test]
     fn debug_redacts_secrets() {
