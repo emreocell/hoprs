@@ -25,6 +25,9 @@ hmac = "0.12"
 suppaftp = { version = "12.2", features = ["tokio", "tokio-rustls-aws-lc-rs"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "logging", "tls12"] }
 rustls-native-certs = "0.8"
+# The verifier rustls uses; only to read the errors it wraps.
+webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["std"] }
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 uuid = { version = "1", features = ["v4"] }

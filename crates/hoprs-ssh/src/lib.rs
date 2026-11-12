@@ -12,8 +12,8 @@ mod watchdog;
 
 pub use config::{AuthConfig, KeySource, SshConfig};
 pub use hoprs_core::ReconnectPolicy;
-pub use prompt::{KbdPrompt, Prompter};
 #[cfg(feature = "testing")]
-pub use prompt::{PromptCalls, ScriptedPrompter};
+pub use prompt::{HostKeyPrompt, PromptCalls, ScriptedPrompter};
+pub use prompt::{KbdPrompt, Prompter};
 pub use session::{SessionState, SshSession};
 pub use shell::{PtyRequest, ShellChannel, ShellOutput};

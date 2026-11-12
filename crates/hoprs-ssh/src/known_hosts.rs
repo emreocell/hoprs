@@ -17,8 +17,11 @@ use sha2::{Digest, Sha256};
 pub enum HostKeyStatus {
     /// The exact key is recorded for this host.
     Known,
-    /// No entry with this key algorithm exists for this host.
-    Unknown,
+    /// No entry with this key algorithm exists for this host. `other_key_types` lists the
+    /// algorithms (`ssh-ed25519`, `ecdsa-sha2-nistp256`, ...) of the keys recorded for it, in
+    /// file order (`@revoked` entries excluded): empty means the host is really new; otherwise
+    /// the server presents a key of a type not seen before, which deserves a warning.
+    Unknown { other_key_types: Vec<String> },
     /// An entry with the same algorithm but a different key exists (1-based line).
     Changed { line: usize },
     /// A `@revoked` entry lists this exact key for this host (1-based line). Must refuse.
@@ -31,14 +34,18 @@ pub fn fingerprint(key: &PublicKey) -> String {
     format!("SHA256:{}", STANDARD_NO_PAD.encode(digest))
 }
 
-/// Looks `host:port` up in the `known_hosts` file at `path`. A missing file is `Unknown`.
+/// Looks `host:port` up in the `known_hosts` file at `path`. A missing file is `Unknown`
+/// with no other key types.
 pub fn check(path: &Path, host: &str, port: u16, key: &PublicKey) -> Result<HostKeyStatus> {
     let Some(data) = read_optional(path)? else {
-        return Ok(HostKeyStatus::Unknown);
+        return Ok(HostKeyStatus::Unknown {
+            other_key_types: Vec::new(),
+        });
     };
     let name = host_name(host, port);
     let mut changed = None;
     let mut known = false;
+    let mut others: Vec<String> = Vec::new();
     for (idx, raw) in data.split_inclusive(|b| *b == b'\n').enumerate() {
         let Some(entry) = parse_line(raw) else {
             continue;
@@ -54,8 +61,13 @@ pub fn check(path: &Path, host: &str, port: u16, key: &PublicKey) -> Result<Host
         }
         if entry.key.key_data() == key.key_data() {
             known = true;
-        } else if changed.is_none() && entry.key.algorithm() == key.algorithm() {
-            changed = Some(idx + 1);
+        } else if entry.key.algorithm() == key.algorithm() {
+            changed.get_or_insert(idx + 1);
+        } else {
+            let other = entry.key.algorithm().as_str().to_owned();
+            if !others.contains(&other) {
+                others.push(other);
+            }
         }
     }
     if known {
@@ -63,7 +75,9 @@ pub fn check(path: &Path, host: &str, port: u16, key: &PublicKey) -> Result<Host
     }
     Ok(match changed {
         Some(line) => HostKeyStatus::Changed { line },
-        None => HostKeyStatus::Unknown,
+        None => HostKeyStatus::Unknown {
+            other_key_types: others,
+        },
     })
 }
 
@@ -308,6 +322,13 @@ mod tests {
             .clone()
     }
 
+    /// `Unknown` with no other key type known for the host.
+    fn new_host() -> HostKeyStatus {
+        HostKeyStatus::Unknown {
+            other_key_types: Vec::new(),
+        }
+    }
+
     fn ed() -> PublicKey {
         key(Algorithm::Ed25519)
     }
@@ -330,7 +351,7 @@ mod tests {
     fn unknown_when_file_missing() {
         let dir = TempDir::new().unwrap();
         let status = check(&kh_path(&dir), "h", 22, &ed()).unwrap();
-        assert_eq!(status, HostKeyStatus::Unknown);
+        assert_eq!(status, new_host());
     }
 
     #[test]
@@ -386,7 +407,7 @@ mod tests {
         let k = ed();
         learn(&p, "h", 2222, &k).unwrap();
         assert_eq!(fs::read_to_string(&p).unwrap(), line_for("[h]:2222", &k));
-        assert_eq!(check(&p, "h", 22, &k).unwrap(), HostKeyStatus::Unknown);
+        assert_eq!(check(&p, "h", 22, &k).unwrap(), new_host());
         assert_eq!(check(&p, "h", 2222, &k).unwrap(), HostKeyStatus::Known);
     }
 
@@ -416,7 +437,12 @@ mod tests {
             curve: russh::keys::EcdsaCurve::NistP256,
         });
         learn(&p, "h", 22, &ecdsa).unwrap();
-        assert_eq!(check(&p, "h", 22, &ed()).unwrap(), HostKeyStatus::Unknown);
+        assert_eq!(
+            check(&p, "h", 22, &ed()).unwrap(),
+            HostKeyStatus::Unknown {
+                other_key_types: vec!["ecdsa-sha2-nistp256".to_owned()]
+            }
+        );
     }
 
     #[test]
@@ -428,10 +454,7 @@ mod tests {
             check(p, "hashed.example", 22, &k).unwrap(),
             HostKeyStatus::Known
         );
-        assert_eq!(
-            check(p, "other.example", 22, &k).unwrap(),
-            HostKeyStatus::Unknown
-        );
+        assert_eq!(check(p, "other.example", 22, &k).unwrap(), new_host());
         assert_eq!(
             check(p, "hashed.example", 22, &ed()).unwrap(),
             HostKeyStatus::Changed { line: 2 }
@@ -453,7 +476,7 @@ mod tests {
             HostKeyStatus::Known
         );
         assert_eq!(check(&p, "beta", 2200, &k).unwrap(), HostKeyStatus::Known);
-        assert_eq!(check(&p, "gamma", 22, &k).unwrap(), HostKeyStatus::Unknown);
+        assert_eq!(check(&p, "gamma", 22, &k).unwrap(), new_host());
     }
 
     #[test]
@@ -467,14 +490,8 @@ mod tests {
             HostKeyStatus::Known
         );
         assert_eq!(check(&p, "10.0.0.5", 22, &k).unwrap(), HostKeyStatus::Known);
-        assert_eq!(
-            check(&p, "10.0.0.55", 22, &k).unwrap(),
-            HostKeyStatus::Unknown
-        );
-        assert_eq!(
-            check(&p, "example.org", 22, &k).unwrap(),
-            HostKeyStatus::Unknown
-        );
+        assert_eq!(check(&p, "10.0.0.55", 22, &k).unwrap(), new_host());
+        assert_eq!(check(&p, "example.org", 22, &k).unwrap(), new_host());
     }
 
     #[test]
@@ -487,10 +504,7 @@ mod tests {
             check(&p, "ok.example.com", 22, &k).unwrap(),
             HostKeyStatus::Known
         );
-        assert_eq!(
-            check(&p, "bad.example.com", 22, &k).unwrap(),
-            HostKeyStatus::Unknown
-        );
+        assert_eq!(check(&p, "bad.example.com", 22, &k).unwrap(), new_host());
     }
 
     #[test]
@@ -501,7 +515,7 @@ mod tests {
         let mut text = String::from("# comment\n\ngarbage line\nh ssh-ed25519 !!!notbase64\n");
         text.push_str(&format!("@cert-authority {}", line_for("h", &k)));
         fs::write(&p, text).unwrap();
-        assert_eq!(check(&p, "h", 22, &k).unwrap(), HostKeyStatus::Unknown);
+        assert_eq!(check(&p, "h", 22, &k).unwrap(), new_host());
     }
 
     #[test]
@@ -583,10 +597,7 @@ mod tests {
         learn(&p, "hashed.example", 22, &k).unwrap();
         learn(&p, "keep.example", 22, &k).unwrap();
         assert_eq!(remove(&p, "hashed.example", 22).unwrap(), 2);
-        assert_eq!(
-            check(&p, "hashed.example", 22, &k).unwrap(),
-            HostKeyStatus::Unknown
-        );
+        assert_eq!(check(&p, "hashed.example", 22, &k).unwrap(), new_host());
         assert_eq!(
             check(&p, "keep.example", 22, &k).unwrap(),
             HostKeyStatus::Known
@@ -616,6 +627,38 @@ mod tests {
         let expected = fs::read_to_string(format!("{FIXTURE_DIR}/fingerprint.txt")).unwrap();
         let expected = expected.split_whitespace().nth(1).unwrap();
         assert_eq!(fingerprint(&fixture_key()), expected);
+    }
+
+    #[test]
+    fn unknown_reports_other_key_types() {
+        let dir = TempDir::new().unwrap();
+        let p = kh_path(&dir);
+        let p256 = Algorithm::Ecdsa {
+            curve: russh::keys::EcdsaCurve::NistP256,
+        };
+        let mut data = String::new();
+        data.push_str(&line_for("h.example", &key(p256.clone())));
+        let p384 = Algorithm::Ecdsa {
+            curve: russh::keys::EcdsaCurve::NistP384,
+        };
+        data.push_str(&line_for("other.example", &key(p384.clone())));
+        // Revoked entries are not "known".
+        data.push_str(&format!("@revoked {}", line_for("h.example", &key(p384))));
+        data.push_str(&line_for("h.example", &key(p256)));
+        fs::write(&p, data).unwrap();
+        assert_eq!(
+            check(&p, "h.example", 22, &ed()).unwrap(),
+            HostKeyStatus::Unknown {
+                other_key_types: vec!["ecdsa-sha2-nistp256".to_owned()]
+            }
+        );
+        // A host with no entry at all is really new.
+        assert_eq!(
+            check(&p, "new.example", 22, &ed()).unwrap(),
+            HostKeyStatus::Unknown {
+                other_key_types: vec![]
+            }
+        );
     }
 
     #[test]

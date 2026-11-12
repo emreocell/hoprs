@@ -65,6 +65,12 @@ async fn unknown_host_prompts_and_learns() {
     assert_eq!(session.user(), "bob");
     session.disconnect().await;
     assert_eq!(p.calls().host, 1);
+    let prompts = p.host_key_prompts();
+    assert_eq!(prompts[0].host, "127.0.0.1");
+    assert_eq!(prompts[0].port, 2222);
+    assert_eq!(prompts[0].key_type, "ssh-ed25519");
+    assert!(prompts[0].fingerprint.starts_with("SHA256:"), "{prompts:?}");
+    assert!(prompts[0].other_key_types.is_empty(), "{prompts:?}");
     let lines = known_hosts_lines(dir.path());
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(
@@ -76,6 +82,36 @@ async fn unknown_host_prompts_and_learns() {
     connect(cfg, &p2).await.unwrap().disconnect().await;
     assert_eq!(p2.calls().host, 0);
     assert_eq!(known_hosts_lines(dir.path()).len(), 1);
+}
+
+/// The server presents its ed25519 key while known_hosts only holds an ecdsa key for it:
+/// the prompt says which other key types are known, and the new key is learned.
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn unknown_host_reports_other_known_key_types() {
+    let dir = TempDir::new().unwrap();
+    let ecdsa = russh::keys::PrivateKey::random(
+        &mut rand::rng(),
+        russh::keys::Algorithm::Ecdsa {
+            curve: russh::keys::EcdsaCurve::NistP256,
+        },
+    )
+    .unwrap();
+    let line = ecdsa.public_key().to_openssh().unwrap();
+    fs::write(
+        dir.path().join("known_hosts"),
+        format!("[127.0.0.1]:2222 {line}\n"),
+    )
+    .unwrap();
+    let mut cfg = test_config("bob", dir.path());
+    cfg.auth.password = Some(SecretString::from("bob-pass"));
+    let p = Arc::new(ScriptedPrompter::new().accept_host(true));
+    connect(cfg, &p).await.unwrap().disconnect().await;
+    let prompts = p.host_key_prompts();
+    assert_eq!(prompts.len(), 1, "{prompts:?}");
+    assert_eq!(prompts[0].key_type, "ssh-ed25519");
+    assert_eq!(prompts[0].other_key_types, vec!["ecdsa-sha2-nistp256"]);
+    assert_eq!(known_hosts_lines(dir.path()).len(), 2);
 }
 
 #[tokio::test]
@@ -326,7 +362,7 @@ struct SlowHostPrompter;
 
 #[async_trait]
 impl Prompter for SlowHostPrompter {
-    async fn confirm_host_key(&self, _: &str, _: u16, _: &str, _: &str) -> bool {
+    async fn confirm_host_key(&self, _: &str, _: u16, _: &str, _: &str, _: &[String]) -> bool {
         tokio::time::sleep(Duration::from_millis(1500)).await;
         true
     }

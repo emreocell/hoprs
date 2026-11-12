@@ -39,6 +39,12 @@ pub const MAX_GRACE_RESTORES: u32 = 3;
 /// resumed the site; that is how a user resume is seen. While given up, a lagged receiver
 /// does not restore either.
 ///
+/// Only `Connected` counts as up: `Connecting`, `Reconnecting` and `WaitingForUser` (an
+/// attempt held by a prompt) are all "not connected yet", so no grace restore fires while
+/// a prompt is open, and the connection that follows restores at once (its generation is
+/// new). A watcher spawned right after a connection's `start` (generation 0) therefore
+/// restores the site when the first connection is up.
+///
 /// The task ends when the connection's state channel closes or the engine stops. Abort the returned handle to stop it earlier.
 pub fn spawn_site_watcher(
     engine: TransferEngine,
@@ -353,6 +359,46 @@ mod tests {
         assert_ne!(state_of(&rig).await, TransferState::Done);
         conn.reconnected();
         wait_done(&mut rig).await;
+    }
+
+    /// A reconnection attempt waiting for the user (a prompt) is not a restored network:
+    /// no grace restore while it waits, and the reconnection that follows restores at once.
+    #[tokio::test(start_paused = true)]
+    async fn no_restore_while_waiting_for_user() {
+        let conn = FakeConnection::new();
+        let (mut rig, _watcher) = rig(&conn).await;
+        wait_paused(&mut rig.rx).await;
+        settle().await;
+        conn.set(ConnectionState::Reconnecting { attempt: 1 });
+        conn.set(ConnectionState::WaitingForUser);
+        tokio::time::advance(RESTORE_GRACE * 5).await;
+        settle().await;
+        assert_ne!(state_of(&rig).await, TransferState::Done);
+        conn.set(ConnectionState::Reconnecting { attempt: 1 });
+        conn.reconnected();
+        tokio::time::timeout(Duration::from_secs(1), wait_done(&mut rig))
+            .await
+            .expect("item finishes right after the reconnection");
+    }
+
+    /// A watcher registered while the first connection is still being made (generation 0,
+    /// prompting) restores the site once that connection is up.
+    #[tokio::test(start_paused = true)]
+    async fn first_connection_after_start_restores() {
+        let conn = FakeConnection::new();
+        conn.generation.store(0, Ordering::SeqCst);
+        conn.set(ConnectionState::Connecting);
+        let (mut rig, _watcher) = rig(&conn).await;
+        wait_paused(&mut rig.rx).await;
+        conn.set(ConnectionState::WaitingForUser);
+        tokio::time::advance(RESTORE_GRACE * 5).await;
+        settle().await;
+        assert_ne!(state_of(&rig).await, TransferState::Done);
+        conn.set(ConnectionState::Connecting);
+        conn.reconnected();
+        tokio::time::timeout(Duration::from_secs(1), wait_done(&mut rig))
+            .await
+            .expect("the first connection restores the site");
     }
 
     #[tokio::test(start_paused = true)]

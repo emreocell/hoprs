@@ -23,7 +23,7 @@ use suppaftp::tokio::AsyncRustlsConnector;
 use suppaftp::tokio_rustls::TlsConnector;
 
 use super::config::FtpConfig;
-use super::prompt::CertProblem;
+use super::prompt::{CertProblem, CertReason};
 
 /// A certificate the verifier refused, and why.
 #[derive(Debug, Clone)]
@@ -97,6 +97,31 @@ pub(crate) fn verifier(cfg: &FtpConfig, slot: RejectedSlot) -> Result<Arc<Pinnin
     }))
 }
 
+/// Why the chain check (webpki) refused a certificate.
+pub(crate) fn cert_reason(chain_error: &rustls::Error) -> CertReason {
+    use CertificateError as E;
+    match chain_error {
+        rustls::Error::InvalidCertificate(e) => match e {
+            E::Expired | E::ExpiredContext { .. } => CertReason::Expired,
+            E::NotValidYet | E::NotValidYetContext { .. } => CertReason::NotYetValid,
+            E::NotValidForName | E::NotValidForNameContext { .. } => CertReason::WrongName,
+            E::UnknownIssuer => CertReason::UnknownIssuer,
+            // A CA certificate presented as the server's own: what `openssl req -x509` makes
+            // by default, i.e. a self-signed certificate.
+            E::Other(other)
+                if matches!(
+                    other.0.downcast_ref::<webpki::Error>(),
+                    Some(webpki::Error::CaUsedAsEndEntity)
+                ) =>
+            {
+                CertReason::UnknownIssuer
+            }
+            _ => CertReason::Other(chain_error.to_string()),
+        },
+        _ => CertReason::Other(chain_error.to_string()),
+    }
+}
+
 /// See the module docs.
 pub(crate) struct PinningVerifier {
     /// `None` when there is no trusted root at all.
@@ -140,14 +165,16 @@ impl ServerCertVerifier for PinningVerifier {
             None => rustls::Error::InvalidCertificate(CertificateError::UnknownIssuer),
         };
         let fp = fingerprint(end_entity);
+        let reason = cert_reason(&chain_error);
         let problem = match &self.pinned {
             Some(pinned) if pinned.eq_ignore_ascii_case(&fp) => {
                 return Ok(ServerCertVerified::assertion());
             }
             Some(pinned) => CertProblem::Changed {
                 pinned: pinned.clone(),
+                reason,
             },
-            None => CertProblem::Untrusted,
+            None => CertProblem::Untrusted { reason },
         };
         *self.slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(RejectedCert {
             der: end_entity.clone().into_owned(),
@@ -214,6 +241,7 @@ pub(crate) fn connector(cfg: &FtpConfig, slot: RejectedSlot) -> Result<AsyncRust
 mod tests {
     use super::*;
     use crate::ftp::FtpSecurity;
+    use crate::ftp::prompt::CertReason;
     use std::path::PathBuf;
 
     fn fixture(name: &str) -> PathBuf {
@@ -240,14 +268,26 @@ mod tests {
 
     /// Runs the verifier on `leaf` for `host`; returns whether it accepted and the slot.
     fn check(cfg: &FtpConfig, leaf: &str, host: &str) -> (bool, Option<RejectedCert>) {
+        check_der(cfg, &cert(leaf), host)
+    }
+
+    fn check_der(
+        cfg: &FtpConfig,
+        leaf: &CertificateDer<'_>,
+        host: &str,
+    ) -> (bool, Option<RejectedCert>) {
         let slot = RejectedSlot::default();
         let v = verifier(cfg, slot.clone()).unwrap();
         let name = ServerName::try_from(host.to_owned()).unwrap();
         let ok = v
-            .verify_server_cert(&cert(leaf), &[], &name, &[], UnixTime::now())
+            .verify_server_cert(leaf, &[], &name, &[], UnixTime::now())
             .is_ok();
         let rejected = slot.lock().unwrap().take();
         (ok, rejected)
+    }
+
+    fn untrusted(reason: CertReason) -> CertProblem {
+        CertProblem::Untrusted { reason }
     }
 
     #[test]
@@ -271,7 +311,7 @@ mod tests {
         let (ok, rejected) = check(&cfg(&[], None), "server.pem", "127.0.0.1");
         assert!(!ok);
         let r = rejected.unwrap();
-        assert_eq!(r.problem, CertProblem::Untrusted);
+        assert_eq!(r.problem, untrusted(CertReason::UnknownIssuer));
         assert_eq!(fingerprint(&r.der), server_fp());
     }
 
@@ -279,7 +319,7 @@ mod tests {
     fn wrong_name_is_untrusted_even_with_the_root() {
         let (ok, rejected) = check(&cfg(&["ca.pem"], None), "server.pem", "example.com");
         assert!(!ok);
-        assert_eq!(rejected.unwrap().problem, CertProblem::Untrusted);
+        assert_eq!(rejected.unwrap().problem, untrusted(CertReason::WrongName));
     }
 
     #[test]
@@ -313,10 +353,104 @@ mod tests {
         assert_eq!(
             r.problem,
             CertProblem::Changed {
-                pinned: server_fp()
+                pinned: server_fp(),
+                reason: CertReason::UnknownIssuer,
             }
         );
         assert_eq!(fingerprint(&r.der), fingerprint(&cert("other.pem")));
+    }
+
+    /// A test CA (written to a PEM file in `dir`) and leaf certificates it signs.
+    struct TestCa {
+        issuer: rcgen::CertifiedIssuer<'static, rcgen::KeyPair>,
+        pem: PathBuf,
+    }
+
+    impl TestCa {
+        fn new(dir: &std::path::Path) -> TestCa {
+            let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+            params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+            let issuer =
+                rcgen::CertifiedIssuer::self_signed(params, rcgen::KeyPair::generate().unwrap())
+                    .unwrap();
+            let pem = dir.join("test-ca.pem");
+            std::fs::write(&pem, issuer.pem()).unwrap();
+            TestCa { issuer, pem }
+        }
+
+        /// A leaf for `name`, valid from `from` to `until` (years, January 1st).
+        fn leaf(&self, name: &str, from: i32, until: i32) -> CertificateDer<'static> {
+            let mut params = rcgen::CertificateParams::new(vec![name.to_owned()]).unwrap();
+            params.not_before = rcgen::date_time_ymd(from, 1, 1);
+            params.not_after = rcgen::date_time_ymd(until, 1, 1);
+            let key = rcgen::KeyPair::generate().unwrap();
+            params.signed_by(&key, &self.issuer).unwrap().der().clone()
+        }
+
+        fn cfg(&self, pin: Option<String>) -> FtpConfig {
+            let mut c = FtpConfig::new("localhost", 21, "u", FtpSecurity::ExplicitTls);
+            c.extra_roots = vec![self.pem.clone()];
+            c.pinned_fingerprint = pin;
+            c
+        }
+    }
+
+    #[test]
+    fn cert_reason_maps_webpki_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let ca = TestCa::new(dir.path());
+        let reason = |cfg: &FtpConfig, leaf: &CertificateDer<'_>, host: &str| {
+            let (ok, rejected) = check_der(cfg, leaf, host);
+            assert!(!ok);
+            rejected.unwrap().problem
+        };
+        let cfg = ca.cfg(None);
+        // Sanity: a current leaf for the right name is trusted.
+        let good = ca.leaf("localhost", 2000, 4000);
+        assert!(matches!(check_der(&cfg, &good, "localhost"), (true, None)));
+
+        let expired = ca.leaf("localhost", 2000, 2001);
+        assert_eq!(
+            reason(&cfg, &expired, "localhost"),
+            untrusted(CertReason::Expired)
+        );
+        let future = ca.leaf("localhost", 3000, 4000);
+        assert_eq!(
+            reason(&cfg, &future, "localhost"),
+            untrusted(CertReason::NotYetValid)
+        );
+        let other_name = ca.leaf("example.com", 2000, 4000);
+        assert_eq!(
+            reason(&cfg, &other_name, "localhost"),
+            untrusted(CertReason::WrongName)
+        );
+        // Without the test CA the issuer is unknown.
+        assert_eq!(
+            reason(&cfg_plain(), &good, "localhost"),
+            untrusted(CertReason::UnknownIssuer)
+        );
+        // A pinned certificate that changed carries the reason too.
+        let pinned = fingerprint(&good);
+        assert_eq!(
+            reason(&ca.cfg(Some(pinned.clone())), &expired, "localhost"),
+            CertProblem::Changed {
+                pinned,
+                reason: CertReason::Expired,
+            }
+        );
+        // Anything else keeps rustls' description.
+        assert_eq!(
+            cert_reason(&rustls::Error::InvalidCertificate(
+                CertificateError::BadSignature
+            )),
+            CertReason::Other(
+                rustls::Error::InvalidCertificate(CertificateError::BadSignature).to_string()
+            )
+        );
+    }
+
+    fn cfg_plain() -> FtpConfig {
+        FtpConfig::new("localhost", 21, "u", FtpSecurity::ExplicitTls)
     }
 
     #[test]

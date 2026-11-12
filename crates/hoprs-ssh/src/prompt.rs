@@ -2,6 +2,8 @@
 
 use std::path::Path;
 #[cfg(feature = "testing")]
+use std::sync::Mutex;
+#[cfg(feature = "testing")]
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use async_trait::async_trait;
@@ -17,12 +19,17 @@ pub struct KbdPrompt {
 /// Asks the user for decisions and secrets. `None` / `false` means cancelled.
 #[async_trait]
 pub trait Prompter: Send + Sync {
+    /// Asks whether to trust an unknown host key (`true` trusts it and records it in
+    /// `known_hosts`). `other_key_types` lists the key types already recorded for the host:
+    /// empty for a host never seen before; otherwise the server presented a key of another
+    /// type than the known ones, which the prompt should point out.
     async fn confirm_host_key(
         &self,
         host: &str,
         port: u16,
         key_type: &str,
         fingerprint: &str,
+        other_key_types: &[String],
     ) -> bool;
     async fn password(&self, user: &str, host: &str) -> Option<SecretString>;
     async fn key_passphrase(&self, path: &Path) -> Option<SecretString>;
@@ -44,13 +51,25 @@ pub struct PromptCalls {
     pub kbd: u32,
 }
 
-/// Prompter with canned answers that counts calls. For tests.
+/// The arguments of one `confirm_host_key` call.
+#[cfg(feature = "testing")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostKeyPrompt {
+    pub host: String,
+    pub port: u16,
+    pub key_type: String,
+    pub fingerprint: String,
+    pub other_key_types: Vec<String>,
+}
+
+/// Prompter with canned answers that counts calls and records host key prompts. For tests.
 #[cfg(feature = "testing")]
 pub struct ScriptedPrompter {
     accept_host: bool,
     password: Option<String>,
     passphrase: Option<String>,
     kbd_answers: Option<Vec<String>>,
+    host_prompts: Mutex<Vec<HostKeyPrompt>>,
     host: AtomicU32,
     password_calls: AtomicU32,
     passphrase_calls: AtomicU32,
@@ -73,6 +92,7 @@ impl ScriptedPrompter {
             password: None,
             passphrase: None,
             kbd_answers: None,
+            host_prompts: Mutex::new(Vec::new()),
             host: AtomicU32::new(0),
             password_calls: AtomicU32::new(0),
             passphrase_calls: AtomicU32::new(0),
@@ -100,6 +120,14 @@ impl ScriptedPrompter {
         self
     }
 
+    /// Every `confirm_host_key` call, in order.
+    pub fn host_key_prompts(&self) -> Vec<HostKeyPrompt> {
+        self.host_prompts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     pub fn calls(&self) -> PromptCalls {
         PromptCalls {
             host: self.host.load(Ordering::SeqCst),
@@ -113,8 +141,25 @@ impl ScriptedPrompter {
 #[cfg(feature = "testing")]
 #[async_trait]
 impl Prompter for ScriptedPrompter {
-    async fn confirm_host_key(&self, _: &str, _: u16, _: &str, _: &str) -> bool {
+    async fn confirm_host_key(
+        &self,
+        host: &str,
+        port: u16,
+        key_type: &str,
+        fingerprint: &str,
+        other_key_types: &[String],
+    ) -> bool {
         self.host.fetch_add(1, Ordering::SeqCst);
+        self.host_prompts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(HostKeyPrompt {
+                host: host.to_owned(),
+                port,
+                key_type: key_type.to_owned(),
+                fingerprint: fingerprint.to_owned(),
+                other_key_types: other_key_types.to_vec(),
+            });
         self.accept_host
     }
 
@@ -152,7 +197,21 @@ mod tests {
             .accept_host(true)
             .with_password(Some("pw"))
             .with_kbd_answers(Some(vec!["a", "b"]));
-        assert!(p.confirm_host_key("h", 22, "ssh-ed25519", "SHA256:x").await);
+        let others = ["ecdsa-sha2-nistp256".to_owned()];
+        assert!(
+            p.confirm_host_key("h", 22, "ssh-ed25519", "SHA256:x", &others)
+                .await
+        );
+        assert_eq!(
+            p.host_key_prompts(),
+            vec![HostKeyPrompt {
+                host: "h".to_owned(),
+                port: 22,
+                key_type: "ssh-ed25519".to_owned(),
+                fingerprint: "SHA256:x".to_owned(),
+                other_key_types: others.to_vec(),
+            }]
+        );
         assert_eq!(p.password("u", "h").await.unwrap().expose_secret(), "pw");
         assert!(p.key_passphrase(Path::new("/k")).await.is_none());
         let kbd = p.keyboard_interactive("", "", &[]).await.unwrap();

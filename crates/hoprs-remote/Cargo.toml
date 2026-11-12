@@ -20,12 +20,14 @@ secrecy.workspace = true
 suppaftp = { workspace = true, features = ["deprecated"] }
 rustls.workspace = true
 rustls-native-certs.workspace = true
+webpki.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["io-util", "fs", "macros", "net", "rt", "time", "test-util"] }
 tempfile.workspace = true
 rustls.workspace = true
+rcgen.workspace = true
 hoprs-ssh = { path = "../hoprs-ssh", features = ["testing"] }
 
 [[test]]

@@ -8,13 +8,29 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use async_trait::async_trait;
 use secrecy::SecretString;
 
+/// Why the certificate chain check refused a server certificate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CertReason {
+    /// Past its validity period.
+    Expired,
+    /// Before its validity period.
+    NotYetValid,
+    /// Not issued for the host name or IP address connected to.
+    WrongName,
+    /// Does not chain to a trusted root (self-signed, unknown authority).
+    UnknownIssuer,
+    /// Anything else, as described by the TLS library.
+    Other(String),
+}
+
 /// Why a server certificate needs the user's decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CertProblem {
-    /// Not valid for the host under the trusted roots (self-signed, unknown CA, ...).
-    Untrusted,
-    /// Differs from the certificate the user accepted before.
-    Changed { pinned: String },
+    /// Not valid for the host under the trusted roots, for `reason`.
+    Untrusted { reason: CertReason },
+    /// Differs from the certificate the user accepted before (`pinned`), and is not valid
+    /// under the trusted roots either, for `reason`.
+    Changed { pinned: String, reason: CertReason },
 }
 
 /// Asks the user for decisions and secrets. `None` / `false` means cancelled.
@@ -149,6 +165,12 @@ mod tests {
     use super::*;
     use secrecy::ExposeSecret;
 
+    fn untrusted() -> CertProblem {
+        CertProblem::Untrusted {
+            reason: CertReason::UnknownIssuer,
+        }
+    }
+
     #[tokio::test]
     async fn scripted_prompter_answers_counts_and_pins() {
         let p = ScriptedFtpPrompter::new()
@@ -156,7 +178,7 @@ mod tests {
             .accept_certificate(true);
         assert_eq!(p.password("u", "h").await.unwrap().expose_secret(), "pw");
         assert!(
-            p.confirm_certificate("h", 21, "SHA256:AA", &CertProblem::Untrusted)
+            p.confirm_certificate("h", 21, "SHA256:AA", &untrusted())
                 .await
         );
         p.store_pin("h", 21, "SHA256:AA").await;
@@ -167,7 +189,7 @@ mod tests {
                 host: "h".to_owned(),
                 port: 21,
                 fingerprint: "SHA256:AA".to_owned(),
-                problem: CertProblem::Untrusted,
+                problem: untrusted(),
             }]
         );
         assert_eq!(

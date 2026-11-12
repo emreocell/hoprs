@@ -23,7 +23,7 @@ pub mod testing;
 
 pub use connection::Connection;
 pub use ftp::{
-    CertProblem, FtpConfig, FtpFs, FtpPrompter, FtpSecurity, TransferMode,
+    CertProblem, CertReason, FtpConfig, FtpFs, FtpPrompter, FtpSecurity, TransferMode,
     fingerprint as cert_fingerprint,
 };
 #[cfg(feature = "testing")]

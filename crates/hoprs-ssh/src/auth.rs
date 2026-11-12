@@ -10,7 +10,7 @@
 use std::fmt;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use hoprs_core::{Error, ErrorKind, Result};
 use russh::client::{self, AuthResult, KeyboardInteractiveAuthResponse};
@@ -39,11 +39,63 @@ const MAX_PUBLICKEY_ATTEMPTS: usize = 4;
 /// Most keyboard-interactive rounds answered before giving up.
 const MAX_KBD_ROUNDS: usize = 10;
 
-/// Authenticates `cfg.user` on an established connection.
+/// A password or key passphrase the user typed at a prompt (never a configured one), kept
+/// in memory only, for the reconnections of the same session. A remembered secret that the
+/// server or the key file refuses is forgotten, so the next attempt asks again.
+#[derive(Default)]
+pub(crate) struct Remembered {
+    password: Mutex<Option<SecretString>>,
+    passphrases: Mutex<Vec<(PathBuf, SecretString)>>,
+}
+
+impl Remembered {
+    fn password(&self) -> Option<SecretString> {
+        self.password
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn set_password(&self, password: Option<SecretString>) {
+        *self.password.lock().unwrap_or_else(PoisonError::into_inner) = password;
+    }
+
+    fn passphrase(&self, path: &Path) -> Option<SecretString> {
+        self.passphrases
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .find(|(p, _)| p == path)
+            .map(|(_, secret)| secret.clone())
+    }
+
+    fn set_passphrase(&self, path: &Path, passphrase: Option<SecretString>) {
+        let mut all = self
+            .passphrases
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        all.retain(|(p, _)| p != path);
+        if let Some(passphrase) = passphrase {
+            all.push((path.to_owned(), passphrase));
+        }
+    }
+}
+
+/// Where a secret came from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Source {
+    Configured,
+    Remembered,
+    Prompted,
+}
+
+/// Authenticates `cfg.user` on an established connection. Secrets prompted for are kept in
+/// `remembered` once they proved right (see [`Remembered`]).
 pub(crate) async fn authenticate<H: client::Handler>(
     handle: &mut client::Handle<H>,
     cfg: &SshConfig,
     prompter: &dyn Prompter,
+    remembered: &Remembered,
 ) -> Result<()> {
     let user = cfg.user.as_str();
     let mut methods = match handle
@@ -102,7 +154,7 @@ pub(crate) async fn authenticate<H: client::Handler>(
                 skipped.push((path, SkipReason::AttemptLimit));
                 continue;
             }
-            let key = match load_key(&path, configured, prompter).await {
+            let key = match load_key(&path, configured, prompter, remembered).await {
                 Ok(key) => key,
                 Err(reason) => {
                     skipped.push((path, reason));
@@ -141,12 +193,16 @@ pub(crate) async fn authenticate<H: client::Handler>(
 
     let mut password_sent = false;
     if methods.contains(&MethodKind::Password) {
-        let password = match &cfg.auth.password {
-            Some(p) => p.clone(),
-            None => prompter
-                .password(user, &cfg.host)
-                .await
-                .ok_or_else(cancelled)?,
+        let (password, source) = match (&cfg.auth.password, remembered.password()) {
+            (Some(p), _) => (p.clone(), Source::Configured),
+            (None, Some(p)) => (p, Source::Remembered),
+            (None, None) => (
+                prompter
+                    .password(user, &cfg.host)
+                    .await
+                    .ok_or_else(cancelled)?,
+                Source::Prompted,
+            ),
         };
         note(&mut tried, MethodKind::Password);
         password_sent = cfg.auth.password.is_some();
@@ -155,7 +211,13 @@ pub(crate) async fn authenticate<H: client::Handler>(
             .await
             .map_err(map_russh_error)?;
         if update(result, &mut methods) {
+            if source == Source::Prompted {
+                remembered.set_password(Some(password));
+            }
             return Ok(());
+        }
+        if source == Source::Remembered {
+            remembered.set_password(None);
         }
     }
 
@@ -485,11 +547,13 @@ fn key_files(source: &KeySource) -> Vec<PathBuf> {
     }
 }
 
-/// Loads a private key; encrypted keys use `configured` or ask once. `Err` skips the key.
+/// Loads a private key; encrypted keys use `configured`, the passphrase `remembered` for
+/// this path, or ask once (and remember it if it decrypts the key). `Err` skips the key.
 async fn load_key(
     path: &Path,
     configured: Option<&SecretString>,
     prompter: &dyn Prompter,
+    remembered: &Remembered,
 ) -> std::result::Result<PrivateKey, SkipReason> {
     let text = read_key_text(path).map_err(|e| match e.kind() {
         io::ErrorKind::NotFound => SkipReason::MissingFile,
@@ -498,15 +562,31 @@ async fn load_key(
     match keys::decode_secret_key(&text, None) {
         Ok(key) => Ok(key),
         Err(keys::Error::KeyIsEncrypted) => {
-            let passphrase = match configured {
-                Some(p) => p.clone(),
-                None => prompter
-                    .key_passphrase(path)
-                    .await
-                    .ok_or(SkipReason::PassphraseCancelled)?,
+            let (passphrase, source) = match (configured, remembered.passphrase(path)) {
+                (Some(p), _) => (p.clone(), Source::Configured),
+                (None, Some(p)) => (p, Source::Remembered),
+                (None, None) => (
+                    prompter
+                        .key_passphrase(path)
+                        .await
+                        .ok_or(SkipReason::PassphraseCancelled)?,
+                    Source::Prompted,
+                ),
             };
-            keys::decode_secret_key(&text, Some(passphrase.expose_secret()))
-                .map_err(|_| SkipReason::WrongPassphrase)
+            match keys::decode_secret_key(&text, Some(passphrase.expose_secret())) {
+                Ok(key) => {
+                    if source == Source::Prompted {
+                        remembered.set_passphrase(path, Some(passphrase));
+                    }
+                    Ok(key)
+                }
+                Err(_) => {
+                    if source == Source::Remembered {
+                        remembered.set_passphrase(path, None);
+                    }
+                    Err(SkipReason::WrongPassphrase)
+                }
+            }
         }
         Err(_) => Err(SkipReason::Unparseable),
     }
@@ -568,12 +648,50 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn prompted_passphrase_is_remembered_until_refused() {
+        use crate::prompt::ScriptedPrompter;
+        let pp = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docker/fixtures/id_ed25519_pp");
+        let remembered = Remembered::default();
+
+        // A wrong prompted passphrase is not remembered.
+        let wrong = ScriptedPrompter::new().with_passphrase(Some("wrong"));
+        assert_eq!(
+            load_key(&pp, None, &wrong, &remembered).await.err(),
+            Some(SkipReason::WrongPassphrase)
+        );
+        assert!(remembered.passphrase(&pp).is_none());
+
+        // A right one is, and is used without asking again.
+        let right = ScriptedPrompter::new().with_passphrase(Some("fixture-pp"));
+        load_key(&pp, None, &right, &remembered).await.unwrap();
+        load_key(&pp, None, &right, &remembered).await.unwrap();
+        assert_eq!(right.calls().passphrase, 1);
+
+        // A remembered passphrase that no longer decrypts the key is forgotten.
+        remembered.set_passphrase(&pp, Some(SecretString::from("stale")));
+        assert_eq!(
+            load_key(&pp, None, &right, &remembered).await.err(),
+            Some(SkipReason::WrongPassphrase)
+        );
+        assert!(remembered.passphrase(&pp).is_none());
+        assert_eq!(right.calls().passphrase, 1);
+    }
+
     #[tokio::test]
     async fn load_key_reasons() {
         struct NoPrompt;
         #[async_trait::async_trait]
         impl Prompter for NoPrompt {
-            async fn confirm_host_key(&self, _: &str, _: u16, _: &str, _: &str) -> bool {
+            async fn confirm_host_key(
+                &self,
+                _: &str,
+                _: u16,
+                _: &str,
+                _: &str,
+                _: &[String],
+            ) -> bool {
                 false
             }
             async fn password(&self, _: &str, _: &str) -> Option<SecretString> {
@@ -597,26 +715,27 @@ mod tests {
         std::fs::write(&garbage, "not a key").unwrap();
         let pp = fixtures.join("id_ed25519_pp");
         let wrong = SecretString::from("wrong");
+        let none = Remembered::default();
 
         let reason = |r: std::result::Result<PrivateKey, SkipReason>| r.err();
         assert_eq!(
-            reason(load_key(&dir.path().join("none"), None, &NoPrompt).await),
+            reason(load_key(&dir.path().join("none"), None, &NoPrompt, &none).await),
             Some(SkipReason::MissingFile)
         );
         assert_eq!(
-            reason(load_key(&garbage, None, &NoPrompt).await),
+            reason(load_key(&garbage, None, &NoPrompt, &none).await),
             Some(SkipReason::Unparseable)
         );
         assert_eq!(
-            reason(load_key(&pp, None, &NoPrompt).await),
+            reason(load_key(&pp, None, &NoPrompt, &none).await),
             Some(SkipReason::PassphraseCancelled)
         );
         assert_eq!(
-            reason(load_key(&pp, Some(&wrong), &NoPrompt).await),
+            reason(load_key(&pp, Some(&wrong), &NoPrompt, &none).await),
             Some(SkipReason::WrongPassphrase)
         );
         assert!(
-            load_key(&fixtures.join("id_ed25519"), None, &NoPrompt)
+            load_key(&fixtures.join("id_ed25519"), None, &NoPrompt, &none)
                 .await
                 .is_ok()
         );

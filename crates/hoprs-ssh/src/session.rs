@@ -1,7 +1,8 @@
 //! SSH session: connection, host key verification, authentication, keepalive and reconnection.
 //!
 //! [`SshSession`] is a cheap handle to a supervisor task that owns the current russh
-//! connection. The supervisor publishes [`SessionState`], reconnects with backoff when the
+//! connection. The supervisor makes the first connection, publishes [`SessionState`]
+//! (`WaitingForUser` while an attempt waits on a prompt), reconnects with backoff when the
 //! connection is lost, and ends when the last handle is dropped.
 //!
 //! Disconnect detection (russh 0.65): keepalive is russh's own (`client::Config::
@@ -17,7 +18,7 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
 use hoprs_core::{Error, ErrorKind, Result};
@@ -26,10 +27,11 @@ use russh::keys::{Algorithm, PublicKey, PublicKeyOrCertificate};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, watch};
 
+use crate::auth::Remembered;
 use crate::config::SshConfig;
 use crate::known_hosts::{self, HostKeyStatus};
 use crate::prompt::Prompter;
-use crate::watchdog::{self, WatchedPrompter};
+use crate::watchdog::{self, WaitingHook, WatchedPrompter};
 
 /// Observable connection state (the protocol-neutral [`hoprs_core::ConnectionState`]).
 pub type SessionState = hoprs_core::ConnectionState;
@@ -50,7 +52,8 @@ struct Inner {
 
 /// State shared between the handles and the supervisor.
 struct Shared {
-    /// The live connection and its generation; `Some` only while `Connected`.
+    /// The live connection and its generation; `Some` only while `Connected`. The
+    /// generation is 0 until the first connection.
     handle: RwLock<Option<(Arc<client::Handle<ClientHandler>>, u64)>>,
     generation: AtomicU64,
     state: watch::Sender<SessionState>,
@@ -88,6 +91,37 @@ impl Shared {
     }
 }
 
+/// Publishes `WaitingForUser` while a connection attempt waits on a prompt, then puts back
+/// the `Connecting` or `Reconnecting` state it replaced. Any other state (a disconnect by the
+/// user meanwhile) is left alone.
+fn waiting_hook(shared: Arc<Shared>) -> WaitingHook {
+    let replaced: Mutex<Option<SessionState>> = Mutex::new(None);
+    Arc::new(move |waiting| {
+        let mut replaced = replaced.lock().unwrap_or_else(PoisonError::into_inner);
+        if waiting {
+            shared.state.send_if_modified(|s| {
+                if matches!(
+                    s,
+                    SessionState::Connecting | SessionState::Reconnecting { .. }
+                ) {
+                    *replaced = Some(std::mem::replace(s, SessionState::WaitingForUser));
+                    true
+                } else {
+                    false
+                }
+            });
+        } else if let Some(previous) = replaced.take() {
+            shared.state.send_if_modified(|s| {
+                let restore = *s == SessionState::WaitingForUser;
+                if restore {
+                    *s = previous;
+                }
+                restore
+            });
+        }
+    })
+}
+
 /// Requests from the handles; each is acknowledged once the state reflects it.
 enum Command {
     Disconnect(oneshot::Sender<()>),
@@ -105,36 +139,62 @@ impl fmt::Debug for SshSession {
 }
 
 impl SshSession {
-    /// Connects, verifies the host key against `config.known_hosts` and authenticates.
+    /// Starts connecting in the background and returns at once, in `Connecting` (generation
+    /// 0). Must be called from within a Tokio runtime.
     ///
-    /// Reconnection attempts reuse `config` and `prompter`: a password that was prompted
-    /// for (not configured) is prompted for again. They must present the host key verified
-    /// by this first connection: any other key, of any algorithm, ends the session with
-    /// `HostKey`, "Host key for {host} has changed", without prompting.
-    pub async fn connect(config: SshConfig, prompter: Arc<dyn Prompter>) -> Result<SshSession> {
-        let conn = establish(&config, &prompter, None).await?;
-        let (state, _) = watch::channel(SessionState::Connected);
+    /// The first connection is a single attempt: it connects, verifies the host key against
+    /// `config.known_hosts` and authenticates, then the state becomes `Connected`
+    /// (generation 1). If it fails, the state becomes `Disconnected` with its error and
+    /// [`reconnect_now`](Self::reconnect_now) tries again (in `Connecting`). While an attempt
+    /// waits on a prompt the state is `WaitingForUser`.
+    ///
+    /// Reconnection attempts reuse `config` and `prompter`. A password or key passphrase
+    /// typed at a prompt (not configured) that proved right is kept in memory for the
+    /// session's reconnections and not asked again; one the server later refuses is
+    /// forgotten, so the next attempt asks again. Reconnections must present the host key
+    /// verified by the first connection: any other key, of any algorithm, ends the session
+    /// with `HostKey`, "Host key for {host} has changed", without prompting.
+    pub fn start(config: SshConfig, prompter: Arc<dyn Prompter>) -> SshSession {
+        let (state, _) = watch::channel(SessionState::Connecting);
         let shared = Arc::new(Shared {
-            handle: RwLock::new(Some((Arc::new(conn.handle), 1))),
-            generation: AtomicU64::new(1),
+            handle: RwLock::new(None),
+            generation: AtomicU64::new(0),
             state,
         });
         let (commands, rx) = mpsc::unbounded_channel();
         let supervisor = Supervisor {
             cfg: config.clone(),
             prompter,
-            host_key: conn.host_key,
+            host_key: None,
+            remembered: Remembered::default(),
             shared: shared.clone(),
             commands: rx,
         };
-        tokio::spawn(supervisor.run(conn.lost));
-        Ok(SshSession {
+        tokio::spawn(supervisor.run());
+        SshSession {
             inner: Arc::new(Inner {
                 config,
                 shared,
                 commands,
             }),
-        })
+        }
+    }
+
+    /// [`start`](Self::start), then waits for the first connection: the session once
+    /// `Connected`, or the error once `Disconnected` (the session is then dropped).
+    pub async fn connect(config: SshConfig, prompter: Arc<dyn Prompter>) -> Result<SshSession> {
+        let session = Self::start(config, prompter);
+        let mut state = session.state();
+        let outcome = state
+            .wait_for(|s| matches!(s, SessionState::Connected | SessionState::Disconnected(_)))
+            .await
+            .map(|s| s.clone());
+        match outcome {
+            Ok(SessionState::Disconnected(e)) => Err(e),
+            Ok(_) => Ok(session),
+            // The supervisor lives as long as a handle does; this one is still here.
+            Err(_) => Err(Error::new(ErrorKind::Network, "Connection lost")),
+        }
     }
 
     pub fn host(&self) -> &str {
@@ -154,8 +214,8 @@ impl SshSession {
         self.inner.shared.state.subscribe()
     }
 
-    /// Starts at 1 and goes up by one after every successful reconnection. Channels opened
-    /// under an older generation are dead.
+    /// 0 until the first connection, which makes it 1; goes up by one after every successful
+    /// reconnection. Channels opened under an older generation are dead.
     ///
     /// Reading this next to [`open_channel`](Self::open_channel) can race with a reconnect;
     /// callers that track which connection a channel belongs to should use
@@ -177,14 +237,16 @@ impl SshSession {
         Ok((channel, generation))
     }
 
-    /// Opens a `session` channel on the current connection. Never waits for a reconnection:
-    /// while `Reconnecting` or `Disconnected` it fails at once with `Network`, "Not connected".
+    /// Opens a `session` channel on the current connection. Never waits for a connection:
+    /// unless `Connected` it fails at once with `Network`, "Not connected".
     pub async fn open_channel(&self) -> Result<russh::Channel<client::Msg>> {
         self.open_channel_tagged().await.map(|(channel, _)| channel)
     }
 
-    /// Starts a new round of reconnection attempts, the first one without delay, when the
-    /// state is `Disconnected`. Does nothing otherwise. Returns once the state shows it.
+    /// When the state is `Disconnected`, starts a new round of reconnection attempts, the
+    /// first one without delay (`Reconnecting`), or, if the session never connected, a new
+    /// first connection attempt (`Connecting`). Does nothing otherwise. Returns once the
+    /// state shows it.
     pub async fn reconnect_now(&self) {
         self.request(Command::ReconnectNow).await;
     }
@@ -205,6 +267,7 @@ impl SshSession {
 
 /// What the supervisor does next.
 enum Phase {
+    Connecting,
     Connected(oneshot::Receiver<Error>),
     Reconnecting { last: Error, immediate: bool },
     Disconnected,
@@ -216,16 +279,20 @@ struct Supervisor {
     cfg: SshConfig,
     prompter: Arc<dyn Prompter>,
     /// The server key verified on the first connection; every reconnection must present it.
-    host_key: PublicKey,
+    /// `None` until the first connection.
+    host_key: Option<PublicKey>,
+    /// Secrets typed at prompts, reused by the reconnections.
+    remembered: Remembered,
     shared: Arc<Shared>,
     commands: mpsc::UnboundedReceiver<Command>,
 }
 
 impl Supervisor {
-    async fn run(mut self, lost: oneshot::Receiver<Error>) {
-        let mut phase = Phase::Connected(lost);
+    async fn run(mut self) {
+        let mut phase = Phase::Connecting;
         loop {
             phase = match phase {
+                Phase::Connecting => self.connecting().await,
                 Phase::Connected(lost) => self.connected(lost).await,
                 Phase::Reconnecting { last, immediate } => self.reconnect(last, immediate).await,
                 Phase::Disconnected => self.disconnected().await,
@@ -236,6 +303,50 @@ impl Supervisor {
             let _ = handle
                 .disconnect(russh::Disconnect::ByApplication, "", "en")
                 .await;
+        }
+    }
+
+    /// One first-connection attempt. A failure is final until `reconnect_now`.
+    async fn connecting(&mut self) -> Phase {
+        let Self {
+            cfg,
+            prompter,
+            host_key,
+            remembered,
+            shared,
+            commands,
+        } = self;
+        shared.set_state(SessionState::Connecting);
+        let try_once = establish(cfg, prompter, None, remembered, shared);
+        tokio::pin!(try_once);
+        let result = loop {
+            tokio::select! {
+                result = &mut try_once => break result,
+                command = commands.recv() => match command {
+                    None => return Phase::Stop,
+                    Some(Command::Disconnect(ack)) => {
+                        // Dropping `try_once` abandons the attempt and its prompts.
+                        shared.set_state(user_disconnected());
+                        let _ = ack.send(());
+                        return Phase::Disconnected;
+                    }
+                    Some(Command::ReconnectNow(ack)) => {
+                        let _ = ack.send(());
+                    }
+                },
+            }
+        };
+        match result {
+            Ok(conn) => {
+                *host_key = Some(conn.host_key);
+                shared.install(conn.handle);
+                shared.set_state(SessionState::Connected);
+                Phase::Connected(conn.lost)
+            }
+            Err(e) => {
+                shared.set_state(SessionState::Disconnected(e));
+                Phase::Disconnected
+            }
         }
     }
 
@@ -271,6 +382,7 @@ impl Supervisor {
             cfg,
             prompter,
             host_key,
+            remembered,
             shared,
             commands,
         } = self;
@@ -284,7 +396,7 @@ impl Supervisor {
             };
             let try_once = async {
                 tokio::time::sleep(delay).await;
-                establish(cfg, prompter, Some(&*host_key)).await
+                establish(cfg, prompter, host_key.as_ref(), remembered, shared).await
             };
             tokio::pin!(try_once);
             let result = loop {
@@ -327,6 +439,11 @@ impl Supervisor {
                 None => return Phase::Stop,
                 Some(Command::Disconnect(ack)) => {
                     let _ = ack.send(());
+                }
+                Some(Command::ReconnectNow(ack)) if self.host_key.is_none() => {
+                    self.shared.set_state(SessionState::Connecting);
+                    let _ = ack.send(());
+                    return Phase::Connecting;
                 }
                 Some(Command::ReconnectNow(ack)) => {
                     let last = match &*self.shared.state.borrow() {
@@ -383,22 +500,27 @@ impl Drop for CancelPrompts {
 }
 
 /// One full connection attempt: TCP, key exchange with host key check, authentication.
-/// With `pinned`, the server must present exactly that key (see [`check_pinned`]).
+/// With `pinned`, the server must present exactly that key (see [`check_pinned`]). While a
+/// prompt is open the session state is `WaitingForUser` (see [`waiting_hook`]); secrets typed
+/// at prompts go to `remembered`.
 ///
 /// Bounded by `cfg.connect_timeout` of network time; time spent in prompts does not count
 /// (see [`crate::watchdog`]). On timeout the attempt future is dropped. If russh had already
 /// spawned its session task (key exchange started), that task may linger until the server
 /// closes the socket or russh's own timeouts end it; it holds no handle we expose, and its
 /// prompts are cancelled (answered "no") once this function returns or is dropped.
-pub(crate) async fn establish(
+async fn establish(
     cfg: &SshConfig,
     prompter: &Arc<dyn Prompter>,
     pinned: Option<&PublicKey>,
+    remembered: &Remembered,
+    shared: &Arc<Shared>,
 ) -> Result<Connection> {
-    let watched = Arc::new(WatchedPrompter::new(prompter.clone()));
+    let watched =
+        Arc::new(WatchedPrompter::new(prompter.clone()).with_hook(waiting_hook(shared.clone())));
     let _cancel = CancelPrompts(watched.clone());
     tokio::select! {
-        result = attempt(cfg, watched.clone(), pinned) => result,
+        result = attempt(cfg, watched.clone(), pinned, remembered) => result,
         _ = watchdog::expired(&watched, cfg.connect_timeout) => {
             Err(Error::new(ErrorKind::Network, "Connection timed out"))
         }
@@ -409,6 +531,7 @@ async fn attempt(
     cfg: &SshConfig,
     prompter: Arc<WatchedPrompter>,
     pinned: Option<&PublicKey>,
+    remembered: &Remembered,
 ) -> Result<Connection> {
     let stream = TcpStream::connect((cfg.host.as_str(), cfg.port))
         .await
@@ -446,7 +569,8 @@ async fn attempt(
         Error::new(ErrorKind::Protocol, "SSH protocol error")
             .with_detail("the server key was never verified")
     })?;
-    if let Err(e) = crate::auth::authenticate(&mut handle, cfg, prompter.as_ref()).await {
+    if let Err(e) = crate::auth::authenticate(&mut handle, cfg, prompter.as_ref(), remembered).await
+    {
         if e.kind == ErrorKind::Network && handle.is_closed() {
             // `lost` resolves once the handler has seen the end of the session.
             let _ = tokio::time::timeout(Duration::from_secs(1), lost).await;
@@ -619,11 +743,17 @@ impl client::Handler for ClientHandler {
                 self.accepted(key);
                 Ok(true)
             }
-            HostKeyStatus::Unknown => {
+            HostKeyStatus::Unknown { other_key_types } => {
                 let fingerprint = known_hosts::fingerprint(key);
                 let accepted = self
                     .prompter
-                    .confirm_host_key(host, self.port, key.algorithm().as_str(), &fingerprint)
+                    .confirm_host_key(
+                        host,
+                        self.port,
+                        key.algorithm().as_str(),
+                        &fingerprint,
+                        &other_key_types,
+                    )
                     .await;
                 if !accepted {
                     return Err(HandlerError(Error::new(
