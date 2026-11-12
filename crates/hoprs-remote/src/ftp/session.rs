@@ -22,7 +22,7 @@ use tokio::time::Instant;
 use super::config::{FtpConfig, FtpSecurity, TransferMode};
 use super::errors::{data_connect_failed, is_control_loss, map_ftp_error, reply_parts};
 use super::prompt::{CertProblem, FtpPrompter};
-use super::tls::{RejectedCert, RejectedSlot, connector, fingerprint};
+use super::tls::{RejectedCert, RejectedSlot, StalePin, connector, fingerprint};
 
 /// The suppaftp stream type for every security mode. The rustls variant also speaks plain
 /// FTP, and `into_secure` (explicit FTPS) keeps the same type.
@@ -52,6 +52,10 @@ pub(crate) struct Control {
 /// [`FtpPrompter::store_pin`], written to `cfg.pinned_fingerprint`, and the connection is
 /// opened again with that pin, once and without asking again. If the user refuses, the
 /// result is a `Tls` error "Certificate not trusted" with the fingerprint in the detail.
+///
+/// A certificate accepted by its trusted chain while `cfg.pinned_fingerprint` names another
+/// certificate makes the pin stale (ruling R5 of Plan 3): it is reported with
+/// [`FtpPrompter::pin_superseded`] and removed from `cfg`.
 pub(crate) async fn open_control(
     cfg: &mut FtpConfig,
     prompter: &dyn FtpPrompter,
@@ -65,7 +69,16 @@ pub(crate) async fn open_control(
     };
 
     let rejected = match attempt(cfg, &password).await? {
-        Attempt::Connected(control) => return Ok(control),
+        Attempt::Connected {
+            control,
+            stale_pin: true,
+        } => {
+            if let Some(pinned) = cfg.pinned_fingerprint.take() {
+                prompter.pin_superseded(&cfg.host, cfg.port, &pinned).await;
+            }
+            return Ok(control);
+        }
+        Attempt::Connected { control, .. } => return Ok(control),
         Attempt::CertificateRejected(rejected) => rejected,
     };
     let fp = fingerprint(&rejected.der);
@@ -78,7 +91,8 @@ pub(crate) async fn open_control(
     prompter.store_pin(&cfg.host, cfg.port, &fp).await;
     cfg.pinned_fingerprint = Some(fp);
     match attempt(cfg, &password).await? {
-        Attempt::Connected(control) => Ok(control),
+        // Pinned to the certificate just accepted, which the chain did not trust: never stale.
+        Attempt::Connected { control, .. } => Ok(control),
         // The server switched certificates between the two connections.
         Attempt::CertificateRejected(rejected) => Err(not_trusted(&fingerprint(&rejected.der))),
     }
@@ -89,7 +103,9 @@ fn not_trusted(fp: &str) -> Error {
 }
 
 enum Attempt {
-    Connected(Control),
+    /// `stale_pin`: the certificate was accepted by its trusted chain although the config
+    /// pins another one.
+    Connected { control: Control, stale_pin: bool },
     /// The TLS handshake failed on this certificate, which needs the user's decision.
     CertificateRejected(RejectedCert),
 }
@@ -98,9 +114,12 @@ enum Attempt {
 async fn attempt(cfg: &FtpConfig, password: &SecretString) -> Result<Attempt> {
     let target = format!("{}:{}", cfg.host, cfg.port);
     let slot = RejectedSlot::default();
+    let stale = StalePin::default();
     let tls = match cfg.security {
         FtpSecurity::Plain => None,
-        FtpSecurity::ExplicitTls | FtpSecurity::ImplicitTls => Some(connector(cfg, slot.clone())?),
+        FtpSecurity::ExplicitTls | FtpSecurity::ImplicitTls => {
+            Some(connector(cfg, slot.clone(), stale.clone())?)
+        }
     };
     let result = tokio::time::timeout(cfg.connect_timeout, connect_and_login(cfg, password, tls))
         .await
@@ -108,7 +127,10 @@ async fn attempt(cfg: &FtpConfig, password: &SecretString) -> Result<Attempt> {
             Err(Error::new(ErrorKind::Network, "Connection timed out").with_detail(target))
         });
     match result {
-        Ok(control) => Ok(Attempt::Connected(control)),
+        Ok(control) => Ok(Attempt::Connected {
+            control,
+            stale_pin: stale.load(std::sync::atomic::Ordering::SeqCst),
+        }),
         // The verifier fills the slot only when it refuses a certificate, which aborts the
         // handshake; any other TLS failure leaves it empty and is returned as is.
         Err(e) if e.kind == ErrorKind::Tls => {
@@ -354,7 +376,8 @@ impl Shared {
             .clone()
     }
 
-    /// Keeps a certificate pin accepted while opening a connection with a copy of the config.
+    /// Keeps a certificate pin accepted (or a stale pin dropped) while opening a connection
+    /// with a copy of the config.
     fn remember_pin(&self, used: &FtpConfig) {
         let mut cfg = self.cfg.lock().unwrap_or_else(PoisonError::into_inner);
         if cfg.pinned_fingerprint != used.pinned_fingerprint {
@@ -522,6 +545,10 @@ impl FtpPrompter for AttemptPrompter<'_> {
 
     async fn store_pin(&self, host: &str, port: u16, fingerprint: &str) {
         self.0.prompter.store_pin(host, port, fingerprint).await;
+    }
+
+    async fn pin_superseded(&self, host: &str, port: u16, pinned: &str) {
+        self.0.prompter.pin_superseded(host, port, pinned).await;
     }
 }
 

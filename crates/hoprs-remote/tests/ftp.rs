@@ -225,6 +225,35 @@ async fn explicit_tls_untrusted_prompts_and_pins() {
     assert!(p.pins().is_empty());
 }
 
+/// Ruling R5 of Plan 3: a certificate that chains to a trusted root is accepted over a pin
+/// for another certificate, and the stale pin is reported (and dropped from the config) so
+/// the app can forget it.
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn trusted_chain_reports_a_stale_pin() {
+    let stale = other_fingerprint();
+    let mut cfg = tls_config(FtpSecurity::ExplicitTls, true);
+    cfg.pinned_fingerprint = Some(stale.clone());
+    let p = ScriptedFtpPrompter::new();
+    let mut c = open_test_control(&mut cfg, &p).await.unwrap();
+    c.nlst().await.unwrap();
+    assert_eq!(p.calls().certificate, 0);
+    assert!(p.pins().is_empty());
+    assert_eq!(
+        p.superseded_pins(),
+        vec![("127.0.0.1".to_owned(), 2121, stale)]
+    );
+    assert!(cfg.pinned_fingerprint.is_none());
+
+    // A pin for the very certificate the chain accepts is not stale.
+    let mut cfg = tls_config(FtpSecurity::ExplicitTls, true);
+    cfg.pinned_fingerprint = Some(server_fingerprint());
+    let p = ScriptedFtpPrompter::new();
+    open_test_control(&mut cfg, &p).await.unwrap();
+    assert!(p.superseded_pins().is_empty());
+    assert_eq!(cfg.pinned_fingerprint, Some(server_fingerprint()));
+}
+
 #[tokio::test]
 #[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
 async fn untrusted_rejected_is_tls() {

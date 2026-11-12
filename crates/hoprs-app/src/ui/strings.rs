@@ -2,6 +2,7 @@
 
 pub const APP_TITLE: &str = "hoprs";
 pub const ALREADY_RUNNING: &str = "hoprs is already running";
+pub const CANNOT_OPEN_PROFILES: &str = "Cannot open the saved sites";
 
 // Top bar.
 pub const BRAND: &str = "hoprs";

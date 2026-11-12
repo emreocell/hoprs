@@ -47,6 +47,12 @@ pub trait FtpPrompter: Send + Sync {
     ) -> bool;
     /// Persists an accepted fingerprint for `host:port`.
     async fn store_pin(&self, host: &str, port: u16, fingerprint: &str);
+    /// The certificate of `host:port` chains to a trusted root, so it was accepted although
+    /// `pinned` (the configured pin, for another certificate) did not match: the pin is
+    /// stale and may be forgotten. The connection no longer uses it. Does nothing by default.
+    async fn pin_superseded(&self, host: &str, port: u16, pinned: &str) {
+        let _ = (host, port, pinned);
+    }
 }
 
 /// Number of times each prompt kind was invoked.
@@ -65,6 +71,7 @@ pub struct ScriptedFtpPrompter {
     password_calls: AtomicU32,
     certificate_calls: AtomicU32,
     pins: Mutex<Vec<(String, u16, String)>>,
+    superseded: Mutex<Vec<(String, u16, String)>>,
     certificates: Mutex<Vec<CertificatePrompt>>,
 }
 
@@ -95,6 +102,7 @@ impl ScriptedFtpPrompter {
             password_calls: AtomicU32::new(0),
             certificate_calls: AtomicU32::new(0),
             pins: Mutex::new(Vec::new()),
+            superseded: Mutex::new(Vec::new()),
             certificates: Mutex::new(Vec::new()),
         }
     }
@@ -112,6 +120,11 @@ impl ScriptedFtpPrompter {
     /// Every `store_pin` call, in order: `(host, port, fingerprint)`.
     pub fn pins(&self) -> Vec<(String, u16, String)> {
         self.pins.lock().unwrap().clone()
+    }
+
+    /// Every `pin_superseded` call, in order: `(host, port, stale pin)`.
+    pub fn superseded_pins(&self) -> Vec<(String, u16, String)> {
+        self.superseded.lock().unwrap().clone()
     }
 
     /// Every `confirm_certificate` call, in order.
@@ -157,6 +170,13 @@ impl FtpPrompter for ScriptedFtpPrompter {
             .lock()
             .unwrap()
             .push((host.to_owned(), port, fingerprint.to_owned()));
+    }
+
+    async fn pin_superseded(&self, host: &str, port: u16, pinned: &str) {
+        self.superseded
+            .lock()
+            .unwrap()
+            .push((host.to_owned(), port, pinned.to_owned()));
     }
 }
 

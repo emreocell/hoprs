@@ -5,9 +5,17 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+hoprs-core = { path = "../hoprs-core" }
+hoprs-vault = { path = "../hoprs-vault" }
+hoprs-ssh = { path = "../hoprs-ssh" }
+hoprs-remote = { path = "../hoprs-remote" }
+hoprs-transfer = { path = "../hoprs-transfer" }
 iced = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
+tokio-util = { workspace = true }
+futures-util = { workspace = true }
 async-trait = { workspace = true }
+secrecy = { workspace = true }
 dirs = { workspace = true }
 fs4 = { workspace = true }
 tracing = { workspace = true }
@@ -15,3 +23,6 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "macros", "time", "test-util"] }
+hoprs-remote = { path = "../hoprs-remote", features = ["testing"] }
+hoprs-ssh = { path = "../hoprs-ssh", features = ["testing"] }

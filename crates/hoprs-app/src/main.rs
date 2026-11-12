@@ -17,7 +17,7 @@ use std::sync::Arc;
 use iced::Task;
 
 use crate::app::{App, Message};
-use crate::backend::{Backend, BackendApi};
+use crate::backend::{Backend, BackendApi, BackendConfig, LazyKeyringStore};
 
 /// Smallest window that still fits the sidebar and two file panes.
 const MIN_WINDOW: iced::Size = iced::Size::new(960.0, 640.0);
@@ -71,10 +71,27 @@ struct Hoprs {
 }
 
 fn boot() -> Hoprs {
+    let backend = match open_backend() {
+        Ok(backend) => backend,
+        Err(err) => {
+            // No profiles, no app: there is nothing to show yet without them.
+            tracing::error!(%err, "cannot open the profiles");
+            eprintln!("{}: {err}", ui::strings::CANNOT_OPEN_PROFILES);
+            std::process::exit(1);
+        }
+    };
     Hoprs {
         app: App::new(),
-        backend: Arc::new(Backend),
+        backend: Arc::new(backend),
     }
+}
+
+/// The real backend at the standard locations, secrets in the system keyring.
+fn open_backend() -> hoprs_core::Result<Backend> {
+    let config = BackendConfig::standard().ok_or_else(|| {
+        hoprs_core::Error::new(hoprs_core::ErrorKind::Io, "No configuration directory")
+    })?;
+    Backend::open(config, Arc::new(LazyKeyringStore::new()))
 }
 
 /// Thin wrapper: the pure update decides, `effects::run` performs.

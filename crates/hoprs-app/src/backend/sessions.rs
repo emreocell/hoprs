@@ -1,0 +1,752 @@
+//! The session manager: connects saved sites, registers them with the transfer engine,
+//! watches them and closes them.
+//!
+//! **Connect shape (ruling R5).** `SftpFs::new` needs a *connected* SSH session, so
+//! [`SessionManager::connect`] starts the connection (`SshSession::start` /
+//! `FtpFs::start`), keeps it under a fresh [`SessionId`] at once (its state is observable
+//! and [`close`](SessionManager::close) can cancel it, prompts included), then waits for
+//! the first `Connected`. Only then does it build the remote filesystem (`SftpFs` over the
+//! session, or the `FtpFs` itself), register the site with the engine
+//! (`LocalFs::new("/")` as the local side) and spawn its `spawn_site_watcher`. FTP takes the
+//! same path for uniformity: `connect` returns once either protocol can list.
+//!
+//! If the first connection ends `Disconnected`, `connect` fails with a [`ConnectError`]
+//! that still carries the session id: the session stays (so the UI shows its error) and
+//! [`reconnect`](SessionManager::reconnect) retries it (`reconnect_now`, then the same
+//! wait-and-register). [`close`](SessionManager::close) drops it.
+//!
+//! One session per site: `connect` on a site that already has one returns that session
+//! (retrying it if it is `Disconnected`). The engine keys endpoints by site, so two live
+//! sessions of one site would replace each other's endpoints.
+
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+
+use hoprs_core::{ConnectionState, Error, ErrorKind, Protocol, Result, Site, SiteId};
+use hoprs_remote::{Connection, FtpFs, LocalFs, RemoteFs, SftpConfig, SftpFs};
+use hoprs_ssh::SshSession;
+use hoprs_transfer::{SiteEndpoints, TransferEngine, spawn_site_watcher};
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+
+use super::broker::{PromptBroker, SessionPrompter};
+use super::mapping::{SiteSecrets, ftp_config, ssh_config};
+use super::vault::VaultHandle;
+
+/// Identifies one open session. Monotonic: never reused within a run.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SessionId(pub u64);
+
+/// A failed connect. `session` is `Some` when the session exists (its first connection
+/// failed): [`SessionManager::reconnect`] retries it, [`SessionManager::close`] drops it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConnectError {
+    pub session: Option<SessionId>,
+    pub error: Error,
+}
+
+impl ConnectError {
+    fn before_start(error: Error) -> Self {
+        Self {
+            session: None,
+            error,
+        }
+    }
+}
+
+/// Session manager options.
+#[derive(Clone, Debug)]
+pub struct SessionConfig {
+    /// Replaces `~/.ssh/known_hosts` (tests).
+    pub known_hosts: Option<PathBuf>,
+    /// Transfer workers per site; also the SFTP stream channels and FTP transfer
+    /// connections (both clamped to `1..=8`).
+    pub workers: usize,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            known_hosts: None,
+            workers: 4,
+        }
+    }
+}
+
+/// The live connection of a session.
+#[derive(Clone)]
+enum Link {
+    Ssh(SshSession),
+    Ftp(FtpFs),
+    /// A test double that only reports state.
+    #[cfg(test)]
+    Fake(Arc<dyn Connection>),
+}
+
+struct Entry {
+    site: SiteId,
+    link: Link,
+    prompter: SessionPrompter,
+    /// Set once the first connection is up and the site is registered.
+    remote: Option<Arc<dyn RemoteFs>>,
+    watcher: Option<JoinHandle<()>>,
+}
+
+/// Connects, registers, watches and closes sessions. Cheap to clone.
+#[derive(Clone)]
+pub struct SessionManager {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
+    engine: TransferEngine,
+    vault: VaultHandle,
+    broker: PromptBroker,
+    config: SessionConfig,
+    local: Arc<dyn RemoteFs>,
+    next_id: AtomicU64,
+    sessions: Mutex<HashMap<SessionId, Entry>>,
+    /// Serializes connect, reconnect and close per site.
+    site_locks: Mutex<HashMap<SiteId, Arc<tokio::sync::Mutex<()>>>>,
+    /// Sites `close` paused in the engine; the next connect resumes them.
+    paused_by_close: Mutex<HashSet<SiteId>>,
+    /// Remotes of the test sessions made by `attach`, until they are ready.
+    #[cfg(test)]
+    test_remotes: Mutex<HashMap<SessionId, Arc<dyn RemoteFs>>>,
+}
+
+impl Link {
+    fn connection(&self) -> Arc<dyn Connection> {
+        match self {
+            Self::Ssh(session) => Arc::new(session.clone()),
+            Self::Ftp(fs) => Arc::new(fs.clone()),
+            #[cfg(test)]
+            Self::Fake(conn) => conn.clone(),
+        }
+    }
+
+    fn state(&self) -> watch::Receiver<ConnectionState> {
+        match self {
+            Self::Ssh(session) => session.state(),
+            Self::Ftp(fs) => Connection::state(fs),
+            #[cfg(test)]
+            Self::Fake(conn) => conn.state(),
+        }
+    }
+
+    async fn reconnect_now(&self) {
+        match self {
+            Self::Ssh(session) => session.reconnect_now().await,
+            Self::Ftp(fs) => fs.reconnect_now().await,
+            #[cfg(test)]
+            Self::Fake(_) => {}
+        }
+    }
+
+    async fn disconnect(&self) {
+        match self {
+            Self::Ssh(session) => session.disconnect().await,
+            Self::Ftp(fs) => fs.disconnect().await,
+            #[cfg(test)]
+            Self::Fake(_) => {}
+        }
+    }
+}
+
+fn closed() -> Error {
+    Error::new(ErrorKind::NotFound, "Session closed")
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl SessionManager {
+    pub fn new(
+        engine: TransferEngine,
+        vault: VaultHandle,
+        broker: PromptBroker,
+        config: SessionConfig,
+    ) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                engine,
+                vault,
+                broker,
+                config,
+                local: Arc::new(LocalFs::new("/")),
+                next_id: AtomicU64::new(1),
+                sessions: Mutex::new(HashMap::new()),
+                site_locks: Mutex::new(HashMap::new()),
+                paused_by_close: Mutex::new(HashSet::new()),
+                #[cfg(test)]
+                test_remotes: Mutex::new(HashMap::new()),
+            }),
+        }
+    }
+
+    /// Connects the saved site `site` (see the module docs).
+    pub async fn connect(&self, site: SiteId) -> std::result::Result<SessionId, ConnectError> {
+        let (_, result) = self
+            .connect_many(vec![site])
+            .await
+            .pop()
+            .expect("one result per site");
+        result
+    }
+
+    /// Connects several sites at once (Open workspace). Their secrets are read with one
+    /// [`SecretBatch`](super::vault::SecretBatch): a locked keyring raises at most one
+    /// unlock prompt, and the sites after it ask for their passwords instead. Results come
+    /// in the order of `sites`; a site missing from the vault is `NotFound`.
+    pub async fn connect_many(
+        &self,
+        sites: Vec<SiteId>,
+    ) -> Vec<(SiteId, std::result::Result<SessionId, ConnectError>)> {
+        let read = match self.inner.vault.sites_with_secrets(sites.clone()).await {
+            Ok(read) => read,
+            Err(error) => {
+                return sites
+                    .into_iter()
+                    .map(|site| (site, Err(ConnectError::before_start(error.clone()))))
+                    .collect();
+            }
+        };
+        let connects = read.into_iter().map(|(id, found)| async move {
+            let result = match found {
+                Ok((site, secrets)) => self.connect_site(site, secrets).await,
+                Err(error) => Err(ConnectError::before_start(error)),
+            };
+            (id, result)
+        });
+        futures_util::future::join_all(connects).await
+    }
+
+    async fn connect_site(
+        &self,
+        site: Site,
+        secrets: SiteSecrets,
+    ) -> std::result::Result<SessionId, ConnectError> {
+        let site_lock = self.site_lock(&site.id);
+        let _turn = site_lock.lock().await;
+        let existing = lock(&self.inner.sessions)
+            .iter()
+            .find(|(_, entry)| entry.site == site.id)
+            .map(|(id, entry)| (*id, entry.link.clone()));
+        let id = match existing {
+            Some((id, link)) => {
+                // Does nothing unless `Disconnected`.
+                link.reconnect_now().await;
+                id
+            }
+            None => self.start(&site, secrets),
+        };
+        self.ready(id).await.map_err(|error| ConnectError {
+            session: Some(id),
+            error,
+        })?;
+        Ok(id)
+    }
+
+    /// Starts the connection of `site` under a new session id.
+    fn start(&self, site: &Site, secrets: SiteSecrets) -> SessionId {
+        let id = SessionId(self.inner.next_id.fetch_add(1, Ordering::SeqCst));
+        let prompter = self
+            .inner
+            .broker
+            .session(id, site.id.clone(), &site.host, site.port);
+        let config = &self.inner.config;
+        let link = match site.protocol {
+            Protocol::Ssh => {
+                let mut ssh = ssh_config(site, &secrets);
+                if let Some(known_hosts) = &config.known_hosts {
+                    ssh.known_hosts = known_hosts.clone();
+                }
+                Link::Ssh(SshSession::start(ssh, Arc::new(prompter.clone())))
+            }
+            Protocol::Ftp | Protocol::FtpsExplicit | Protocol::FtpsImplicit => {
+                let mut ftp = ftp_config(site, &secrets);
+                ftp.transfer_connections = config.workers.clamp(1, 8);
+                Link::Ftp(FtpFs::start(ftp, Arc::new(prompter.clone())))
+            }
+        };
+        self.insert(id, site.id.clone(), link, prompter);
+        id
+    }
+
+    fn insert(&self, id: SessionId, site: SiteId, link: Link, prompter: SessionPrompter) {
+        let entry = Entry {
+            site,
+            link,
+            prompter,
+            remote: None,
+            watcher: None,
+        };
+        lock(&self.inner.sessions).insert(id, entry);
+    }
+
+    /// Waits for the session's first `Connected` (or its failure), then, once per session,
+    /// builds its remote filesystem, registers the site and spawns its watcher. Called
+    /// with the site's lock held.
+    async fn ready(&self, id: SessionId) -> Result<()> {
+        let (link, site, built) = {
+            let sessions = lock(&self.inner.sessions);
+            let entry = sessions.get(&id).ok_or_else(closed)?;
+            (
+                entry.link.clone(),
+                entry.site.clone(),
+                entry.remote.is_some(),
+            )
+        };
+        let mut state = link.state();
+        let outcome = state
+            .wait_for(|s| {
+                matches!(
+                    s,
+                    ConnectionState::Connected | ConnectionState::Disconnected(_)
+                )
+            })
+            .await
+            .map(|s| s.clone())
+            .map_err(|_| closed())?;
+        if let ConnectionState::Disconnected(error) = outcome {
+            return Err(error);
+        }
+        if built {
+            return Ok(());
+        }
+
+        let workers = self.inner.config.workers;
+        let remote: Arc<dyn RemoteFs> = match &link {
+            Link::Ssh(session) => {
+                let sftp = SftpConfig {
+                    stream_channels: workers.clamp(1, 8),
+                };
+                Arc::new(SftpFs::new(session.clone(), sftp).await?)
+            }
+            Link::Ftp(fs) => Arc::new(fs.clone()),
+            #[cfg(test)]
+            Link::Fake(_) => self.test_remote(id)?,
+        };
+        let engine = &self.inner.engine;
+        let endpoints = SiteEndpoints {
+            local: self.inner.local.clone(),
+            remote: remote.clone(),
+            workers,
+        };
+        engine.register_site(site.clone(), endpoints).await;
+        if lock(&self.inner.paused_by_close).remove(&site) {
+            engine.resume_site(site.clone()).await;
+        }
+        let watcher = spawn_site_watcher(engine.clone(), site, link.connection());
+
+        let mut sessions = lock(&self.inner.sessions);
+        let Some(entry) = sessions.get_mut(&id) else {
+            // Closed meanwhile: `close` pauses the site once it gets the site's lock.
+            watcher.abort();
+            return Err(closed());
+        };
+        entry.remote = Some(remote);
+        entry.watcher = Some(watcher);
+        Ok(())
+    }
+
+    /// Retries a session whose connection is `Disconnected` (first connection included)
+    /// and waits for it like `connect`.
+    pub async fn reconnect(&self, id: SessionId) -> Result<()> {
+        let (site, link) = {
+            let sessions = lock(&self.inner.sessions);
+            let entry = sessions.get(&id).ok_or_else(closed)?;
+            (entry.site.clone(), entry.link.clone())
+        };
+        let site_lock = self.site_lock(&site);
+        let _turn = site_lock.lock().await;
+        link.reconnect_now().await;
+        self.ready(id).await
+    }
+
+    /// Closes a session: refuses its prompts, disconnects it, aborts its site watcher and
+    /// pauses its site in the engine (the next connect of the site resumes it). Unknown
+    /// ids are ignored.
+    pub async fn close(&self, id: SessionId) {
+        let Some(entry) = lock(&self.inner.sessions).remove(&id) else {
+            return;
+        };
+        // Not under the site's lock: a connect waiting on a prompt holds it, and this is
+        // what ends that wait.
+        entry.prompter.cancel();
+        entry.link.disconnect().await;
+        if let Some(watcher) = &entry.watcher {
+            watcher.abort();
+        }
+
+        // Once any connect of this site has finished, pause the site unless a new
+        // session of it has taken over (and registered its own endpoints).
+        let site_lock = self.site_lock(&entry.site);
+        let _turn = site_lock.lock().await;
+        let replaced = lock(&self.inner.sessions)
+            .values()
+            .any(|other| other.site == entry.site);
+        if !replaced {
+            self.inner.engine.pause_site(entry.site.clone()).await;
+            lock(&self.inner.paused_by_close).insert(entry.site.clone());
+        }
+    }
+
+    /// The remote filesystem of a connected session.
+    pub fn remote(&self, id: SessionId) -> Result<Arc<dyn RemoteFs>> {
+        let sessions = lock(&self.inner.sessions);
+        let entry = sessions.get(&id).ok_or_else(closed)?;
+        entry
+            .remote
+            .clone()
+            .ok_or_else(|| Error::new(ErrorKind::Network, "Not connected"))
+    }
+
+    /// The local filesystem every session transfers with.
+    pub fn local(&self) -> Arc<dyn RemoteFs> {
+        self.inner.local.clone()
+    }
+
+    /// Watches a session's connection state.
+    pub fn state(&self, id: SessionId) -> Option<watch::Receiver<ConnectionState>> {
+        lock(&self.inner.sessions)
+            .get(&id)
+            .map(|entry| entry.link.state())
+    }
+
+    fn site_lock(&self, site: &SiteId) -> Arc<tokio::sync::Mutex<()>> {
+        lock(&self.inner.site_locks)
+            .entry(site.clone())
+            .or_default()
+            .clone()
+    }
+
+    /// Adds a session over a test connection and `remote`, then readies it like `connect`.
+    #[cfg(test)]
+    async fn attach(
+        &self,
+        site: SiteId,
+        conn: Arc<dyn Connection>,
+        remote: Arc<dyn RemoteFs>,
+    ) -> Result<SessionId> {
+        let id = SessionId(self.inner.next_id.fetch_add(1, Ordering::SeqCst));
+        let prompter = self.inner.broker.session(id, site.clone(), "test", 0);
+        self.insert(id, site.clone(), Link::Fake(conn), prompter);
+        lock(&self.inner.test_remotes).insert(id, remote);
+        let site_lock = self.site_lock(&site);
+        let _turn = site_lock.lock().await;
+        self.ready(id).await?;
+        Ok(id)
+    }
+
+    #[cfg(test)]
+    fn test_remote(&self, id: SessionId) -> Result<Arc<dyn RemoteFs>> {
+        lock(&self.inner.test_remotes)
+            .remove(&id)
+            .ok_or_else(closed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use hoprs_core::{EntryKind, RemotePath};
+    use hoprs_remote::MemFs;
+    use hoprs_transfer::{EngineConfig, QueueStore};
+    use hoprs_vault::{MemoryStore, SecretKind, Vault};
+    use secrecy::SecretString;
+
+    use super::super::broker::{BrokerEvent, PromptAnswer, PromptKind};
+    use super::*;
+
+    struct FakeConn {
+        state: watch::Sender<ConnectionState>,
+    }
+
+    impl Connection for FakeConn {
+        fn state(&self) -> watch::Receiver<ConnectionState> {
+            self.state.subscribe()
+        }
+
+        fn generation(&self) -> u64 {
+            1
+        }
+    }
+
+    struct Fixture {
+        manager: SessionManager,
+        broker: PromptBroker,
+        vault: VaultHandle,
+        dir: tempfile::TempDir,
+    }
+
+    fn fixture() -> Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(dir.path(), Arc::new(MemoryStore::new())).unwrap();
+        let vault = VaultHandle::new(vault);
+        let broker = PromptBroker::new(vault.clone());
+        let engine = TransferEngine::start(
+            QueueStore::open_in_memory().unwrap(),
+            EngineConfig::default(),
+        )
+        .unwrap();
+        let config = SessionConfig {
+            known_hosts: Some(dir.path().join("known_hosts")),
+            workers: 2,
+        };
+        let manager = SessionManager::new(engine, vault.clone(), broker.clone(), config);
+        Fixture {
+            manager,
+            broker,
+            vault,
+            dir,
+        }
+    }
+
+    async fn eventually(what: &str, mut check: impl FnMut() -> bool) {
+        for _ in 0..200 {
+            if check() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    #[tokio::test]
+    async fn close_aborts_watcher() {
+        let f = fixture();
+        let (state, _) = watch::channel(ConnectionState::Connected);
+        let conn = Arc::new(FakeConn { state });
+        let remote = MemFs::new();
+        remote.add_dir("/srv");
+        let site = SiteId::new();
+        let id = f
+            .manager
+            .attach(site.clone(), conn.clone(), Arc::new(remote))
+            .await
+            .unwrap();
+        let listed = f
+            .manager
+            .remote(id)
+            .unwrap()
+            .list(&RemotePath::root())
+            .await
+            .unwrap();
+        assert_eq!(listed[0].kind, EntryKind::Dir);
+        // The session and its watcher hold the connection.
+        assert!(
+            Arc::strong_count(&conn) >= 3,
+            "{}",
+            Arc::strong_count(&conn)
+        );
+        assert!(f.manager.state(id).is_some());
+
+        f.manager.close(id).await;
+        eventually("the watcher to drop the connection", || {
+            Arc::strong_count(&conn) == 1
+        })
+        .await;
+        assert!(f.manager.remote(id).is_err());
+        assert!(f.manager.state(id).is_none());
+        // Closing twice is harmless.
+        f.manager.close(id).await;
+    }
+
+    #[tokio::test]
+    async fn session_ids_are_monotonic() {
+        let f = fixture();
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            let (state, _) = watch::channel(ConnectionState::Connected);
+            let conn = Arc::new(FakeConn { state });
+            let id = f
+                .manager
+                .attach(SiteId::new(), conn, Arc::new(MemFs::new()))
+                .await
+                .unwrap();
+            ids.push(id);
+        }
+        f.manager.close(ids[1]).await;
+        let (state, _) = watch::channel(ConnectionState::Connected);
+        let conn = Arc::new(FakeConn { state });
+        let last = f
+            .manager
+            .attach(SiteId::new(), conn, Arc::new(MemFs::new()))
+            .await
+            .unwrap();
+        ids.push(last);
+        assert!(ids.windows(2).all(|w| w[0] < w[1]), "{ids:?}");
+    }
+
+    #[tokio::test]
+    async fn connect_unknown_site_is_not_found() {
+        let f = fixture();
+        let err = f.manager.connect(SiteId::new()).await.unwrap_err();
+        assert_eq!(err.session, None);
+        assert_eq!(err.error.kind, ErrorKind::NotFound);
+
+        let missing = SiteId::new();
+        let results = f.manager.connect_many(vec![missing.clone()]).await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, missing);
+        assert_eq!(
+            results[0].1.as_ref().unwrap_err().error.kind,
+            ErrorKind::NotFound
+        );
+    }
+
+    /// A failed first connection keeps the session: its id comes with the error, its
+    /// state shows the failure, and `close` drops it.
+    #[tokio::test]
+    async fn failed_first_connect_keeps_the_session() {
+        let f = fixture();
+        // Nothing listens on port 1.
+        let mut site = Site::new("down", "127.0.0.1", "u", Protocol::Ftp);
+        site.port = 1;
+        f.vault.upsert_site(site.clone()).await.unwrap();
+        let mut events = f.broker.take_events().unwrap();
+        let answer = tokio::spawn({
+            let broker = f.broker.clone();
+            async move {
+                while let Some(event) = events.recv().await {
+                    if let BrokerEvent::Request(r) = event {
+                        broker.answer(r.id, PromptAnswer::Secret(SecretString::from("pw")));
+                    }
+                }
+            }
+        });
+
+        let err = f.manager.connect(site.id.clone()).await.unwrap_err();
+        let id = err.session.expect("the session is kept");
+        assert_eq!(err.error.kind, ErrorKind::Network, "{:?}", err.error);
+        assert!(matches!(
+            *f.manager.state(id).unwrap().borrow(),
+            ConnectionState::Disconnected(_)
+        ));
+        assert!(f.manager.remote(id).is_err());
+        // Connecting the site again retries the same session.
+        let again = f.manager.connect(site.id.clone()).await.unwrap_err();
+        assert_eq!(again.session, Some(id));
+        assert!(f.manager.reconnect(id).await.is_err());
+        f.manager.close(id).await;
+        assert!(f.manager.state(id).is_none());
+        answer.abort();
+    }
+
+    /// Answers every dialog: trusts host keys and certificates, refuses the rest. Returns
+    /// the task and the kinds of the dialogs it saw.
+    fn answer_prompts(broker: &PromptBroker) -> (JoinHandle<()>, Arc<Mutex<Vec<PromptKind>>>) {
+        let mut events = broker.take_events().unwrap();
+        let broker = broker.clone();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let task = tokio::spawn({
+            let seen = seen.clone();
+            async move {
+                while let Some(event) = events.recv().await {
+                    if let BrokerEvent::Request(r) = event {
+                        let answer = match r.kind {
+                            PromptKind::HostKey { .. } | PromptKind::Certificate { .. } => {
+                                PromptAnswer::Decision(true)
+                            }
+                            _ => PromptAnswer::Cancel,
+                        };
+                        seen.lock().unwrap().push(r.kind);
+                        broker.answer(r.id, answer);
+                    }
+                }
+            }
+        });
+        (task, seen)
+    }
+
+    #[tokio::test]
+    #[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+    async fn connect_ssh_site_end_to_end() {
+        let f = fixture();
+        let mut site = Site::new("docker ssh", "127.0.0.1", "alice", Protocol::Ssh);
+        site.port = hoprs_ssh::testing::SSH_PORT;
+        site.ssh.use_agent = false;
+        site.ssh.key_file = Some(hoprs_ssh::testing::fixture("id_ed25519"));
+        f.vault.upsert_site(site.clone()).await.unwrap();
+        let (prompts, seen) = answer_prompts(&f.broker);
+
+        let id = f.manager.connect(site.id.clone()).await.unwrap();
+        let entries = f
+            .manager
+            .remote(id)
+            .unwrap()
+            .list(&RemotePath::root())
+            .await
+            .unwrap();
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.name == "home" && e.kind == EntryKind::Dir),
+            "{entries:?}"
+        );
+        // The host key was asked once and recorded in the test's known_hosts.
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert!(matches!(seen[0], PromptKind::HostKey { .. }), "{seen:?}");
+        assert!(f.dir.path().join("known_hosts").exists());
+        // Connecting again returns the same session.
+        assert_eq!(f.manager.connect(site.id.clone()).await.unwrap(), id);
+
+        let state = f.manager.state(id).unwrap();
+        f.manager.close(id).await;
+        assert!(matches!(*state.borrow(), ConnectionState::Disconnected(_)));
+        prompts.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+    async fn connect_ftps_site_end_to_end() {
+        let f = fixture();
+        let mut site = Site::new("docker ftps", "127.0.0.1", "frank", Protocol::FtpsImplicit);
+        site.port = hoprs_remote::testing::FTPS_IMPLICIT_PORT;
+        f.vault.upsert_site(site.clone()).await.unwrap();
+        let id_for_secret = site.id.clone();
+        f.vault
+            .call(move |v| {
+                v.set_secret(
+                    &id_for_secret,
+                    SecretKind::Password,
+                    &SecretString::from("frank-pass"),
+                )
+            })
+            .await
+            .unwrap();
+        let (prompts, seen) = answer_prompts(&f.broker);
+
+        let id = f.manager.connect(site.id.clone()).await.unwrap();
+        let entries = f
+            .manager
+            .remote(id)
+            .unwrap()
+            .list(&RemotePath::root())
+            .await
+            .unwrap();
+        assert!(!entries.is_empty());
+        // One certificate dialog, no password dialog (the password came from the vault).
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert!(
+            matches!(seen[0], PromptKind::Certificate { .. }),
+            "{seen:?}"
+        );
+        // The accepted certificate was pinned in the vault through the broker.
+        let saved = f.vault.site(site.id.clone()).await.unwrap().unwrap();
+        assert_eq!(
+            saved.ftp.pinned_fingerprint,
+            Some(hoprs_remote::testing::server_fingerprint())
+        );
+
+        f.manager.close(id).await;
+        prompts.abort();
+    }
+}
