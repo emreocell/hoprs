@@ -11,9 +11,12 @@ Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI), open source (MIT OR Apa
 
 ## Current status (2026-11-12)
 
-- Plan 1 implemented on branch `plan-1-foundation` (hoprs-core, hoprs-remote, hoprs-transfer), every task reviewed plus a whole-branch review; follow-ups deferred to later plans are in `docs/superpowers/plans/2026-11-12-01-followups.md`.
-- **Next step:** merge Plan 1, then write Plan 2 (SSH + SFTP) from the real signatures (`RemoteFs` contract in `crates/hoprs-remote/src/lib.rs`, `TransferEngine::register_site`, `pause_site`, `resume_site`).
-- Plans 2–6 are written only after the previous plan is done, using the real signatures it produced.
+- Plan 1 (hoprs-core, hoprs-remote, hoprs-transfer) merged to `main`.
+- Plan 2 (hoprs-ssh, `SftpFs`, engine hardening, Docker OpenSSH test env) implemented on branch `plan-2-ssh-sftp`; every task reviewed plus a whole-branch review.
+- Deferred follow-ups for later plans: `docs/superpowers/plans/2026-11-12-01-followups.md` (sections "Before Plan 3/5/6", perf, Windows, Later).
+- **Next step:** merge Plan 2, then write Plan 3 (FTP + FTPS) from the real signatures (`RemoteFs` contract in `crates/hoprs-remote/src/lib.rs`, `TransferEngine::network_restored`, the Docker test env in `docker/`).
+- Plans 3–6 are written only after the previous plan is done, using the real signatures it produced.
+- Docker integration tests: `docker compose -f docker/compose.yml up -d --build --wait`, then `cargo test --workspace --all-features -- --ignored --test-threads=1`.
 
 ## Decisions already made (do not re-litigate)
 
