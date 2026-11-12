@@ -88,6 +88,24 @@ async fn open_write_offsets() {
 }
 
 #[tokio::test]
+async fn open_read_at_or_past_eof_is_empty() {
+    let (_dir, fs) = setup();
+    write(&fs, "/a", 0, b"hello").await;
+    assert_eq!(read(&fs, "/a", 5).await, "");
+    assert_eq!(read(&fs, "/a", 1 << 40).await, "");
+}
+
+#[tokio::test]
+async fn open_write_zero_truncates_before_any_write() {
+    let (_dir, fs) = setup();
+    write(&fs, "/a", 0, b"old contents").await;
+    let w = fs.open_write(&p("/a"), 0).await.unwrap();
+    assert_eq!(fs.stat(&p("/a")).await.unwrap().size, 0);
+    drop(w);
+    assert_eq!(read(&fs, "/a", 0).await, "");
+}
+
+#[tokio::test]
 async fn mkdir_is_idempotent_and_leaf_only() {
     let (_dir, fs) = setup();
     fs.mkdir(&p("/d")).await.unwrap();

@@ -509,6 +509,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn open_read_at_or_past_eof_is_empty() {
+        let fs = MemFs::new();
+        fs.add_file("/a", b"hello", UNIX_EPOCH);
+        for offset in [5, 6, u64::MAX] {
+            let mut buf = Vec::new();
+            fs.open_read(&p("/a"), offset)
+                .await
+                .unwrap()
+                .read_to_end(&mut buf)
+                .await
+                .unwrap();
+            assert!(buf.is_empty(), "offset {offset}");
+        }
+    }
+
+    #[tokio::test]
+    async fn open_write_zero_truncates_before_any_write() {
+        let fs = MemFs::new();
+        fs.add_file("/a", b"old contents", UNIX_EPOCH);
+        let w = fs.open_write(&p("/a"), 0).await.unwrap();
+        assert_eq!(fs.read_file("/a").unwrap(), b"");
+        drop(w);
+        assert_eq!(fs.stat(&p("/a")).await.unwrap().size, 0);
+    }
+
+    #[tokio::test]
     async fn mkdir_is_idempotent_and_leaf_only() {
         let fs = MemFs::new();
         fs.mkdir(&p("/d")).await.unwrap();
