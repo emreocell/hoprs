@@ -63,7 +63,7 @@ fn parses_all_protocols() {
     assert_eq!(site("Implicit TLS").protocol, Ok(Protocol::FtpsImplicit));
     let explicit = site("Explicit TLS");
     assert_eq!(explicit.protocol, Ok(Protocol::FtpsExplicit));
-    assert!(explicit.notes.is_empty());
+    assert_eq!(explicit.notes, vec!["password is asked at each connection"]);
     assert_eq!(site("Plain FTP").protocol, Ok(Protocol::Ftp));
 }
 
@@ -292,4 +292,47 @@ fn debug_has_no_password() {
     let s = site("Legacy FTP");
     assert!(!format!("{:?}", s.password).contains("hunter2"));
     assert!(!format!("{s:?}").contains("hunter2"));
+}
+
+fn inline_site(fields: &str) -> ParsedSite {
+    let xml = format!(
+        "<?xml version=\"1.0\"?><FileZilla3><Servers><Server>{fields}<Name>x</Name></Server></Servers></FileZilla3>"
+    );
+    match parse_sitemanager(&xml).unwrap().entries.remove(0) {
+        ParsedEntry::Site(s) => s,
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn ask_logons_note_that_the_password_is_asked() {
+    for logon in ["2", "3"] {
+        let s = inline_site(&format!(
+            "<Host>h</Host><Protocol>1</Protocol><User>u</User><Logontype>{logon}</Logontype>"
+        ));
+        assert!(matches!(s.password, ParsedPassword::AskEachTime));
+        assert_eq!(s.notes, vec!["password is asked at each connection"]);
+    }
+}
+
+#[test]
+fn account_logon_notes_the_dropped_account_field() {
+    let s = inline_site(
+        "<Host>h</Host><Protocol>0</Protocol><User>u</User><Logontype>4</Logontype><Account>acct</Account>",
+    );
+    assert!(
+        s.notes
+            .contains(&"FileZilla account field not imported".to_string()),
+        "{:?}",
+        s.notes
+    );
+}
+
+#[test]
+fn missing_logontype_is_anonymous() {
+    let s = inline_site(
+        "<Host>h</Host><Protocol>0</Protocol><User>bob</User><Pass encoding=\"base64\">aHVudGVyMg==</Pass>",
+    );
+    assert_eq!(s.user, "anonymous");
+    assert!(matches!(s.password, ParsedPassword::None));
 }

@@ -335,12 +335,20 @@ fn convert_site(server: &Elem) -> ParsedSite {
     let mut user = server.child("User").map(|e| e.text()).unwrap_or_default();
     let mut key_file = None;
     let password = match field(server, "Logontype").as_deref() {
-        Some("0") => {
+        // A missing Logontype is anonymous, as in FileZilla.
+        None | Some("0") => {
             user = "anonymous".to_owned();
             ParsedPassword::None
         }
-        None | Some("1") | Some("4") => convert_password(server.child("Pass"), &mut notes),
-        Some("2") | Some("3") => ParsedPassword::AskEachTime,
+        Some("1") => convert_password(server.child("Pass"), &mut notes),
+        Some("4") => {
+            notes.push("FileZilla account field not imported".to_owned());
+            convert_password(server.child("Pass"), &mut notes)
+        }
+        Some("2") | Some("3") => {
+            notes.push("password is asked at each connection".to_owned());
+            ParsedPassword::AskEachTime
+        }
         Some("5") => {
             key_file = field(server, "Keyfile").map(PathBuf::from);
             ParsedPassword::None

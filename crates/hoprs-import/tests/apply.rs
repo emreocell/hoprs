@@ -361,6 +361,10 @@ fn existing_workspace_name_is_skipped() {
         ]
     );
     assert_eq!(vault.workspaces().len(), 3);
+    assert_eq!(
+        report.skipped_workspaces,
+        vec!["Work: a workspace with this name already exists"]
+    );
     let work = vault
         .workspaces()
         .iter()
@@ -509,4 +513,23 @@ mod unix_failures {
         assert_eq!(again.workspaces_created, vec!["F"]);
         assert_eq!(vault.workspaces()[0].sites.len(), 2);
     }
+}
+
+#[test]
+fn empty_host_and_port_zero_are_skipped() {
+    let (_dir, _store, mut vault) = open();
+    let xml = "<Server><Host></Host><Protocol>1</Protocol><Logontype>1</Logontype><Name>NoHost</Name></Server>\
+               <Server><Host>h.test</Host><Port>0</Port><Protocol>1</Protocol><Logontype>1</Logontype><Name>Port0</Name></Server>";
+    let report = apply(&mut vault, inline_xml(xml), &FLAT).unwrap();
+    assert!(report.imported.is_empty());
+    let skipped: Vec<_> = report
+        .skipped
+        .iter()
+        .map(|s| (s.name.as_str(), s.reason.as_str()))
+        .collect();
+    assert_eq!(
+        skipped,
+        vec![("NoHost", "missing host"), ("Port0", "invalid port")]
+    );
+    assert!(vault.sites().is_empty());
 }

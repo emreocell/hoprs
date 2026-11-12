@@ -36,6 +36,8 @@ pub struct ImportReport {
     pub imported: Vec<ImportedSite>,
     pub skipped: Vec<SkippedSite>,
     pub workspaces_created: Vec<String>,
+    /// Folders whose workspace was not created, as "<name>: <reason>".
+    pub skipped_workspaces: Vec<String>,
     /// Sites or workspaces that could not be written, as "<name>: <message>".
     pub failures: Vec<String>,
 }
@@ -71,7 +73,13 @@ pub fn apply(
     );
 
     for (name, ids) in folders {
-        if ids.is_empty() || vault.workspaces().iter().any(|w| w.name == name) {
+        if ids.is_empty() {
+            continue;
+        }
+        if vault.workspaces().iter().any(|w| w.name == name) {
+            report
+                .skipped_workspaces
+                .push(format!("{name}: a workspace with this name already exists"));
             continue;
         }
         let workspace = Workspace {
@@ -149,6 +157,20 @@ fn import_site(
             return None;
         }
     };
+    if parsed.host.is_empty() {
+        report.skipped.push(SkippedSite {
+            name,
+            reason: "missing host".to_owned(),
+        });
+        return None;
+    }
+    if parsed.port == Some(0) {
+        report.skipped.push(SkippedSite {
+            name,
+            reason: "invalid port".to_owned(),
+        });
+        return None;
+    }
     let port = parsed.port.unwrap_or_else(|| protocol.default_port());
     let existing = vault.sites().iter().find(|s| {
         s.name == name
