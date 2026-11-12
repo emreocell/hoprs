@@ -35,10 +35,14 @@ pub fn docker(args: &[&str]) {
     assert!(status.success(), "docker compose {args:?} failed: {status}");
 }
 
-/// Kills every authenticated sshd session process, dropping client connections.
+/// Kills every per-connection sshd process, dropping client connections.
 /// Having no session to kill is not an error.
+///
+/// Matches every sshd process title except the listener's (`sshd: /usr/sbin/sshd ...`):
+/// `sshd: bob [priv]`, `sshd: bob` (authenticated, no command yet), `sshd: bob@notty`.
+/// `sshd: .*@` alone would miss connections that never ran a command or subsystem.
 pub fn kill_ssh_sessions() {
-    let args = ["exec", "-T", "sshd", "pkill", "-f", "sshd: .*@"];
+    let args = ["exec", "-T", "sshd", "pkill", "-f", "^sshd: [^/]"];
     let status = compose(&args);
     // pkill exits 1 when nothing matched.
     assert!(

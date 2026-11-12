@@ -13,4 +13,4 @@ pub use config::{AuthConfig, KeySource, ReconnectPolicy, SshConfig};
 pub use prompt::{KbdPrompt, Prompter};
 #[cfg(feature = "testing")]
 pub use prompt::{PromptCalls, ScriptedPrompter};
-pub use session::SshSession;
+pub use session::{SessionState, SshSession};
