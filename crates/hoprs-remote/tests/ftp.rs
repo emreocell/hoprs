@@ -1319,7 +1319,10 @@ async fn chmod_roundtrip() {
     let c = setup().await;
     c.sh("printf data > m");
     c.fs.chmod(&c.at("m"), 0o640).await.unwrap();
-    assert_eq!(c.fs.stat(&c.at("m")).await.unwrap().mode, Some(0o640));
+    // A file's permissions come from a listing (`stat` of a file is `SIZE`, ruling R9).
+    let listed = c.fs.list(&c.work).await.unwrap();
+    let m = listed.iter().find(|e| e.name == "m").unwrap();
+    assert_eq!(m.mode, Some(0o640));
     c.sh("test \"$(stat -c %a m)\" = 640");
     c.fs.mkdir(&c.at("d")).await.unwrap();
     c.fs.chmod(&c.at("d"), 0o700).await.unwrap();
@@ -2008,4 +2011,82 @@ async fn refused_open_keeps_the_transfer_connection() {
     // The control connection and one transfer connection.
     assert_eq!(accepted.load(Ordering::SeqCst), 2);
     fs.disconnect().await;
+}
+
+/// A refused `RETR` after a `REST` may leave the restart offset set on the server, so that
+/// connection is closed instead of going back to the pool (a refusal at offset 0 keeps it).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refused_resumed_read_closes_the_transfer_connection() {
+    let src = data(50_000, 5);
+    let (port, accepted) =
+        transfer_server(src.clone(), "226 Transfer complete.\r\n", "226 ok\r\n").await;
+    let fs = transfer_fs(port, 1).await;
+    let e = fs.open_read(&path("/denied"), 10).await.err().unwrap();
+    assert_eq!(e.kind, ErrorKind::Permission, "{e:?}");
+    assert!(download(&fs, &path("/f"), 0).await == src);
+    // The control connection, the closed transfer connection and a new one.
+    assert_eq!(accepted.load(Ordering::SeqCst), 3);
+    fs.disconnect().await;
+}
+
+/// Ruling R9: `stat` of a regular file is `SIZE` + `MDTM`, without listing the parent, even
+/// in a big directory. Directories, special files and missing paths still list it.
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn stat_file_without_listing() {
+    let c = setup().await;
+    c.sh("seq -f 'e%g' 2000 | xargs touch && printf hello > f && touch -d @1000003 f && mkdir d");
+    c.sh("ln -s f link && mkfifo fifo");
+    let before = ftp_listings(&c.fs);
+    for _ in 0..20 {
+        let st = c.fs.stat(&c.at("f")).await.unwrap();
+        assert_eq!(st.kind, EntryKind::File);
+        assert_eq!((st.name.as_str(), &st.path), ("f", &c.at("f")));
+        assert_eq!(st.size, 5);
+        assert_eq!(
+            st.modified,
+            Some(UNIX_EPOCH + Duration::from_secs(1_000_003))
+        );
+        // Only a listing has permissions.
+        assert_eq!(st.mode, None);
+    }
+    // Known edge (R9): `SIZE` follows a symlink to a file, so it is stat'ed as that file.
+    assert_eq!(
+        c.fs.stat(&c.at("link")).await.unwrap().kind,
+        EntryKind::File
+    );
+    assert_eq!(ftp_listings(&c.fs), before);
+
+    assert_eq!(c.fs.stat(&c.at("d")).await.unwrap().kind, EntryKind::Dir);
+    assert_eq!(
+        c.fs.stat(&c.at("nope")).await.unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+    assert_eq!(
+        c.fs.stat(&c.at("fifo")).await.unwrap_err().kind,
+        ErrorKind::Io
+    );
+    assert_eq!(ftp_listings(&c.fs), before + 3);
+    assert_eq!(
+        c.fs.stat(&RemotePath::root()).await.unwrap().kind,
+        EntryKind::Dir
+    );
+    assert_eq!(ftp_listings(&c.fs), before + 3);
+}
+
+/// vsftpd refuses a `STOR` into a directory it cannot write with `553`: `Permission`, not
+/// `NotFound` (the file is missing, but its directory is there).
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn upload_into_read_only_dir_is_permission() {
+    let c = setup().await;
+    c.sh("mkdir ro && chmod 555 ro");
+    let e = c.fs.open_write(&c.at("ro/f"), 0).await.err().unwrap();
+    assert_eq!(e.kind, ErrorKind::Permission, "{e:?}");
+    assert!(e.message.contains(c.at("ro/f").as_str()), "{e:?}");
+    // A missing directory is still NotFound, and chmod of a missing file too.
+    let e = c.fs.open_write(&c.at("nope/f"), 0).await.err().unwrap();
+    assert_eq!(e.kind, ErrorKind::NotFound, "{e:?}");
+    let e = c.fs.chmod(&c.at("ro/missing"), 0o600).await.unwrap_err();
+    assert_eq!(e.kind, ErrorKind::NotFound, "{e:?}");
 }

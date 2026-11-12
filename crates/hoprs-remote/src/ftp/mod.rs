@@ -37,8 +37,13 @@ use stream::{FtpReader, FtpWriter, Timeouts, Transfer};
 ///
 /// - `list` uses `MLSD` when `FEAT` announces it, `LIST -a` otherwise (unix `ls -l` format).
 ///   `.`, `..`, FIFOs, sockets and devices are left out; symlinks are reported, not followed.
-/// - `stat` lists the parent directory and looks the name up (`/` is a directory without
-///   asking). A file's exact modification time comes from `MDTM` when the listing has none.
+/// - `stat` asks `SIZE` first (ruling R9): a `213` means a regular file, whose exact
+///   modification time comes from `MDTM` (`None` when that fails), with no listing. Its `mode`
+///   is `None`: only a listing has permissions. Otherwise (`550`, or no `SIZE` support:
+///   `500`/`502`) it lists the parent directory and looks the name up: directories, symlinks,
+///   special files, missing paths, unreadable parents. `/` is a directory without asking.
+///   Known edge: `SIZE` follows symlinks, so `stat` of a symlink to a file reports the file
+///   (`list` still reports the symlink).
 /// - Servers answer most failures with a bare `550` (vsftpd: "Delete operation failed."), so
 ///   an ambiguous failure is explained with a `stat`: a missing path is `NotFound`, the wrong
 ///   kind of entry `Io`.
@@ -176,6 +181,33 @@ impl FtpFs {
         }
     }
 
+    /// [`explain`](Self::explain) for a refused `STOR`/`APPE`. A refusal (`550`, `553`) of a
+    /// missing file whose parent is a directory is `Permission`: the server could not create
+    /// the file there (vsftpd: `553 Could not create file.` in a read-only directory).
+    async fn explain_write(&self, path: &RemotePath, err: Error) -> Error {
+        let refused = err
+            .detail
+            .as_deref()
+            .is_some_and(|d| d.starts_with("550 ") || d.starts_with("553 "));
+        let err = self.explain(path, err).await;
+        if !refused || err.kind != ErrorKind::NotFound {
+            return err;
+        }
+        let Some(parent) = path.parent() else {
+            return err;
+        };
+        match self.stat(&parent).await {
+            Ok(st) if st.kind == EntryKind::Dir => {
+                let e = Error::new(ErrorKind::Permission, format!("Permission denied: {path}"));
+                match err.detail {
+                    Some(detail) => e.with_detail(detail),
+                    None => e,
+                }
+            }
+            _ => err,
+        }
+    }
+
     #[cfg(feature = "testing")]
     pub(crate) fn listings(&self) -> u64 {
         self.listings.load(Ordering::Relaxed)
@@ -194,13 +226,10 @@ impl FtpFs {
     async fn file_size(&self, path: &RemotePath) -> Result<u64> {
         let (code, text) = self.reply(format!("SIZE {}", arg(path)?), path).await?;
         if code == 213 {
-            return text.trim().parse().map_err(|_| {
-                Error::new(ErrorKind::Protocol, format!("Unexpected FTP reply: {path}"))
-                    .with_detail(format!("{code} {text}"))
-            });
+            return parse_size(code, &text, path);
         }
         if matches!(code, 500 | 502) {
-            let st = self.stat(path).await?;
+            let st = self.stat_listed(path).await?;
             regular_file(&st, path)?;
             return Ok(st.size);
         }
@@ -208,7 +237,7 @@ impl FtpFs {
         if !matches!(err.kind, ErrorKind::Io | ErrorKind::NotFound) {
             return Err(err);
         }
-        match self.stat(path).await {
+        match self.stat_listed(path).await {
             Err(e) if e.kind == ErrorKind::NotFound => Err(not_found(path, &err)),
             Err(e) => Err(e),
             Ok(st) => {
@@ -216,6 +245,81 @@ impl FtpFs {
                 Err(err)
             }
         }
+    }
+
+    /// `stat` from a listing of the parent directory: directories, symlinks, special files,
+    /// missing paths and unreadable parents (`Permission`). `path` is not `/`.
+    async fn stat_listed(&self, path: &RemotePath) -> Result<RemoteEntry> {
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+            return Ok(root_entry());
+        };
+        let Listing {
+            entries,
+            is_dir,
+            mlsd,
+        } = match self.entries(&parent).await {
+            Ok(listing) => listing,
+            // `MLSD` refused: the parent is missing or not a directory.
+            Err(e) if matches!(e.kind, ErrorKind::Io | ErrorKind::NotFound) => {
+                return Err(not_found(path, &e));
+            }
+            Err(e) => return Err(e),
+        };
+        // Without a `.` entry the listing may be the parent's own line (vsftpd lists a file, or
+        // a directory it cannot open, that way): never look the child up in it.
+        if !is_dir
+            && let [only] = entries.as_slice()
+            && Some(only.name.as_str()) == parent.file_name()
+        {
+            let up = self.stat(&parent).await?;
+            match up.kind {
+                // The same check as `list`: the directory's own entry, so it is unreadable.
+                EntryKind::Dir
+                    if only.kind == Some(EntryKind::Dir)
+                        && only.mode == up.mode
+                        && only.modified == up.modified =>
+                {
+                    return Err(Error::new(
+                        ErrorKind::Permission,
+                        format!("Permission denied: {path}"),
+                    ));
+                }
+                // A real child that happens to share the directory's name.
+                EntryKind::Dir => {}
+                // Nothing lives under a file (SftpFs: `NoSuchFile`). A symlink listed as its
+                // own entry points to a file or to a directory that cannot be opened; it is
+                // taken as a file.
+                EntryKind::File | EntryKind::Symlink => {
+                    return Err(Error::new(
+                        ErrorKind::NotFound,
+                        format!("No such file or directory: {path}"),
+                    )
+                    .with_detail(format!("{parent} is not a directory")));
+                }
+            }
+        }
+        let Some(listed) = entries.into_iter().find(|e| e.name == name) else {
+            return Err(Error::new(
+                ErrorKind::NotFound,
+                format!("No such file or directory: {path}"),
+            ));
+        };
+        let Some(mut entry) = to_entry(&parent, listed) else {
+            return Err(Error::new(
+                ErrorKind::Io,
+                format!("Not a regular file: {path}"),
+            ));
+        };
+        if entry.kind == EntryKind::File && !mlsd {
+            // `LIST` dates have minutes at best (only a day for older files).
+            let (code, text) = self.reply(format!("MDTM {}", arg(path)?), path).await?;
+            if code == 213
+                && let Some(t) = parse_timeval(text.trim())
+            {
+                entry.modified = Some(t);
+            }
+        }
+        Ok(entry)
     }
 
     fn timeouts(&self) -> Timeouts {
@@ -262,6 +366,26 @@ fn arg(path: &RemotePath) -> Result<&str> {
     Ok(s)
 }
 
+/// The entry for `/`, a directory that is never asked about.
+fn root_entry() -> RemoteEntry {
+    RemoteEntry {
+        name: "/".to_owned(),
+        path: RemotePath::root(),
+        kind: EntryKind::Dir,
+        size: 0,
+        modified: None,
+        mode: None,
+    }
+}
+
+/// The size in a `213` reply to `SIZE`.
+fn parse_size(code: u32, text: &str, path: &RemotePath) -> Result<u64> {
+    text.trim().parse().map_err(|_| {
+        Error::new(ErrorKind::Protocol, format!("Unexpected FTP reply: {path}"))
+            .with_detail(format!("{code} {text}"))
+    })
+}
+
 fn not_found(path: &RemotePath, cause: &Error) -> Error {
     let e = Error::new(
         ErrorKind::NotFound,
@@ -278,7 +402,7 @@ fn is_definite(e: &Error) -> bool {
     matches!(e.kind, ErrorKind::Network | ErrorKind::Permission)
 }
 
-/// Only regular files are opened: a directory, a symlink (never followed) or a special file
+/// Only regular files are opened: a directory, a symlink (as a listing reports it) or a special file
 /// (which `stat` already refuses) is `Io`.
 fn regular_file(st: &RemoteEntry, path: &RemotePath) -> Result<()> {
     match st.kind {
@@ -292,19 +416,22 @@ fn regular_file(st: &RemoteEntry, path: &RemotePath) -> Result<()> {
 }
 
 /// The transfer command's outcome on `conn` (bounded by `command_timeout`), errors mapped.
-/// A refusal read as a clean reply (`550` on `RETR`, a refused `REST`, ...) leaves `conn` in
-/// sync, so it is marked clean and goes back to the pool when the caller drops it; after a
-/// socket error or a timeout it is closed, and a lost connection is reported to the session.
+/// A refusal read as a clean reply (`550` on `RETR`, ...) leaves `conn` in sync, so with
+/// `reusable` it is marked clean and goes back to the pool when the caller drops it. A read
+/// that sent `REST` passes `reusable = false`: after a refused `RETR` the server may keep the
+/// restart offset for the next transfer. After a socket error or a timeout `conn` is closed,
+/// and a lost connection is reported to the session.
 fn transfer_opened(
     conn: &mut PooledConn,
     opened: std::result::Result<suppaftp::FtpResult<Transfer>, tokio::time::error::Elapsed>,
     path: &RemotePath,
+    reusable: bool,
 ) -> Result<Transfer> {
     let e = match opened {
         Ok(Ok(transfer)) => return Ok(transfer),
         Ok(Err(e @ suppaftp::FtpError::UnexpectedResponse(_))) => {
             let e = map_ftp_error(e, path.as_str());
-            if !is_control_loss(&e) {
+            if reusable && !is_control_loss(&e) {
                 conn.mark_clean();
             }
             e
@@ -417,83 +544,40 @@ impl RemoteFs for FtpFs {
     }
 
     async fn stat(&self, path: &RemotePath) -> Result<RemoteEntry> {
-        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
-            return Ok(RemoteEntry {
-                name: "/".to_owned(),
-                path: RemotePath::root(),
-                kind: EntryKind::Dir,
-                size: 0,
-                modified: None,
+        if path.parent().is_none() {
+            return Ok(root_entry());
+        }
+        let size = format!("SIZE {}", arg(path)?);
+        let mdtm = format!("MDTM {path}");
+        let context = path.to_string();
+        let (code, text, modified) = self
+            .session
+            .with_control(move |c| {
+                Box::pin(async move {
+                    let (code, text) = session::quote(&mut c.stream, &size, &context).await?;
+                    if code != 213 {
+                        return Ok((code, text, None));
+                    }
+                    let (mdtm_code, stamp) = session::quote(&mut c.stream, &mdtm, &context).await?;
+                    let modified = (mdtm_code == 213)
+                        .then(|| parse_timeval(stamp.trim()))
+                        .flatten();
+                    Ok((code, text, modified))
+                })
+            })
+            .await?;
+        match code {
+            213 => Ok(RemoteEntry {
+                name: path.file_name().unwrap_or_default().to_owned(),
+                path: path.clone(),
+                kind: EntryKind::File,
+                size: parse_size(code, &text, path)?,
+                modified,
                 mode: None,
-            });
-        };
-        let Listing {
-            entries,
-            is_dir,
-            mlsd,
-        } = match self.entries(&parent).await {
-            Ok(listing) => listing,
-            // `MLSD` refused: the parent is missing or not a directory.
-            Err(e) if matches!(e.kind, ErrorKind::Io | ErrorKind::NotFound) => {
-                return Err(not_found(path, &e));
-            }
-            Err(e) => return Err(e),
-        };
-        // Without a `.` entry the listing may be the parent's own line (vsftpd lists a file, or
-        // a directory it cannot open, that way): never look the child up in it.
-        if !is_dir
-            && let [only] = entries.as_slice()
-            && Some(only.name.as_str()) == parent.file_name()
-        {
-            let up = self.stat(&parent).await?;
-            match up.kind {
-                // The same check as `list`: the directory's own entry, so it is unreadable.
-                EntryKind::Dir
-                    if only.kind == Some(EntryKind::Dir)
-                        && only.mode == up.mode
-                        && only.modified == up.modified =>
-                {
-                    return Err(Error::new(
-                        ErrorKind::Permission,
-                        format!("Permission denied: {path}"),
-                    ));
-                }
-                // A real child that happens to share the directory's name.
-                EntryKind::Dir => {}
-                // Nothing lives under a file (SftpFs: `NoSuchFile`). A symlink listed as its
-                // own entry points to a file or to a directory that cannot be opened; it is
-                // taken as a file.
-                EntryKind::File | EntryKind::Symlink => {
-                    return Err(Error::new(
-                        ErrorKind::NotFound,
-                        format!("No such file or directory: {path}"),
-                    )
-                    .with_detail(format!("{parent} is not a directory")));
-                }
-            }
+            }),
+            500 | 502 | 550 => self.stat_listed(path).await,
+            _ => Err(map_reply(code, &text, path.as_str())),
         }
-        let Some(listed) = entries.into_iter().find(|e| e.name == name) else {
-            return Err(Error::new(
-                ErrorKind::NotFound,
-                format!("No such file or directory: {path}"),
-            ));
-        };
-        let Some(mut entry) = to_entry(&parent, listed) else {
-            return Err(Error::new(
-                ErrorKind::Io,
-                format!("Not a regular file: {path}"),
-            ));
-        };
-        if entry.kind == EntryKind::File && !mlsd {
-            // `LIST` dates have minutes at best (only a day for older files).
-            let (code, text) = self.reply(format!("MDTM {}", arg(path)?), path).await?;
-            if code == 213
-                && let Some(t) = parse_timeval(text.trim())
-            {
-                entry.modified = Some(t);
-            }
-        }
-        Ok(entry)
     }
 
     async fn open_read(&self, path: &RemotePath, offset: u64) -> Result<BoxAsyncRead> {
@@ -514,7 +598,7 @@ impl RemoteFs for FtpFs {
             ftp.retr_as_stream(&name).await
         })
         .await;
-        let transfer = transfer_opened(&mut conn, opened, path)?;
+        let transfer = transfer_opened(&mut conn, opened, path, rest == 0)?;
         Ok(Box::new(FtpReader::new(
             conn,
             transfer,
@@ -557,11 +641,11 @@ impl RemoteFs for FtpFs {
             }
         })
         .await;
-        let transfer = match transfer_opened(&mut conn, opened, path) {
+        let transfer = match transfer_opened(&mut conn, opened, path, true) {
             Ok(transfer) => transfer,
             Err(e) => {
                 drop(conn);
-                return Err(self.explain(path, e).await);
+                return Err(self.explain_write(path, e).await);
             }
         };
         Ok(Box::new(FtpWriter::new(
