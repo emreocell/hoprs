@@ -261,3 +261,205 @@ fn delete_source_refuses_symlink() {
     assert_eq!(delete_source(&link).unwrap_err().kind, ErrorKind::Protocol);
     assert!(real.exists() && link.exists());
 }
+
+fn inline_xml(servers: &str) -> hoprs_import::ParsedSiteManager {
+    parse_sitemanager(&format!(
+        "<?xml version=\"1.0\"?><FileZilla3><Servers>{servers}</Servers></FileZilla3>"
+    ))
+    .unwrap()
+}
+
+fn server(name: &str, host: &str, pass: bool) -> String {
+    let pass = if pass {
+        "<Pass encoding=\"base64\">aHVudGVyMg==</Pass>"
+    } else {
+        ""
+    };
+    format!(
+        "<Server><Host>{host}</Host><Protocol>1</Protocol><User>u</User>{pass}<Logontype>1</Logontype>{name}</Server>"
+    )
+}
+
+#[test]
+fn duplicate_within_the_same_xml_is_skipped() {
+    let (_dir, _store, mut vault) = open();
+    let xml = format!(
+        "{}{}",
+        server("Same", "h.test", false),
+        server("Same", "h.test", false)
+    );
+    let report = apply(&mut vault, inline_xml(&xml), &FLAT).unwrap();
+    assert_eq!(report.imported.len(), 1);
+    assert_eq!(report.skipped.len(), 1);
+    assert_eq!(report.skipped[0].reason, "already in hoprs");
+    assert_eq!(vault.sites().len(), 1);
+}
+
+#[test]
+fn existing_workspace_name_is_skipped() {
+    let (_dir, _store, mut vault) = open();
+    vault
+        .upsert_workspace(hoprs_core::Workspace {
+            id: hoprs_core::WorkspaceId::new(),
+            name: "Work".into(),
+            sites: vec![],
+        })
+        .unwrap();
+    let report = apply(&mut vault, parsed("sitemanager-3.40-folders.xml"), &WS).unwrap();
+    assert_eq!(
+        report.workspaces_created,
+        vec![
+            "Work/Clientes de Produção",
+            "Work/Clientes de Produção/Deep"
+        ]
+    );
+    assert_eq!(vault.workspaces().len(), 3);
+    let work = vault
+        .workspaces()
+        .iter()
+        .find(|w| w.name == "Work")
+        .unwrap();
+    assert!(work.sites.is_empty());
+}
+
+#[test]
+fn delete_source_accepts_bom_and_refuses_late_marker() {
+    let dir = TempDir::new().unwrap();
+    let bom = dir.path().join("bom.xml");
+    let mut bytes = b"\xEF\xBB\xBF".to_vec();
+    bytes.extend(std::fs::read(fixture_path("sitemanager-3.66.xml")).unwrap());
+    std::fs::write(&bom, bytes).unwrap();
+    delete_source(&bom).unwrap();
+    assert!(!bom.exists());
+
+    let late = dir.path().join("late.xml");
+    let body = format!("<?xml version=\"1.0\"?>{}<FileZilla3/>", " ".repeat(5000));
+    std::fs::write(&late, body).unwrap();
+    assert_eq!(delete_source(&late).unwrap_err().kind, ErrorKind::Protocol);
+    assert!(late.exists());
+}
+
+#[cfg(unix)]
+mod unix_failures {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Makes the vault dir read-only on the first secret it is asked to
+    /// store (while armed), so later writes fail.
+    struct LockingStore {
+        inner: MemoryStore,
+        dir: PathBuf,
+        armed: AtomicBool,
+    }
+
+    impl SecretStore for LockingStore {
+        fn get(&self, s: &SiteId, k: SecretKind) -> Result<Option<SecretString>> {
+            self.inner.get(s, k)
+        }
+        fn set(&self, s: &SiteId, k: SecretKind, v: &SecretString) -> Result<()> {
+            let r = self.inner.set(s, k, v);
+            if self.armed.swap(false, Ordering::SeqCst) {
+                set_mode(&self.dir, 0o500);
+            }
+            r
+        }
+        fn delete(&self, s: &SiteId, k: SecretKind) -> Result<()> {
+            self.inner.delete(s, k)
+        }
+    }
+
+    fn set_mode(dir: &Path, mode: u32) {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    struct Restore(PathBuf);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            set_mode(&self.0, 0o700);
+        }
+    }
+
+    fn writable(dir: &Path) -> bool {
+        let probe = dir.join("probe");
+        let ok = std::fs::write(&probe, b"x").is_ok();
+        let _ = std::fs::remove_file(probe);
+        ok
+    }
+
+    #[test]
+    fn mid_import_failure_is_reported_and_rerun_recovers_workspace() {
+        let dir = TempDir::new().unwrap();
+        let _restore = Restore(dir.path().to_path_buf());
+        let store = Arc::new(LockingStore {
+            inner: MemoryStore::new(),
+            dir: dir.path().to_path_buf(),
+            armed: AtomicBool::new(true),
+        });
+        let mut vault = Vault::open(dir.path(), store.clone()).unwrap();
+        // First site has a password: storing it locks the directory.
+        let xml = format!(
+            "<Folder>F{}{}{}</Folder>",
+            server("One", "1.test", true),
+            server("Two", "2.test", false),
+            server("Three", "3.test", false)
+        );
+        let report = apply(&mut vault, inline_xml(&xml), &WS).unwrap();
+        if writable(dir.path()) {
+            return; // running as root: permissions are not enforced
+        }
+        assert_eq!(report.imported.len(), 1, "{report:?}");
+        assert_eq!(report.imported[0].name, "One");
+        let failed: Vec<_> = report.failures.iter().map(String::as_str).collect();
+        assert!(failed.iter().any(|f| f.starts_with("Two: ")), "{failed:?}");
+        assert!(
+            failed.iter().any(|f| f.starts_with("Three: ")),
+            "{failed:?}"
+        );
+        assert!(failed.iter().any(|f| f.starts_with("F: ")), "{failed:?}");
+        assert!(report.workspaces_created.is_empty());
+        assert!(!format!("{report:?}").contains("hunter2"));
+
+        // Fix the directory and re-run: One is a duplicate, the rest import,
+        // and the workspace is created from existing and new ids.
+        set_mode(dir.path(), 0o700);
+        let again = apply(&mut vault, inline_xml(&xml), &WS).unwrap();
+        assert!(again.failures.is_empty(), "{again:?}");
+        assert_eq!(again.imported.len(), 2);
+        assert_eq!(again.workspaces_created, vec!["F"]);
+        assert_eq!(vault.workspaces()[0].sites.len(), 3);
+    }
+
+    #[test]
+    fn rerun_after_workspace_only_failure_creates_workspace() {
+        let dir = TempDir::new().unwrap();
+        let _restore = Restore(dir.path().to_path_buf());
+        let store = Arc::new(LockingStore {
+            inner: MemoryStore::new(),
+            dir: dir.path().to_path_buf(),
+            armed: AtomicBool::new(true),
+        });
+        let mut vault = Vault::open(dir.path(), store.clone()).unwrap();
+        // The last site's password locks the directory after both sites are
+        // saved; only its flag write and the workspace write then fail.
+        let xml = format!(
+            "<Folder>F{}{}</Folder>",
+            server("One", "1.test", false),
+            server("Two", "2.test", true)
+        );
+        let report = apply(&mut vault, inline_xml(&xml), &WS).unwrap();
+        if writable(dir.path()) {
+            return;
+        }
+        assert_eq!(report.imported.len(), 2);
+        assert!(report.failures.iter().any(|f| f.starts_with("F: ")));
+        assert!(vault.workspaces().is_empty());
+
+        set_mode(dir.path(), 0o700);
+        let again = apply(&mut vault, inline_xml(&xml), &WS).unwrap();
+        assert!(again.imported.is_empty());
+        assert_eq!(again.skipped.len(), 2);
+        assert_eq!(again.workspaces_created, vec!["F"]);
+        assert_eq!(vault.workspaces()[0].sites.len(), 2);
+    }
+}

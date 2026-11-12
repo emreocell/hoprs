@@ -1346,6 +1346,7 @@ dependencies = [
  "dirs",
  "hoprs-core",
  "hoprs-vault",
+ "libc",
  "quick-xml",
  "secrecy",
  "tempfile",

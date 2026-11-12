@@ -36,12 +36,21 @@ pub struct ImportReport {
     pub imported: Vec<ImportedSite>,
     pub skipped: Vec<SkippedSite>,
     pub workspaces_created: Vec<String>,
+    /// Sites or workspaces that could not be written, as "<name>: <message>".
+    pub failures: Vec<String>,
 }
 
 /// Applies `parsed` to the vault: sites, passwords (to the secret store) and,
 /// optionally, folders as workspaces. Re-importing the same file skips every
 /// site already present (same name, host, port, user and protocol) and every
 /// workspace whose name already exists.
+///
+/// A write that fails does not stop the import: it is recorded in
+/// [`ImportReport::failures`] and the remaining sites are still tried, so the
+/// report always says what was persisted. A folder whose workspace is missing
+/// gets one made of its imported sites and of the existing sites it matched,
+/// so re-running after a failure recovers. `Err` is reserved for failures
+/// before anything is applied (none today).
 pub fn apply(
     vault: &mut Vault,
     parsed: ParsedSiteManager,
@@ -57,13 +66,13 @@ pub fn apply(
         &mut path,
         &mut report,
         &mut folders,
-    )?;
+    );
 
     for (name, ids) in folders {
         if ids.is_empty() || vault.workspaces().iter().any(|w| w.name == name) {
             continue;
         }
-        vault.upsert_workspace(Workspace {
+        let workspace = Workspace {
             id: WorkspaceId::new(),
             name: name.clone(),
             sites: ids
@@ -73,8 +82,11 @@ pub fn apply(
                     tabs: Vec::new(),
                 })
                 .collect(),
-        })?;
-        report.workspaces_created.push(name);
+        };
+        match vault.upsert_workspace(workspace) {
+            Ok(()) => report.workspaces_created.push(name),
+            Err(err) => report.failures.push(format!("{name}: {}", err.message)),
+        }
     }
     Ok(report)
 }
@@ -86,7 +98,7 @@ fn walk(
     path: &mut Vec<String>,
     report: &mut ImportReport,
     folders: &mut Vec<(String, Vec<SiteId>)>,
-) -> Result<()> {
+) {
     // Workspaces are created in XML (pre-)order: reserve this folder's slot.
     let slot = (!path.is_empty() && options.folders_as_workspaces).then(|| {
         folders.push((path.join("/"), Vec::new()));
@@ -100,7 +112,7 @@ fn walk(
                 } else {
                     &path[..]
                 };
-                if let Some(id) = import_site(vault, site, prefix, report)?
+                if let Some(id) = import_site(vault, site, prefix, report)
                     && let Some(slot) = slot
                 {
                     folders[slot].1.push(id);
@@ -108,13 +120,11 @@ fn walk(
             }
             ParsedEntry::Folder { name, entries } => {
                 path.push(name);
-                let result = walk(vault, entries, options, path, report, folders);
+                walk(vault, entries, options, path, report, folders);
                 path.pop();
-                result?;
             }
         }
     }
-    Ok(())
 }
 
 fn import_site(
@@ -122,7 +132,7 @@ fn import_site(
     parsed: ParsedSite,
     prefix: &[String],
     report: &mut ImportReport,
-) -> Result<Option<SiteId>> {
+) -> Option<SiteId> {
     let name = if prefix.is_empty() {
         parsed.name.clone()
     } else {
@@ -132,23 +142,25 @@ fn import_site(
         Ok(protocol) => protocol,
         Err(reason) => {
             report.skipped.push(SkippedSite { name, reason });
-            return Ok(None);
+            return None;
         }
     };
     let port = parsed.port.unwrap_or_else(|| protocol.default_port());
-    let duplicate = vault.sites().iter().any(|s| {
+    let existing = vault.sites().iter().find(|s| {
         s.name == name
             && s.host == parsed.host
             && s.port == port
             && s.user == parsed.user
             && s.protocol == protocol
     });
-    if duplicate {
+    if let Some(existing) = existing {
+        let id = existing.id.clone();
         report.skipped.push(SkippedSite {
             name,
             reason: "already in hoprs".to_owned(),
         });
-        return Ok(None);
+        // Its folder's workspace may be missing (an earlier run failed).
+        return Some(id);
     }
 
     let mut site = Site::new(name.clone(), parsed.host, parsed.user, protocol);
@@ -162,7 +174,10 @@ fn import_site(
         site.ssh.key_file = parsed.key_file;
     }
     let id = site.id.clone();
-    vault.upsert_site(site)?;
+    if let Err(err) = vault.upsert_site(site) {
+        report.failures.push(format!("{name}: {}", err.message));
+        return None;
+    }
 
     let mut notes = parsed.notes;
     if let ParsedPassword::Plain(password) = &parsed.password
@@ -175,7 +190,7 @@ fn import_site(
         id: id.clone(),
         notes,
     });
-    Ok(Some(id))
+    Some(id)
 }
 
 /// How much of the file is inspected before deleting it.
@@ -183,20 +198,23 @@ const SNIFF_BYTES: u64 = 4096;
 
 /// Deletes the original `sitemanager.xml`, after checking it still is a
 /// FileZilla file (starts with `<?xml`, mentions `<FileZilla3` in its first
-/// 4 KiB). Symlinks and non-regular files are refused, never followed.
+/// 4 KiB). Symlinks and non-regular files are refused, never followed (on
+/// unix the file is opened with `O_NOFOLLOW` and checked through the handle).
+/// A window remains between that check and `remove_file`: the path could be
+/// swapped in between. The caller only runs this on explicit user request.
 pub fn delete_source(path: &Path) -> Result<()> {
     let refuse = |why: &str| Error::new(ErrorKind::Protocol, format!("not deleting: {why}"));
-    let meta = std::fs::symlink_metadata(path)?;
-    if meta.file_type().is_symlink() {
+    // Friendly refusal for the common case; O_NOFOLLOW below closes the race.
+    if std::fs::symlink_metadata(path)?.file_type().is_symlink() {
         return Err(refuse("the path is a symlink"));
     }
-    if !meta.is_file() {
+    let mut file = open_nofollow(path)?;
+    if !file.metadata()?.is_file() {
         return Err(refuse("not a regular file"));
     }
     let mut head = Vec::new();
-    std::fs::File::open(path)?
-        .take(SNIFF_BYTES)
-        .read_to_end(&mut head)?;
+    (&mut file).take(SNIFF_BYTES).read_to_end(&mut head)?;
+    drop(file);
     let text = head.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&head);
     let is_filezilla = text.starts_with(b"<?xml")
         && text
@@ -207,4 +225,18 @@ pub fn delete_source(path: &Path) -> Result<()> {
     }
     std::fs::remove_file(path)?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn open_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
 }
