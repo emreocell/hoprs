@@ -95,6 +95,8 @@ pub trait BackendApi: Send + Sync {
     ) -> Result<Vec<RemoteEntry>>;
     /// Creates the folder `path` (its parent must exist) on the side's filesystem.
     async fn mkdir(&self, session: Option<SessionId>, side: Side, path: RemotePath) -> Result<()>;
+    /// Renames `from` to `to`; fails with `Conflict` if something is already at `to`
+    /// (see [`ops::rename_no_replace`]).
     async fn rename(
         &self,
         session: Option<SessionId>,
@@ -301,7 +303,8 @@ impl BackendApi for Backend {
         from: RemotePath,
         to: RemotePath,
     ) -> Result<()> {
-        self.fs(session, side)?.rename(&from, &to).await
+        let fs = self.fs(session, side)?;
+        ops::rename_no_replace(fs.as_ref(), &from, &to).await
     }
 
     async fn delete(

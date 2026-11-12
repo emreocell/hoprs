@@ -466,7 +466,8 @@ impl BackendApi for FakeBackend {
         from: RemotePath,
         to: RemotePath,
     ) -> Result<()> {
-        self.fs(session, side)?.rename(&from, &to).await
+        let fs = self.fs(session, side)?;
+        super::ops::rename_no_replace(&fs, &from, &to).await
     }
 
     async fn delete(

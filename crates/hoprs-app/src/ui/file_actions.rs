@@ -28,6 +28,7 @@ pub fn toolbar<'a>(tab: &'a Tab, side: Side) -> Element<'a, Message> {
     };
     let can = tab.can_act(side);
     let some = can && !pane.selected_entries().is_empty();
+    let chmod = can && !pane.permission_targets().is_empty();
     let action = |label: &'a str, key: Option<&'a str>, enabled: bool, pane_msg: PaneMsg| {
         let mut content = row![text(label).size(theme::TEXT_XS)].spacing(theme::SPACE_2XS);
         if let Some(key) = key {
@@ -67,7 +68,7 @@ pub fn toolbar<'a>(tab: &'a Tab, side: Side) -> Element<'a, Message> {
         bar = bar.push(action(
             strings::PERMISSIONS,
             None,
-            some,
+            chmod,
             PaneMsg::Permissions,
         ));
     }
@@ -302,6 +303,13 @@ fn permissions<'a>(
             ))
             .size(theme::TEXT_XS)
             .color(p.muted),
+        );
+    }
+    if dialog.mixed {
+        names = names.push(
+            text(strings::MIXED_PERMISSIONS)
+                .size(theme::TEXT_XS)
+                .color(p.muted),
         );
     }
     let mut octal = column![

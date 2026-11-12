@@ -51,6 +51,8 @@ pub struct Permissions {
     pub octal: String,
     /// The octal field holds no valid mode; Apply is off.
     pub invalid: bool,
+    /// The entries had different modes; the dialog starts from the first one's.
+    pub mixed: bool,
 }
 
 /// The nine rwx bits, owner first, as the grid shows them.
@@ -68,6 +70,7 @@ impl Permissions {
             mode,
             octal: octal(mode),
             invalid: false,
+            mixed: false,
         }
     }
 
@@ -162,16 +165,27 @@ impl FileAction {
 
 /// Whether `name` can be a new name in a folder holding `entries` (`except` is the entry
 /// being renamed).
+///
+/// The listing may be stale, so the backend checks again before a rename (see
+/// [`crate::backend::ops::rename_no_replace`]).
 pub fn check_name(
     name: &str,
     entries: &[RemoteEntry],
     except: Option<&str>,
+    side: Side,
 ) -> Result<(), &'static str> {
     if name.trim().is_empty() {
         return Err(strings::NAME_EMPTY);
     }
+    if name.trim() != name {
+        return Err(strings::NAME_SPACES);
+    }
     if name == "." || name == ".." || name.contains('/') || name.contains('\0') {
         return Err(strings::NAME_INVALID);
+    }
+    // On Windows the local disk takes `\` as a separator too.
+    if cfg!(windows) && side == Side::Local && name.contains('\\') {
+        return Err(strings::NAME_INVALID_WINDOWS);
     }
     if except != Some(name) && entries.iter().any(|e| e.name == name) {
         return Err(strings::NAME_TAKEN);
@@ -212,6 +226,16 @@ impl Pane {
                 Some(Row::Entry(entry)) => Some(entry),
                 Some(Row::Up) | None => None,
             })
+            .collect()
+    }
+
+    /// What Permissions… acts on: the selected entries but links. A chmod through a link
+    /// (SFTP setstat, `set_permissions`, FTP `SITE CHMOD`) changes its target, and the
+    /// link's own `lrwxrwxrwx` would start the dialog at 777.
+    pub fn permission_targets(&self) -> Vec<&RemoteEntry> {
+        self.selected_entries()
+            .into_iter()
+            .filter(|e| e.kind != EntryKind::Symlink)
             .collect()
     }
 }
@@ -279,16 +303,35 @@ impl App {
         let select_end = preselect(&name, is_dir);
         let tab = &mut self.tabs[index];
         let tab_id = tab.id;
-        tab.pane_mut(side).action = Some(PaneAction::Edit(Edit {
+        let pane = tab.pane_mut(side);
+        pane.action = Some(PaneAction::Edit(Edit {
             kind: EditKind::Rename { from: name.clone() },
-            value: name,
+            value: name.clone(),
             error: None,
         }));
-        vec![Effect::FocusEdit {
+        // The editor lives in the entry's row: bring it into view, or it would take the
+        // pane's keys from off screen.
+        let mut effects = Vec::new();
+        let row = usize::from(pane.has_up())
+            + pane
+                .entries
+                .iter()
+                .position(|e| e.name == name)
+                .unwrap_or(0);
+        if let Some(offset_y) = pane.scroll_to_show(row) {
+            pane.offset_y = offset_y;
+            effects.push(Effect::ScrollPane {
+                tab: tab_id,
+                side,
+                offset_y,
+            });
+        }
+        effects.push(Effect::FocusEdit {
             tab: tab_id,
             side,
             select_end,
-        }]
+        });
+        effects
     }
 
     /// Del / "Delete": asks first, listing the names.
@@ -312,19 +355,24 @@ impl App {
         if side != Side::Remote || !self.can_act(index, side) {
             return Vec::new();
         }
-        let selected = self.selected_entries(index, side);
+        let selected = self.tabs[index].pane(side).permission_targets();
         let Some(first) = selected.first() else {
             return Vec::new();
         };
-        let default = if first.kind == EntryKind::Dir {
-            0o755
-        } else {
-            0o644
+        let mode_of = |e: &RemoteEntry| {
+            let default = if e.kind == EntryKind::Dir {
+                0o755
+            } else {
+                0o644
+            };
+            e.mode.unwrap_or(default) & 0o7777
         };
-        let mode = first.mode.unwrap_or(default);
+        let mode = mode_of(first);
+        let mixed = selected.iter().any(|e| mode_of(e) != mode);
         let names = selected.iter().map(|e| e.name.clone()).collect();
-        self.tabs[index].pane_mut(side).action =
-            Some(PaneAction::Permissions(Permissions::new(names, mode)));
+        let mut dialog = Permissions::new(names, mode);
+        dialog.mixed = mixed;
+        self.tabs[index].pane_mut(side).action = Some(PaneAction::Permissions(dialog));
         Vec::new()
     }
 
@@ -338,7 +386,7 @@ impl App {
             EditKind::Rename { from } => Some(from.as_str()),
             EditKind::NewFolder => None,
         };
-        if let Err(error) = check_name(&edit.value, &pane.entries, except) {
+        if let Err(error) = check_name(&edit.value, &pane.entries, except, side) {
             edit.error = Some(error);
             return Vec::new();
         }
@@ -451,7 +499,11 @@ impl App {
         let Some(busy) = pane.busy.take_if(|busy| busy.op == op) else {
             return Vec::new();
         };
-        if let Err(error) = result {
+        if let Err(mut error) = result {
+            // A delete that stopped half way: say how far it got.
+            if busy.kind == BusyKind::Delete && busy.done > 0 {
+                error.message = strings::deleted_then(busy.done, &error.message);
+            }
             pane.action_error = Some(error);
             pane.select_after = None;
         }
@@ -530,20 +582,41 @@ mod tests {
             mode: None,
         };
         let entries = [entry("a.txt"), entry("New folder")];
-        assert_eq!(check_name("b.txt", &entries, None), Ok(()));
-        assert_eq!(check_name("  ", &entries, None), Err(strings::NAME_EMPTY));
+        assert_eq!(check_name("b.txt", &entries, None, Side::Remote), Ok(()));
+        assert_eq!(
+            check_name("  ", &entries, None, Side::Remote),
+            Err(strings::NAME_EMPTY)
+        );
         for bad in [".", "..", "a/b"] {
             assert_eq!(
-                check_name(bad, &entries, None),
+                check_name(bad, &entries, None, Side::Remote),
                 Err(strings::NAME_INVALID),
                 "{bad:?}"
             );
         }
         assert_eq!(
-            check_name("a.txt", &entries, None),
+            check_name("a.txt", &entries, None, Side::Remote),
             Err(strings::NAME_TAKEN)
         );
-        assert_eq!(check_name("a.txt", &entries, Some("a.txt")), Ok(()));
+        assert_eq!(
+            check_name("a.txt", &entries, Some("a.txt"), Side::Remote),
+            Ok(())
+        );
+        for padded in [" b.txt", "b.txt ", "b.txt\t"] {
+            assert_eq!(
+                check_name(padded, &entries, None, Side::Local),
+                Err(strings::NAME_SPACES),
+                "{padded:?}"
+            );
+        }
+        // `\` is a separator only on a Windows local disk.
+        assert_eq!(check_name("a\\b", &entries, None, Side::Remote), Ok(()));
+        let local = check_name("a\\b", &entries, None, Side::Local);
+        if cfg!(windows) {
+            assert_eq!(local, Err(strings::NAME_INVALID_WINDOWS));
+        } else {
+            assert_eq!(local, Ok(()));
+        }
         assert_eq!(new_folder_name(&entries), "New folder 2");
         assert_eq!(new_folder_name(&[]), "New folder");
         assert_eq!(preselect("report.pdf", false), 6);

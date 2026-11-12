@@ -1,10 +1,15 @@
-//! File actions shared by the real and the fake backend: the recursive delete.
+//! File actions shared by the real and the fake backend: the recursive delete and the
+//! rename that never replaces.
 //!
 //! A folder is deleted depth first: list it, remove its files and links, go into its
 //! folders, then `remove_dir` it once it is empty (an empty folder is just `remove_dir`).
-//! Links are never followed: a link to a folder is removed as a link.
+//! A link the listing reports as a link is removed as a link, never followed. Some FTP
+//! servers report a link to a folder as a folder, though: there the walk goes into it
+//! (and deletes what the link points at), since nothing in the listing tells them apart.
 
-use hoprs_core::{EntryKind, RemotePath, Result};
+use std::time::{Duration, Instant};
+
+use hoprs_core::{EntryKind, Error, ErrorKind, RemotePath, Result};
 use hoprs_remote::RemoteFs;
 use tokio::sync::mpsc;
 
@@ -15,24 +20,67 @@ pub struct DeleteTarget {
     pub kind: EntryKind,
 }
 
-/// Deletes `targets` in order, folders with everything in them. After each item removed
-/// (file, link or folder) the running count goes to `progress`. Stops at the first error,
-/// leaving the rest in place. Returns how many items were removed.
+/// Progress goes out at most once per this many items…
+pub const PROGRESS_EVERY: u64 = 64;
+/// …or once per this long, whichever comes first.
+pub const PROGRESS_INTERVAL: Duration = Duration::from_millis(50);
+
+/// The running count, throttled: a report every [`PROGRESS_EVERY`] items or
+/// [`PROGRESS_INTERVAL`], and always the last count (on success or failure).
+struct Progress<'a> {
+    sender: &'a mpsc::UnboundedSender<u64>,
+    removed: u64,
+    sent: u64,
+    last: Instant,
+}
+
+impl Progress<'_> {
+    fn step(&mut self) {
+        self.removed += 1;
+        if self.removed - self.sent >= PROGRESS_EVERY || self.last.elapsed() >= PROGRESS_INTERVAL {
+            self.send();
+        }
+    }
+
+    fn send(&mut self) {
+        if self.removed != self.sent {
+            // The UI may be gone; the delete still finishes.
+            let _ = self.sender.send(self.removed);
+            self.sent = self.removed;
+            self.last = Instant::now();
+        }
+    }
+}
+
+/// Deletes `targets` in order, folders with everything in them. The running count of
+/// removed items (files, links, folders) goes to `progress`, throttled, the final count
+/// always last. Stops at the first error, leaving the rest in place. Returns how many
+/// items were removed.
 pub async fn delete_all(
     fs: &dyn RemoteFs,
     targets: Vec<DeleteTarget>,
     progress: &mpsc::UnboundedSender<u64>,
 ) -> Result<u64> {
-    let mut removed = 0;
-    let step = |removed: &mut u64| {
-        *removed += 1;
-        // The UI may be gone; the delete still finishes.
-        let _ = progress.send(*removed);
+    let mut progress = Progress {
+        sender: progress,
+        removed: 0,
+        sent: 0,
+        last: Instant::now(),
     };
+    let result = delete_targets(fs, targets, &mut progress).await;
+    progress.send();
+    result.map(|()| progress.removed)
+}
+
+async fn delete_targets(
+    fs: &dyn RemoteFs,
+    targets: Vec<DeleteTarget>,
+    progress: &mut Progress<'_>,
+) -> Result<()> {
     for target in targets {
         if target.kind != EntryKind::Dir {
             fs.remove_file(&target.path).await?;
-            step(&mut removed);
+            progress.step();
             continue;
         }
         // (folder, its content is already removed)
@@ -40,7 +88,7 @@ pub async fn delete_all(
         while let Some((dir, emptied)) = stack.pop() {
             if emptied {
                 fs.remove_dir(&dir).await?;
-                step(&mut removed);
+                progress.step();
                 continue;
             }
             stack.push((dir.clone(), true));
@@ -53,13 +101,36 @@ pub async fn delete_all(
                     EntryKind::Dir => stack.push((path, false)),
                     EntryKind::File | EntryKind::Symlink => {
                         fs.remove_file(&path).await?;
-                        step(&mut removed);
+                        progress.step();
                     }
                 }
             }
         }
     }
-    Ok(removed)
+    Ok(())
+}
+
+/// Renames `from` to `to` unless something is already at `to`: local `rename`, SFTP
+/// posix-rename and FTP `RNTO` would all replace it silently, and the pane's listing may
+/// be stale. A change of case only (`a.txt` → `A.txt`) is let through, since on a
+/// case-insensitive disk `to` is `from` itself.
+pub async fn rename_no_replace(
+    fs: &dyn RemoteFs,
+    from: &RemotePath,
+    to: &RemotePath,
+) -> Result<()> {
+    let same_but_case = from.as_str().to_lowercase() == to.as_str().to_lowercase();
+    if !same_but_case {
+        match fs.stat(to).await {
+            Ok(_) => {
+                return Err(Error::new(ErrorKind::Conflict, "Already exists")
+                    .with_detail(to.as_str().to_owned()));
+            }
+            Err(e) if e.kind == ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    fs.rename(from, to).await
 }
 
 #[cfg(test)]
@@ -116,7 +187,8 @@ mod tests {
         while let Some(n) = rx.recv().await {
             counts.push(n);
         }
-        assert_eq!(counts, (1..=8).collect::<Vec<_>>(), "one report per item");
+        assert_eq!(counts.last(), Some(&8), "the final count always goes out");
+        assert!(counts.windows(2).all(|w| w[0] < w[1]), "{counts:?}");
         assert!(fs.list(&p("/srv")).await.unwrap().is_empty());
         assert_eq!(fs.read_file("/keep/k.txt").as_deref(), Some(&b"k"[..]));
 
@@ -136,5 +208,72 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.kind, ErrorKind::Permission);
         assert!(fs.read_file("/locked/x/y.txt").is_some());
+    }
+
+    /// Progress is throttled to one report per 64 items (or 50 ms), the last always sent,
+    /// also when the walk fails half way.
+    #[tokio::test]
+    async fn delete_progress_is_throttled() {
+        let fs = MemFs::new();
+        let t = SystemTime::UNIX_EPOCH;
+        for i in 0..200 {
+            fs.add_file(&format!("/big/f{i:03}"), b"", t);
+        }
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let target = DeleteTarget {
+            path: p("/big"),
+            kind: EntryKind::Dir,
+        };
+        assert_eq!(delete_all(&fs, vec![target], &tx).await.unwrap(), 201);
+        drop(tx);
+        let mut counts = Vec::new();
+        while let Some(n) = rx.recv().await {
+            counts.push(n);
+        }
+        // 64, 128, 192 at least (more only if the 50 ms tick fires), then 201.
+        assert!(counts.len() >= 4 && counts.len() < 201, "{counts:?}");
+        assert_eq!(counts.last(), Some(&201));
+        assert!(counts.windows(2).all(|w| w[1] - w[0] <= 64), "{counts:?}");
+
+        // A failure half way still reports how far it got.
+        for i in 0..3 {
+            fs.add_file(&format!("/part/a{i}"), b"", t);
+        }
+        fs.add_file("/part/z/locked", b"", t);
+        fs.deny_writes_under("/part/z");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let target = DeleteTarget {
+            path: p("/part"),
+            kind: EntryKind::Dir,
+        };
+        assert!(delete_all(&fs, vec![target], &tx).await.is_err());
+        drop(tx);
+        let mut last = None;
+        while let Some(n) = rx.recv().await {
+            last = Some(n);
+        }
+        assert_eq!(last, Some(3), "a0..a2 went before z/locked failed");
+    }
+
+    #[tokio::test]
+    async fn rename_never_replaces() {
+        let fs = MemFs::new();
+        let t = SystemTime::UNIX_EPOCH;
+        fs.add_file("/a.txt", b"a", t);
+        fs.add_file("/b.txt", b"b", t);
+        let err = rename_no_replace(&fs, &p("/a.txt"), &p("/b.txt"))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Conflict);
+        assert_eq!(fs.read_file("/b.txt").as_deref(), Some(&b"b"[..]));
+        rename_no_replace(&fs, &p("/a.txt"), &p("/c.txt"))
+            .await
+            .unwrap();
+        assert_eq!(fs.read_file("/c.txt").as_deref(), Some(&b"a"[..]));
+        // A change of case only is not "something else at the target".
+        rename_no_replace(&fs, &p("/c.txt"), &p("/C.txt"))
+            .await
+            .unwrap();
+        assert!(fs.read_file("/C.txt").is_some());
     }
 }

@@ -170,6 +170,9 @@ pub const KEY_DELETE: &str = "Del";
 pub const NEW_FOLDER_NAME: &str = "New folder";
 pub const NAME_EMPTY: &str = "The name can't be empty";
 pub const NAME_INVALID: &str = "The name can't contain / or be . or ..";
+pub const NAME_INVALID_WINDOWS: &str = "The name can't contain \\ on this disk";
+pub const NAME_SPACES: &str = "The name can't start or end with a space";
+pub const MIXED_PERMISSIONS: &str = "Mixed permissions: showing the first item's";
 pub const NAME_TAKEN: &str = "Something with this name is already here";
 pub const DISMISS: &str = "Dismiss";
 pub const CREATING_FOLDER: &str = "Creating folder…";
@@ -213,5 +216,14 @@ pub fn deleting(done: u64) -> String {
         0 => "Deleting…".to_owned(),
         1 => "Deleting… 1 item".to_owned(),
         n => format!("Deleting… {n} items"),
+    }
+}
+
+/// A delete that stopped after removing some items.
+pub fn deleted_then(done: u64, error: &str) -> String {
+    if done == 1 {
+        format!("Deleted 1 item, then: {error}")
+    } else {
+        format!("Deleted {done} items, then: {error}")
     }
 }
