@@ -966,3 +966,21 @@ async fn pause_with_deferred_write_error_fails_and_retry_overwrites() {
         "the retry starts over"
     );
 }
+
+#[tokio::test]
+async fn stopped_resolves_after_shutdown_of_another_handle() {
+    let (engine, _local, _remote, _rx) = engine_with_memfs(1).await;
+    let waiter = engine.clone();
+    let stopped = tokio::spawn(async move { waiter.stopped().await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!stopped.is_finished(), "still running");
+    engine.clone().shutdown().await;
+    tokio::time::timeout(Duration::from_secs(1), stopped)
+        .await
+        .expect("stopped resolves")
+        .unwrap();
+    // Already stopped: resolves at once.
+    tokio::time::timeout(Duration::from_secs(1), engine.stopped())
+        .await
+        .expect("stopped resolves again");
+}

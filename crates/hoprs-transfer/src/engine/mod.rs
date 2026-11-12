@@ -232,6 +232,15 @@ impl TransferEngine {
         self.request(|reply| Command::Shutdown { reply }).await;
     }
 
+    /// Resolves once the engine actor has exited (after [`shutdown`](Self::shutdown) on any
+    /// handle). Resolves at once if it already has. Long-lived helpers that hold an engine
+    /// handle (such as the site watcher) use it to end with the engine, since their own
+    /// handle keeps the event channel open.
+    pub async fn stopped(&self) {
+        // The actor owns the command receiver, so the channel closes when it exits.
+        self.commands.closed().await;
+    }
+
     /// Sends a command whose only reply is an acknowledgement, and waits for
     /// it. Does nothing if the engine has stopped.
     async fn request(&self, command: impl FnOnce(oneshot::Sender<()>) -> Command) {

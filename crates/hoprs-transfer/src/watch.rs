@@ -26,8 +26,7 @@ pub const RESTORE_GRACE: Duration = Duration::from_secs(2);
 /// - the event receiver lagged (a `SitePaused` may have been lost): if the state is
 ///   `Connected`, call `network_restored` (it does nothing when the site is not paused).
 ///
-/// The task ends when the connection's state channel closes or the engine's event channel
-/// closes. Abort the returned handle to stop it earlier.
+/// The task ends when the connection's state channel closes or the engine stops. Abort the returned handle to stop it earlier.
 pub fn spawn_site_watcher(
     engine: TransferEngine,
     site: SiteId,
@@ -73,6 +72,7 @@ pub fn spawn_site_watcher(
                     Ok(_) => {}
                     Err(RecvError::Closed) => break,
                 },
+                _ = engine.stopped() => break,
                 // Reap finished grace timers.
                 Some(_) = graces.join_next(), if !graces.is_empty() => {}
             }
@@ -87,7 +87,7 @@ fn is_connected(state: &watch::Receiver<ConnectionState>) -> bool {
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::SystemTime;
 
     use hoprs_core::{ConnectionState, ErrorKind, RemotePath};
@@ -103,6 +103,8 @@ mod tests {
     struct FakeConnection {
         tx: Mutex<Option<watch::Sender<ConnectionState>>>,
         generation: AtomicU64,
+        /// While set, `generation()` blocks the calling thread (stalls the watcher).
+        block: AtomicBool,
     }
 
     impl FakeConnection {
@@ -111,6 +113,7 @@ mod tests {
             Arc::new(Self {
                 tx: Mutex::new(Some(tx)),
                 generation: AtomicU64::new(1),
+                block: AtomicBool::new(false),
             })
         }
 
@@ -141,6 +144,9 @@ mod tests {
         }
 
         fn generation(&self) -> u64 {
+            while self.block.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
             self.generation.load(Ordering::SeqCst)
         }
     }
@@ -156,39 +162,63 @@ mod tests {
         remote: MemFs,
     }
 
-    /// An engine with one upload whose first attempt fails with a network error, watched by a
-    /// site watcher over `conn` (started before the upload is queued, so no event is missed).
-    async fn rig(conn: &Arc<FakeConnection>) -> (Rig, JoinHandle<()>) {
+    fn upload_spec(site: &SiteId, name: &str) -> TransferSpec {
+        TransferSpec {
+            site: site.clone(),
+            direction: Direction::Upload,
+            local: RemotePath::new(&format!("/w/{name}")).unwrap(),
+            remote: RemotePath::new(&format!("/srv/{name}")).unwrap(),
+        }
+    }
+
+    /// Registers `site` on `engine`: a local `MemFs` holding `files` (name, size) under `/w`,
+    /// and a remote `MemFs` with `/srv`. Returns the remote and its fault injector.
+    async fn add_site(
+        engine: &TransferEngine,
+        site: &SiteId,
+        files: &[(String, usize)],
+    ) -> (MemFs, FaultFs<MemFs>) {
         let local = MemFs::new();
         let remote_mem = MemFs::new();
         let remote = FaultFs::new(remote_mem.clone());
         local.add_dir("/w");
         remote_mem.add_dir("/srv");
-        local.add_file("/w/a", &vec![7u8; 1 << 20], SystemTime::UNIX_EPOCH);
-        remote.fail_io_after(200_000, ErrorKind::Network);
-        let store = QueueStore::open_in_memory().unwrap();
-        let engine = TransferEngine::start(store, EngineConfig::default());
-        let rx = engine.subscribe();
+        for (name, size) in files {
+            local.add_file(
+                &format!("/w/{name}"),
+                &vec![7u8; *size],
+                SystemTime::UNIX_EPOCH,
+            );
+        }
         engine
             .register_site(
-                site(),
+                site.clone(),
                 SiteEndpoints {
                     local: Arc::new(local),
-                    remote: Arc::new(remote),
+                    remote: Arc::new(remote.clone()),
                     workers: 1,
                 },
             )
             .await;
+        (remote_mem, remote)
+    }
+
+    fn engine() -> TransferEngine {
+        TransferEngine::start(
+            QueueStore::open_in_memory().unwrap(),
+            EngineConfig::default(),
+        )
+    }
+
+    /// An engine with one upload whose first attempt fails with a network error, watched by a
+    /// site watcher over `conn` (started before the upload is queued, so no event is missed).
+    async fn rig(conn: &Arc<FakeConnection>) -> (Rig, JoinHandle<()>) {
+        let engine = engine();
+        let rx = engine.subscribe();
+        let (remote_mem, remote) = add_site(&engine, &site(), &[("a".into(), 1 << 20)]).await;
+        remote.fail_io_after(200_000, ErrorKind::Network);
         let watcher = spawn_site_watcher(engine.clone(), site(), conn.clone());
-        let id = engine
-            .enqueue(TransferSpec {
-                site: site(),
-                direction: Direction::Upload,
-                local: RemotePath::new("/w/a").unwrap(),
-                remote: RemotePath::new("/srv/a").unwrap(),
-            })
-            .await
-            .unwrap();
+        let id = engine.enqueue(upload_spec(&site(), "a")).await.unwrap();
         let rig = Rig {
             engine,
             rx,
@@ -208,8 +238,12 @@ mod tests {
 
     /// Polls the queue (progress events can overflow the broadcast buffer, so events may be lost).
     async fn wait_done(rig: &mut Rig) {
+        wait_item_done(&rig.engine, rig.id).await;
+    }
+
+    async fn wait_item_done(engine: &TransferEngine, id: TransferId) {
         loop {
-            match state_of(rig).await {
+            match state_in(engine, id).await {
                 TransferState::Done => return,
                 s => assert!(!s.is_terminal(), "unexpected terminal state {s:?}"),
             }
@@ -217,14 +251,18 @@ mod tests {
         }
     }
 
-    async fn state_of(rig: &Rig) -> TransferState {
-        rig.engine
+    async fn state_in(engine: &TransferEngine, id: TransferId) -> TransferState {
+        engine
             .snapshot()
             .await
             .into_iter()
-            .find(|i| i.id == rig.id)
+            .find(|i| i.id == id)
             .unwrap()
             .state
+    }
+
+    async fn state_of(rig: &Rig) -> TransferState {
+        state_in(&rig.engine, rig.id).await
     }
 
     async fn settle() {
@@ -272,6 +310,10 @@ mod tests {
         let conn = FakeConnection::new();
         let (mut rig, _watcher) = rig(&conn).await;
         wait_paused(&mut rig.rx).await;
+        settle().await;
+        // The grace timer is running (half elapsed) when the connection drops.
+        tokio::time::advance(RESTORE_GRACE / 2).await;
+        settle().await;
         conn.set(ConnectionState::Reconnecting { attempt: 1 });
         tokio::time::advance(RESTORE_GRACE * 5).await;
         settle().await;
@@ -289,5 +331,70 @@ mod tests {
             .await
             .expect("watcher ends")
             .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ends_when_engine_shuts_down() {
+        let conn = FakeConnection::new();
+        let (rig, watcher) = rig(&conn).await;
+        rig.engine.clone().shutdown().await;
+        tokio::time::timeout(Duration::from_secs(1), watcher)
+            .await
+            .expect("watcher ends with the engine")
+            .unwrap();
+        drop(conn);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ignores_pause_of_another_site() {
+        let conn = FakeConnection::new();
+        let (rig, _watcher) = rig(&conn).await;
+        let other = SiteId("other".to_string());
+        let (_remote, fault) = add_site(&rig.engine, &other, &[("b".into(), 1 << 20)]).await;
+        fault.fail_io_after(200_000, ErrorKind::Network);
+        let mut rx = rig.engine.subscribe();
+        let id = rig.engine.enqueue(upload_spec(&other, "b")).await.unwrap();
+        loop {
+            if let Ok(Event::SitePaused { site, .. }) = rx.recv().await
+                && site == other
+            {
+                break;
+            }
+        }
+        settle().await;
+        tokio::time::advance(RESTORE_GRACE * 5).await;
+        settle().await;
+        assert_ne!(
+            state_in(&rig.engine, id).await,
+            TransferState::Done,
+            "the other site is not restored by this watcher"
+        );
+    }
+
+    /// Overflows the watcher's event receiver while it is stuck, so that a `SitePaused` is lost.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn restores_after_lagged_events_when_connected() {
+        let conn = FakeConnection::new();
+        let (mut rig, _watcher) = rig(&conn).await;
+        // The watcher sees a state change and blocks inside `generation()`, so it stops
+        // receiving events.
+        conn.block.store(true, Ordering::SeqCst);
+        conn.set(ConnectionState::Reconnecting { attempt: 1 });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // The item fails (SitePaused is emitted, then lost), and another site floods events.
+        wait_paused(&mut rig.rx).await;
+        let other = SiteId("other".to_string());
+        let files: Vec<(String, usize)> = (0..400).map(|i| (format!("f{i}"), 10)).collect();
+        add_site(&rig.engine, &other, &files).await;
+        for (name, _) in &files {
+            rig.engine.enqueue(upload_spec(&other, name)).await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Connected again without a new generation: only the lag rule can restore.
+        conn.set(ConnectionState::Connected);
+        conn.block.store(false, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(1), wait_done(&mut rig))
+            .await
+            .expect("lag while connected restores the site");
     }
 }
