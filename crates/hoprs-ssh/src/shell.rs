@@ -27,6 +27,12 @@ const OUTPUT_QUEUE: usize = 256;
 const MAX_PENDING_OUTPUT: usize = 16 * 1024 * 1024;
 
 /// How long after an `Eof` the server may take to send `Close` before we close the channel.
+/// Largest `Data` item the pump builds by coalescing. With the 256-slot queue this bounds the
+/// output held for a consumer at 256 x 64 KiB = 16 MiB queued, plus at most `MAX_PENDING_OUTPUT`
+/// waiting behind a full queue.
+const MAX_COALESCED_CHUNK: usize = 64 * 1024;
+
+/// How long after an `Eof` the server may take to send `Close` before we close the channel.
 const EOF_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long the server may take to answer the PTY and shell requests.
@@ -66,6 +72,7 @@ pub enum ShellOutput {
 pub struct ShellChannel {
     writer: Arc<ChannelWriteHalf<Msg>>,
     closed: Arc<AtomicBool>,
+    overflowed: Arc<AtomicBool>,
     stop: Arc<Notify>,
     rx: mpsc::Receiver<ShellOutput>,
 }
@@ -119,6 +126,13 @@ impl ShellChannel {
         &mut self.rx
     }
 
+    /// Whether the pump gave up on a consumer that let `MAX_PENDING_OUTPUT` pile up.
+    /// For tests.
+    #[doc(hidden)]
+    pub fn overflowed(&self) -> bool {
+        self.overflowed.load(Ordering::SeqCst)
+    }
+
     fn map_send(&self, e: russh::Error) -> Error {
         match e {
             russh::Error::SendError => shell_closed(),
@@ -129,15 +143,23 @@ impl ShellChannel {
 
 impl Drop for ShellChannel {
     fn drop(&mut self) {
+        // Ends the pump promptly; the permit is kept if it is not waiting yet.
+        self.stop.notify_one();
         if self.closed.load(Ordering::SeqCst) {
             return;
         }
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            let writer = self.writer.clone();
-            runtime.spawn(async move {
-                let _ = writer.close().await;
-            });
-        }
+        close_detached(&self.writer);
+    }
+}
+
+/// Asks the server to close the channel without waiting for the request to be queued: the
+/// handle-to-session channel can be full while the session task is busy delivering data.
+fn close_detached(writer: &Arc<ChannelWriteHalf<Msg>>) {
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        let writer = writer.clone();
+        runtime.spawn(async move {
+            let _ = writer.close().await;
+        });
     }
 }
 
@@ -183,7 +205,9 @@ impl Pending {
         }
         self.bytes += data.len();
         match self.items.back_mut() {
-            Some(ShellOutput::Data(last)) => last.extend_from_slice(&data),
+            Some(ShellOutput::Data(last)) if last.len() + data.len() <= MAX_COALESCED_CHUNK => {
+                last.extend_from_slice(&data);
+            }
             _ => self.items.push_back(ShellOutput::Data(data)),
         }
         true
@@ -205,6 +229,7 @@ async fn pump(
     writer: Arc<ChannelWriteHalf<Msg>>,
     tx: mpsc::Sender<ShellOutput>,
     closed: Arc<AtomicBool>,
+    overflowed: Arc<AtomicBool>,
     stop: Arc<Notify>,
 ) {
     let mut reader = Some(reader);
@@ -224,11 +249,13 @@ async fn pump(
             }
             msg = async { reader.as_mut().expect("reading").wait().await }, if reading => {
                 let mut end = false;
+                let mut close_after_finish = false;
                 match msg {
                     Some(ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. }) => {
                         if !pending.push_data(data.to_vec()) {
-                            let _ = writer.close().await;
+                            overflowed.store(true, Ordering::SeqCst);
                             end = true;
+                            close_after_finish = true;
                         }
                     }
                     Some(ChannelMsg::ExitStatus { exit_status }) => {
@@ -244,12 +271,17 @@ async fn pump(
                     Some(_) => {}
                 }
                 if end {
+                    // Stop reading first: closing may have to wait for the session task, which
+                    // may in turn be waiting for this channel to take its data.
                     finish(&mut reader, &mut pending, &closed);
+                    if close_after_finish {
+                        close_detached(&writer);
+                    }
                 }
             }
             () = async { tokio::time::sleep_until(eof_at.expect("armed")).await }, if reading && eof_at.is_some() => {
-                let _ = writer.close().await;
                 finish(&mut reader, &mut pending, &closed);
+                close_detached(&writer);
             }
             () = stop.notified(), if reading => {
                 finish(&mut reader, &mut pending, &closed);
@@ -285,17 +317,20 @@ impl SshSession {
         let (tx, rx) = mpsc::channel(OUTPUT_QUEUE);
         let closed = Arc::new(AtomicBool::new(false));
         let writer = Arc::new(writer);
+        let overflowed = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(Notify::new());
         tokio::spawn(pump(
             reader,
             writer.clone(),
             tx,
             closed.clone(),
+            overflowed.clone(),
             stop.clone(),
         ));
         Ok(ShellChannel {
             writer,
             closed,
+            overflowed,
             stop,
             rx,
         })
@@ -319,6 +354,24 @@ mod tests {
         assert_eq!(p.pop(), Some(ShellOutput::Data(b"ef".to_vec())));
         assert_eq!(p.bytes, 0);
         assert_eq!(p.pop(), None);
+    }
+
+    #[test]
+    fn pending_chunks_stay_bounded() {
+        let mut p = Pending::default();
+        let piece = vec![7u8; 32 * 1024];
+        for _ in 0..320 {
+            assert!(p.push_data(piece.clone()));
+        }
+        let mut total = 0;
+        while let Some(item) = p.pop() {
+            let ShellOutput::Data(d) = item else {
+                panic!("unexpected {item:?}")
+            };
+            assert!(d.len() <= MAX_COALESCED_CHUNK);
+            total += d.len();
+        }
+        assert_eq!(total, 320 * 32 * 1024);
     }
 
     #[test]

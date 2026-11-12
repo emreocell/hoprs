@@ -213,3 +213,58 @@ async fn stalled_consumer_does_not_block_connection() {
         }
     }
 }
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn overflow_tears_down_shell_without_blocking_connection() {
+    let (session, mut shell, _d) = open().await;
+    // 192 MiB of output; nothing reads until the pump has given up on this consumer.
+    shell
+        .write(b"yes hoprs | head -c 201326592; exit\n")
+        .await
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !shell.overflowed() {
+        assert!(Instant::now() < deadline, "pump never overflowed");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // The connection stays usable while the stalled shell is torn down.
+    let mut other = timeout(Duration::from_secs(10), session.open_channel())
+        .await
+        .expect("open_channel blocked")
+        .unwrap();
+    timeout(Duration::from_secs(10), other.exec(true, "printf ok-%s 7"))
+        .await
+        .expect("exec blocked")
+        .unwrap();
+    let mut out = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !String::from_utf8_lossy(&out).contains("ok-7") {
+        match timeout(deadline - Instant::now(), other.wait())
+            .await
+            .expect("second channel starved")
+        {
+            Some(russh::ChannelMsg::Data { data }) => out.extend_from_slice(&data),
+            Some(_) => {}
+            None => panic!("second channel ended early: {out:?}"),
+        }
+    }
+
+    // Draining yields the buffered data, then Closed, then the end of the stream.
+    let mut total = 0usize;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match timeout(deadline - Instant::now(), shell.output().recv())
+            .await
+            .unwrap_or_else(|_| panic!("shell never closed; drained {total} bytes"))
+        {
+            Some(ShellOutput::Closed) => break,
+            Some(ShellOutput::Data(d)) => total += d.len(),
+            Some(_) => {}
+            None => panic!("output ended without Closed"),
+        }
+    }
+    assert!(total > 0 && total < 192 * 1024 * 1024, "drained {total}");
+    assert!(shell.output().recv().await.is_none());
+}
