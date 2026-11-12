@@ -7,7 +7,7 @@ use hoprs_core::Result;
 use hoprs_ssh::testing::{docker, docker_with_env};
 use secrecy::SecretString;
 
-use crate::ftp::session::{Control, open_control};
+use crate::ftp::session::{Control, open_control, quote};
 use crate::ftp::{FtpConfig, FtpPrompter, FtpSecurity};
 
 /// Host port of the `ftp` service (plain FTP and explicit FTPS).
@@ -115,6 +115,22 @@ impl TestControl {
 
     /// Sends a raw command and returns the reply's code and text, whatever the code.
     pub async fn quote(&mut self, command: &str) -> Result<(u32, String)> {
-        crate::ftp::session::quote(&mut self.0.stream, command).await
+        quote(&mut self.0.stream, command).await
     }
+}
+
+pub use crate::ftp::session::{FtpSession, PooledConn};
+
+/// Sends a raw command on the session's control connection; returns the reply's code and
+/// text, whatever the code.
+pub async fn session_quote(session: &FtpSession, command: &str) -> Result<(u32, String)> {
+    let command = command.to_owned();
+    session
+        .with_control(move |c| Box::pin(async move { quote(&mut c.stream, &command).await }))
+        .await
+}
+
+/// Sends a raw command on a pooled transfer connection.
+pub async fn pooled_quote(conn: &mut PooledConn, command: &str) -> Result<(u32, String)> {
+    quote(conn.stream(), command).await
 }

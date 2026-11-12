@@ -21,3 +21,13 @@ impl Connection for SshSession {
         SshSession::generation(self)
     }
 }
+
+impl Connection for crate::ftp::session::FtpSession {
+    fn state(&self) -> watch::Receiver<ConnectionState> {
+        crate::ftp::session::FtpSession::state(self)
+    }
+
+    fn generation(&self) -> u64 {
+        crate::ftp::session::FtpSession::generation(self)
+    }
+}

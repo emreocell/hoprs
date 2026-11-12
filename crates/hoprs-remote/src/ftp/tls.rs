@@ -296,6 +296,14 @@ mod tests {
         assert!(matches!(check(&c, "server.pem", "127.0.0.1"), (true, None)));
     }
 
+    /// Ruling R5: a certificate that chains to a trusted root is accepted even when a pin
+    /// for another certificate exists; the stale pin is never consulted.
+    #[test]
+    fn trusted_chain_beats_a_stale_pin() {
+        let c = cfg(&["ca.pem"], Some(fingerprint(&cert("other.pem"))));
+        assert!(matches!(check(&c, "server.pem", "127.0.0.1"), (true, None)));
+    }
+
     #[test]
     fn different_certificate_is_changed() {
         let c = cfg(&[], Some(server_fp()));
