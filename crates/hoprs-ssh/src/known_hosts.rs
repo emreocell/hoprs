@@ -1,0 +1,491 @@
+//! OpenSSH-compatible `known_hosts` handling: check, learn, remove and SHA256 fingerprints.
+
+use std::fs;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::Path;
+
+use base64::Engine;
+use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
+use hmac::{Hmac, Mac};
+use hoprs_core::Result;
+use russh::keys::PublicKey;
+use sha1::Sha1;
+use sha2::{Digest, Sha256};
+
+/// Outcome of looking a host key up in a `known_hosts` file.
+#[derive(Debug, PartialEq, Eq)]
+pub enum HostKeyStatus {
+    /// The exact key is recorded for this host.
+    Known,
+    /// No entry with this key algorithm exists for this host.
+    Unknown,
+    /// An entry with the same algorithm but a different key exists (1-based line).
+    Changed { line: usize },
+}
+
+/// `SHA256:<base64 without padding>` of the key's wire-format blob, like `ssh-keygen -lf`.
+pub fn fingerprint(key: &PublicKey) -> String {
+    let digest = Sha256::digest(wire_blob(key));
+    format!("SHA256:{}", STANDARD_NO_PAD.encode(digest))
+}
+
+/// Looks `host:port` up in the `known_hosts` file at `path`. A missing file is `Unknown`.
+pub fn check(path: &Path, host: &str, port: u16, key: &PublicKey) -> Result<HostKeyStatus> {
+    let Some(data) = read_optional(path)? else {
+        return Ok(HostKeyStatus::Unknown);
+    };
+    let name = host_name(host, port);
+    let mut changed = None;
+    for (idx, raw) in data.split_inclusive(|b| *b == b'\n').enumerate() {
+        let Some(entry) = parse_line(raw) else {
+            continue;
+        };
+        if !patterns_match(entry.patterns, &name) {
+            continue;
+        }
+        if entry.key.key_data() == key.key_data() {
+            return Ok(HostKeyStatus::Known);
+        }
+        if changed.is_none() && entry.key.algorithm() == key.algorithm() {
+            changed = Some(idx + 1);
+        }
+    }
+    Ok(match changed {
+        Some(line) => HostKeyStatus::Changed { line },
+        None => HostKeyStatus::Unknown,
+    })
+}
+
+/// Appends a plain-text entry for `host:port`, creating the file and parent directory if needed.
+pub fn learn(path: &Path, host: &str, port: u16, key: &PublicKey) -> Result<()> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        create_parent_dir(parent)?;
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true).append(true).create(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(path)?;
+
+    let mut entry = String::new();
+    if file.metadata()?.len() > 0 {
+        let mut last = [0u8; 1];
+        file.seek(SeekFrom::End(-1))?;
+        file.read_exact(&mut last)?;
+        if last[0] != b'\n' {
+            entry.push('\n');
+        }
+    }
+    entry.push_str(&format!(
+        "{} {} {}\n",
+        host_name(host, port),
+        key.algorithm().as_str(),
+        STANDARD.encode(wire_blob(key))
+    ));
+    file.write_all(entry.as_bytes())?;
+    Ok(())
+}
+
+/// Deletes every line matching `host:port` (hashed ones included); returns how many were removed.
+pub fn remove(path: &Path, host: &str, port: u16) -> Result<usize> {
+    let Some(data) = read_optional(path)? else {
+        return Ok(0);
+    };
+    let name = host_name(host, port);
+    let mut kept = Vec::with_capacity(data.len());
+    let mut removed = 0;
+    for raw in data.split_inclusive(|b| *b == b'\n') {
+        match parse_line(raw) {
+            Some(entry) if patterns_match(entry.patterns, &name) => removed += 1,
+            _ => kept.extend_from_slice(raw),
+        }
+    }
+    if removed > 0 {
+        write_atomic(path, &kept)?;
+    }
+    Ok(removed)
+}
+
+struct Entry<'a> {
+    patterns: &'a str,
+    key: PublicKey,
+}
+
+fn wire_blob(key: &PublicKey) -> Vec<u8> {
+    // Encoding an in-memory key to a Vec cannot fail.
+    key.to_bytes().unwrap_or_default()
+}
+
+fn host_name(host: &str, port: u16) -> String {
+    if port == 22 {
+        host.to_owned()
+    } else {
+        format!("[{host}]:{port}")
+    }
+}
+
+fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(data) => Ok(Some(data)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err.into()),
+    }
+}
+
+/// Parses one line. Comments, blank lines, `@marker` lines and malformed lines yield `None`.
+fn parse_line(raw: &[u8]) -> Option<Entry<'_>> {
+    let line = std::str::from_utf8(raw).ok()?.trim();
+    if line.is_empty() || line.starts_with('#') || line.starts_with('@') {
+        return None;
+    }
+    let mut fields = line.split_whitespace();
+    let patterns = fields.next()?;
+    let algorithm = fields.next()?;
+    let blob = STANDARD.decode(fields.next()?).ok()?;
+    let key = PublicKey::from_bytes(&blob).ok()?;
+    (key.algorithm().as_str() == algorithm).then_some(Entry { patterns, key })
+}
+
+fn patterns_match(patterns: &str, name: &str) -> bool {
+    if patterns.starts_with("|1|") {
+        return hashed_match(patterns, name);
+    }
+    let mut matched = false;
+    for pattern in patterns.split(',') {
+        if let Some(negated) = pattern.strip_prefix('!') {
+            if glob_match(negated.as_bytes(), name.as_bytes()) {
+                return false;
+            }
+        } else if glob_match(pattern.as_bytes(), name.as_bytes()) {
+            matched = true;
+        }
+    }
+    matched
+}
+
+fn hashed_match(field: &str, name: &str) -> bool {
+    let mut parts = field.split('|').skip(2);
+    let (Some(salt), Some(hash)) = (parts.next(), parts.next()) else {
+        return false;
+    };
+    let (Ok(salt), Ok(hash)) = (STANDARD.decode(salt), STANDARD.decode(hash)) else {
+        return false;
+    };
+    let Ok(mut mac) = Hmac::<Sha1>::new_from_slice(&salt) else {
+        return false;
+    };
+    mac.update(name.as_bytes());
+    mac.verify_slice(&hash).is_ok()
+}
+
+/// Case-insensitive glob supporting `*` and `?`, as OpenSSH does for host patterns.
+fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
+    let (mut p, mut t) = (0, 0);
+    let mut backtrack: Option<(usize, usize)> = None;
+    while t < text.len() {
+        if p < pattern.len() && pattern[p] == b'*' {
+            backtrack = Some((p, t));
+            p += 1;
+        } else if p < pattern.len()
+            && (pattern[p] == b'?' || pattern[p].eq_ignore_ascii_case(&text[t]))
+        {
+            p += 1;
+            t += 1;
+        } else if let Some((star_p, star_t)) = backtrack {
+            p = star_p + 1;
+            t = star_t + 1;
+            backtrack = Some((star_p, star_t + 1));
+        } else {
+            return false;
+        }
+    }
+    pattern[p..].iter().all(|b| *b == b'*')
+}
+
+fn create_parent_dir(dir: &Path) -> Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)?;
+    Ok(())
+}
+
+/// Writes `data` to a temp file next to `path`, then renames it over `path`.
+fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".hoprs-tmp-{}", std::process::id()));
+    let tmp = path.with_file_name(name);
+    let result = (|| -> std::io::Result<()> {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options.open(&tmp)?;
+        file.write_all(data)?;
+        file.set_permissions(fs::metadata(path)?.permissions())?;
+        file.sync_all()?;
+        fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    Ok(result?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use russh::keys::{Algorithm, PrivateKey};
+    use tempfile::TempDir;
+
+    const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
+
+    fn key(algorithm: Algorithm) -> PublicKey {
+        PrivateKey::random(&mut rand::rng(), algorithm)
+            .unwrap()
+            .public_key()
+            .clone()
+    }
+
+    fn ed() -> PublicKey {
+        key(Algorithm::Ed25519)
+    }
+
+    fn fixture_key() -> PublicKey {
+        let text = fs::read_to_string(format!("{FIXTURE_DIR}/id_ed25519.pub")).unwrap();
+        PublicKey::from_openssh(&text).unwrap()
+    }
+
+    fn kh_path(dir: &TempDir) -> std::path::PathBuf {
+        dir.path().join("known_hosts")
+    }
+
+    fn line_for(host: &str, key: &PublicKey) -> String {
+        let b64 = STANDARD.encode(key.to_bytes().unwrap());
+        format!("{host} {} {b64}\n", key.algorithm().as_str())
+    }
+
+    #[test]
+    fn unknown_when_file_missing() {
+        let dir = TempDir::new().unwrap();
+        let status = check(&kh_path(&dir), "h", 22, &ed()).unwrap();
+        assert_eq!(status, HostKeyStatus::Unknown);
+    }
+
+    #[test]
+    fn learn_then_known() {
+        let dir = TempDir::new().unwrap();
+        let p = kh_path(&dir);
+        let k = ed();
+        learn(&p, "h", 22, &k).unwrap();
+        assert_eq!(check(&p, "h", 22, &k).unwrap(), HostKeyStatus::Known);
+        assert_eq!(fs::read_to_string(&p).unwrap(), line_for("h", &k));
+    }
+
+    #[test]
+    fn learn_creates_parent_dir() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("a").join("b").join("known_hosts");
+        let k = ed();
+        learn(&p, "h", 22, &k).unwrap();
+        assert_eq!(check(&p, "h", 22, &k).unwrap(), HostKeyStatus::Known);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let file_mode = fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+            let dir_mode = fs::metadata(p.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(file_mode, 0o600);
+            assert_eq!(dir_mode, 0o700);
+        }
+    }
+
+    #[test]
+    fn learn_appends_newline_to_unterminated_file() {
+        let dir = TempDir::new().unwrap();
+        let p = kh_path(&dir);
+        fs::write(&p, "# no trailing newline").unwrap();
+        let k = ed();
+        learn(&p, "h", 22, &k).unwrap();
+        let text = fs::read_to_string(&p).unwrap();
+        assert_eq!(
+            text,
+            format!("# no trailing newline\n{}", line_for("h", &k))
+        );
+        assert_eq!(check(&p, "h", 22, &k).unwrap(), HostKeyStatus::Known);
+    }
+
+    #[test]
+    fn port_22_plain_name_and_other_port_bracketed() {
+        let dir = TempDir::new().unwrap();
+        let p = kh_path(&dir);
+        let k = ed();
+        learn(&p, "h", 2222, &k).unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), line_for("[h]:2222", &k));
+        assert_eq!(check(&p, "h", 22, &k).unwrap(), HostKeyStatus::Unknown);
+        assert_eq!(check(&p, "h", 2222, &k).unwrap(), HostKeyStatus::Known);
+    }
+
+    #[test]
+    fn changed_reports_line() {
+        let dir = TempDir::new().unwrap();
+        let p = kh_path(&dir);
+        let (a, b) = (ed(), ed());
+        let text = format!(
+            "# c\nother {}\n{}",
+            line_for("x", &a).trim_end().split_once(' ').unwrap().1,
+            line_for("h", &a)
+        );
+        fs::write(&p, text).unwrap();
+        assert_eq!(check(&p, "h", 22, &a).unwrap(), HostKeyStatus::Known);
+        assert_eq!(
+            check(&p, "h", 22, &b).unwrap(),
+            HostKeyStatus::Changed { line: 3 }
+        );
+    }
+
+    #[test]
+    fn other_algorithm_is_unknown_not_changed() {
+        let dir = TempDir::new().unwrap();
+        let p = kh_path(&dir);
+        let ecdsa = key(Algorithm::Ecdsa {
+            curve: russh::keys::EcdsaCurve::NistP256,
+        });
+        learn(&p, "h", 22, &ecdsa).unwrap();
+        assert_eq!(check(&p, "h", 22, &ed()).unwrap(), HostKeyStatus::Unknown);
+    }
+
+    #[test]
+    fn hashed_entry_matches() {
+        let p = format!("{FIXTURE_DIR}/known_hosts");
+        let p = Path::new(&p);
+        let k = fixture_key();
+        assert_eq!(
+            check(p, "hashed.example", 22, &k).unwrap(),
+            HostKeyStatus::Known
+        );
+        assert_eq!(
+            check(p, "other.example", 22, &k).unwrap(),
+            HostKeyStatus::Unknown
+        );
+        assert_eq!(
+            check(p, "hashed.example", 22, &ed()).unwrap(),
+            HostKeyStatus::Changed { line: 2 }
+        );
+    }
+
+    #[test]
+    fn comma_list_matches() {
+        let dir = TempDir::new().unwrap();
+        let p = kh_path(&dir);
+        let k = ed();
+        fs::write(&p, line_for("alpha.example,192.0.2.7,[beta]:2200", &k)).unwrap();
+        assert_eq!(
+            check(&p, "alpha.example", 22, &k).unwrap(),
+            HostKeyStatus::Known
+        );
+        assert_eq!(
+            check(&p, "192.0.2.7", 22, &k).unwrap(),
+            HostKeyStatus::Known
+        );
+        assert_eq!(check(&p, "beta", 2200, &k).unwrap(), HostKeyStatus::Known);
+        assert_eq!(check(&p, "gamma", 22, &k).unwrap(), HostKeyStatus::Unknown);
+    }
+
+    #[test]
+    fn glob_patterns_match() {
+        let dir = TempDir::new().unwrap();
+        let p = kh_path(&dir);
+        let k = ed();
+        fs::write(&p, line_for("*.example.com,10.0.0.?", &k)).unwrap();
+        assert_eq!(
+            check(&p, "a.example.com", 22, &k).unwrap(),
+            HostKeyStatus::Known
+        );
+        assert_eq!(check(&p, "10.0.0.5", 22, &k).unwrap(), HostKeyStatus::Known);
+        assert_eq!(
+            check(&p, "10.0.0.55", 22, &k).unwrap(),
+            HostKeyStatus::Unknown
+        );
+        assert_eq!(
+            check(&p, "example.org", 22, &k).unwrap(),
+            HostKeyStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn negation_excludes_host() {
+        let dir = TempDir::new().unwrap();
+        let p = kh_path(&dir);
+        let k = ed();
+        fs::write(&p, line_for("*.example.com,!bad.example.com", &k)).unwrap();
+        assert_eq!(
+            check(&p, "ok.example.com", 22, &k).unwrap(),
+            HostKeyStatus::Known
+        );
+        assert_eq!(
+            check(&p, "bad.example.com", 22, &k).unwrap(),
+            HostKeyStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn markers_comments_and_garbage_are_ignored() {
+        let dir = TempDir::new().unwrap();
+        let p = kh_path(&dir);
+        let k = ed();
+        let mut text = String::from("# comment\n\ngarbage line\nh ssh-ed25519 !!!notbase64\n");
+        text.push_str(&format!("@revoked {}", line_for("h", &k)));
+        text.push_str(&format!("@cert-authority {}", line_for("h", &k)));
+        fs::write(&p, text).unwrap();
+        assert_eq!(check(&p, "h", 22, &k).unwrap(), HostKeyStatus::Unknown);
+    }
+
+    #[test]
+    fn remove_deletes_plain_and_hashed() {
+        let dir = TempDir::new().unwrap();
+        let p = kh_path(&dir);
+        fs::copy(format!("{FIXTURE_DIR}/known_hosts"), &p).unwrap();
+        let k = fixture_key();
+        learn(&p, "hashed.example", 22, &k).unwrap();
+        learn(&p, "keep.example", 22, &k).unwrap();
+        assert_eq!(remove(&p, "hashed.example", 22).unwrap(), 2);
+        assert_eq!(
+            check(&p, "hashed.example", 22, &k).unwrap(),
+            HostKeyStatus::Unknown
+        );
+        assert_eq!(
+            check(&p, "keep.example", 22, &k).unwrap(),
+            HostKeyStatus::Known
+        );
+    }
+
+    #[test]
+    fn remove_preserves_other_lines_byte_for_byte() {
+        let dir = TempDir::new().unwrap();
+        let p = kh_path(&dir);
+        let k = ed();
+        let mut data = b"# odd \xff bytes\r\nkeep ssh-ed25519 AAAA\r\n".to_vec();
+        data.extend_from_slice(line_for("gone", &k).as_bytes());
+        data.extend_from_slice(b"tail without newline");
+        fs::write(&p, &data).unwrap();
+        assert_eq!(remove(&p, "gone", 22).unwrap(), 1);
+        assert_eq!(
+            fs::read(&p).unwrap(),
+            b"# odd \xff bytes\r\nkeep ssh-ed25519 AAAA\r\ntail without newline"
+        );
+        assert_eq!(remove(&p, "gone", 22).unwrap(), 0);
+        assert_eq!(remove(&dir.path().join("missing"), "gone", 22).unwrap(), 0);
+    }
+
+    #[test]
+    fn fingerprint_matches_ssh_keygen() {
+        let expected = fs::read_to_string(format!("{FIXTURE_DIR}/fingerprint.txt")).unwrap();
+        let expected = expected.split_whitespace().nth(1).unwrap();
+        assert_eq!(fingerprint(&fixture_key()), expected);
+    }
+}
