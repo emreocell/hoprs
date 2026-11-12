@@ -44,14 +44,14 @@ pub fn toolbar<'a>(tab: &'a Tab, side: Side) -> Element<'a, Message> {
             .style(theme::button_text)
             .on_press_maybe(enabled.then(|| msg(pane_msg)))
     };
-    let (transfer, transfer_key) = match side {
-        Side::Local => (strings::UPLOAD, strings::KEY_TRANSFER),
-        Side::Remote => (strings::DOWNLOAD, strings::KEY_TRANSFER),
+    let transfer = match side {
+        Side::Local => strings::UPLOAD,
+        Side::Remote => strings::DOWNLOAD,
     };
     let mut bar = row![
         action(
             transfer,
-            Some(transfer_key),
+            Some(strings::KEY_TRANSFER),
             tab.can_transfer(side),
             PaneMsg::Transfer
         ),

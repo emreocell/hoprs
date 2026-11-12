@@ -79,7 +79,14 @@ impl App {
             .filter(|&(over_tab, over)| over_tab == tab && over == other(from))
     }
 
-    /// The mouse button went up anywhere: a drag that ends over the other pane sends its
+    /// The pointer left the window: a drag started in it ends without dropping (its
+    /// release may never reach the window).
+    pub(super) fn drag_cancel(&mut self) {
+        self.drag = None;
+        self.pointer = None;
+    }
+
+    /// A mouse button went up anywhere: a drag that ends over the other pane sends its
     /// selection there; any other ends with nothing.
     pub(super) fn drag_end(&mut self) -> Vec<Effect> {
         let target = self.drop_target();
@@ -96,14 +103,20 @@ impl App {
     /// folder of the tab in view. Without a connected tab in view, the queue says why.
     pub(super) fn file_dropped(&mut self, path: &Path) -> Vec<Effect> {
         self.os_drag = false;
-        let index = self
+        // No connected tab in view, or one whose remote folder is still loading (or
+        // failed to list, or runs a file operation): each says so.
+        let connected = self
             .shown_tab()
             .and_then(|id| self.tab_index(id))
-            .filter(|&i| self.tabs[i].can_act(Side::Remote));
-        let Some(index) = index else {
+            .filter(|&i| self.tabs[i].session().is_some());
+        let Some(index) = connected else {
             self.queue_error(Error::new(ErrorKind::NotFound, strings::DROP_NEEDS_SITE));
             return Vec::new();
         };
+        if !self.tabs[index].can_act(Side::Remote) {
+            self.queue_error(Error::new(ErrorKind::Conflict, strings::DROP_PANE_BUSY));
+            return Vec::new();
+        }
         let local = local_path(path);
         let name = local
             .as_ref()
@@ -173,9 +186,7 @@ impl App {
     }
 
     pub(super) fn control_done(&mut self, id: TransferId, result: Result<(), Error>) {
-        if let Err(error) = result {
-            self.queue.control_failed(id, error);
-        }
+        self.queue.control_done(id, result);
     }
 
     /// "Clear finished" emits no engine event: a new snapshot shows the rows gone.

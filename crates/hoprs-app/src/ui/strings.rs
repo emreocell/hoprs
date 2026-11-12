@@ -161,11 +161,16 @@ pub const NOTHING_ACTIVE: &str = "Nothing running";
 pub const NOTHING_QUEUED: &str = "Nothing waiting";
 pub const NOTHING_FAILED: &str = "No failures";
 pub const NOTHING_DONE: &str = "Nothing finished yet";
-pub const CLEAR_FINISHED: &str = "Clear finished";
+/// Removes done, skipped, cancelled and failed rows (the engine's `clear_finished`).
+pub const CLEAR_FINISHED: &str = "Clear finished and failed";
 pub const UPLOAD_ARROW: &str = "↑";
 pub const DOWNLOAD_ARROW: &str = "↓";
 pub const WAITING_FOR_WORKER: &str = "Waiting for a worker";
 pub const STARTING: &str = "Starting…";
+/// A folder whose files are being copied.
+pub const TRANSFERRING: &str = "Transferring…";
+/// A failed row the user dismissed (still failed in the engine; Retry stays).
+pub const DISMISSED: &str = "Dismissed";
 pub const PAUSED: &str = "Paused";
 pub const CANCELLED: &str = "Cancelled";
 pub const TRANSFER_DONE: &str = "Done";
@@ -175,9 +180,12 @@ pub const OVERWRITE: &str = "Overwrite";
 pub const RESUME: &str = "Resume";
 pub const SKIP: &str = "Skip";
 pub const PAUSE: &str = "Pause";
-pub const APPLY_TO_ALL: &str = "Apply to all";
+/// The engine also makes the answer its policy for every later conflict of this run.
+pub const APPLY_TO_ALL: &str = "Apply to all (this session)";
 pub const SITE_PAUSED: &str = "Paused — connection lost";
 pub const DROP_NEEDS_SITE: &str = "Open a connected site to drop files into it";
+pub const DROP_PANE_BUSY: &str =
+    "The remote folder is busy or not listed yet; drop again in a moment";
 pub const DROP_UNSUPPORTED: &str = "Can't upload this path";
 
 /// A queue tab: "Active 3".
@@ -202,6 +210,28 @@ pub fn total_workers(workers: usize) -> String {
 /// "51%".
 pub fn percent(fraction: f32) -> String {
     format!("{:.0}%", (fraction * 100.0).floor())
+}
+
+/// A file of unknown size: "12 MB, 3.4 MB/s".
+pub fn bytes_and_speed(done: u64, bytes_per_sec: u64) -> String {
+    format!(
+        "{}, {}",
+        crate::ui::format::size(done),
+        speed(bytes_per_sec)
+    )
+}
+
+/// In the queue head once an answer went "to all": "Conflicts: overwrite (this session)".
+pub fn session_policy(policy: hoprs_transfer::ConflictPolicy) -> String {
+    use hoprs_transfer::ConflictPolicy::*;
+    let name = match policy {
+        Ask => "ask",
+        Overwrite => "overwrite",
+        Skip => "skip",
+        OverwriteIfNewer => "overwrite if newer",
+        Resume => "resume",
+    };
+    format!("Conflicts: {name} (this session)")
 }
 
 /// "Skipped: exists".

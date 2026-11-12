@@ -193,8 +193,11 @@ pub enum Message {
     FileDropped(PathBuf),
     /// Files from the system file manager entered (`true`) or left the window.
     FilesHovered(bool),
-    /// The left mouse button went up, anywhere: ends a drag between panes.
+    /// A mouse button went up, anywhere: ends a drag between panes (dropping it only over
+    /// the other pane).
     DragEnd,
+    /// The pointer left the window: a drag ends without dropping.
+    DragCancel,
 }
 
 /// The profile change a form asked for, carried back with its result.
@@ -453,6 +456,7 @@ impl App {
             Message::FileDropped(path) => return self.file_dropped(&path),
             Message::FilesHovered(hovered) => self.os_drag = hovered,
             Message::DragEnd => return self.drag_end(),
+            Message::DragCancel => self.drag_cancel(),
         }
         Vec::new()
     }

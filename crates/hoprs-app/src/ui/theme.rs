@@ -567,7 +567,7 @@ pub fn drop_target(active: bool) -> impl Fn(&Theme) -> container::Style {
             Border {
                 color: palette().accent,
                 width: HAIRLINE,
-                radius: Radius::default(),
+                radius: radius(),
             }
         } else {
             Border::default()

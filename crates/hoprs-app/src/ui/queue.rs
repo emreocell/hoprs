@@ -10,9 +10,9 @@ use iced::mouse;
 use iced::widget::{Id, button, checkbox, column, container, progress_bar, row, rule, space, text};
 use iced::{Alignment, Element, Event, Length, Padding, window};
 
-use hoprs_transfer::{Direction, ResolveAction, TransferState};
+use hoprs_transfer::{Direction, ResolveAction};
 
-use crate::app::queue::QueueRow;
+use crate::app::queue::{QueueRow, RowStatus};
 use crate::app::{App, Message, QueueMsg, QueueTab, RowAction};
 use crate::ui::file_actions::error_bar;
 use crate::ui::layout::{QUEUE_HEAD_HEIGHT, QUEUE_MAX_HEIGHT, UNDERLINE};
@@ -37,11 +37,14 @@ fn scroll_id() -> Id {
     Id::new("queue")
 }
 
-/// Mouse button releases (they end a drag between panes) and files dragged from the system
+/// Mouse button releases and the pointer leaving the window (they end a drag between
+/// panes) and files dragged from the system
 /// file manager.
 pub fn pointer_message(event: Event, _: Status, _: window::Id) -> Option<Message> {
     match event {
-        Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => Some(Message::DragEnd),
+        // Any button: a release the drop doesn't use still ends the drag.
+        Event::Mouse(mouse::Event::ButtonReleased(_)) => Some(Message::DragEnd),
+        Event::Mouse(mouse::Event::CursorLeft) => Some(Message::DragCancel),
         Event::Window(window::Event::FileHovered(_)) => Some(Message::FilesHovered(true)),
         Event::Window(window::Event::FilesHoveredLeft) => Some(Message::FilesHovered(false)),
         Event::Window(window::Event::FileDropped(path)) => Some(Message::FileDropped(path)),
@@ -81,6 +84,13 @@ pub fn view(app: &App) -> Element<'_, Message> {
     };
     let head = head
         .push(space::horizontal())
+        // An answer "to all" became the engine's policy for this run: say so.
+        .push(queue.session_policy().map(|policy| {
+            text(strings::session_policy(policy))
+                .size(theme::TEXT_XS)
+                .color(p.muted)
+                .wrapping(text::Wrapping::None)
+        }))
         .push(
             row![
                 text(strings::speed(queue.total_speed())).font(theme::INTER_SEMIBOLD),
@@ -235,33 +245,42 @@ fn queue_row<'a>(app: &'a App, row: &'a QueueRow) -> Element<'a, Message> {
             .wrapping(text::Wrapping::None)
             .into()
     };
-    let status: Element<'a, Message> = match (app.queue.row_error(id), &item.state) {
-        (Some(error), _) => error_text(&error.message),
-        (None, TransferState::Active) => match (item.is_dir, row.fraction()) {
-            (Some(false) | None, Some(fraction)) => row![
-                progress_bar(0.0..=1.0, fraction)
-                    .length(BAR_WIDTH)
-                    .girth(BAR_GIRTH)
-                    .style(theme::progress),
-                container(text(strings::percent(fraction)).size(theme::TEXT_SM))
-                    .width(PERCENT_WIDTH)
-                    .align_x(Alignment::End),
-                container(
-                    text(strings::speed(row.bytes_per_sec))
-                        .size(theme::TEXT_SM)
-                        .wrapping(text::Wrapping::None),
-                )
-                .width(SPEED_WIDTH)
+    let status: Element<'a, Message> = match app.queue.status(row) {
+        RowStatus::Error(error) => error_text(&error.message),
+        RowStatus::Progress {
+            fraction,
+            bytes_per_sec,
+        } => row![
+            progress_bar(0.0..=1.0, fraction)
+                .length(BAR_WIDTH)
+                .girth(BAR_GIRTH)
+                .style(theme::progress),
+            container(text(strings::percent(fraction)).size(theme::TEXT_SM))
+                .width(PERCENT_WIDTH)
                 .align_x(Alignment::End),
-            ]
-            .spacing(theme::SPACE_MD)
-            .align_y(Alignment::Center)
+            container(
+                text(strings::speed(bytes_per_sec))
+                    .size(theme::TEXT_SM)
+                    .wrapping(text::Wrapping::None),
+            )
+            .width(SPEED_WIDTH)
+            .align_x(Alignment::End),
+        ]
+        .spacing(theme::SPACE_MD)
+        .align_y(Alignment::Center)
+        .into(),
+        RowStatus::Bytes {
+            done,
+            bytes_per_sec,
+        } => text(strings::bytes_and_speed(done, bytes_per_sec))
+            .size(theme::TEXT_SM)
+            .wrapping(text::Wrapping::None)
             .into(),
-            _ => muted(strings::STARTING.to_owned()),
-        },
-        (None, TransferState::Queued) => muted(strings::WAITING_FOR_WORKER.to_owned()),
-        (None, TransferState::Paused) => muted(strings::PAUSED.to_owned()),
-        (None, TransferState::AwaitingDecision(_)) => row![
+        RowStatus::Transferring => muted(strings::TRANSFERRING.to_owned()),
+        RowStatus::Starting => muted(strings::STARTING.to_owned()),
+        RowStatus::Waiting => muted(strings::WAITING_FOR_WORKER.to_owned()),
+        RowStatus::Paused => muted(strings::PAUSED.to_owned()),
+        RowStatus::Conflict => row![
             text(strings::FILE_EXISTS).size(theme::TEXT_SM),
             checkbox(app.queue.apply_all(id))
                 .label(strings::APPLY_TO_ALL)
@@ -273,17 +292,10 @@ fn queue_row<'a>(app: &'a App, row: &'a QueueRow) -> Element<'a, Message> {
         .spacing(theme::SPACE_SM)
         .align_y(Alignment::Center)
         .into(),
-        (None, TransferState::Failed(error)) => error_text(&error.message),
-        (None, TransferState::Done) => muted(strings::TRANSFER_DONE.to_owned()),
-        (None, TransferState::Skipped(reason)) => muted(strings::skipped(reason)),
-        (None, TransferState::Cancelled) => muted(strings::CANCELLED.to_owned()),
-    };
-    let skipped_failure =
-        matches!(item.state, TransferState::Failed(_)) && app.queue.tab_of(row) == QueueTab::Done;
-    let status = if skipped_failure {
-        muted(strings::SKIPPED.to_owned())
-    } else {
-        status
+        RowStatus::Done => muted(strings::TRANSFER_DONE.to_owned()),
+        RowStatus::Skipped(reason) => muted(strings::skipped(reason)),
+        RowStatus::Dismissed => muted(strings::DISMISSED.to_owned()),
+        RowStatus::Cancelled => muted(strings::CANCELLED.to_owned()),
     };
     let mut actions = row![].spacing(theme::SPACE_3XS).align_y(Alignment::Center);
     for action in app.queue.actions(row) {
@@ -292,7 +304,8 @@ fn queue_row<'a>(app: &'a App, row: &'a QueueRow) -> Element<'a, Message> {
             RowAction::Resume | RowAction::Resolve(ResolveAction::Resume) => strings::RESUME,
             RowAction::Cancel => strings::CANCEL,
             RowAction::Retry => strings::RETRY,
-            RowAction::Skip | RowAction::Resolve(ResolveAction::Skip) => strings::SKIP,
+            RowAction::Dismiss => strings::DISMISS,
+            RowAction::Resolve(ResolveAction::Skip) => strings::SKIP,
             RowAction::Resolve(ResolveAction::Overwrite) => strings::OVERWRITE,
         };
         actions = actions.push(

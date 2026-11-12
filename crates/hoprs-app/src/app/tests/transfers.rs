@@ -7,11 +7,11 @@ use super::*;
 
 use hoprs_core::Error;
 use hoprs_transfer::{
-    ConflictInfo, Direction, Event, EventKind, ProgressUpdate, Resolution, ResolveAction,
-    TransferId, TransferItem, TransferSpec, TransferState,
+    ConflictInfo, ConflictPolicy, Direction, Event, EventKind, ProgressUpdate, Resolution,
+    ResolveAction, TransferId, TransferItem, TransferSpec, TransferState,
 };
 
-use crate::app::queue::QueueRow;
+use crate::app::queue::{QueueRow, RowStatus};
 use crate::backend::{ControlOp, TransferSnapshot};
 
 fn spec(site: &SiteId, direction: Direction, local: &str, remote: &str) -> TransferSpec {
@@ -320,6 +320,17 @@ async fn drop_from_os_targets_remote_dir() {
         )]
     );
 
+    // The remote folder is busy (still listing): a different message than "no site".
+    let effects = app.update(pane_msg(tab, Side::Remote, PaneMsg::Retry));
+    assert!(!effects.is_empty(), "a listing is in flight");
+    let effects = app.update(Message::FileDropped(PathBuf::from("/home/me/a.txt")));
+    assert!(no_enqueue(&effects));
+    assert_eq!(
+        app.queue.error.as_ref().map(|e| e.message.as_str()),
+        Some(strings::DROP_PANE_BUSY)
+    );
+    app.update(Message::Queue(QueueMsg::DismissError));
+
     // A form in the center: no tab in view.
     app.update(Message::NewSite);
     let effects = app.update(Message::FileDropped(PathBuf::from("/home/me/a.txt")));
@@ -379,6 +390,38 @@ async fn drag_between_panes_enqueues() {
             "/srv/r.txt"
         )]
     );
+
+    // The pointer leaves the window mid-drag (its release may never come back): the drag
+    // ends, and a later release elsewhere drops nothing.
+    app.update(pane_msg(tab, Side::Local, PaneMsg::Click(b_row)));
+    app.update(pane_msg(tab, Side::Remote, PaneMsg::PointerIn));
+    assert!(app.update(Message::DragCancel).is_empty());
+    assert_eq!((app.drag, app.pointer), (None, None));
+    app.update(pane_msg(tab, Side::Remote, PaneMsg::PointerIn));
+    assert!(no_enqueue(&app.update(Message::DragEnd)));
+    app.update(pane_msg(tab, Side::Remote, PaneMsg::PointerOut));
+
+    // The window events behind it: any button up ends a drag, leaving the window cancels.
+    use iced::{Event as IcedEvent, mouse};
+    let id = iced::window::Id::unique();
+    let status = iced::event::Status::Ignored;
+    let map = |e| crate::ui::queue::pointer_message(e, status, id);
+    assert!(matches!(
+        map(IcedEvent::Mouse(mouse::Event::ButtonReleased(
+            mouse::Button::Right
+        ))),
+        Some(Message::DragEnd)
+    ));
+    assert!(matches!(
+        map(IcedEvent::Mouse(mouse::Event::ButtonReleased(
+            mouse::Button::Left
+        ))),
+        Some(Message::DragEnd)
+    ));
+    assert!(matches!(
+        map(IcedEvent::Mouse(mouse::Event::CursorLeft)),
+        Some(Message::DragCancel)
+    ));
 
     // Released outside both panes (over the queue): nothing.
     app.update(pane_msg(tab, Side::Local, PaneMsg::Click(b_row)));
@@ -679,10 +722,40 @@ async fn conflict_inline_apply_to_all() {
         [Effect::Control { id: TransferId(1), op }] if *op == overwrite_all
     ));
     assert!(app.form.is_none(), "no modal");
+    // The label says the answer lasts for the session (the engine makes it its policy).
+    assert_eq!(strings::APPLY_TO_ALL, "Apply to all (this session)");
+    assert_eq!(
+        app.queue.session_policy(),
+        None,
+        "not before the engine accepts it"
+    );
     for message in run_queue(&fake, effects).await {
         assert!(app.update(message).is_empty());
     }
     assert_eq!(fake.controls(), vec![(TransferId(1), overwrite_all)]);
+    // Accepted: the queue remembers the session's policy and its head says so.
+    assert_eq!(app.queue.session_policy(), Some(ConflictPolicy::Overwrite));
+    assert_eq!(
+        strings::session_policy(ConflictPolicy::Overwrite),
+        "Conflicts: overwrite (this session)"
+    );
+
+    // A refused "to all" answer leaves the session's policy as it was.
+    app.update(Message::Queue(QueueMsg::ToggleApplyAll(TransferId(2))));
+    let effects = app.update(Message::Queue(QueueMsg::Action(
+        TransferId(2),
+        RowAction::Resolve(ResolveAction::Resume),
+    )));
+    assert_eq!(effects.len(), 1);
+    app.update(Message::ControlDone {
+        id: TransferId(2),
+        result: Err(Error::new(
+            ErrorKind::Conflict,
+            "Transfer is not awaiting a decision",
+        )),
+    });
+    assert_eq!(app.queue.session_policy(), Some(ConflictPolicy::Overwrite));
+    app.update(Message::Queue(QueueMsg::ToggleApplyAll(TransferId(2))));
 
     // Row 2 alone: Skip, not to all.
     let effects = app.update(Message::Queue(QueueMsg::Action(
@@ -711,8 +784,9 @@ async fn conflict_inline_apply_to_all() {
     assert_eq!(app.queue.counts(), [0, 1, 0, 1]);
 }
 
-/// A failed row shows its error and Retry / Skip. Retry asks the engine (its refusal shows
-/// in the row); Skip moves the row to Done without touching the engine.
+/// A failed row shows its error and Retry / Dismiss. Retry asks the engine (its refusal
+/// shows in the row); Dismiss moves the row to Done without touching the engine, and Retry
+/// still works from there.
 #[tokio::test]
 async fn failed_row_retry_skip() {
     let fake = Arc::new(FakeBackend::new());
@@ -728,7 +802,10 @@ async fn failed_row_retry_skip() {
     );
     assert_eq!(ids(&app.queue.rows_in(QueueTab::Failed)), [1, 2]);
     let row = app.queue.row(TransferId(1)).unwrap();
-    assert_eq!(app.queue.actions(row), [RowAction::Retry, RowAction::Skip]);
+    assert_eq!(
+        app.queue.actions(row),
+        [RowAction::Retry, RowAction::Dismiss]
+    );
 
     // Retry: to the engine. Its refusal stays in the row until the row changes.
     let effects = app.update(Message::Queue(QueueMsg::Action(
@@ -763,11 +840,11 @@ async fn failed_row_retry_skip() {
         QueueTab::Queued
     );
 
-    // Skip: out of Failed, into Done, no buttons; the engine is not asked.
+    // Dismiss: out of Failed, into Done, only Retry left; the engine is not asked.
     assert!(
         app.update(Message::Queue(QueueMsg::Action(
             TransferId(2),
-            RowAction::Skip
+            RowAction::Dismiss
         )))
         .is_empty()
     );
@@ -775,8 +852,9 @@ async fn failed_row_retry_skip() {
     assert_eq!(app.queue.counts(), [0, 1, 0, 1]);
     let row = app.queue.row(TransferId(2)).unwrap();
     assert_eq!(app.queue.tab_of(row), QueueTab::Done);
-    assert!(app.queue.actions(row).is_empty());
-    // A skipped row keeps its place across a resync.
+    assert_eq!(app.queue.actions(row), [RowAction::Retry]);
+    assert_eq!(app.queue.status(row), RowStatus::Dismissed);
+    // A dismissed row keeps its place across a resync.
     let request = snapshot_request(&app.update(Message::QueueResync));
     app.update(Message::QueueSnapshot {
         request,
@@ -789,6 +867,106 @@ async fn failed_row_retry_skip() {
         ),
     });
     assert_eq!(app.queue.counts(), [0, 1, 0, 1]);
+
+    // Retry from Done: to the engine, and the row is no longer dismissed.
+    assert!(matches!(
+        &app.update(Message::Queue(QueueMsg::Action(
+            TransferId(2),
+            RowAction::Retry
+        )))[..],
+        [Effect::Control {
+            id: TransferId(2),
+            op: ControlOp::Retry
+        }]
+    ));
+    let row = app.queue.row(TransferId(2)).unwrap();
+    assert_eq!(app.queue.tab_of(row), QueueTab::Failed);
+}
+
+/// The status column of a row: a running folder reads "Transferring…" (never "Starting…"
+/// for its whole run); a file of unknown size shows its bytes and speed; "Starting…" only
+/// before any byte or progress; a known size gets the bar.
+#[test]
+fn row_status_labels() {
+    let mut app = App::new();
+    let s = SiteId::new();
+    let mut folder = item(1, &s, TransferState::Active);
+    folder.is_dir = Some(true);
+    folder.size = None;
+    let mut unknown = item(2, &s, TransferState::Active);
+    unknown.size = None;
+    let fresh = item(3, &s, TransferState::Active);
+    let mut resumed = item(4, &s, TransferState::Active);
+    resumed.bytes_done = 250;
+    synced(
+        &mut app,
+        1,
+        vec![
+            folder,
+            unknown,
+            fresh,
+            resumed,
+            item(5, &s, TransferState::Queued),
+            item(6, &s, failed("boom")),
+            item(7, &s, TransferState::Skipped("exists".into())),
+        ],
+    );
+    fn status(app: &App, id: i64) -> RowStatus<'_> {
+        app.queue.status(app.queue.row(TransferId(id)).unwrap())
+    }
+    assert_eq!(status(&app, 1), RowStatus::Transferring);
+    assert_eq!(status(&app, 2), RowStatus::Starting);
+    assert_eq!(status(&app, 3), RowStatus::Starting);
+    // Bytes already there (a resumed copy): the bar at once.
+    assert_eq!(
+        status(&app, 4),
+        RowStatus::Progress {
+            fraction: 0.25,
+            bytes_per_sec: 0
+        }
+    );
+    assert_eq!(status(&app, 5), RowStatus::Waiting);
+    assert!(matches!(status(&app, 6), RowStatus::Error(e) if e.message == "boom"));
+    assert_eq!(status(&app, 7), RowStatus::Skipped("exists"));
+
+    let update = |id, bytes_done, total, bytes_per_sec| ProgressUpdate {
+        id: TransferId(id),
+        bytes_done,
+        total,
+        bytes_per_sec,
+    };
+    app.update(Message::TransferEvent(event(
+        2,
+        EventKind::Progress(vec![
+            update(1, 0, None, 0),
+            update(2, 4096, None, 2048),
+            update(3, 0, Some(1000), 0),
+        ]),
+    )));
+    // The folder stays "Transferring…"; the unknown size shows bytes and speed.
+    assert_eq!(status(&app, 1), RowStatus::Transferring);
+    assert_eq!(
+        status(&app, 2),
+        RowStatus::Bytes {
+            done: 4096,
+            bytes_per_sec: 2048
+        }
+    );
+    assert_eq!(strings::bytes_and_speed(4096, 2048), "4.0 KB, 2.0 KB/s");
+    // A progress came (even at 0 bytes): the bar, not "Starting…".
+    assert_eq!(
+        status(&app, 3),
+        RowStatus::Progress {
+            fraction: 0.0,
+            bytes_per_sec: 0
+        }
+    );
+    // A refused control wins over the state.
+    app.update(Message::ControlDone {
+        id: TransferId(3),
+        result: Err(Error::new(ErrorKind::Conflict, "nope")),
+    });
+    assert!(matches!(status(&app, 3), RowStatus::Error(e) if e.message == "nope"));
 }
 
 /// The total is the sum of the running rows' speeds; a row that stops counts no more.
@@ -907,6 +1085,32 @@ fn site_paused_until_a_transfer_runs() {
     assert!(app.queue.site_paused(&s).is_some());
     app.update(Message::TransferEvent(changed(2, 1, TransferState::Active)));
     assert!(app.queue.site_paused(&s).is_none());
+
+    // Paused again; a resync whose snapshot shows the site running clears it, while a
+    // site with nothing running stays paused (the snapshot doesn't list paused sites).
+    let other = SiteId::new();
+    for (seq, site) in [(3, &s), (4, &other)] {
+        app.update(Message::TransferEvent(event(
+            seq,
+            EventKind::SitePaused {
+                site: site.clone(),
+                error: Error::new(ErrorKind::Network, "Connection reset"),
+            },
+        )));
+    }
+    let request = snapshot_request(&app.update(Message::QueueResync));
+    app.update(Message::QueueSnapshot {
+        request,
+        snapshot: snapshot(
+            4,
+            vec![
+                item(1, &s, TransferState::Active),
+                item(2, &other, TransferState::Queued),
+            ],
+        ),
+    });
+    assert!(app.queue.site_paused(&s).is_none());
+    assert!(app.queue.site_paused(&other).is_some());
 }
 
 /// End to end against the Docker SSH server: the real backend and engine, the

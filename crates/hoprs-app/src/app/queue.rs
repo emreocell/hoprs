@@ -12,7 +12,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use hoprs_core::{Error, SiteId};
-use hoprs_transfer::{Event, EventKind, ResolveAction, TransferId, TransferItem, TransferState};
+use hoprs_transfer::{
+    ConflictPolicy, Event, EventKind, ResolveAction, TransferId, TransferItem, TransferState,
+};
 
 use super::files::RequestId;
 use crate::backend::{ControlOp, TransferSnapshot};
@@ -47,6 +49,8 @@ pub struct QueueRow {
     pub item: TransferItem,
     /// From the last `Progress`; 0 once the item is no longer active.
     pub bytes_per_sec: u64,
+    /// A `Progress` came for it since the last snapshot.
+    pub progressed: bool,
 }
 
 impl QueueRow {
@@ -71,10 +75,40 @@ pub enum RowAction {
     Resume,
     Cancel,
     Retry,
-    /// A failed row: out of the Failed tab (the engine keeps the item as it is).
-    Skip,
+    /// A failed row: out of the Failed tab, into Done (the engine keeps the item failed;
+    /// Retry still works from there).
+    Dismiss,
     /// The answers to a conflict.
     Resolve(ResolveAction),
+}
+
+/// What a row's status column shows.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RowStatus<'a> {
+    /// A refused control, or the failure itself: in red.
+    Error(&'a Error),
+    /// A file of known size: the bar, the percent and the speed.
+    Progress {
+        fraction: f32,
+        bytes_per_sec: u64,
+    },
+    /// A file of unknown size: the bytes so far and the speed.
+    Bytes {
+        done: u64,
+        bytes_per_sec: u64,
+    },
+    /// A folder whose children are being copied.
+    Transferring,
+    /// Active, but no byte has moved yet.
+    Starting,
+    Waiting,
+    Paused,
+    Conflict,
+    Done,
+    Skipped(&'a str),
+    /// A failed row the user dismissed.
+    Dismissed,
+    Cancelled,
 }
 
 /// What the queue's widgets send.
@@ -122,6 +156,10 @@ pub struct Queue {
     pub error: Option<Error>,
     /// Sites whose transfers stopped on a lost connection, until one runs again.
     paused_sites: HashMap<SiteId, Error>,
+    /// "To all" answers sent and not yet acknowledged, by item.
+    pending_policy: HashMap<TransferId, ResolveAction>,
+    /// The policy an acknowledged "to all" answer set for the rest of the session.
+    session_policy: Option<ConflictPolicy>,
     /// Transfer workers per site, from the last snapshot.
     pub workers: usize,
     /// The list's scroll offset.
@@ -150,6 +188,8 @@ impl Queue {
             row_errors: HashMap::new(),
             error: None,
             paused_sites: HashMap::new(),
+            pending_policy: HashMap::new(),
+            session_policy: None,
             workers: 0,
             offset_y: 0.0,
         }
@@ -209,7 +249,8 @@ impl Queue {
             .sum()
     }
 
-    /// Whether anything is finished (Done tab), for "Clear finished".
+    /// Whether anything is terminal (done, skipped, cancelled or failed): what "Clear
+    /// finished and failed" removes. The engine's `clear_finished` takes failed items too.
     pub fn has_finished(&self) -> bool {
         self.rows.values().any(|row| row.item.state.is_terminal())
     }
@@ -218,6 +259,7 @@ impl Queue {
         self.apply_all.contains(&id)
     }
 
+    #[cfg(test)]
     pub fn row_error(&self, id: TransferId) -> Option<&Error> {
         self.row_errors.get(&id)
     }
@@ -237,7 +279,43 @@ impl Queue {
         matches!(self.sync, Sync::Resyncing { .. })
     }
 
-    /// The buttons of a row, by its state (a skipped failure has none).
+    /// What the row's status column shows (pure: the view only draws it).
+    pub fn status<'a>(&'a self, row: &'a QueueRow) -> RowStatus<'a> {
+        let item = &row.item;
+        if let Some(error) = self.row_errors.get(&item.id) {
+            return RowStatus::Error(error);
+        }
+        match &item.state {
+            TransferState::Active if item.is_dir == Some(true) => RowStatus::Transferring,
+            TransferState::Active if item.bytes_done == 0 && !row.progressed => RowStatus::Starting,
+            TransferState::Active => match row.fraction() {
+                Some(fraction) => RowStatus::Progress {
+                    fraction,
+                    bytes_per_sec: row.bytes_per_sec,
+                },
+                None => RowStatus::Bytes {
+                    done: item.bytes_done,
+                    bytes_per_sec: row.bytes_per_sec,
+                },
+            },
+            TransferState::Queued => RowStatus::Waiting,
+            TransferState::Paused => RowStatus::Paused,
+            TransferState::AwaitingDecision(_) => RowStatus::Conflict,
+            TransferState::Failed(_) if self.skipped.contains(&item.id) => RowStatus::Dismissed,
+            TransferState::Failed(error) => RowStatus::Error(error),
+            TransferState::Done => RowStatus::Done,
+            TransferState::Skipped(reason) => RowStatus::Skipped(reason),
+            TransferState::Cancelled => RowStatus::Cancelled,
+        }
+    }
+
+    /// The conflict policy the engine now runs under for this session because an answer
+    /// went "to all" (the engine makes it its global policy), if any.
+    pub fn session_policy(&self) -> Option<ConflictPolicy> {
+        self.session_policy
+    }
+
+    /// The buttons of a row, by its state (a dismissed failure keeps Retry).
     pub fn actions(&self, row: &QueueRow) -> Vec<RowAction> {
         use RowAction::*;
         match &row.item.state {
@@ -248,14 +326,14 @@ impl Queue {
                 Resolve(ResolveAction::Resume),
                 Resolve(ResolveAction::Skip),
             ],
-            TransferState::Failed(_) if self.skipped.contains(&row.item.id) => Vec::new(),
-            TransferState::Failed(_) => vec![Retry, Skip],
+            TransferState::Failed(_) if self.skipped.contains(&row.item.id) => vec![Retry],
+            TransferState::Failed(_) => vec![Retry, Dismiss],
             TransferState::Cancelled => vec![Retry],
             TransferState::Done | TransferState::Skipped(_) => Vec::new(),
         }
     }
 
-    /// The engine operation for a button, if it takes one. Skip on a failed row only
+    /// The engine operation for a button, if it takes one. Dismiss on a failed row only
     /// moves it out of the Failed tab; a button the row doesn't show does nothing.
     pub fn control(&mut self, id: TransferId, action: RowAction) -> Option<ControlOp> {
         let row = self.rows.get(&id)?;
@@ -271,14 +349,20 @@ impl Queue {
                 self.skipped.remove(&id);
                 ControlOp::Retry
             }
-            RowAction::Skip => {
+            RowAction::Dismiss => {
                 self.skipped.insert(id);
                 return None;
             }
-            RowAction::Resolve(action) => ControlOp::Resolve(hoprs_transfer::Resolution {
-                action,
-                apply_to_all: self.apply_all.contains(&id),
-            }),
+            RowAction::Resolve(action) => {
+                let apply_to_all = self.apply_all.contains(&id);
+                if apply_to_all {
+                    self.pending_policy.insert(id, action);
+                }
+                ControlOp::Resolve(hoprs_transfer::Resolution {
+                    action,
+                    apply_to_all,
+                })
+            }
         })
     }
 
@@ -288,10 +372,25 @@ impl Queue {
         }
     }
 
-    /// The engine refused a control: shown in the row.
-    pub fn control_failed(&mut self, id: TransferId, error: Error) {
-        if self.rows.contains_key(&id) {
-            self.row_errors.insert(id, error);
+    /// A control's answer from the engine. A refusal shows in the row; an accepted
+    /// "to all" answer becomes the session's policy (the engine switched to it).
+    pub fn control_done(&mut self, id: TransferId, result: Result<(), Error>) {
+        let pending = self.pending_policy.remove(&id);
+        match result {
+            Ok(()) => {
+                if let Some(action) = pending {
+                    self.session_policy = Some(match action {
+                        ResolveAction::Overwrite => ConflictPolicy::Overwrite,
+                        ResolveAction::Resume => ConflictPolicy::Resume,
+                        ResolveAction::Skip => ConflictPolicy::Skip,
+                    });
+                }
+            }
+            Err(error) => {
+                if self.rows.contains_key(&id) {
+                    self.row_errors.insert(id, error);
+                }
+            }
         }
     }
 
@@ -355,11 +454,19 @@ impl Queue {
                     QueueRow {
                         item,
                         bytes_per_sec: 0,
+                        progressed: false,
                     },
                 )
             })
             .collect();
         let rows = &self.rows;
+        // A site with a running item is not paused (any more). The engine's snapshot
+        // doesn't say which sites are paused, so none is added here.
+        self.paused_sites.retain(|site, _| {
+            !rows
+                .values()
+                .any(|r| &r.item.spec.site == site && r.item.state == TransferState::Active)
+        });
         self.skipped.retain(|id| rows.contains_key(id));
         self.apply_all.retain(|id| rows.contains_key(id));
         self.row_errors.retain(|id, _| rows.contains_key(id));
@@ -387,6 +494,7 @@ impl Queue {
                     QueueRow {
                         item,
                         bytes_per_sec: 0,
+                        progressed: false,
                     },
                 );
             }
@@ -412,6 +520,7 @@ impl Queue {
                 for update in updates {
                     if let Some(row) = self.rows.get_mut(&update.id) {
                         row.item.bytes_done = update.bytes_done;
+                        row.progressed = true;
                         if update.total.is_some() {
                             row.item.size = update.total;
                         }
