@@ -21,3 +21,12 @@ Match User bob
 
 Match User carol
     AuthenticationMethods keyboard-interactive
+
+# dave: OpenSSH's default MaxAuthTries; no authorized keys, password works.
+Match User dave
+    MaxAuthTries 6
+
+# erin: public keys only (none authorized), so too many keys exhaust MaxAuthTries.
+Match User erin
+    AuthenticationMethods publickey
+    MaxAuthTries 3

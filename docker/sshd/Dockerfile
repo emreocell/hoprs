@@ -11,7 +11,9 @@ RUN apt-get update \
 
 RUN useradd -m -u 1001 -s /bin/bash alice && echo 'alice:alice-pass' | chpasswd \
     && useradd -m -u 1002 -s /bin/bash bob && echo 'bob:bob-pass' | chpasswd \
-    && useradd -m -u 1003 -s /bin/bash carol && echo 'carol:carol-pass' | chpasswd
+    && useradd -m -u 1003 -s /bin/bash carol && echo 'carol:carol-pass' | chpasswd \
+    && useradd -m -u 1004 -s /bin/bash dave && echo 'dave:dave-pass' | chpasswd \
+    && useradd -m -u 1005 -s /bin/bash erin && echo 'erin:erin-pass' | chpasswd
 
 COPY fixtures/id_ed25519.pub fixtures/id_ed25519_pp.pub /fixtures/
 COPY sshd/sshd_config /etc/ssh/sshd_config

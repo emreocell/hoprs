@@ -1,6 +1,11 @@
 //! Client authentication sequence: agent, key, password, keyboard-interactive.
 //!
 //! Each step runs only if the server's last reply still lists its method.
+//!
+//! Servers drop the connection after `MaxAuthTries` failures (OpenSSH default 6), counting
+//! every public key offered. So a key file whose key the agent already offered is not
+//! offered again, and when a password or keyboard-interactive step can follow, at most
+//! [`MAX_PUBLICKEY_ATTEMPTS`] public keys are offered in all.
 
 use std::fmt;
 use std::io::{self, Read};
@@ -21,10 +26,15 @@ use crate::session::map_russh_error;
 /// Default key files tried when the profile has no key, in this order.
 const DEFAULT_KEY_FILES: [&str; 3] = ["id_ed25519", "id_ecdsa", "id_rsa"];
 
-/// Most agent identities offered before moving on, so key and password still get a chance
-/// within the server's `MaxAuthTries` (10 on the test server).
+/// Most agent identities offered before moving on to the key files when no password or
+/// keyboard-interactive step can follow.
 #[cfg(unix)]
 const MAX_AGENT_IDENTITIES: usize = 5;
+
+/// Most public keys offered in all (agent identities and key files) when a password or
+/// keyboard-interactive step can follow, so that it still fits in OpenSSH's default
+/// `MaxAuthTries 6`.
+const MAX_PUBLICKEY_ATTEMPTS: usize = 4;
 
 /// Most keyboard-interactive rounds answered before giving up.
 const MAX_KBD_ROUNDS: usize = 10;
@@ -49,9 +59,28 @@ pub(crate) async fn authenticate<H: client::Handler>(
     let mut tried: Vec<&'static str> = Vec::new();
     let mut skipped: Vec<(PathBuf, SkipReason)> = Vec::new();
     let mut agent_skipped: Vec<(String, String)> = Vec::new();
+    let fallback = methods.contains(&MethodKind::Password)
+        || (cfg.auth.allow_keyboard_interactive
+            && methods.contains(&MethodKind::KeyboardInteractive));
+    let mut offers = PublicKeyOffers {
+        budget: if fallback {
+            MAX_PUBLICKEY_ATTEMPTS
+        } else {
+            usize::MAX
+        },
+        offered: Vec::new(),
+    };
 
     if cfg.auth.use_agent && methods.contains(&MethodKind::PublicKey) {
-        let done = try_agent(handle, cfg, &mut methods, &mut tried, &mut agent_skipped).await?;
+        let done = try_agent(
+            handle,
+            cfg,
+            &mut methods,
+            &mut tried,
+            &mut agent_skipped,
+            &mut offers,
+        )
+        .await?;
         if done {
             return Ok(());
         }
@@ -63,6 +92,16 @@ pub(crate) async fn authenticate<H: client::Handler>(
                 KeySource::File { passphrase, .. } => passphrase.as_ref(),
                 _ => None,
             };
+            // Checked before loading, so an encrypted key never asks for its passphrase
+            // in vain.
+            if public_key_of(&path).is_some_and(|k| offers.was_offered(&k)) {
+                skipped.push((path, SkipReason::OfferedByAgent));
+                continue;
+            }
+            if offers.budget == 0 {
+                skipped.push((path, SkipReason::AttemptLimit));
+                continue;
+            }
             let key = match load_key(&path, configured, prompter).await {
                 Ok(key) => key,
                 Err(reason) => {
@@ -70,6 +109,11 @@ pub(crate) async fn authenticate<H: client::Handler>(
                     continue;
                 }
             };
+            if offers.was_offered(key.public_key()) {
+                skipped.push((path, SkipReason::OfferedByAgent));
+                continue;
+            }
+            offers.offer(key.public_key().clone());
             note(&mut tried, MethodKind::PublicKey);
             let hash_alg = if key.algorithm().is_rsa() {
                 handle
@@ -128,6 +172,7 @@ pub(crate) async fn authenticate<H: client::Handler>(
     }
 
     if handle.is_closed() {
+        // See `session::attempt`, which tells a server disconnect apart from a lost link.
         return Err(Error::new(ErrorKind::Network, "Connection lost"));
     }
     Err(
@@ -140,8 +185,26 @@ pub(crate) async fn authenticate<H: client::Handler>(
     )
 }
 
-/// Offers the agent's identities by public key. A missing socket, an unreachable agent or an
-/// identity the agent cannot sign with is skipped, never fatal. `true` means authenticated.
+/// Public keys offered so far, and how many more may be offered.
+struct PublicKeyOffers {
+    budget: usize,
+    offered: Vec<keys::PublicKey>,
+}
+
+impl PublicKeyOffers {
+    fn was_offered(&self, key: &keys::PublicKey) -> bool {
+        self.offered.iter().any(|k| k.key_data() == key.key_data())
+    }
+
+    fn offer(&mut self, key: keys::PublicKey) {
+        self.budget = self.budget.saturating_sub(1);
+        self.offered.push(key);
+    }
+}
+
+/// Offers the agent's identities by public key, at most `MAX_AGENT_IDENTITIES` and within
+/// the attempt budget. A missing socket, an unreachable agent or an identity the agent
+/// cannot sign with is skipped, never fatal. `true` means authenticated.
 #[cfg(unix)]
 async fn try_agent<H: client::Handler>(
     handle: &mut client::Handle<H>,
@@ -149,6 +212,7 @@ async fn try_agent<H: client::Handler>(
     methods: &mut MethodSet,
     tried: &mut Vec<&'static str>,
     agent_skipped: &mut Vec<(String, String)>,
+    offers: &mut PublicKeyOffers,
 ) -> Result<bool> {
     use russh::keys::agent::AgentIdentity;
     use russh::keys::agent::client::AgentClient;
@@ -173,10 +237,14 @@ async fn try_agent<H: client::Handler>(
         let AgentIdentity::PublicKey { key, .. } = identity else {
             continue;
         };
-        if offered == MAX_AGENT_IDENTITIES || !methods.contains(&MethodKind::PublicKey) {
+        if offered == MAX_AGENT_IDENTITIES
+            || offers.budget == 0
+            || !methods.contains(&MethodKind::PublicKey)
+        {
             break;
         }
         offered += 1;
+        offers.offer(key.clone());
         note_name(tried, "agent");
         let hash_alg = if key.algorithm().is_rsa() {
             handle
@@ -216,6 +284,7 @@ async fn try_agent<H: client::Handler>(
     _: &mut MethodSet,
     _: &mut Vec<&'static str>,
     _: &mut Vec<(String, String)>,
+    _: &mut PublicKeyOffers,
 ) -> Result<bool> {
     Ok(false)
 }
@@ -381,6 +450,8 @@ enum SkipReason {
     Unparseable,
     PassphraseCancelled,
     WrongPassphrase,
+    OfferedByAgent,
+    AttemptLimit,
 }
 
 impl fmt::Display for SkipReason {
@@ -391,6 +462,8 @@ impl fmt::Display for SkipReason {
             Self::Unparseable => "unparseable",
             Self::PassphraseCancelled => "passphrase cancelled",
             Self::WrongPassphrase => "wrong passphrase",
+            Self::OfferedByAgent => "already offered by the agent",
+            Self::AttemptLimit => "public key attempt limit reached",
         })
     }
 }
@@ -437,6 +510,14 @@ async fn load_key(
         }
         Err(_) => Err(SkipReason::Unparseable),
     }
+}
+
+/// The public key of an OpenSSH private key file, read without decrypting it. `None` for
+/// other formats or unreadable files.
+fn public_key_of(path: &Path) -> Option<keys::PublicKey> {
+    let text = read_key_text(path).ok()?;
+    let key = PrivateKey::from_openssh(text.as_bytes()).ok()?;
+    Some(key.public_key().clone())
 }
 
 /// Reads the key file into a buffer sized up front (no reallocation) and wiped on drop.

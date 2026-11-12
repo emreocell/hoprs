@@ -15,7 +15,7 @@
 //! ends; no polling of `Handle::is_closed` is needed.
 
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 
@@ -438,6 +438,7 @@ async fn attempt(
     let russh_config = Arc::new(russh_config(cfg, &known));
     let (lost_tx, lost) = oneshot::channel();
     let (verified_tx, mut verified) = oneshot::channel();
+    let server_disconnected = Arc::new(AtomicBool::new(false));
     let handler = ClientHandler {
         host: cfg.host.clone(),
         port: cfg.port,
@@ -445,6 +446,7 @@ async fn attempt(
         prompter: prompter.clone(),
         pinned: pinned.cloned(),
         verified: Some(verified_tx),
+        server_disconnected: server_disconnected.clone(),
         lost: Some(lost_tx),
     };
     let mut handle = client::connect_stream(russh_config, stream, handler)
@@ -455,12 +457,28 @@ async fn attempt(
         Error::new(ErrorKind::Protocol, "SSH protocol error")
             .with_detail("the server key was never verified")
     })?;
-    crate::auth::authenticate(&mut handle, cfg, prompter.as_ref()).await?;
+    if let Err(e) = crate::auth::authenticate(&mut handle, cfg, prompter.as_ref()).await {
+        if e.kind == ErrorKind::Network && handle.is_closed() {
+            // `lost` resolves once the handler has seen the end of the session.
+            let _ = tokio::time::timeout(Duration::from_secs(1), lost).await;
+            if server_disconnected.load(Ordering::SeqCst) {
+                return Err(closed_during_auth());
+            }
+        }
+        return Err(e);
+    }
     Ok(Connection {
         handle,
         host_key,
         lost,
     })
+}
+
+/// The server sent `DISCONNECT` while we authenticated: most likely `MaxAuthTries` was
+/// reached, which retrying cannot fix.
+fn closed_during_auth() -> Error {
+    Error::new(ErrorKind::Auth, "Authentication failed")
+        .with_detail("server closed the connection during authentication (MaxAuthTries?)")
 }
 
 /// russh client settings for `cfg`. `keepalive_max` is clamped to at least 1: russh treats
@@ -522,6 +540,8 @@ pub(crate) struct ClientHandler {
     pinned: Option<PublicKey>,
     /// Receives the server key once it is accepted.
     verified: Option<oneshot::Sender<PublicKey>>,
+    /// Set when the server ended the session with `DISCONNECT`.
+    server_disconnected: Arc<AtomicBool>,
     lost: Option<oneshot::Sender<Error>>,
 }
 
@@ -573,13 +593,16 @@ impl client::Handler for ClientHandler {
         reason: client::DisconnectReason<Self::Error>,
     ) -> std::result::Result<(), Self::Error> {
         let (error, result) = match reason {
-            client::DisconnectReason::ReceivedDisconnect(info) => (
-                Error::new(ErrorKind::Network, "Connection lost").with_detail(format!(
-                    "server disconnected ({:?}): {}",
-                    info.reason_code, info.message
-                )),
-                Ok(()),
-            ),
+            client::DisconnectReason::ReceivedDisconnect(info) => {
+                self.server_disconnected.store(true, Ordering::SeqCst);
+                (
+                    Error::new(ErrorKind::Network, "Connection lost").with_detail(format!(
+                        "server disconnected ({:?}): {}",
+                        info.reason_code, info.message
+                    )),
+                    Ok(()),
+                )
+            }
             client::DisconnectReason::Error(HandlerError(e)) => (e.clone(), Err(HandlerError(e))),
         };
         if let Some(lost) = self.lost.take() {

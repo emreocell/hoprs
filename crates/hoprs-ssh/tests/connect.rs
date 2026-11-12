@@ -362,7 +362,8 @@ async fn slow_prompt_does_not_time_out() {
 }
 
 #[cfg(unix)]
-/// A private `ssh-agent` holding one fixture key; killed on drop.
+/// A private `ssh-agent` holding one fixture key (and optionally generated ones); killed on
+/// drop.
 struct TestAgent {
     child: Child,
     socket: PathBuf,
@@ -399,16 +400,37 @@ impl TestAgent {
         let copy = agent._dir.path().join("key");
         fs::copy(fixture(key), &copy).unwrap();
         fs::set_permissions(&copy, fs::Permissions::from_mode(0o600)).unwrap();
+        agent.add(&copy);
+        agent
+    }
+
+    /// Generates `n` fresh ed25519 keys (authorized nowhere) and adds them after the
+    /// fixture key, in order.
+    fn add_generated(&self, n: usize) {
+        for i in 0..n {
+            let path = self._dir.path().join(format!("extra{i}"));
+            let status = Command::new("ssh-keygen")
+                .args(["-q", "-N", "", "-t", "ed25519", "-f"])
+                .arg(&path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .status()
+                .expect("ssh-keygen is required for the agent tests");
+            assert!(status.success(), "ssh-keygen failed: {status}");
+            self.add(&path);
+        }
+    }
+
+    fn add(&self, path: &Path) {
         let status = Command::new("ssh-add")
-            .arg(&copy)
-            .env("SSH_AUTH_SOCK", &agent.socket)
+            .arg(path)
+            .env("SSH_AUTH_SOCK", &self.socket)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
             .expect("ssh-add is required for the agent tests");
         assert!(status.success(), "ssh-add failed: {status}");
-        agent
     }
 }
 
@@ -467,6 +489,82 @@ async fn order_is_agent_key_password() {
     connect(cfg, &p).await.unwrap().disconnect().await;
     assert_eq!(p.calls().password, 0);
     assert_eq!(p.calls().passphrase, 0, "key step must not run after agent");
+}
+
+/// Against `MaxAuthTries 6` (OpenSSH's default), six agent keys plus a key file the agent
+/// already offered must still leave room for the password.
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn many_agent_keys_leave_room_for_password() {
+    let dir = trusted_dir().await;
+    let agent = TestAgent::start("id_ed25519");
+    agent.add_generated(5);
+    let mut cfg = test_config("dave", dir.path());
+    cfg.auth.use_agent = true;
+    cfg.auth.agent_socket = Some(agent.socket.clone());
+    cfg.auth.key = KeySource::File {
+        path: fixture("id_ed25519"),
+        passphrase: None,
+    };
+    cfg.auth.password = Some(SecretString::from("dave-pass"));
+    let p = Arc::new(ScriptedPrompter::new());
+    connect(cfg, &p).await.unwrap().disconnect().await;
+}
+
+/// A key file whose key the agent already offered is not offered again.
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn key_file_offered_by_agent_is_skipped() {
+    let dir = trusted_dir().await;
+    let agent = TestAgent::start("id_ed25519");
+    let mut cfg = test_config("dave", dir.path());
+    cfg.auth.use_agent = true;
+    cfg.auth.agent_socket = Some(agent.socket.clone());
+    cfg.auth.key = KeySource::File {
+        path: fixture("id_ed25519"),
+        passphrase: None,
+    };
+    cfg.auth.password = Some(SecretString::from("not-daves-pass"));
+    let p = Arc::new(ScriptedPrompter::new());
+    let e = assert_err(
+        connect(cfg, &p).await,
+        ErrorKind::Auth,
+        "Authentication failed",
+    );
+    let detail = e.detail.unwrap_or_default();
+    assert!(
+        detail.contains(&format!(
+            "skipped {}: already offered by the agent",
+            fixture("id_ed25519").display()
+        )),
+        "{detail}"
+    );
+}
+
+/// A server that drops the connection during authentication (here: `MaxAuthTries 3`, no
+/// password step) is an authentication failure, not a network error.
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn max_auth_tries_disconnect_is_auth_error() {
+    let dir = trusted_dir().await;
+    let agent = TestAgent::start("id_ed25519");
+    agent.add_generated(4);
+    let mut cfg = test_config("erin", dir.path());
+    cfg.auth.use_agent = true;
+    cfg.auth.agent_socket = Some(agent.socket.clone());
+    let p = Arc::new(ScriptedPrompter::new());
+    let e = assert_err(
+        connect(cfg, &p).await,
+        ErrorKind::Auth,
+        "Authentication failed",
+    );
+    assert_eq!(
+        e.detail.as_deref(),
+        Some("server closed the connection during authentication (MaxAuthTries?)")
+    );
 }
 
 #[tokio::test]
