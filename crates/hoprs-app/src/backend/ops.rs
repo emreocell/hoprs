@@ -112,23 +112,34 @@ async fn delete_targets(
 
 /// Renames `from` to `to` unless something is already at `to`: local `rename`, SFTP
 /// posix-rename and FTP `RNTO` would all replace it silently, and the pane's listing may
-/// be stale. A change of case only (`a.txt` → `A.txt`) is let through, since on a
-/// case-insensitive disk `to` is `from` itself.
+/// be stale.
+///
+/// A change of case only (`a.txt` → `A.txt`) can't use `stat(to)`: on a case-insensitive
+/// disk it finds `from` itself. Instead the parent is listed and only an entry named
+/// exactly `to` counts: a case-sensitive server with both `a.txt` and `A.txt` refuses,
+/// while a case-insensitive disk lists only the source's own casing and lets it through.
 pub async fn rename_no_replace(
     fs: &dyn RemoteFs,
     from: &RemotePath,
     to: &RemotePath,
 ) -> Result<()> {
-    let same_but_case = from.as_str().to_lowercase() == to.as_str().to_lowercase();
-    if !same_but_case {
+    let exists = if from == to {
+        false
+    } else if from.as_str().to_lowercase() == to.as_str().to_lowercase() {
+        let name = to.file_name().unwrap_or_default();
+        let parent = to.parent().unwrap_or_else(RemotePath::root);
+        fs.list(&parent).await?.iter().any(|e| e.name == name)
+    } else {
         match fs.stat(to).await {
-            Ok(_) => {
-                return Err(Error::new(ErrorKind::Conflict, "Already exists")
-                    .with_detail(to.as_str().to_owned()));
-            }
-            Err(e) if e.kind == ErrorKind::NotFound => {}
+            Ok(_) => true,
+            Err(e) if e.kind == ErrorKind::NotFound => false,
             Err(e) => return Err(e),
         }
+    };
+    if exists {
+        return Err(
+            Error::new(ErrorKind::Conflict, "Already exists").with_detail(to.as_str().to_owned())
+        );
     }
     fs.rename(from, to).await
 }
@@ -270,10 +281,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fs.read_file("/c.txt").as_deref(), Some(&b"a"[..]));
-        // A change of case only is not "something else at the target".
+        // A change of case only with no exact-case sibling goes through (MemFs is case
+        // sensitive; a case-insensitive disk lists only the source's casing, same result).
         rename_no_replace(&fs, &p("/c.txt"), &p("/C.txt"))
             .await
             .unwrap();
         assert!(fs.read_file("/C.txt").is_some());
+        assert!(fs.read_file("/c.txt").is_none());
+
+        // A case-sensitive server with both casings: the exact-case sibling is kept.
+        fs.add_file("/x.txt", b"lower", t);
+        fs.add_file("/X.txt", b"upper", t);
+        let err = rename_no_replace(&fs, &p("/x.txt"), &p("/X.txt"))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Conflict);
+        assert_eq!(fs.read_file("/X.txt").as_deref(), Some(&b"upper"[..]));
+        assert_eq!(fs.read_file("/x.txt").as_deref(), Some(&b"lower"[..]));
     }
 }

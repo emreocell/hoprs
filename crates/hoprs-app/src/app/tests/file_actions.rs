@@ -914,3 +914,56 @@ async fn partial_delete_reports_its_count() {
     assert_eq!(strings::deleted_then(1, "x"), "Deleted 1 item, then: x");
     assert_eq!(entry_names(&app, 0, Side::Remote), ["tree"], "what is left");
 }
+
+/// A case-only rename onto an exact-case sibling the pane never listed is refused (a
+/// case-sensitive server would replace it); without one it goes through.
+#[tokio::test]
+async fn case_only_rename_never_overwrites() {
+    let a = srv_site();
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    let remote = fake.remote_fs(&a.id);
+    remote.add_file("/srv/a.txt", b"mine", SystemTime::UNIX_EPOCH);
+    remote.add_file("/srv/b.txt", b"b", SystemTime::UNIX_EPOCH);
+    fake.local_fs().add_dir("/home/me");
+    let (mut app, tab) = remote_focused(&fake, &a).await;
+    // "A.txt" appears after the listing.
+    remote.add_file("/srv/A.txt", b"theirs", SystemTime::UNIX_EPOCH);
+
+    let rename = |app: &mut App, row: usize, to: &str| {
+        app.update(pane_msg(tab, Side::Remote, PaneMsg::Click(row)));
+        app.update(key(FileKey::Rename));
+        app.update(pane_msg(tab, Side::Remote, PaneMsg::EditChanged(to.into())));
+        app.update(key(FileKey::Enter))
+    };
+    let row = row_of(&app, Side::Remote, "a.txt");
+    let commit = rename(&mut app, row, "A.txt");
+    assert_eq!(
+        file_ops(&commit).len(),
+        1,
+        "the cached listing let it through"
+    );
+    settle(&mut app, &fake, run_file_ops(&fake, &commit).await).await;
+    let error = app.tabs[0]
+        .remote
+        .action_error
+        .clone()
+        .expect("refused inline");
+    assert_eq!(error.kind, ErrorKind::Conflict);
+    assert_eq!(
+        remote.read_file("/srv/A.txt").as_deref(),
+        Some(&b"theirs"[..])
+    );
+    assert_eq!(
+        remote.read_file("/srv/a.txt").as_deref(),
+        Some(&b"mine"[..])
+    );
+
+    // No exact-case sibling: "b.txt" → "B.txt" goes through.
+    let row = row_of(&app, Side::Remote, "b.txt");
+    let commit = rename(&mut app, row, "B.txt");
+    settle(&mut app, &fake, run_file_ops(&fake, &commit).await).await;
+    assert_eq!(app.tabs[0].remote.action_error, None);
+    assert_eq!(remote.read_file("/srv/B.txt").as_deref(), Some(&b"b"[..]));
+    assert!(remote.read_file("/srv/b.txt").is_none());
+    assert_eq!(selected_names(&app, Side::Remote), ["B.txt"]);
+}
