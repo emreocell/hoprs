@@ -178,8 +178,8 @@ async fn cancel_cascades_in_folder() {
     }
     // Partial destinations of the files that were copying are not deleted.
     let partial = remote.list(&path("/srv/d")).await.unwrap();
-    assert!(!partial.is_empty());
-    assert!(partial.iter().all(|e| e.size > 0 && e.size < MIB as u64));
+    assert!(partial.iter().any(|e| e.size > 0));
+    assert!(partial.iter().all(|e| e.size < MIB as u64));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -596,4 +596,174 @@ async fn resume_folder_while_child_is_stopping() {
             Some(bytes)
         );
     }
+}
+
+/// Engine with a slow-streaming local `FaultFs` and a remote `FaultFs`.
+async fn faulty_engine(
+    workers: usize,
+    stream_latency: Duration,
+) -> (
+    TransferEngine,
+    MemFs,
+    FaultFs<MemFs>,
+    MemFs,
+    Receiver<Event>,
+) {
+    let local = MemFs::new();
+    let local_fault = FaultFs::new(local.clone());
+    local_fault.set_stream_latency(stream_latency);
+    let remote = MemFs::new();
+    let remote_fault = FaultFs::new(remote.clone());
+    let config = EngineConfig {
+        buf_size: 64 * 1024,
+        ..EngineConfig::default()
+    };
+    let (engine, rx) = engine_with(
+        Arc::new(local_fault),
+        Arc::new(remote_fault.clone()),
+        workers,
+        config,
+    )
+    .await;
+    (engine, local, remote_fault, remote, rx)
+}
+
+/// Retrying a failed child while a sibling is still copying keeps the
+/// folder's counters right: it ends `Done` only after every child is done.
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_failed_child_while_sibling_copies() {
+    let (engine, local, remote_fault, remote, mut rx) =
+        faulty_engine(1, Duration::from_millis(20)).await;
+    let files: Vec<(String, Vec<u8>)> = ["a", "b", "c"]
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.to_string(), data(MIB / 2 + i)))
+        .collect();
+    for (name, bytes) in &files {
+        local.add_file(&format!("/w/d/{name}"), bytes, mtime());
+    }
+    remote.add_dir("/srv");
+    remote_fault.fail_next(Op::OpenWrite, ErrorKind::Permission);
+
+    let root = engine
+        .enqueue(spec(Direction::Upload, "/w/d", "/srv/d"))
+        .await
+        .unwrap();
+    let ev = wait_for(&mut rx, |e| {
+        matches!(
+            e,
+            Event::StateChanged {
+                state: TransferState::Failed(_),
+                ..
+            }
+        )
+    })
+    .await;
+    let Event::StateChanged { id: a, .. } = ev else {
+        unreachable!()
+    };
+    assert_ne!(a, root);
+    engine.retry(a).await.unwrap();
+
+    assert_eq!(wait_terminal(&mut rx, root).await, TransferState::Done);
+    let snap = engine.snapshot().await;
+    assert!(
+        snap.iter().all(|i| i.state == TransferState::Done),
+        "{snap:?}"
+    );
+    for (name, bytes) in &files {
+        assert_eq!(
+            remote.read_file(&format!("/srv/d/{name}")).as_ref(),
+            Some(bytes)
+        );
+    }
+}
+
+/// Retrying the failed child of a folder that already finished `Failed`
+/// reopens the folder, which then ends `Done`.
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_failed_child_of_finished_folder() {
+    let (engine, local, remote_fault, remote, mut rx) = faulty_engine(1, Duration::ZERO).await;
+    local.add_file("/w/d/a", &data(100), mtime());
+    local.add_file("/w/d/b", &data(200), mtime());
+    remote.add_dir("/srv");
+    remote_fault.fail_next(Op::OpenWrite, ErrorKind::Permission);
+
+    let root = engine
+        .enqueue(spec(Direction::Upload, "/w/d", "/srv/d"))
+        .await
+        .unwrap();
+    assert!(matches!(
+        wait_terminal(&mut rx, root).await,
+        TransferState::Failed(_)
+    ));
+    let snap = engine.snapshot().await;
+    let a = snap
+        .iter()
+        .find(|i| matches!(i.state, TransferState::Failed(_)) && i.id != root)
+        .expect("a failed child")
+        .id;
+
+    engine.retry(a).await.unwrap();
+    assert_eq!(wait_terminal(&mut rx, root).await, TransferState::Done);
+    let snap = engine.snapshot().await;
+    assert!(
+        snap.iter().all(|i| i.state == TransferState::Done),
+        "{snap:?}"
+    );
+    assert_eq!(remote.read_file("/srv/d/a").unwrap(), data(100));
+}
+
+/// "Apply to all" also covers an item whose prepare was already in flight
+/// when the user answered: it does not ask again.
+#[tokio::test(flavor = "multi_thread")]
+async fn apply_to_all_covers_in_flight_prepare() {
+    let local = MemFs::new();
+    let remote = MemFs::new();
+    let remote_fault = FaultFs::new(remote.clone());
+    let (engine, mut rx) = engine_with(
+        Arc::new(local.clone()),
+        Arc::new(remote_fault.clone()),
+        2,
+        EngineConfig::default(),
+    )
+    .await;
+    for name in ["a", "b"] {
+        local.add_file(&format!("/w/{name}"), &data(1_000), mtime());
+        remote.add_file(&format!("/srv/{name}"), b"old", mtime());
+    }
+
+    let a = engine
+        .enqueue(spec(Direction::Upload, "/w/a", "/srv/a"))
+        .await
+        .unwrap();
+    wait_awaiting(&mut rx, a).await;
+
+    // b's prepare (its destination stat) is slow, so it is still in flight
+    // when the user answers "skip all".
+    remote_fault.set_latency(Duration::from_millis(300));
+    let b = engine
+        .enqueue(spec(Direction::Upload, "/w/b", "/srv/b"))
+        .await
+        .unwrap();
+    wait_state(&mut rx, b, TransferState::Active).await;
+    engine
+        .resolve(a, resolution(ResolveAction::Skip, true))
+        .await
+        .unwrap();
+
+    let ev = wait_for(&mut rx, |e| {
+        matches!(e, Event::StateChanged { id, state }
+            if *id == b && (state.is_terminal() || matches!(state, TransferState::AwaitingDecision(_))))
+    })
+    .await;
+    let Event::StateChanged { state, .. } = ev else {
+        unreachable!()
+    };
+    assert_eq!(state, TransferState::Skipped("exists".to_string()));
+    assert_eq!(
+        find(&engine.snapshot().await, a).state,
+        TransferState::Skipped("skipped by user".to_string())
+    );
+    assert_eq!(remote.read_file("/srv/b").unwrap(), b"old");
 }

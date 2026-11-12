@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::worker::{self, Prepared, Route, WorkerMsg};
 use super::{EngineConfig, Event, Resolution, ResolveAction, SiteEndpoints};
-use crate::conflict::Decision;
+use crate::conflict::{Decision, decide};
 use crate::copy::CopyOutcome;
 use crate::model::{
     ConflictInfo, ConflictPolicy, TransferId, TransferItem, TransferSpec, TransferState,
@@ -418,7 +418,7 @@ impl Actor {
     }
 
     /// Makes the expanded directory `id` `Active` again, counting its
-    /// current children. Finishes it right away if none is pending.
+    /// current `children`. Finishes it right away if none is pending.
     fn reactivate_dir(&mut self, id: TransferId, children: &[TransferId]) {
         let (mut pending, mut failed) = (0, 0);
         for child in children.iter().filter_map(|c| self.items.get(c)) {
@@ -428,11 +428,14 @@ impl Actor {
                 _ => {}
             }
         }
-        if pending == 0 {
-            self.finish_dir(id, failed);
+        // Through `Active`, so that leaving and re-entering a terminal state
+        // is reported to the parent directory.
+        if !self.transition(id, TransferState::Active) {
             return;
         }
-        if self.transition(id, TransferState::Active) {
+        if pending == 0 {
+            self.finish_dir(id, failed);
+        } else {
             self.dirs.insert(id, DirProgress { pending, failed });
         }
     }
@@ -501,6 +504,7 @@ impl Actor {
             }
         };
         let mut finished_child_of = None;
+        let mut reopened_child_of = None;
         if let Some(item) = self.items.get_mut(&id) {
             let was_queued = item.state == TransferState::Queued;
             let is_queued = state == TransferState::Queued;
@@ -515,6 +519,10 @@ impl Actor {
             if !item.state.is_terminal() && state.is_terminal() {
                 finished_child_of = item.parent;
             }
+            if item.state.is_terminal() && !state.is_terminal() {
+                let was_failed = matches!(item.state, TransferState::Failed(_));
+                reopened_child_of = item.parent.map(|p| (p, was_failed));
+            }
             item.state = state.clone();
         }
         let failed = matches!(state, TransferState::Failed(_));
@@ -522,7 +530,33 @@ impl Actor {
         if let Some(parent) = finished_child_of {
             self.child_finished(parent, failed);
         }
+        if let Some((parent, was_failed)) = reopened_child_of {
+            self.child_reopened(parent, was_failed);
+        }
         applied
+    }
+
+    /// Accounts for a child of `dir` that left a terminal state (retried):
+    /// a counting `dir` waits for it again; a finished `dir` is reopened,
+    /// which recurses to its own parent. A paused `dir` recounts its
+    /// children when it is resumed.
+    fn child_reopened(&mut self, dir: TransferId, was_failed: bool) {
+        if let Some(progress) = self.dirs.get_mut(&dir) {
+            progress.pending += 1;
+            if was_failed {
+                progress.failed = progress.failed.saturating_sub(1);
+            }
+            return;
+        }
+        if self.items.get(&dir).is_some_and(|d| d.state.is_terminal()) {
+            let children: Vec<TransferId> = self
+                .items
+                .values()
+                .filter(|i| i.parent == Some(dir))
+                .map(|i| i.id)
+                .collect();
+            self.reactivate_dir(dir, &children);
+        }
     }
 
     /// Accounts for a child of `dir` that reached a terminal state. When it
@@ -632,8 +666,10 @@ impl Actor {
                     (_, Some(Intent::Pause)) => {
                         // Recorded as paused from `Queued`, so a resume
                         // applies the global policy (no copy to continue).
-                        let _ = self.store.set_state(id, &TransferState::Queued);
-                        self.release(id, TransferState::Paused);
+                        match self.store.set_state(id, &TransferState::Queued) {
+                            Ok(()) => self.release(id, TransferState::Paused),
+                            Err(e) => self.release(id, TransferState::Failed(e)),
+                        }
                     }
                     (_, Some(Intent::Cancel)) => self.release(id, TransferState::Cancelled),
                     (_, Some(Intent::Requeue)) => self.release(id, TransferState::Queued),
@@ -759,6 +795,14 @@ impl Actor {
             item.is_dir = Some(false);
             item.size = Some(src.size);
         }
+        // Prepared under `Ask` before the user chose a policy for all
+        // conflicts: apply that policy instead of asking again.
+        let decision = match decision {
+            Decision::Ask if self.policy != ConflictPolicy::Ask => {
+                decide(self.policy, &src, dst.as_ref())
+            }
+            decision => decision,
+        };
         match decision {
             Decision::Write { offset } => {
                 let cancel = self
