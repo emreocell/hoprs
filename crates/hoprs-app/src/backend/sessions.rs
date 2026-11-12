@@ -39,12 +39,25 @@ use super::vault::VaultHandle;
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SessionId(pub u64);
 
+/// A connected session.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Connected {
+    pub session: SessionId,
+    /// The keyring could not be reached when the session's secrets were read, so its
+    /// stored password or passphrase (if any) was not used: the UI says so, which tells a
+    /// locked keyring apart from no stored secret.
+    pub keyring_unavailable: bool,
+}
+
 /// A failed connect. `session` is `Some` when the session exists (its first connection
 /// failed): [`SessionManager::reconnect`] retries it, [`SessionManager::close`] drops it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConnectError {
     pub session: Option<SessionId>,
     pub error: Error,
+    /// As in [`Connected::keyring_unavailable`]: the keyring was unreachable when the
+    /// secrets were read (a likely reason for an authentication failure).
+    pub keyring_unavailable: bool,
 }
 
 impl ConnectError {
@@ -52,6 +65,7 @@ impl ConnectError {
         Self {
             session: None,
             error,
+            keyring_unavailable: false,
         }
     }
 }
@@ -89,6 +103,8 @@ struct Entry {
     site: SiteId,
     link: Link,
     prompter: SessionPrompter,
+    /// The secrets were read while the keyring was unreachable.
+    keyring_unavailable: bool,
     /// Set once the first connection is up and the site is registered.
     remote: Option<Arc<dyn RemoteFs>>,
     watcher: Option<JoinHandle<()>>,
@@ -188,7 +204,7 @@ impl SessionManager {
     }
 
     /// Connects the saved site `site` (see the module docs).
-    pub async fn connect(&self, site: SiteId) -> std::result::Result<SessionId, ConnectError> {
+    pub async fn connect(&self, site: SiteId) -> std::result::Result<Connected, ConnectError> {
         let (_, result) = self
             .connect_many(vec![site])
             .await
@@ -204,7 +220,7 @@ impl SessionManager {
     pub async fn connect_many(
         &self,
         sites: Vec<SiteId>,
-    ) -> Vec<(SiteId, std::result::Result<SessionId, ConnectError>)> {
+    ) -> Vec<(SiteId, std::result::Result<Connected, ConnectError>)> {
         let read = match self.inner.vault.sites_with_secrets(sites.clone()).await {
             Ok(read) => read,
             Err(error) => {
@@ -228,30 +244,37 @@ impl SessionManager {
         &self,
         site: Site,
         secrets: SiteSecrets,
-    ) -> std::result::Result<SessionId, ConnectError> {
+    ) -> std::result::Result<Connected, ConnectError> {
         let site_lock = self.site_lock(&site.id);
         let _turn = site_lock.lock().await;
         let existing = lock(&self.inner.sessions)
             .iter()
             .find(|(_, entry)| entry.site == site.id)
-            .map(|(id, entry)| (*id, entry.link.clone()));
-        let id = match existing {
-            Some((id, link)) => {
+            .map(|(id, entry)| (*id, entry.link.clone(), entry.keyring_unavailable));
+        // An existing session keeps the secrets (and the flag) it was started with.
+        let (id, keyring_unavailable) = match existing {
+            Some((id, link, keyring_unavailable)) => {
                 // Does nothing unless `Disconnected`.
                 link.reconnect_now().await;
-                id
+                (id, keyring_unavailable)
             }
-            None => self.start(&site, secrets),
+            None => (self.start(&site, &secrets), secrets.keyring_unavailable),
         };
-        self.ready(id).await.map_err(|error| ConnectError {
-            session: Some(id),
-            error,
-        })?;
-        Ok(id)
+        match self.ready(id).await {
+            Ok(()) => Ok(Connected {
+                session: id,
+                keyring_unavailable,
+            }),
+            Err(error) => Err(ConnectError {
+                session: Some(id),
+                error,
+                keyring_unavailable,
+            }),
+        }
     }
 
     /// Starts the connection of `site` under a new session id.
-    fn start(&self, site: &Site, secrets: SiteSecrets) -> SessionId {
+    fn start(&self, site: &Site, secrets: &SiteSecrets) -> SessionId {
         let id = SessionId(self.inner.next_id.fetch_add(1, Ordering::SeqCst));
         let prompter = self
             .inner
@@ -260,27 +283,41 @@ impl SessionManager {
         let config = &self.inner.config;
         let link = match site.protocol {
             Protocol::Ssh => {
-                let mut ssh = ssh_config(site, &secrets);
+                let mut ssh = ssh_config(site, secrets);
                 if let Some(known_hosts) = &config.known_hosts {
                     ssh.known_hosts = known_hosts.clone();
                 }
                 Link::Ssh(SshSession::start(ssh, Arc::new(prompter.clone())))
             }
             Protocol::Ftp | Protocol::FtpsExplicit | Protocol::FtpsImplicit => {
-                let mut ftp = ftp_config(site, &secrets);
+                let mut ftp = ftp_config(site, secrets);
                 ftp.transfer_connections = config.workers.clamp(1, 8);
                 Link::Ftp(FtpFs::start(ftp, Arc::new(prompter.clone())))
             }
         };
-        self.insert(id, site.id.clone(), link, prompter);
+        self.insert(
+            id,
+            site.id.clone(),
+            link,
+            prompter,
+            secrets.keyring_unavailable,
+        );
         id
     }
 
-    fn insert(&self, id: SessionId, site: SiteId, link: Link, prompter: SessionPrompter) {
+    fn insert(
+        &self,
+        id: SessionId,
+        site: SiteId,
+        link: Link,
+        prompter: SessionPrompter,
+        keyring_unavailable: bool,
+    ) {
         let entry = Entry {
             site,
             link,
             prompter,
+            keyring_unavailable,
             remote: None,
             watcher: None,
         };
@@ -340,17 +377,23 @@ impl SessionManager {
         if lock(&self.inner.paused_by_close).remove(&site) {
             engine.resume_site(site.clone()).await;
         }
-        let watcher = spawn_site_watcher(engine.clone(), site, link.connection());
+        let watcher = spawn_site_watcher(engine.clone(), site.clone(), link.connection());
 
-        let mut sessions = lock(&self.inner.sessions);
-        let Some(entry) = sessions.get_mut(&id) else {
-            // Closed meanwhile: `close` pauses the site once it gets the site's lock.
-            watcher.abort();
-            return Err(closed());
-        };
-        entry.remote = Some(remote);
-        entry.watcher = Some(watcher);
-        Ok(())
+        {
+            let mut sessions = lock(&self.inner.sessions);
+            if let Some(entry) = sessions.get_mut(&id) {
+                entry.remote = Some(remote);
+                entry.watcher = Some(watcher);
+                return Ok(());
+            }
+        }
+        // Closed while this registered the site (`close` may have paused it before the
+        // registration and resume above): undo, so the site ends paused. No other session
+        // of the site can exist meanwhile: this runs under the site's lock.
+        watcher.abort();
+        lock(&self.inner.paused_by_close).insert(site.clone());
+        engine.pause_site(site).await;
+        Err(closed())
     }
 
     /// Retries a session whose connection is `Disconnected` (first connection included)
@@ -367,32 +410,32 @@ impl SessionManager {
         self.ready(id).await
     }
 
-    /// Closes a session: refuses its prompts, disconnects it, aborts its site watcher and
-    /// pauses its site in the engine (the next connect of the site resumes it). Unknown
-    /// ids are ignored.
+    /// Closes a session: refuses its prompts, aborts its site watcher, pauses its site in
+    /// the engine (the next connect of the site resumes it), then disconnects and drops
+    /// the connection. Unknown ids are ignored.
+    ///
+    /// It does not take the site's lock: a connect waiting on this session's prompts or
+    /// first connection holds it, and closing is what ends that wait. A `ready` still
+    /// running for this session notices the close and pauses the site again itself.
     pub async fn close(&self, id: SessionId) {
-        let Some(entry) = lock(&self.inner.sessions).remove(&id) else {
-            return;
+        let (entry, replaced) = {
+            let mut sessions = lock(&self.inner.sessions);
+            let Some(entry) = sessions.remove(&id) else {
+                return;
+            };
+            let replaced = sessions.values().any(|other| other.site == entry.site);
+            (entry, replaced)
         };
-        // Not under the site's lock: a connect waiting on a prompt holds it, and this is
-        // what ends that wait.
         entry.prompter.cancel();
-        entry.link.disconnect().await;
         if let Some(watcher) = &entry.watcher {
             watcher.abort();
         }
-
-        // Once any connect of this site has finished, pause the site unless a new
-        // session of it has taken over (and registered its own endpoints).
-        let site_lock = self.site_lock(&entry.site);
-        let _turn = site_lock.lock().await;
-        let replaced = lock(&self.inner.sessions)
-            .values()
-            .any(|other| other.site == entry.site);
         if !replaced {
-            self.inner.engine.pause_site(entry.site.clone()).await;
             lock(&self.inner.paused_by_close).insert(entry.site.clone());
+            self.inner.engine.pause_site(entry.site.clone()).await;
         }
+        entry.link.disconnect().await;
+        drop(entry);
     }
 
     /// The remote filesystem of a connected session.
@@ -434,7 +477,7 @@ impl SessionManager {
     ) -> Result<SessionId> {
         let id = SessionId(self.inner.next_id.fetch_add(1, Ordering::SeqCst));
         let prompter = self.inner.broker.session(id, site.clone(), "test", 0);
-        self.insert(id, site.clone(), Link::Fake(conn), prompter);
+        self.insert(id, site.clone(), Link::Fake(conn), prompter, false);
         lock(&self.inner.test_remotes).insert(id, remote);
         let site_lock = self.site_lock(&site);
         let _turn = site_lock.lock().await;
@@ -485,8 +528,12 @@ mod tests {
     }
 
     fn fixture() -> Fixture {
+        fixture_with(Arc::new(MemoryStore::new()))
+    }
+
+    fn fixture_with(store: Arc<dyn hoprs_vault::SecretStore>) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
-        let vault = Vault::open(dir.path(), Arc::new(MemoryStore::new())).unwrap();
+        let vault = Vault::open(dir.path(), store).unwrap();
         let vault = VaultHandle::new(vault);
         let broker = PromptBroker::new(vault.clone());
         let engine = TransferEngine::start(
@@ -638,6 +685,128 @@ mod tests {
         answer.abort();
     }
 
+    /// Answers every dialog with the password `pw` (and refuses the rest).
+    fn answer_passwords(broker: &PromptBroker) -> (JoinHandle<()>, Arc<Mutex<Vec<PromptKind>>>) {
+        let mut events = broker.take_events().unwrap();
+        let broker = broker.clone();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let task = tokio::spawn({
+            let seen = seen.clone();
+            async move {
+                while let Some(event) = events.recv().await {
+                    if let BrokerEvent::Request(r) = event {
+                        seen.lock().unwrap().push(r.kind);
+                        broker.answer(r.id, PromptAnswer::Secret(SecretString::from("pw")));
+                    }
+                }
+            }
+        });
+        (task, seen)
+    }
+
+    /// A locked keyring is reported with the connect result, error path included, and
+    /// the stored password falls back to the prompt. A site with no stored secret is not
+    /// marked.
+    #[tokio::test]
+    async fn keyring_unavailable_reaches_the_caller() {
+        let store = Arc::new(super::super::vault::tests::LockedStore::default());
+        let f = fixture_with(store.clone());
+        let mut locked = Site::new("locked", "127.0.0.1", "u", Protocol::Ftp);
+        locked.port = 1;
+        let mut plain = Site::new("plain", "127.0.0.1", "u", Protocol::Ftp);
+        plain.port = 1;
+        f.vault.upsert_site(locked.clone()).await.unwrap();
+        f.vault.upsert_site(plain.clone()).await.unwrap();
+        let id = locked.id.clone();
+        f.vault
+            .call(move |v| v.set_secret(&id, SecretKind::Password, &SecretString::from("x")))
+            .await
+            .unwrap();
+        let (answer, seen) = answer_passwords(&f.broker);
+
+        let results = f
+            .manager
+            .connect_many(vec![locked.id.clone(), plain.id.clone()])
+            .await;
+        let locked_err = results[0].1.as_ref().unwrap_err();
+        assert!(locked_err.keyring_unavailable, "{locked_err:?}");
+        assert!(locked_err.session.is_some());
+        let plain_err = results[1].1.as_ref().unwrap_err();
+        assert!(!plain_err.keyring_unavailable, "{plain_err:?}");
+        // Both asked for the password instead; the keyring was tried once.
+        let passwords = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|k| matches!(k, PromptKind::Password { .. }))
+            .count();
+        assert_eq!(passwords, 2);
+        assert_eq!(store.gets.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Connecting the kept session again reports the flag it was started with.
+        let again = f.manager.connect(locked.id.clone()).await.unwrap_err();
+        assert_eq!(again.session, locked_err.session);
+        assert!(again.keyring_unavailable);
+        answer.abort();
+    }
+
+    /// `close` pauses the site in the engine (nothing new is dispatched to the dead
+    /// connection) and the next connect of the site resumes it.
+    #[tokio::test]
+    async fn close_pauses_the_site_and_reconnecting_resumes_it() {
+        use hoprs_transfer::{Direction, TransferSpec, TransferState};
+
+        let f = fixture();
+        let site = SiteId::new();
+        let remote = MemFs::new();
+        remote.add_file("/f.txt", b"data", std::time::SystemTime::UNIX_EPOCH);
+        let local = tempfile::tempdir().unwrap();
+        let local_path = RemotePath::new(&format!(
+            "{}/f.txt",
+            local.path().to_string_lossy().replace('\\', "/")
+        ));
+        let Ok(local_path) = local_path else {
+            return; // A drive-letter path: LocalFs("/") cannot address it (Windows).
+        };
+        let (state, _) = watch::channel(ConnectionState::Connected);
+        let conn: Arc<dyn Connection> = Arc::new(FakeConn { state });
+        let id = f
+            .manager
+            .attach(site.clone(), conn.clone(), Arc::new(remote.clone()))
+            .await
+            .unwrap();
+        f.manager.close(id).await;
+
+        let engine = f.manager.inner.engine.clone();
+        let item = engine
+            .enqueue(TransferSpec {
+                site: site.clone(),
+                direction: Direction::Download,
+                local: local_path,
+                remote: RemotePath::new("/f.txt").unwrap(),
+            })
+            .await
+            .unwrap();
+        let state_of = |items: Vec<hoprs_transfer::TransferItem>| {
+            items.into_iter().find(|i| i.id == item).unwrap().state
+        };
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(state_of(engine.snapshot().await), TransferState::Queued);
+
+        f.manager
+            .attach(site, conn, Arc::new(remote))
+            .await
+            .unwrap();
+        for _ in 0..200 {
+            if state_of(engine.snapshot().await) == TransferState::Done {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(state_of(engine.snapshot().await), TransferState::Done);
+        assert_eq!(std::fs::read(local.path().join("f.txt")).unwrap(), b"data");
+    }
+
     /// Answers every dialog: trusts host keys and certificates, refuses the rest. Returns
     /// the task and the kinds of the dialogs it saw.
     fn answer_prompts(broker: &PromptBroker) -> (JoinHandle<()>, Arc<Mutex<Vec<PromptKind>>>) {
@@ -675,7 +844,9 @@ mod tests {
         f.vault.upsert_site(site.clone()).await.unwrap();
         let (prompts, seen) = answer_prompts(&f.broker);
 
-        let id = f.manager.connect(site.id.clone()).await.unwrap();
+        let connected = f.manager.connect(site.id.clone()).await.unwrap();
+        assert!(!connected.keyring_unavailable);
+        let id = connected.session;
         let entries = f
             .manager
             .remote(id)
@@ -695,7 +866,8 @@ mod tests {
         assert!(matches!(seen[0], PromptKind::HostKey { .. }), "{seen:?}");
         assert!(f.dir.path().join("known_hosts").exists());
         // Connecting again returns the same session.
-        assert_eq!(f.manager.connect(site.id.clone()).await.unwrap(), id);
+        let again = f.manager.connect(site.id.clone()).await.unwrap();
+        assert_eq!(again.session, id);
 
         let state = f.manager.state(id).unwrap();
         f.manager.close(id).await;
@@ -723,7 +895,9 @@ mod tests {
             .unwrap();
         let (prompts, seen) = answer_prompts(&f.broker);
 
-        let id = f.manager.connect(site.id.clone()).await.unwrap();
+        let connected = f.manager.connect(site.id.clone()).await.unwrap();
+        assert!(!connected.keyring_unavailable);
+        let id = connected.session;
         let entries = f
             .manager
             .remote(id)

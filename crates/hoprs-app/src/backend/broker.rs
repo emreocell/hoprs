@@ -358,9 +358,11 @@ struct Leader<'a> {
 }
 
 impl Leader<'_> {
-    /// Ends the turn and hands `accept` to the waiters.
+    /// Ends the turn and hands `accept` to the waiters. Both happen under the state lock:
+    /// no request can see the entry gone before the waiters have the answer.
     fn finish(mut self, accept: bool) {
-        self.broker.state().decisions.remove(self.key);
+        let mut state = self.broker.state();
+        state.decisions.remove(self.key);
         if let Some(answer) = self.answer.take() {
             answer.send_replace(Some(accept));
         }

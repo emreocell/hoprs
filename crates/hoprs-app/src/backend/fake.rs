@@ -1,11 +1,20 @@
 //! An in-memory [`BackendApi`] for the UI tests of Tasks 5–11 (ruling R3: test-only).
 //!
 //! Sites and workspaces live in memory. Every site has its own [`MemFs`] as its remote
-//! side, and one shared `MemFs` stands for the local disk. `connect` follows a script per
-//! site (default: success). Transfers, controls, answers and closes are recorded, and
-//! dialogs are pushed by the test with [`FakeBackend::push_prompt`].
+//! side, and one shared `MemFs` stands for the local disk. Transfers, controls, answers and
+//! closes are recorded, and dialogs are pushed by the test with
+//! [`FakeBackend::push_prompt`].
+//!
+//! Connects follow the real [`SessionManager`](super::SessionManager) rules:
+//! - one session per site: connecting a site with an open session returns that session;
+//! - each connect attempt takes the next scripted outcome of the site (default success);
+//! - a failed first connect keeps the session (its id comes with the error); connecting
+//!   the site again, or `reconnect`, retries it with the next outcome, while a connected
+//!   session is returned as is;
+//! - with the keyring "locked" ([`FakeBackend::lock_keyring`]), sessions of sites with a
+//!   stored secret report `keyring_unavailable`.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -18,7 +27,8 @@ use hoprs_transfer::{TransferId, TransferSpec};
 use tokio::sync::mpsc;
 
 use super::{
-    BackendApi, BrokerEvent, ConnectError, ControlOp, PromptAnswer, PromptId, SessionId, Side,
+    BackendApi, BrokerEvent, ConnectError, Connected, ControlOp, PromptAnswer, PromptId, SessionId,
+    Side,
 };
 
 /// See the module docs.
@@ -37,6 +47,11 @@ struct State {
     /// Scripted outcomes of the next connects of a site; empty means success.
     connects: HashMap<SiteId, VecDeque<std::result::Result<(), Error>>>,
     sessions: HashMap<SessionId, SiteId>,
+    /// Sessions whose connection is up (the others failed and wait for a retry).
+    connected: HashSet<SessionId>,
+    /// Sessions started while the keyring was locked.
+    keyring_unavailable: HashSet<SessionId>,
+    keyring_locked: bool,
     remotes: HashMap<SiteId, MemFs>,
     local: MemFs,
     enqueued: Vec<TransferSpec>,
@@ -86,6 +101,12 @@ impl FakeBackend {
             .push_back(Err(error));
     }
 
+    /// From now on, new sessions of sites with a stored secret report the keyring as
+    /// unavailable.
+    pub fn lock_keyring(&self) {
+        self.state().keyring_locked = true;
+    }
+
     /// The remote side of `site` (shared with the backend: fill it in the test).
     pub fn remote_fs(&self, site: &SiteId) -> MemFs {
         self.state()
@@ -124,6 +145,23 @@ impl FakeBackend {
     /// The site a session belongs to, while it is open.
     pub fn session_site(&self, session: SessionId) -> Option<SiteId> {
         self.state().sessions.get(&session).cloned()
+    }
+
+    /// One connection attempt of `session`: a connected session stays connected;
+    /// otherwise the site's next scripted outcome decides.
+    fn attempt(state: &mut State, session: SessionId, site: &SiteId) -> Result<()> {
+        if state.connected.contains(&session) {
+            return Ok(());
+        }
+        let outcome = state
+            .connects
+            .get_mut(site)
+            .and_then(VecDeque::pop_front)
+            .unwrap_or(Ok(()));
+        if outcome.is_ok() {
+            state.connected.insert(session);
+        }
+        outcome
     }
 
     fn not_found(what: &str) -> Error {
@@ -182,31 +220,51 @@ impl BackendApi for FakeBackend {
         Ok(())
     }
 
-    async fn connect(&self, site: SiteId) -> std::result::Result<SessionId, ConnectError> {
+    async fn connect(&self, site: SiteId) -> std::result::Result<Connected, ConnectError> {
         let mut state = self.state();
-        if !state.sites.iter().any(|s| s.id == site) {
+        let Some(found) = state.sites.iter().find(|s| s.id == site) else {
             return Err(ConnectError {
                 session: None,
                 error: Self::not_found("Unknown site"),
+                keyring_unavailable: false,
             });
-        }
-        let id = SessionId(self.next_session.fetch_add(1, Ordering::SeqCst));
-        state.sessions.insert(id, site.clone());
-        state.remotes.entry(site.clone()).or_default();
-        let scripted = state.connects.get_mut(&site).and_then(VecDeque::pop_front);
-        match scripted {
-            Some(Err(error)) => Err(ConnectError {
+        };
+        let has_secret = found.has_password || found.has_key_passphrase;
+        let existing = state
+            .sessions
+            .iter()
+            .find(|(_, s)| **s == site)
+            .map(|(id, _)| *id);
+        let id = match existing {
+            Some(id) => id,
+            None => {
+                let id = SessionId(self.next_session.fetch_add(1, Ordering::SeqCst));
+                state.sessions.insert(id, site.clone());
+                state.remotes.entry(site.clone()).or_default();
+                if state.keyring_locked && has_secret {
+                    state.keyring_unavailable.insert(id);
+                }
+                id
+            }
+        };
+        let keyring_unavailable = state.keyring_unavailable.contains(&id);
+        match Self::attempt(&mut state, id, &site) {
+            Ok(()) => Ok(Connected {
+                session: id,
+                keyring_unavailable,
+            }),
+            Err(error) => Err(ConnectError {
                 session: Some(id),
                 error,
+                keyring_unavailable,
             }),
-            Some(Ok(())) | None => Ok(id),
         }
     }
 
     async fn connect_many(
         &self,
         sites: Vec<SiteId>,
-    ) -> Vec<(SiteId, std::result::Result<SessionId, ConnectError>)> {
+    ) -> Vec<(SiteId, std::result::Result<Connected, ConnectError>)> {
         let mut out = Vec::new();
         for site in sites {
             let result = self.connect(site.clone()).await;
@@ -216,20 +274,20 @@ impl BackendApi for FakeBackend {
     }
 
     async fn reconnect(&self, session: SessionId) -> Result<()> {
-        let site = self
-            .session_site(session)
+        let mut state = self.state();
+        let site = state
+            .sessions
+            .get(&session)
+            .cloned()
             .ok_or_else(|| Self::not_found("Unknown session"))?;
-        let scripted = self
-            .state()
-            .connects
-            .get_mut(&site)
-            .and_then(VecDeque::pop_front);
-        scripted.unwrap_or(Ok(()))
+        Self::attempt(&mut state, session, &site)
     }
 
     async fn close(&self, session: SessionId) {
         let mut state = self.state();
         if state.sessions.remove(&session).is_some() {
+            state.connected.remove(&session);
+            state.keyring_unavailable.remove(&session);
             state.closed.push(session);
         }
     }
@@ -309,8 +367,8 @@ mod tests {
         assert_eq!(err.error.kind, ErrorKind::Auth);
         let failed = err.session.unwrap();
         assert!(fake.reconnect(failed).await.is_ok());
-        let id = fake.connect(site.id.clone()).await.unwrap();
-        assert!(id > failed);
+        let id = fake.connect(site.id.clone()).await.unwrap().session;
+        assert_eq!(id, failed, "the kept session was retried, not replaced");
         let missing = fake.connect(SiteId::new()).await.unwrap_err();
         assert_eq!(missing.session, None);
 
@@ -356,11 +414,60 @@ mod tests {
         // Sites and workspaces.
         let results = fake.connect_many(vec![site.id.clone()]).await;
         assert!(results[0].1.is_ok());
+        fake.close(results[0].1.as_ref().unwrap().session).await;
         fake.save_workspace(ws.clone()).await.unwrap();
         assert_eq!(fake.workspaces().await.unwrap().len(), 1);
         fake.delete_site(site.id.clone()).await.unwrap();
         assert!(fake.workspaces().await.unwrap()[0].sites.is_empty());
         fake.delete_workspace(ws.id).await.unwrap();
         assert!(fake.sites().await.unwrap().is_empty());
+    }
+
+    /// The fake follows the real `SessionManager` rules (see the module docs).
+    #[tokio::test]
+    async fn fake_backend_follows_session_manager_rules() {
+        let site = Site::new("s", "h", "u", Protocol::Ftp);
+        let mut secret = Site::new("p", "h", "u", Protocol::Ftp);
+        secret.has_password = true;
+        let fake = FakeBackend::new()
+            .with_site(site.clone())
+            .with_site(secret.clone());
+
+        // A second connect of an open site returns the same session, without an attempt.
+        let first = fake.connect(site.id.clone()).await.unwrap();
+        assert!(!first.keyring_unavailable);
+        fake.fail_next_connect(&site.id, Error::new(ErrorKind::Network, "down"));
+        assert_eq!(fake.connect(site.id.clone()).await.unwrap(), first);
+        // The scripted failure is still pending: a closed site starts a new session.
+        fake.close(first.session).await;
+        let err = fake.connect(site.id.clone()).await.unwrap_err();
+        let kept = err
+            .session
+            .expect("a failed first connect keeps the session");
+        assert!(kept > first.session);
+
+        // Connecting again retries the kept session; so does reconnect.
+        fake.fail_next_connect(&site.id, Error::new(ErrorKind::Network, "still down"));
+        let again = fake.connect(site.id.clone()).await.unwrap_err();
+        assert_eq!(again.session, Some(kept));
+        assert_eq!(again.error.message, "still down");
+        assert!(fake.reconnect(kept).await.is_ok());
+        assert_eq!(fake.connect(site.id.clone()).await.unwrap().session, kept);
+        // A connected session's reconnect consumes no script.
+        fake.fail_next_connect(&site.id, Error::new(ErrorKind::Network, "unused"));
+        assert!(fake.reconnect(kept).await.is_ok());
+        assert!(fake.reconnect(SessionId(999)).await.is_err());
+
+        // A locked keyring is reported for sites with a stored secret, on both paths.
+        fake.lock_keyring();
+        let ok = fake.connect(secret.id.clone()).await.unwrap();
+        assert!(ok.keyring_unavailable);
+        fake.close(ok.session).await;
+        fake.fail_next_connect(&secret.id, Error::new(ErrorKind::Auth, "Denied"));
+        let err = fake.connect(secret.id.clone()).await.unwrap_err();
+        assert!(err.keyring_unavailable);
+        let other = Site::new("o", "h", "u", Protocol::Ftp);
+        let fake = fake.with_site(other.clone());
+        assert!(!fake.connect(other.id).await.unwrap().keyring_unavailable);
     }
 }

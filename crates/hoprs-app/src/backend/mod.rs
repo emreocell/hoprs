@@ -23,7 +23,7 @@ use hoprs_vault::{SecretStore, Vault};
 use tokio::sync::mpsc;
 
 pub use broker::{BrokerEvent, PromptAnswer, PromptBroker, PromptId};
-pub use sessions::{ConnectError, SessionConfig, SessionId, SessionManager};
+pub use sessions::{ConnectError, Connected, SessionConfig, SessionId, SessionManager};
 pub use vault::{LazyKeyringStore, VaultHandle};
 
 /// Which pane of a files tab.
@@ -55,13 +55,13 @@ pub trait BackendApi: Send + Sync {
     async fn delete_workspace(&self, id: WorkspaceId) -> Result<()>;
 
     /// Connects a saved site; see [`SessionManager::connect`].
-    async fn connect(&self, site: SiteId) -> std::result::Result<SessionId, ConnectError>;
+    async fn connect(&self, site: SiteId) -> std::result::Result<Connected, ConnectError>;
     /// Connects several sites, reading their secrets as one batch ("Open workspace"); see
     /// [`SessionManager::connect_many`].
     async fn connect_many(
         &self,
         sites: Vec<SiteId>,
-    ) -> Vec<(SiteId, std::result::Result<SessionId, ConnectError>)>;
+    ) -> Vec<(SiteId, std::result::Result<Connected, ConnectError>)>;
     /// Retries a `Disconnected` session; see [`SessionManager::reconnect`].
     async fn reconnect(&self, session: SessionId) -> Result<()>;
     async fn close(&self, session: SessionId);
@@ -185,14 +185,14 @@ impl BackendApi for Backend {
         self.vault.remove_workspace(id).await
     }
 
-    async fn connect(&self, site: SiteId) -> std::result::Result<SessionId, ConnectError> {
+    async fn connect(&self, site: SiteId) -> std::result::Result<Connected, ConnectError> {
         self.sessions.connect(site).await
     }
 
     async fn connect_many(
         &self,
         sites: Vec<SiteId>,
-    ) -> Vec<(SiteId, std::result::Result<SessionId, ConnectError>)> {
+    ) -> Vec<(SiteId, std::result::Result<Connected, ConnectError>)> {
         self.sessions.connect_many(sites).await
     }
 
