@@ -16,8 +16,13 @@ fn repo_root() -> PathBuf {
 const PROJECT: &str = "hoprs-test";
 
 fn compose(args: &[&str]) -> ExitStatus {
+    compose_with_env(&[], args)
+}
+
+fn compose_with_env(env: &[(&str, &str)], args: &[&str]) -> ExitStatus {
     let file = repo_root().join("docker/compose.yml");
     Command::new("docker")
+        .envs(env.iter().copied())
         .arg("compose")
         .arg("-p")
         .arg(PROJECT)
@@ -33,6 +38,15 @@ fn compose(args: &[&str]) -> ExitStatus {
 pub fn docker(args: &[&str]) {
     let status = compose(args);
     assert!(status.success(), "docker compose {args:?} failed: {status}");
+}
+
+/// Like [`docker`], with extra environment variables for compose's `${VAR}` interpolation.
+pub fn docker_with_env(env: &[(&str, &str)], args: &[&str]) {
+    let status = compose_with_env(env, args);
+    assert!(
+        status.success(),
+        "docker compose {args:?} with {env:?} failed: {status}"
+    );
 }
 
 /// Kills every per-connection sshd process, dropping client connections.

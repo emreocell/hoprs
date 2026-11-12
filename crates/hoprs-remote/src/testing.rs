@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use hoprs_core::Result;
-use hoprs_ssh::testing::docker;
+use hoprs_ssh::testing::{docker, docker_with_env};
 use secrecy::SecretString;
 
 use crate::ftp::session::{Control, open_control};
@@ -36,6 +36,40 @@ pub fn ftps_fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// `SHA256:`-prefixed fingerprint of `server.pem` (from `server.fingerprint`).
+pub fn server_fingerprint() -> String {
+    let hex = std::fs::read_to_string(ftps_fixture("server.fingerprint"))
+        .expect("read server.fingerprint");
+    format!("SHA256:{}", hex.trim())
+}
+
+/// While alive, the `ftps-implicit` service serves the unrelated self-signed `other.pem`.
+/// Dropping it recreates the service with `server.pem` again.
+pub struct OtherCertificate(());
+
+impl OtherCertificate {
+    /// Recreates `ftps-implicit` with `FTPS_CERT=other` and waits until it is healthy.
+    pub fn serve() -> Self {
+        // The guard exists first, so a failed or partial recreate is still undone.
+        let guard = Self(());
+        recreate_implicit("other");
+        guard
+    }
+}
+
+impl Drop for OtherCertificate {
+    fn drop(&mut self) {
+        recreate_implicit("server");
+    }
+}
+
+fn recreate_implicit(cert: &str) {
+    docker_with_env(
+        &[("FTPS_CERT", cert)],
+        &["up", "-d", "--force-recreate", "--wait", "ftps-implicit"],
+    );
+}
+
 /// Kills every vsftpd session process in both FTP services, dropping client connections.
 /// The listener (the oldest vsftpd process) survives. Having no session is not an error.
 pub fn kill_ftp_sessions() {
@@ -49,8 +83,11 @@ pub fn kill_ftp_sessions() {
 /// A control connection opened by `open_control`, for tests that check the login itself.
 pub struct TestControl(Control);
 
-/// Runs the crate's `open_control`.
-pub async fn open_test_control(cfg: &FtpConfig, prompter: &dyn FtpPrompter) -> Result<TestControl> {
+/// Runs the crate's `open_control`; an accepted certificate is pinned in `cfg`.
+pub async fn open_test_control(
+    cfg: &mut FtpConfig,
+    prompter: &dyn FtpPrompter,
+) -> Result<TestControl> {
     open_control(cfg, prompter).await.map(TestControl)
 }
 
@@ -65,6 +102,15 @@ impl TestControl {
 
     pub fn has_utf8(&self) -> bool {
         self.0.has_utf8
+    }
+
+    /// Names in the current directory (`NLST`), over a data connection.
+    pub async fn nlst(&mut self) -> Result<Vec<String>> {
+        self.0
+            .stream
+            .nlst(None)
+            .await
+            .map_err(|e| crate::ftp::errors::map_ftp_error(e, "NLST"))
     }
 
     /// Sends a raw command and returns the reply's code and text, whatever the code.

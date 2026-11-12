@@ -49,6 +49,17 @@ pub struct ScriptedFtpPrompter {
     password_calls: AtomicU32,
     certificate_calls: AtomicU32,
     pins: Mutex<Vec<(String, u16, String)>>,
+    certificates: Mutex<Vec<CertificatePrompt>>,
+}
+
+/// The arguments of one `confirm_certificate` call.
+#[cfg(feature = "testing")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertificatePrompt {
+    pub host: String,
+    pub port: u16,
+    pub fingerprint: String,
+    pub problem: CertProblem,
 }
 
 #[cfg(feature = "testing")]
@@ -68,6 +79,7 @@ impl ScriptedFtpPrompter {
             password_calls: AtomicU32::new(0),
             certificate_calls: AtomicU32::new(0),
             pins: Mutex::new(Vec::new()),
+            certificates: Mutex::new(Vec::new()),
         }
     }
 
@@ -86,6 +98,11 @@ impl ScriptedFtpPrompter {
         self.pins.lock().unwrap().clone()
     }
 
+    /// Every `confirm_certificate` call, in order.
+    pub fn certificate_prompts(&self) -> Vec<CertificatePrompt> {
+        self.certificates.lock().unwrap().clone()
+    }
+
     pub fn calls(&self) -> FtpPromptCalls {
         FtpPromptCalls {
             password: self.password_calls.load(Ordering::SeqCst),
@@ -102,8 +119,20 @@ impl FtpPrompter for ScriptedFtpPrompter {
         self.password.as_deref().map(SecretString::from)
     }
 
-    async fn confirm_certificate(&self, _: &str, _: u16, _: &str, _: &CertProblem) -> bool {
+    async fn confirm_certificate(
+        &self,
+        host: &str,
+        port: u16,
+        fingerprint: &str,
+        problem: &CertProblem,
+    ) -> bool {
         self.certificate_calls.fetch_add(1, Ordering::SeqCst);
+        self.certificates.lock().unwrap().push(CertificatePrompt {
+            host: host.to_owned(),
+            port,
+            fingerprint: fingerprint.to_owned(),
+            problem: problem.clone(),
+        });
         self.accept_certificate
     }
 
@@ -132,6 +161,15 @@ mod tests {
         );
         p.store_pin("h", 21, "SHA256:AA").await;
         assert_eq!(p.pins(), vec![("h".to_owned(), 21, "SHA256:AA".to_owned())]);
+        assert_eq!(
+            p.certificate_prompts(),
+            vec![CertificatePrompt {
+                host: "h".to_owned(),
+                port: 21,
+                fingerprint: "SHA256:AA".to_owned(),
+                problem: CertProblem::Untrusted,
+            }]
+        );
         assert_eq!(
             p.calls(),
             FtpPromptCalls {

@@ -22,9 +22,11 @@ mod sftp;
 pub mod testing;
 
 pub use connection::Connection;
-pub use ftp::{CertProblem, FtpConfig, FtpPrompter, FtpSecurity, TransferMode};
+pub use ftp::{
+    CertProblem, FtpConfig, FtpPrompter, FtpSecurity, TransferMode, fingerprint as cert_fingerprint,
+};
 #[cfg(feature = "testing")]
-pub use ftp::{FtpPromptCalls, ScriptedFtpPrompter};
+pub use ftp::{CertificatePrompt, FtpPromptCalls, ScriptedFtpPrompter};
 pub use sftp::{SftpConfig, SftpFs};
 
 pub use local::LocalFs;

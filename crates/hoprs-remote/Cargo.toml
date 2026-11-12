@@ -16,11 +16,16 @@ tokio = { workspace = true, features = ["io-util", "fs", "net", "rt", "sync", "t
 async-trait.workspace = true
 futures-util.workspace = true
 secrecy.workspace = true
-suppaftp.workspace = true
+# `deprecated` enables `connect_secure_implicit` (implicit FTPS).
+suppaftp = { workspace = true, features = ["deprecated"] }
+rustls.workspace = true
+rustls-native-certs.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["io-util", "fs", "macros", "net", "rt", "time", "test-util"] }
 tempfile.workspace = true
+rustls.workspace = true
 hoprs-ssh = { path = "../hoprs-ssh", features = ["testing"] }
 
 [[test]]
