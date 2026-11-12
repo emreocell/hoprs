@@ -1245,3 +1245,4 @@ async fn switching_tabs_restores_scroll_offsets() {
 }
 
 mod file_actions;
+mod transfers;

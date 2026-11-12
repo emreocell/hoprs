@@ -317,6 +317,12 @@ pub enum PaneMsg {
     ApplyPermissions,
     /// "Dismiss" on the error bar.
     DismissError,
+    /// Upload (local pane) / Download (remote pane): the selection to the other pane's
+    /// folder.
+    Transfer,
+    /// The pointer entered or left the pane (a drag drops on the pane under it).
+    PointerIn,
+    PointerOut,
 }
 
 /// The keys the focused pane handles.
@@ -340,6 +346,8 @@ pub enum FileKey {
     Delete,
     /// Closes the inline editor, confirmation or dialog (or the error bar).
     Escape,
+    /// Ctrl+Enter: the selection to the other pane's folder.
+    Transfer,
 }
 
 /// One file tab: a site, its connection and its two panes.
@@ -525,6 +533,8 @@ impl App {
             PaneMsg::Click(row) => {
                 if row < pane.row_count() {
                     pane.selection.click(row, mods);
+                    // A press on a row may start a drag to the other pane.
+                    self.drag = Some((tab, side));
                 }
             }
             PaneMsg::Open(row) => {
@@ -598,6 +608,14 @@ impl App {
             }
             PaneMsg::ApplyPermissions => return self.apply_permissions(index, side),
             PaneMsg::DismissError => pane.action_error = None,
+            PaneMsg::Transfer => {
+                self.tabs[index].focus = side;
+                return self.transfer_selection(index, side);
+            }
+            PaneMsg::PointerIn | PaneMsg::PointerOut => {
+                self.pointer(tab, side, matches!(msg, PaneMsg::PointerIn));
+                return Vec::new();
+            }
         }
         self.tabs[index].focus = side;
         Vec::new()
@@ -695,6 +713,7 @@ impl App {
             (None, FileKey::NewFolder) => return self.start_new_folder(index, side),
             (None, FileKey::Rename) => return self.start_rename(index, side),
             (None, FileKey::Delete) => return self.start_delete(index, side),
+            (None, FileKey::Transfer) => return self.transfer_selection(index, side),
             (None, _) => {}
         }
         if key == FileKey::SwitchPane {
@@ -735,6 +754,7 @@ impl App {
             | FileKey::NewFolder
             | FileKey::Rename
             | FileKey::Delete
+            | FileKey::Transfer
             | FileKey::Escape => unreachable!("handled above"),
         };
         pane.selection.move_to(target, shift);

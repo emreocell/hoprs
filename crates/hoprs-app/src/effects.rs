@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use futures_util::{Stream, StreamExt, stream};
 use hoprs_core::{Error, ErrorKind, RemotePath, Site, SiteId};
-use tokio::sync::mpsc;
+use hoprs_transfer::{Event, TransferSpec};
+use tokio::sync::{broadcast, mpsc};
 
 use crate::app::{Effect, FileAction, Message, ProfileOp, RequestId, TabId};
 use crate::backend::{BackendApi, SessionId, Side};
@@ -102,7 +103,60 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
                 }
             })
         }
+        Effect::Enqueue(specs) => Task::perform(enqueue_all(backend, specs), Message::Enqueued),
+        Effect::Control { id, op } => Task::perform(
+            async move { backend.control(id, op).await },
+            move |result| Message::ControlDone { id, result },
+        ),
+        Effect::SnapshotQueue(request) => Task::perform(
+            async move { backend.transfer_snapshot().await },
+            move |snapshot| Message::QueueSnapshot { request, snapshot },
+        ),
+        Effect::ClearFinished => Task::perform(
+            async move { backend.clear_finished().await },
+            Message::Cleared,
+        ),
     }
+}
+
+/// Queues each transfer in order; stops at the first failure.
+pub async fn enqueue_all(
+    backend: Arc<dyn BackendApi>,
+    specs: Vec<TransferSpec>,
+) -> Result<(), Error> {
+    for spec in specs {
+        backend.enqueue(spec).await?;
+    }
+    Ok(())
+}
+
+/// The engine's events for the queue's subscription. It subscribes at once, then starts
+/// with [`Message::QueueResync`], so the snapshot it leads to is taken after the
+/// subscription (nothing falls between the two).
+pub fn transfer_feed(backend: &dyn BackendApi) -> impl Stream<Item = Message> + Send + use<> {
+    engine_messages(backend.transfer_events())
+}
+
+/// Each event as [`Message::TransferEvent`], after a first [`Message::QueueResync`]. A
+/// receiver that lagged (it lost events) gives another `QueueResync`; the stream ends with
+/// the engine.
+pub fn engine_messages(
+    events: broadcast::Receiver<Event>,
+) -> impl Stream<Item = Message> + Send + 'static {
+    let events = stream::unfold(events, |mut events| async move {
+        match events.recv().await {
+            Ok(event) => Some((Message::TransferEvent(event), events)),
+            Err(broadcast::error::RecvError::Lagged(lost)) => {
+                tracing::warn!(
+                    lost,
+                    "the queue lagged behind the transfer engine; resyncing"
+                );
+                Some((Message::QueueResync, events))
+            }
+            Err(broadcast::error::RecvError::Closed) => None,
+        }
+    });
+    stream::once(std::future::ready(Message::QueueResync)).chain(events)
 }
 
 /// Runs one file operation: a delete's progress as it goes, then

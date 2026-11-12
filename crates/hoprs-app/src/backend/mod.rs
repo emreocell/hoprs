@@ -19,11 +19,12 @@ use async_trait::async_trait;
 use hoprs_core::{Error, RemoteEntry, RemotePath, Result, Site, SiteId, Workspace, WorkspaceId};
 use hoprs_remote::RemoteFs;
 use hoprs_transfer::{
-    EngineConfig, QueueStore, Resolution, TransferEngine, TransferId, TransferSpec,
+    EngineConfig, Event, QueueStore, Resolution, TransferEngine, TransferId, TransferItem,
+    TransferSpec,
 };
 use hoprs_vault::{SecretStore, Vault};
 use secrecy::SecretString;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 pub use broker::{BrokerEvent, PromptAnswer, PromptBroker, PromptId};
 pub use ops::DeleteTarget;
@@ -47,6 +48,18 @@ pub enum ControlOp {
     Cancel,
     Retry,
     Resolve(Resolution),
+}
+
+/// The transfer queue as the engine has it, for the queue panel to start (or start over)
+/// from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TransferSnapshot {
+    /// The `seq` of the last engine event the items reflect (see
+    /// [`TransferEngine::snapshot_with_seq`]).
+    pub seq: u64,
+    pub items: Vec<TransferItem>,
+    /// Transfer workers per site.
+    pub workers: usize,
 }
 
 /// What `effects::run` may call. Each later task adds the methods its effects need.
@@ -123,6 +136,14 @@ pub trait BackendApi: Send + Sync {
 
     async fn enqueue(&self, spec: TransferSpec) -> Result<TransferId>;
     async fn control(&self, id: TransferId, op: ControlOp) -> Result<()>;
+    /// A new receiver of the engine's events. Subscribe first, then take
+    /// [`transfer_snapshot`](Self::transfer_snapshot): events at or below its `seq` are
+    /// already in it.
+    fn transfer_events(&self) -> broadcast::Receiver<Event>;
+    async fn transfer_snapshot(&self) -> TransferSnapshot;
+    /// Removes the finished top-level items (and their children). Emits no event: take a
+    /// new snapshot afterwards.
+    async fn clear_finished(&self) -> Result<usize>;
 
     /// Delivers the UI's answer to a dialog (closing it is [`PromptAnswer::Cancel`]).
     async fn answer_prompt(&self, id: PromptId, answer: PromptAnswer);
@@ -160,6 +181,8 @@ impl BackendConfig {
 /// The real backend.
 pub struct Backend {
     profile_dir: PathBuf,
+    /// Transfer workers per site (shown by the queue).
+    workers: usize,
     vault: VaultHandle,
     engine: TransferEngine,
     sessions: SessionManager,
@@ -177,6 +200,7 @@ impl Backend {
     pub fn open(config: BackendConfig, secrets: Arc<dyn SecretStore>) -> Result<Backend> {
         let vault = VaultHandle::new(Vault::open(&config.profile_dir, secrets)?);
         let engine = start_engine(config.queue_path.as_deref());
+        let workers = config.sessions.workers;
         let broker = PromptBroker::new(vault.clone());
         let sessions = SessionManager::new(
             engine.clone(),
@@ -186,6 +210,7 @@ impl Backend {
         );
         Ok(Backend {
             profile_dir: config.profile_dir,
+            workers,
             vault,
             engine,
             sessions,
@@ -340,6 +365,24 @@ impl BackendApi for Backend {
             ControlOp::Retry => self.engine.retry(id).await,
             ControlOp::Resolve(resolution) => self.engine.resolve(id, resolution).await,
         }
+    }
+
+    fn transfer_events(&self) -> broadcast::Receiver<Event> {
+        self.engine.subscribe()
+    }
+
+    async fn transfer_snapshot(&self) -> TransferSnapshot {
+        let (seq, items) = self.engine.snapshot_with_seq().await;
+        TransferSnapshot {
+            seq,
+            items,
+            // As the engine clamps it.
+            workers: self.workers.clamp(1, 16),
+        }
+    }
+
+    async fn clear_finished(&self) -> Result<usize> {
+        self.engine.clear_finished().await
     }
 
     async fn answer_prompt(&self, id: PromptId, answer: PromptAnswer) {
@@ -533,6 +576,41 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.kind, ErrorKind::NotFound);
+    }
+
+    /// The queue's feed: events numbered after the snapshot's `seq`, the workers per site,
+    /// and "Clear finished" (no event: only a new snapshot shows it).
+    #[tokio::test]
+    async fn transfer_feed_snapshot_and_clear() {
+        use hoprs_transfer::{EventKind, TransferState};
+
+        let dir = tempfile::tempdir().unwrap();
+        let backend = open(dir.path());
+        let mut events = backend.transfer_events();
+        let empty = backend.transfer_snapshot().await;
+        assert_eq!((empty.seq, empty.items.len(), empty.workers), (0, 0, 4));
+
+        let id = backend
+            .enqueue(TransferSpec {
+                site: SiteId::new(),
+                direction: Direction::Upload,
+                local: RemotePath::new("/l").unwrap(),
+                remote: RemotePath::new("/r").unwrap(),
+            })
+            .await
+            .unwrap();
+        let added = events.recv().await.unwrap();
+        assert!(matches!(&added.kind, EventKind::Added(item) if item.id == id));
+        backend.control(id, ControlOp::Cancel).await.unwrap();
+        let cancelled = events.recv().await.unwrap();
+        assert_eq!(cancelled.seq, added.seq + 1);
+        let snapshot = backend.transfer_snapshot().await;
+        assert_eq!(snapshot.seq, cancelled.seq);
+        assert_eq!(snapshot.items[0].state, TransferState::Cancelled);
+
+        assert_eq!(backend.clear_finished().await.unwrap(), 1);
+        let after = backend.transfer_snapshot().await;
+        assert_eq!((after.seq, after.items.len()), (snapshot.seq, 0));
     }
 
     #[tokio::test]

@@ -36,14 +36,14 @@ use hoprs_core::{
     Error, ErrorKind, RemoteEntry, RemotePath, Result, Site, SiteId, Workspace, WorkspaceId,
 };
 use hoprs_remote::{MemFs, RemoteFs};
-use hoprs_transfer::{TransferId, TransferSpec};
+use hoprs_transfer::{Event, TransferId, TransferItem, TransferSpec};
 use hoprs_vault::UnreadableEntry;
 use secrecy::SecretString;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use super::{
     BackendApi, BrokerEvent, ConnectError, ConnectResult, Connected, ControlOp, DeleteTarget,
-    ProfileSnapshot, PromptAnswer, PromptId, SessionId, Side,
+    ProfileSnapshot, PromptAnswer, PromptId, SessionId, Side, TransferSnapshot,
 };
 
 /// See the module docs.
@@ -53,6 +53,8 @@ pub struct FakeBackend {
     next_transfer: AtomicI64,
     events: mpsc::UnboundedSender<BrokerEvent>,
     receiver: Mutex<Option<mpsc::UnboundedReceiver<BrokerEvent>>>,
+    /// Engine events the test sends with [`FakeBackend::send_transfer_event`].
+    transfer_events: broadcast::Sender<Event>,
 }
 
 #[derive(Default)]
@@ -78,6 +80,9 @@ struct State {
     local: MemFs,
     enqueued: Vec<TransferSpec>,
     controls: Vec<(TransferId, ControlOp)>,
+    /// What `transfer_snapshot` returns, as the test set it.
+    queue: (u64, Vec<TransferItem>),
+    clears: u32,
     answers: Vec<(PromptId, PromptAnswer)>,
     closed: Vec<SessionId>,
 }
@@ -97,6 +102,7 @@ impl FakeBackend {
             next_transfer: AtomicI64::new(1),
             events,
             receiver: Mutex::new(Some(receiver)),
+            transfer_events: broadcast::channel(16).0,
         }
     }
 
@@ -176,6 +182,21 @@ impl FakeBackend {
 
     pub fn controls(&self) -> Vec<(TransferId, ControlOp)> {
         self.state().controls.clone()
+    }
+
+    /// Sets what the next snapshots return.
+    pub fn set_queue(&self, seq: u64, items: Vec<TransferItem>) {
+        self.state().queue = (seq, items);
+    }
+
+    /// Sends `event` to every `transfer_events` receiver (16 deep: more unread events
+    /// make a receiver lag).
+    pub fn send_transfer_event(&self, event: Event) {
+        let _ = self.transfer_events.send(event);
+    }
+
+    pub fn clears(&self) -> u32 {
+        self.state().clears
     }
 
     pub fn answers(&self) -> Vec<(PromptId, PromptAnswer)> {
@@ -501,6 +522,35 @@ impl BackendApi for FakeBackend {
     async fn control(&self, id: TransferId, op: ControlOp) -> Result<()> {
         self.state().controls.push((id, op));
         Ok(())
+    }
+
+    fn transfer_events(&self) -> broadcast::Receiver<Event> {
+        self.transfer_events.subscribe()
+    }
+
+    async fn transfer_snapshot(&self) -> TransferSnapshot {
+        let (seq, items) = self.state().queue.clone();
+        TransferSnapshot {
+            seq,
+            items,
+            workers: 4,
+        }
+    }
+
+    /// Removes the terminal top-level items (and their children) from the snapshot.
+    async fn clear_finished(&self) -> Result<usize> {
+        let mut state = self.state();
+        state.clears += 1;
+        let items = &mut state.queue.1;
+        let finished: HashSet<TransferId> = items
+            .iter()
+            .filter(|i| i.parent.is_none() && i.state.is_terminal())
+            .map(|i| i.id)
+            .collect();
+        items.retain(|i| {
+            !finished.contains(&i.id) && !i.parent.is_some_and(|p| finished.contains(&p))
+        });
+        Ok(finished.len())
     }
 
     async fn answer_prompt(&self, id: PromptId, answer: PromptAnswer) {

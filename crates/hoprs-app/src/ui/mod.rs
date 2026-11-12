@@ -4,6 +4,7 @@ pub mod file_actions;
 pub mod files;
 pub mod format;
 pub mod layout;
+pub mod queue;
 pub mod sidebar;
 pub mod site_form;
 pub mod strings;

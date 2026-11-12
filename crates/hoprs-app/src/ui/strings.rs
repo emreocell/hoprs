@@ -151,10 +151,63 @@ pub const QUEUE_ACTIVE: &str = "Active";
 pub const QUEUE_QUEUED: &str = "Queued";
 pub const QUEUE_FAILED: &str = "Failed";
 pub const QUEUE_DONE: &str = "Done";
-pub const QUEUE_TOTAL_IDLE: &str = "Idle";
 pub const QUEUE_HIDE: &str = "Hide";
 pub const QUEUE_SHOW: &str = "Show";
 pub const NO_TRANSFERS: &str = "No transfers";
+pub const NO_TRANSFERS_HINT: &str =
+    "Select files and press Upload or Download, drag them to the other pane, or drop them here.";
+pub const QUEUE_LOADING: &str = "Loading transfers…";
+pub const NOTHING_ACTIVE: &str = "Nothing running";
+pub const NOTHING_QUEUED: &str = "Nothing waiting";
+pub const NOTHING_FAILED: &str = "No failures";
+pub const NOTHING_DONE: &str = "Nothing finished yet";
+pub const CLEAR_FINISHED: &str = "Clear finished";
+pub const UPLOAD_ARROW: &str = "↑";
+pub const DOWNLOAD_ARROW: &str = "↓";
+pub const WAITING_FOR_WORKER: &str = "Waiting for a worker";
+pub const STARTING: &str = "Starting…";
+pub const PAUSED: &str = "Paused";
+pub const CANCELLED: &str = "Cancelled";
+pub const TRANSFER_DONE: &str = "Done";
+pub const SKIPPED: &str = "Skipped";
+pub const FILE_EXISTS: &str = "File exists —";
+pub const OVERWRITE: &str = "Overwrite";
+pub const RESUME: &str = "Resume";
+pub const SKIP: &str = "Skip";
+pub const PAUSE: &str = "Pause";
+pub const APPLY_TO_ALL: &str = "Apply to all";
+pub const SITE_PAUSED: &str = "Paused — connection lost";
+pub const DROP_NEEDS_SITE: &str = "Open a connected site to drop files into it";
+pub const DROP_UNSUPPORTED: &str = "Can't upload this path";
+
+/// A queue tab: "Active 3".
+pub fn queue_tab(label: &str, count: usize) -> String {
+    format!("{label} {count}")
+}
+
+/// "41.7 MB/s".
+pub fn speed(bytes_per_sec: u64) -> String {
+    format!("{}/s", crate::ui::format::size(bytes_per_sec))
+}
+
+/// After the total speed: " total, 4 workers".
+pub fn total_workers(workers: usize) -> String {
+    if workers == 1 {
+        " total, 1 worker".to_owned()
+    } else {
+        format!(" total, {workers} workers")
+    }
+}
+
+/// "51%".
+pub fn percent(fraction: f32) -> String {
+    format!("{:.0}%", (fraction * 100.0).floor())
+}
+
+/// "Skipped: exists".
+pub fn skipped(reason: &str) -> String {
+    format!("{SKIPPED}: {reason}")
+}
 
 // Status bar.
 pub const NOT_CONNECTED: &str = "Not connected";
@@ -166,6 +219,9 @@ pub const PERMISSIONS: &str = "Permissions…";
 pub const KEY_NEW_FOLDER: &str = "F7";
 pub const KEY_RENAME: &str = "F2";
 pub const KEY_DELETE: &str = "Del";
+pub const UPLOAD: &str = "Upload";
+pub const DOWNLOAD: &str = "Download";
+pub const KEY_TRANSFER: &str = "Ctrl ↵";
 /// The name a new folder starts with.
 pub const NEW_FOLDER_NAME: &str = "New folder";
 pub const NAME_EMPTY: &str = "The name can't be empty";

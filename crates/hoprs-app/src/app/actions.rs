@@ -248,6 +248,14 @@ impl Tab {
             && self.pane(side).busy.is_none()
             && (side == Side::Local || self.session().is_some())
     }
+
+    /// Whether Upload (local) / Download (remote) can send the selection of `side` to
+    /// the other pane: both panes listed, connected, and something selected.
+    pub fn can_transfer(&self, side: Side) -> bool {
+        self.can_act(Side::Local)
+            && self.can_act(Side::Remote)
+            && !self.pane(side).selected_entries().is_empty()
+    }
 }
 
 impl App {

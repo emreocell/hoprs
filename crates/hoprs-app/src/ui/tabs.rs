@@ -49,12 +49,20 @@ fn session_tab<'a>(app: &'a App, index: usize, tab: &'a Tab) -> Element<'a, Mess
         .padding(Padding::from([0.0, theme::SPACE_2XS]))
         .style(theme::button_text)
         .on_press(Message::CloseTab(tab.id));
+    // The site's transfers stopped on a lost connection, until they run again.
+    let paused = app.queue.site_paused(&tab.site).map(|_| {
+        text(strings::SITE_PAUSED)
+            .size(theme::TEXT_TAG)
+            .color(p.error)
+            .wrapping(text::Wrapping::None)
+    });
     let label = row![
         text(name),
         text(tag)
             .font(theme::MONO)
             .size(theme::TEXT_TAG)
             .color(if active { p.ink_2 } else { p.muted }),
+        paused,
         close,
     ]
     .spacing(theme::SPACE_XS)

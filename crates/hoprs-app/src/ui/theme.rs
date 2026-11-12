@@ -11,8 +11,8 @@ use std::sync::LazyLock;
 use iced::border::Radius;
 use iced::widget::overlay::menu;
 use iced::widget::{
-    button, checkbox as iced_checkbox, container, pick_list as iced_pick_list, rule, scrollable,
-    text_input,
+    button, checkbox as iced_checkbox, container, pick_list as iced_pick_list, progress_bar, rule,
+    scrollable, text_input,
 };
 use iced::{Background, Border, Color, Font, Shadow, Theme, font};
 
@@ -533,6 +533,46 @@ pub fn menu(_: &Theme) -> menu::Style {
         selected_text_color: p.ink,
         selected_background: Background::Color(p.accent_wash),
         shadow: Shadow::default(),
+    }
+}
+
+/// A queue row's action (mockup `.act`): muted, ink on `paper_3` when hovered.
+pub fn queue_action(_: &Theme, status: button::Status) -> button::Style {
+    let p = palette();
+    match status {
+        button::Status::Active => flat_button(None, p.muted),
+        button::Status::Hovered | button::Status::Pressed => flat_button(Some(p.paper_3), p.ink),
+        button::Status::Disabled => flat_button(None, p.rule_2),
+    }
+}
+
+/// The queue's 4 px progress bar: the accent over a `rule` track (mockup `.track`,
+/// `.fill`).
+pub fn progress(_: &Theme) -> progress_bar::Style {
+    let p = palette();
+    progress_bar::Style {
+        background: Background::Color(p.rule),
+        bar: Background::Color(p.accent),
+        border: Border {
+            radius: Radius::from(2.0),
+            ..Border::default()
+        },
+    }
+}
+
+/// The pane a drag (or files from the system) would drop on: a 1 px accent outline.
+pub fn drop_target(active: bool) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        border: if active {
+            Border {
+                color: palette().accent,
+                width: HAIRLINE,
+                radius: Radius::default(),
+            }
+        } else {
+            Border::default()
+        },
+        ..container::Style::default()
     }
 }
 

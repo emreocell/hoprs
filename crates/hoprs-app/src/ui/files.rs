@@ -102,7 +102,11 @@ pub fn key_message(event: Event, status: Status, _: window::Id) -> Option<Messag
             modifiers,
             ..
         } => {
-            let key = file_key(named)?;
+            // Ctrl+Enter sends the selection to the other pane.
+            let key = match file_key(named)? {
+                FileKey::Enter if modifiers.command() => FileKey::Transfer,
+                key => key,
+            };
             if status == Status::Captured && key != FileKey::Escape {
                 return None;
             }
@@ -222,8 +226,21 @@ fn pane<'a>(
         .push(body)
         .width(Length::FillPortion(1))
         .height(Length::Fill);
-    // A press anywhere focuses the pane for the keyboard, without taking the click.
-    mouse_area(content).on_release(msg(PaneMsg::Focus)).into()
+    // A drag from the other pane (or files from the system, on the remote side) would
+    // drop here: a 1 px accent outline.
+    let target = app.drop_target() == Some((tab.id, side))
+        || (app.os_drag && side == Side::Remote && tab.can_act(Side::Remote));
+    let content = container(content)
+        .width(Length::FillPortion(1))
+        .height(Length::Fill)
+        .style(theme::drop_target(target));
+    // A press anywhere focuses the pane for the keyboard, without taking the click; the
+    // pointer going in and out tells a drag where it would drop.
+    mouse_area(content)
+        .on_release(msg(PaneMsg::Focus))
+        .on_enter(msg(PaneMsg::PointerIn))
+        .on_exit(msg(PaneMsg::PointerOut))
+        .into()
 }
 
 fn hrule<'a>() -> Element<'a, Message> {

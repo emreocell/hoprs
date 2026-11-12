@@ -44,7 +44,17 @@ pub fn toolbar<'a>(tab: &'a Tab, side: Side) -> Element<'a, Message> {
             .style(theme::button_text)
             .on_press_maybe(enabled.then(|| msg(pane_msg)))
     };
+    let (transfer, transfer_key) = match side {
+        Side::Local => (strings::UPLOAD, strings::KEY_TRANSFER),
+        Side::Remote => (strings::DOWNLOAD, strings::KEY_TRANSFER),
+    };
     let mut bar = row![
+        action(
+            transfer,
+            Some(transfer_key),
+            tab.can_transfer(side),
+            PaneMsg::Transfer
+        ),
         action(
             strings::NEW_FOLDER,
             Some(strings::KEY_NEW_FOLDER),
@@ -160,7 +170,7 @@ fn bar(content: Element<'_, Message>) -> Element<'_, Message> {
 }
 
 /// The operation's error: its message, its detail in mono, "Dismiss".
-fn error_bar(error: &Error, dismiss: Message) -> Element<'_, Message> {
+pub fn error_bar(error: &Error, dismiss: Message) -> Element<'_, Message> {
     let p = palette();
     let mut lines = column![text(&error.message).size(theme::TEXT_XS).color(p.error)]
         .spacing(theme::SPACE_3XS)

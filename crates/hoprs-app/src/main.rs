@@ -113,9 +113,26 @@ fn view(state: &Hoprs) -> iced::Element<'_, Message> {
     ui::layout::view(&state.app)
 }
 
-/// The keyboard for the file panes.
-fn subscription(_: &Hoprs) -> iced::Subscription<Message> {
-    iced::event::listen_with(ui::files::key_message)
+/// The keyboard for the file panes, the mouse button and dropped files (drags), and the
+/// transfer engine's events.
+fn subscription(state: &Hoprs) -> iced::Subscription<Message> {
+    iced::Subscription::batch([
+        iced::event::listen_with(ui::files::key_message),
+        iced::event::listen_with(ui::queue::pointer_message),
+        iced::Subscription::run_with(TransferFeed(Arc::clone(&state.backend)), |feed| {
+            effects::transfer_feed(feed.0.as_ref())
+        }),
+    ])
+}
+
+/// The backend, as the identity of the transfer events' subscription: there is one
+/// backend, so one subscription for the whole run.
+struct TransferFeed(Arc<dyn BackendApi>);
+
+impl std::hash::Hash for TransferFeed {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        "transfer-feed".hash(state);
+    }
 }
 
 /// Where the lock may live, in order: `$XDG_RUNTIME_DIR/hoprs/`, the

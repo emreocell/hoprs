@@ -2,13 +2,13 @@
 //! 256 px sidebar on the left and, on the right, the center, the
 //! collapsible transfer queue and the status bar.
 
-use iced::widget::{button, column, container, row, rule, space, text};
+use iced::widget::{column, container, row, rule, text};
 use iced::{Alignment, Element, Length, Padding};
 
 use crate::app::{App, Form, Message};
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
-use crate::ui::{files, sidebar, site_form, tabs, workspace_form};
+use crate::ui::{files, queue, sidebar, site_form, tabs, workspace_form};
 
 pub const SIDEBAR_WIDTH: f32 = sidebar::WIDTH;
 /// 4 px above the 36 px tabs.
@@ -20,7 +20,7 @@ pub const STATUS_HEIGHT: f32 = 26.0;
 pub const UNDERLINE: f32 = 2.0;
 
 pub fn view(app: &App) -> Element<'_, Message> {
-    let right = column![center(app), queue(app), status_bar()].width(Length::Fill);
+    let right = column![center(app), queue::view(app), status_bar()].width(Length::Fill);
     let body = row![sidebar::view(app), vrule(), right].height(Length::Fill);
 
     container(column![top_bar(app), hrule(), body])
@@ -108,77 +108,6 @@ fn center(app: &App) -> Element<'_, Message> {
         .align_x(Alignment::Center),
     )
     .center(Length::Fill)
-    .into()
-}
-
-fn queue(app: &App) -> Element<'_, Message> {
-    let tab = |label: &str, count: usize, active: bool| {
-        tab_with_underline(
-            button(text(format!("{label} {count}")))
-                .padding(0)
-                .style(theme::queue_tab(active))
-                .into(),
-            active,
-        )
-    };
-    let toggle = if app.queue_open {
-        strings::QUEUE_HIDE
-    } else {
-        strings::QUEUE_SHOW
-    };
-
-    let head = row![
-        text(strings::TRANSFERS).font(theme::INTER_SEMIBOLD),
-        tab(strings::QUEUE_ACTIVE, 0, true),
-        tab(strings::QUEUE_QUEUED, 0, false),
-        tab(strings::QUEUE_FAILED, 0, false),
-        tab(strings::QUEUE_DONE, 0, false),
-        space::horizontal(),
-        muted(strings::QUEUE_TOTAL_IDLE, theme::TEXT_SM),
-        button(text(toggle))
-            .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
-            .on_press(Message::ToggleQueue)
-            .style(theme::button_text),
-    ]
-    .spacing(theme::SPACE_LG)
-    .align_y(Alignment::Center)
-    .height(QUEUE_HEAD_HEIGHT)
-    .padding(Padding::ZERO.left(theme::SPACE_MD).right(theme::SPACE_MD));
-
-    let strong = rule::horizontal(theme::HAIRLINE).style(theme::rule_strong);
-    let queue = if app.queue_open {
-        column![
-            strong,
-            head,
-            hrule(),
-            container(muted(strings::NO_TRANSFERS, theme::TEXT_SM))
-                .padding(Padding::from([theme::SPACE_SM, theme::SPACE_MD])),
-        ]
-    } else {
-        column![strong, head]
-    };
-
-    container(queue)
-        .width(Length::Fill)
-        .max_height(QUEUE_MAX_HEIGHT)
-        .into()
-}
-
-/// A tab label over the 2 px accent underline of the active tab.
-fn tab_with_underline(label: Element<'_, Message>, active: bool) -> Element<'_, Message> {
-    let underline = container(space()).width(Length::Fill).height(UNDERLINE);
-    let underline = if active {
-        underline.style(theme::underline)
-    } else {
-        underline
-    };
-    column![
-        container(label)
-            .height(Length::Fill)
-            .align_y(Alignment::Center),
-        underline,
-    ]
-    .width(Length::Shrink)
     .into()
 }
 

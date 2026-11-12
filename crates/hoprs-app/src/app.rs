@@ -2,11 +2,16 @@
 //! changes and the [`Effect`]s for `effects::run` to perform.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use hoprs_core::{Error, RemoteEntry, RemotePath, Site, SiteId, Workspace, WorkspaceId};
+use hoprs_transfer::{Event, TransferId, TransferSpec};
 use hoprs_vault::UnreadableEntry;
 
-use crate::backend::{ConnectError, ConnectResult, Connected, ProfileSnapshot, SessionId, Side};
+use crate::backend::{
+    ConnectError, ConnectResult, Connected, ControlOp, ProfileSnapshot, SessionId, Side,
+    TransferSnapshot,
+};
 use crate::ui::sidebar;
 use crate::ui::site_form::{PasswordChange, SiteForm, SiteFormMsg, SiteFormOutcome};
 use crate::ui::workspace_form::{WorkspaceForm, WorkspaceFormMsg, WorkspaceFormOutcome};
@@ -30,9 +35,12 @@ pub enum Form {
 
 pub mod actions;
 pub mod files;
+pub mod queue;
+pub mod transfers;
 
 pub use actions::FileAction;
 pub use files::{FileKey, Mods, PaneMsg, RequestId, Tab, TabId};
+pub use queue::{Queue, QueueMsg, QueueTab, RowAction};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TabState {
@@ -76,6 +84,14 @@ pub struct App {
     pub home: Option<RemotePath>,
     /// The modifiers held now, for clicks in the file lists.
     pub mods: Mods,
+    /// The transfer queue panel.
+    pub queue: Queue,
+    /// A press on a row started a possible drag from this pane (until the button is up).
+    pub drag: Option<(TabId, Side)>,
+    /// The pane under the pointer.
+    pub pointer: Option<(TabId, Side)>,
+    /// Files from the system file manager hover the window.
+    pub os_drag: bool,
     /// The last tab or listing id handed out.
     next_id: u64,
 }
@@ -153,6 +169,32 @@ pub enum Message {
         op: RequestId,
         result: Result<(), Error>,
     },
+    /// Something in the queue panel.
+    Queue(QueueMsg),
+    /// An engine event, from the queue's subscription.
+    TransferEvent(Event),
+    /// The queue must start over from a snapshot: the subscription just started, or its
+    /// receiver lagged and lost events.
+    QueueResync,
+    /// The snapshot asked for by `request`; dropped unless it is the latest request.
+    QueueSnapshot {
+        request: RequestId,
+        snapshot: TransferSnapshot,
+    },
+    /// The transfers of one [`Effect::Enqueue`] were queued (or the first failure).
+    Enqueued(Result<(), Error>),
+    ControlDone {
+        id: TransferId,
+        result: Result<(), Error>,
+    },
+    /// "Clear finished" ended: the number of items removed.
+    Cleared(Result<usize, Error>),
+    /// A file or folder dropped on the window from the system file manager.
+    FileDropped(PathBuf),
+    /// Files from the system file manager entered (`true`) or left the window.
+    FilesHovered(bool),
+    /// The left mouse button went up, anywhere: ends a drag between panes.
+    DragEnd,
 }
 
 /// The profile change a form asked for, carried back with its result.
@@ -222,6 +264,16 @@ pub enum Effect {
         key: FileKey,
         shift: bool,
     },
+    /// Adds transfers to the engine's queue; one [`Message::Enqueued`] for all.
+    Enqueue(Vec<TransferSpec>),
+    /// Pause, resume, cancel, retry or resolve one item.
+    Control {
+        id: TransferId,
+        op: ControlOp,
+    },
+    /// Takes the queue's snapshot; comes back as [`Message::QueueSnapshot`].
+    SnapshotQueue(RequestId),
+    ClearFinished,
 }
 
 impl App {
@@ -240,6 +292,10 @@ impl App {
             sidebar_error: None,
             home: dirs::home_dir().as_deref().and_then(files::local_path),
             mods: Mods::default(),
+            queue: Queue::new(),
+            drag: None,
+            pointer: None,
+            os_drag: false,
             next_id: 0,
         }
     }
@@ -294,7 +350,7 @@ impl App {
     }
 
     /// The tab the center shows, if any.
-    fn shown_tab(&self) -> Option<TabId> {
+    pub(crate) fn shown_tab(&self) -> Option<TabId> {
         if self.form.is_some() {
             return None;
         }
@@ -381,6 +437,22 @@ impl App {
                 op,
                 result,
             } => return self.file_op_done(tab, side, op, result),
+            Message::Queue(msg) => return self.queue_msg(msg),
+            Message::TransferEvent(event) => return self.transfer_event(event),
+            Message::QueueResync => return self.resync_queue(),
+            Message::QueueSnapshot { request, snapshot } => {
+                return self.queue_snapshot(request, snapshot);
+            }
+            Message::Enqueued(result) => {
+                if let Err(error) = result {
+                    self.queue_error(error);
+                }
+            }
+            Message::ControlDone { id, result } => self.control_done(id, result),
+            Message::Cleared(result) => return self.cleared(result),
+            Message::FileDropped(path) => return self.file_dropped(&path),
+            Message::FilesHovered(hovered) => self.os_drag = hovered,
+            Message::DragEnd => return self.drag_end(),
         }
         Vec::new()
     }
@@ -453,6 +525,7 @@ impl App {
         };
         match result {
             Ok(connected) => {
+                self.queue.site_restored(&site);
                 self.tabs[index].state = TabState::Connected(connected);
                 // The remote pane lists its folder now that it can.
                 self.request_listing(index, Side::Remote)
