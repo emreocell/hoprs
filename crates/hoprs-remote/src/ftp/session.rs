@@ -2,7 +2,7 @@
 //! [`FtpSession`] (control connection, transfer connection pool, keepalive, reconnection).
 
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, PoisonError, Weak};
 use std::time::Duration;
 
@@ -307,6 +307,10 @@ struct Shared {
     idle: StdMutex<Vec<(FtpStream, u64)>>,
     /// One permit per checked-out transfer connection.
     permits: Arc<Semaphore>,
+    /// `transfer_connections`: the number of permits.
+    transfer_connections: usize,
+    /// The most transfer connections checked out at once (tests).
+    peak_checked_out: AtomicUsize,
     /// Tells the supervisor that the control connection of a generation was lost.
     lost: mpsc::UnboundedSender<(u64, Error)>,
     /// Asks the supervisor to probe the control connection now (a transfer connection was
@@ -439,6 +443,8 @@ impl FtpSession {
             reply_timeout: cfg.connect_timeout,
             command_timeout: cfg.command_timeout,
             permits: Arc::new(Semaphore::new(cfg.transfer_connections)),
+            transfer_connections: cfg.transfer_connections,
+            peak_checked_out: AtomicUsize::new(0),
             cfg: StdMutex::new(cfg),
             prompter,
             control: Mutex::new(Some((control, 1))),
@@ -566,6 +572,10 @@ impl FtpSession {
                 return Err(not_connected());
             }
         };
+        let checked_out = shared.transfer_connections - shared.permits.available_permits();
+        shared
+            .peak_checked_out
+            .fetch_max(checked_out, Ordering::Relaxed);
         let pooled = |stream, generation| PooledConn {
             stream: Some(stream),
             generation,
@@ -586,6 +596,12 @@ impl FtpSession {
             return Err(not_connected());
         }
         Ok(pooled(control.stream, generation))
+    }
+
+    /// The most transfer connections checked out at once so far.
+    #[cfg(feature = "testing")]
+    pub(crate) fn peak_transfer_connections(&self) -> usize {
+        self.inner.shared.peak_checked_out.load(Ordering::Relaxed)
     }
 
     /// [`FtpConfig::command_timeout`]: bounds a whole command, a transfer's final reply
@@ -652,6 +668,7 @@ impl PooledConn {
     }
 
     /// The session generation this connection was opened in.
+    #[cfg(feature = "testing")]
     pub fn generation(&self) -> u64 {
         self.generation
     }

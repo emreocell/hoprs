@@ -176,6 +176,7 @@ impl AsyncRead for FtpReader {
                     let failure = match ready!(Pin::new(transfer).poll_read(cx, buf)) {
                         Ok(()) if buf.filled().len() > before => return Poll::Ready(Ok(())),
                         Ok(()) => None,
+                        Err(e) if data_ended(&e) => None,
                         Err(e) => Some(e),
                     };
                     let ReadState::Reading(conn, transfer) =
@@ -345,6 +346,30 @@ impl Drop for FtpWriter {
     fn drop(&mut self) {
         if let WriteState::Open(conn, data) = std::mem::replace(&mut self.state, WriteState::Done) {
             abort_in_background(conn, data.into_inner(), self.timeouts.reply);
+        }
+    }
+}
+
+/// Whether a read error on a download's data connection is just its end: a TLS peer that
+/// closes without `close_notify` (common among FTPS servers) reads as `UnexpectedEof`. The
+/// final reply still decides whether the transfer was complete.
+fn data_ended(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::UnexpectedEof
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_close_notify_is_the_end_of_the_data() {
+        let e = io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "peer closed connection without sending TLS close_notify",
+        );
+        assert!(data_ended(&e));
+        for kind in [io::ErrorKind::ConnectionReset, io::ErrorKind::TimedOut] {
+            assert!(!data_ended(&io::Error::from(kind)), "{kind:?}");
         }
     }
 }

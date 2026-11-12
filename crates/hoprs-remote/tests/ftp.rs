@@ -8,9 +8,10 @@ use hoprs_core::{
     ConnectionState, EntryKind, Error, ErrorKind, ReconnectPolicy, RemoteEntry, RemotePath,
 };
 use hoprs_remote::testing::{
-    FTPS_IMPLICIT_PORT, FtpSession, OtherCertificate, TestControl, ftp_config, ftps_fixture,
-    kill_ftp_sessions, open_test_control, pooled_quote, server_fingerprint, session_command,
-    session_disconnect_inside_command, session_fail, session_quote,
+    FTPS_IMPLICIT_PORT, FtpSession, OtherCertificate, TestControl, ftp_config, ftp_listings,
+    ftp_peak_transfer_connections, ftps_fixture, kill_ftp_sessions, open_test_control,
+    pooled_quote, server_fingerprint, session_command, session_disconnect_inside_command,
+    session_fail, session_quote,
 };
 use hoprs_remote::{
     CertProblem, Connection, FtpConfig, FtpFs, FtpPrompter, FtpSecurity, RemoteFs,
@@ -1544,23 +1545,28 @@ async fn read_dir_is_io() {
     );
     assert_eq!(c.fs.stat(&c.at("d")).await.unwrap().kind, EntryKind::Dir);
 
-    // Special files and symlinks are never opened (a FIFO would block the server).
+    // A FIFO is never opened (it would block the server): vsftpd's `SIZE` refuses it, and
+    // so does its `STOR`.
     c.sh("mkfifo fifo && printf abc > target && ln -s target link");
-    for name in ["fifo", "link"] {
-        let p = c.at(name);
-        let r = tokio::time::timeout(Duration::from_secs(10), c.fs.open_read(&p, 0))
+    let fifo = c.at("fifo");
+    let r = tokio::time::timeout(Duration::from_secs(10), c.fs.open_read(&fifo, 0))
+        .await
+        .expect("open_read hung");
+    let e = r.err().unwrap();
+    assert_eq!(e.kind, ErrorKind::Io, "{e:?}");
+    assert!(e.message.contains("Not a regular file"), "{e:?}");
+    assert!(e.message.contains(fifo.as_str()), "{e:?}");
+    for off in [0, 1] {
+        let w = tokio::time::timeout(Duration::from_secs(10), c.fs.open_write(&fifo, off))
             .await
-            .expect("open_read hung");
-        let e = r.err().unwrap();
-        assert_eq!(e.kind, ErrorKind::Io, "{name}: {e:?}");
-        assert!(e.message.contains(p.as_str()), "{e:?}");
-        for off in [0, 1] {
-            let w = tokio::time::timeout(Duration::from_secs(10), c.fs.open_write(&p, off))
-                .await
-                .expect("open_write hung");
-            assert_eq!(w.err().unwrap().kind, ErrorKind::Io, "{name} at {off}");
-        }
+            .expect("open_write hung");
+        assert_eq!(w.err().unwrap().kind, ErrorKind::Io, "fifo at {off}");
     }
+    // Ruling R8: opens trust `SIZE`, which vsftpd answers through a symlink, so a symlink to
+    // a file is read like the file (documented on `FtpFs`).
+    assert_eq!(download(&c.fs, &c.at("link"), 0).await, b"abc");
+    let e = c.fs.open_write(&c.at("link"), 1).await.err().unwrap();
+    assert_eq!(e.kind, ErrorKind::Io, "{e:?}");
     c.sh("test -p fifo && test -L link && test \"$(cat target)\" = abc");
     assert_eq!(download(&c.fs, &c.at("target"), 0).await, b"abc");
 }
@@ -1807,4 +1813,199 @@ async fn concurrent_streams_share_pool() {
     for (p, src) in done {
         assert!(download(&c.fs, &p, 0).await == src, "{p}");
     }
+    assert_eq!(ftp_peak_transfer_connections(&c.fs), 2);
+}
+
+/// Ruling R8: opening a file never lists its directory (one `SIZE` at most), so many files in
+/// a big directory cost no listing at all.
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn opens_do_not_list_the_directory() {
+    let c = setup().await;
+    c.sh("seq -f 'e%g' 2000 | xargs touch");
+    let before = ftp_listings(&c.fs);
+    for i in 0..20u64 {
+        upload(&c.fs, &c.at(&format!("u{i}")), 0, &data(1000, 300 + i)).await;
+    }
+    for i in 0..5u64 {
+        let f = c.at(&format!("u{i}"));
+        upload(&c.fs, &f, 1000, &data(500, 400 + i)).await;
+        assert!(download(&c.fs, &f, 1200).await == data(500, 400 + i)[200..]);
+    }
+    let e = c.fs.open_write(&c.at("u5"), 999).await.err().unwrap();
+    assert_eq!(e.kind, ErrorKind::Io, "{e:?}");
+    assert_eq!(ftp_listings(&c.fs), before);
+    assert_eq!(c.fs.list(&c.work).await.unwrap().len(), 2020);
+    assert_eq!(ftp_listings(&c.fs), before + 1);
+}
+
+// Scripted transfers on a fake server: the branches that decide between success, `Io` and
+// `Network` at the end of a transfer.
+
+/// A fake FTP server for transfers. `SIZE` answers `payload.len()`; `RETR` sends `payload`,
+/// closes the data connection and replies `retr_final` (`550 Permission denied.` for a path
+/// ending in `denied`); `STOR` reads the data to its end and replies `stor_final`. Also
+/// returns how many connections it accepted.
+async fn transfer_server(
+    payload: Vec<u8>,
+    retr_final: &'static str,
+    stor_final: &'static str,
+) -> (u16, Arc<AtomicUsize>) {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let count = accepted.clone();
+    let payload = Arc::new(payload);
+    tokio::spawn(async move {
+        while let Ok((sock, _)) = listener.accept().await {
+            count.fetch_add(1, Ordering::SeqCst);
+            let payload = payload.clone();
+            tokio::spawn(async move {
+                let (read, mut write) = sock.into_split();
+                let mut lines = BufReader::new(read).lines();
+                let mut data: Option<TcpListener> = None;
+                let _ = write.write_all(b"220 fake\r\n").await;
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let (verb, arg) = line.split_once(' ').unwrap_or((&line, ""));
+                    let reply = match verb.to_ascii_uppercase().as_str() {
+                        "USER" => "331 Password please.\r\n".to_owned(),
+                        "PASS" => "230 Logged in.\r\n".to_owned(),
+                        "TYPE" => "200 Binary.\r\n".to_owned(),
+                        "NOOP" => "200 NOOP ok.\r\n".to_owned(),
+                        "ABOR" => "225 No transfer to ABOR.\r\n".to_owned(),
+                        "SIZE" => format!("213 {}\r\n", payload.len()),
+                        "REST" => "350 Restart position accepted.\r\n".to_owned(),
+                        "PASV" => {
+                            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                            let p = l.local_addr().unwrap().port();
+                            data = Some(l);
+                            format!(
+                                "227 Entering Passive Mode (127,0,0,1,{},{}).\r\n",
+                                p / 256,
+                                p % 256
+                            )
+                        }
+                        "RETR" if arg.ends_with("denied") => {
+                            data = None;
+                            "550 Permission denied.\r\n".to_owned()
+                        }
+                        "RETR" => {
+                            let l = data.take().unwrap();
+                            let _ = write.write_all(b"150 Here it comes.\r\n").await;
+                            let (mut d, _) = l.accept().await.unwrap();
+                            let _ = d.write_all(&payload).await;
+                            let _ = d.shutdown().await;
+                            drop(d);
+                            retr_final.to_owned()
+                        }
+                        "STOR" => {
+                            let l = data.take().unwrap();
+                            let _ = write.write_all(b"150 Go ahead.\r\n").await;
+                            let (mut d, _) = l.accept().await.unwrap();
+                            let _ = d.read_to_end(&mut Vec::new()).await;
+                            stor_final.to_owned()
+                        }
+                        _ => "502 Not implemented.\r\n".to_owned(),
+                    };
+                    if write.write_all(reply.as_bytes()).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    (port, accepted)
+}
+
+async fn transfer_fs(port: u16, transfer_connections: usize) -> FtpFs {
+    let mut cfg = session_config();
+    cfg.port = port;
+    cfg.keepalive_interval = Duration::from_secs(60);
+    cfg.transfer_connections = transfer_connections;
+    let p = Arc::new(ScriptedFtpPrompter::new());
+    FtpFs::connect(cfg, p as Arc<dyn FtpPrompter>)
+        .await
+        .unwrap()
+}
+
+/// Reads `path` to its end; returns the error the end of the transfer produced.
+async fn download_error(fs: &FtpFs, path: &str) -> Error {
+    let mut r = fs
+        .open_read(&RemotePath::new(path).unwrap(), 0)
+        .await
+        .unwrap();
+    let mut out = Vec::new();
+    let e = tokio::time::timeout(Duration::from_secs(10), r.read_to_end(&mut out))
+        .await
+        .expect("read hung")
+        .expect_err("a failed transfer ended like a complete one");
+    Error::from(e)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_then_426_is_network_not_eof() {
+    let (port, _) = transfer_server(
+        data(100_000, 1),
+        "426 Connection closed; transfer aborted.\r\n",
+        "226 ok\r\n",
+    )
+    .await;
+    let fs = transfer_fs(port, 1).await;
+    let e = download_error(&fs, "/f").await;
+    assert_eq!(e.kind, ErrorKind::Network, "{e:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_then_451_is_io_not_eof() {
+    let (port, _) = transfer_server(
+        data(100_000, 2),
+        "451 Failure reading local file.\r\n",
+        "226 ok\r\n",
+    )
+    .await;
+    let fs = transfer_fs(port, 1).await;
+    let e = download_error(&fs, "/f").await;
+    assert_eq!(e.kind, ErrorKind::Io, "{e:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upload_final_451_fails_shutdown_with_io() {
+    let (port, _) = transfer_server(
+        Vec::new(),
+        "226 ok\r\n",
+        "451 Failure writing to local file.\r\n",
+    )
+    .await;
+    let fs = transfer_fs(port, 1).await;
+    let mut w = fs
+        .open_write(&RemotePath::new("/u").unwrap(), 0)
+        .await
+        .unwrap();
+    w.write_all(&data(10_000, 3)).await.unwrap();
+    let e = tokio::time::timeout(Duration::from_secs(10), w.shutdown())
+        .await
+        .expect("shutdown hung")
+        .expect_err("shutdown succeeded after a 451");
+    let e = Error::from(e);
+    assert_eq!(e.kind, ErrorKind::Io, "{e:?}");
+}
+
+/// A transfer command refused with a clean reply leaves its connection in sync: it goes back
+/// to the pool instead of being closed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refused_open_keeps_the_transfer_connection() {
+    let src = data(50_000, 4);
+    let (port, accepted) =
+        transfer_server(src.clone(), "226 Transfer complete.\r\n", "226 ok\r\n").await;
+    let fs = transfer_fs(port, 1).await;
+    for _ in 0..2 {
+        let e = fs.open_read(&path("/denied"), 0).await.err().unwrap();
+        assert_eq!(e.kind, ErrorKind::Permission, "{e:?}");
+    }
+    assert!(download(&fs, &path("/f"), 0).await == src);
+    // The control connection and one transfer connection.
+    assert_eq!(accepted.load(Ordering::SeqCst), 2);
+    fs.disconnect().await;
 }

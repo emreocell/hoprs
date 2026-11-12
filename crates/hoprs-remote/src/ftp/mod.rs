@@ -9,6 +9,7 @@ mod stream;
 mod tls;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use async_trait::async_trait;
@@ -22,7 +23,7 @@ pub use prompt::{CertificatePrompt, FtpPromptCalls, ScriptedFtpPrompter};
 pub use tls::fingerprint;
 
 use crate::{BoxAsyncRead, BoxAsyncWrite, Connection, RemoteFs};
-use errors::{map_ftp_error, map_reply};
+use errors::{is_control_loss, map_ftp_error, map_reply};
 use list::{
     ListedEntry, format_timeval, is_dot_line, parse_list_line, parse_mlsd_line, parse_timeval,
 };
@@ -46,13 +47,18 @@ use stream::{FtpReader, FtpWriter, Timeouts, Transfer};
 /// Transfers run on the session's pool of transfer connections, never on the control
 /// connection, in binary mode (see `stream`):
 ///
-/// - `open_read` checks with `stat` that the path is a regular file (a directory, symlink or
-///   special file is `Io`); at or past its size the stream is empty without a `RETR`,
-///   otherwise `REST` (when `offset > 0`) and `RETR`. The stream ends only after the final
-///   `226`/`250`.
-/// - `open_write` refuses anything but a regular file or a missing path the same way. Offset
-///   0 sends `STOR`, so the file is created or truncated before it returns. A larger offset
-///   must equal the file's size, then `APPE` continues it. `shutdown` flushes the 256 KiB
+/// - Opening never lists a directory (ruling R8): one `SIZE` on the control connection, and
+///   a `stat` only to explain a refusal.
+/// - `open_read` gets the size with `SIZE`; the server refuses directories and special files
+///   (vsftpd: `550`), which `stat` then reports as `Io` (or `NotFound`, `Permission`). At or
+///   past the size the stream is empty without a `RETR`, otherwise `REST` (when
+///   `offset > 0`) and `RETR`. The stream ends only after the final `226`/`250`.
+/// - `open_write` with offset 0 sends `STOR` at once, so the file is created or truncated
+///   before it returns. A larger offset must equal the file's `SIZE`, then `APPE` continues
+///   it.
+/// - Known edge (R8): `SIZE` and `STOR` follow symlinks on the server, so a symlink to a file
+///   is read or written like the file. Writing to a FIFO is left to the server (vsftpd
+///   refuses it with `553`; a server that opens it would block that transfer). `shutdown` flushes the 256 KiB
 ///   buffer, closes the data connection and returns `Ok` only after the `226`. A refusal from
 ///   the server (`451`, `452`, `552`: a full disk) is `Io`; a lost connection is `Network`.
 /// - Passive mode sends `PASV` (`EPSV` to an IPv6 server). With `pasv_nat_workaround` the
@@ -69,13 +75,18 @@ use stream::{FtpReader, FtpWriter, Timeouts, Transfer};
 #[derive(Clone)]
 pub struct FtpFs {
     session: FtpSession,
+    /// Directory listings sent so far (tests check that opens send none).
+    listings: Arc<AtomicU64>,
 }
 
 impl FtpFs {
     /// Connects and logs in (see [`FtpSession::connect`]).
     pub async fn connect(cfg: FtpConfig, prompter: Arc<dyn FtpPrompter>) -> Result<FtpFs> {
         let session = FtpSession::connect(cfg, prompter).await?;
-        Ok(FtpFs { session })
+        Ok(FtpFs {
+            session,
+            listings: Arc::new(AtomicU64::new(0)),
+        })
     }
 
     /// Closes every connection and stops reconnecting.
@@ -86,6 +97,7 @@ impl FtpFs {
     /// The raw lines of `dir`'s listing, and whether they came from `MLSD`.
     async fn listing(&self, dir: &RemotePath) -> Result<(Vec<String>, bool)> {
         let arg = arg(dir)?.to_owned();
+        self.listings.fetch_add(1, Ordering::Relaxed);
         let context = dir.to_string();
         self.session
             .with_control(move |c| {
@@ -164,6 +176,48 @@ impl FtpFs {
         }
     }
 
+    #[cfg(feature = "testing")]
+    pub(crate) fn listings(&self) -> u64 {
+        self.listings.load(Ordering::Relaxed)
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn session(&self) -> &FtpSession {
+        &self.session
+    }
+
+    /// The size of the regular file `path`, with one `SIZE` on the control connection. vsftpd
+    /// answers it with `stat()` (a symlink is followed, nothing is opened) and refuses
+    /// directories and special files with `550`. Only a refusal is explained with a `stat`
+    /// (a listing of the parent): `NotFound`, `Io` "Is a directory" / "Not a regular file",
+    /// or `Permission`. A server without `SIZE` is asked with `stat` alone.
+    async fn file_size(&self, path: &RemotePath) -> Result<u64> {
+        let (code, text) = self.reply(format!("SIZE {}", arg(path)?), path).await?;
+        if code == 213 {
+            return text.trim().parse().map_err(|_| {
+                Error::new(ErrorKind::Protocol, format!("Unexpected FTP reply: {path}"))
+                    .with_detail(format!("{code} {text}"))
+            });
+        }
+        if matches!(code, 500 | 502) {
+            let st = self.stat(path).await?;
+            regular_file(&st, path)?;
+            return Ok(st.size);
+        }
+        let err = map_reply(code, &text, path.as_str());
+        if !matches!(err.kind, ErrorKind::Io | ErrorKind::NotFound) {
+            return Err(err);
+        }
+        match self.stat(path).await {
+            Err(e) if e.kind == ErrorKind::NotFound => Err(not_found(path, &err)),
+            Err(e) => Err(e),
+            Ok(st) => {
+                regular_file(&st, path)?;
+                Err(err)
+            }
+        }
+    }
+
     fn timeouts(&self) -> Timeouts {
         Timeouts {
             command: self.session.command_timeout(),
@@ -238,14 +292,23 @@ fn regular_file(st: &RemoteEntry, path: &RemotePath) -> Result<()> {
 }
 
 /// The transfer command's outcome on `conn` (bounded by `command_timeout`), errors mapped.
-/// A lost connection is reported to the session; `conn` is dropped (closed) by the caller.
+/// A refusal read as a clean reply (`550` on `RETR`, a refused `REST`, ...) leaves `conn` in
+/// sync, so it is marked clean and goes back to the pool when the caller drops it; after a
+/// socket error or a timeout it is closed, and a lost connection is reported to the session.
 fn transfer_opened(
-    conn: &PooledConn,
+    conn: &mut PooledConn,
     opened: std::result::Result<suppaftp::FtpResult<Transfer>, tokio::time::error::Elapsed>,
     path: &RemotePath,
 ) -> Result<Transfer> {
     let e = match opened {
         Ok(Ok(transfer)) => return Ok(transfer),
+        Ok(Err(e @ suppaftp::FtpError::UnexpectedResponse(_))) => {
+            let e = map_ftp_error(e, path.as_str());
+            if !is_control_loss(&e) {
+                conn.mark_clean();
+            }
+            e
+        }
         Ok(Err(e)) => map_ftp_error(e, path.as_str()),
         Err(_) => Error::new(ErrorKind::Network, format!("Connection lost: {path}"))
             .with_detail("no reply to the transfer command"),
@@ -435,9 +498,7 @@ impl RemoteFs for FtpFs {
 
     async fn open_read(&self, path: &RemotePath, offset: u64) -> Result<BoxAsyncRead> {
         let name = arg(path)?.to_owned();
-        let st = self.stat(path).await?;
-        regular_file(&st, path)?;
-        if offset >= st.size {
+        if offset >= self.file_size(path).await? {
             return Ok(Box::new(tokio::io::empty()));
         }
         let rest = usize::try_from(offset).map_err(|_| {
@@ -453,7 +514,7 @@ impl RemoteFs for FtpFs {
             ftp.retr_as_stream(&name).await
         })
         .await;
-        let transfer = transfer_opened(&conn, opened, path)?;
+        let transfer = transfer_opened(&mut conn, opened, path)?;
         Ok(Box::new(FtpReader::new(
             conn,
             transfer,
@@ -464,27 +525,26 @@ impl RemoteFs for FtpFs {
 
     async fn open_write(&self, path: &RemotePath, offset: u64) -> Result<BoxAsyncWrite> {
         let name = arg(path)?.to_owned();
-        // Never write through a symlink or into a FIFO (it would block the server), and
+        // Offset 0 sends `STOR` straight away (ruling R8); a refusal is explained afterwards.
         // `APPE` only continues a file whose size is exactly `offset`.
-        match self.stat(path).await {
-            Ok(st) => {
-                regular_file(&st, path)?;
-                if offset > 0 && st.size != offset {
+        if offset > 0 {
+            match self.file_size(path).await {
+                Ok(size) if size == offset => {}
+                Ok(size) => {
                     return Err(Error::new(
                         ErrorKind::Io,
                         format!("Cannot continue {path} at byte {offset}"),
                     )
-                    .with_detail(format!("the file has {} bytes", st.size)));
+                    .with_detail(format!("the file has {size} bytes")));
                 }
+                Err(e) if e.kind == ErrorKind::NotFound => {
+                    return Err(Error::new(
+                        ErrorKind::Io,
+                        format!("Cannot continue a missing file: {path}"),
+                    ));
+                }
+                Err(e) => return Err(e),
             }
-            Err(e) if e.kind == ErrorKind::NotFound && offset == 0 => {}
-            Err(e) if e.kind == ErrorKind::NotFound => {
-                return Err(Error::new(
-                    ErrorKind::Io,
-                    format!("Cannot continue a missing file: {path}"),
-                ));
-            }
-            Err(e) => return Err(e),
         }
         let mut conn = self.session.checkout().await?;
         // The server creates or truncates the file before its `150`: done once this returns.
@@ -497,7 +557,7 @@ impl RemoteFs for FtpFs {
             }
         })
         .await;
-        let transfer = match transfer_opened(&conn, opened, path) {
+        let transfer = match transfer_opened(&mut conn, opened, path) {
             Ok(transfer) => transfer,
             Err(e) => {
                 drop(conn);

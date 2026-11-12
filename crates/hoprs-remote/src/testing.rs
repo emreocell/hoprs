@@ -177,3 +177,13 @@ pub async fn session_disconnect_inside_command(session: &FtpSession) -> Result<S
         })
         .await
 }
+
+/// How many directory listings (`LIST`/`MLSD`) `fs` has sent on its control connection.
+pub fn ftp_listings(fs: &crate::FtpFs) -> u64 {
+    fs.listings()
+}
+
+/// The most transfer connections `fs` has had checked out at once.
+pub fn ftp_peak_transfer_connections(fs: &crate::FtpFs) -> usize {
+    fs.session().peak_transfer_connections()
+}

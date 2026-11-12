@@ -49,7 +49,10 @@ pub struct FtpConfig {
     pub security: FtpSecurity,
     pub mode: TransferMode,
     /// In passive mode, connect data channels to the control connection's host instead of
-    /// a private or unreachable address announced by the server (NAT).
+    /// the address the server announces in `PASV` (a private or unreachable one behind NAT).
+    /// Any announced address that differs from the control host is replaced, a public one
+    /// included, as clustered servers sometimes send: the data connection then goes to the
+    /// node that serves the control connection.
     pub pasv_nat_workaround: bool,
     /// Maximum number of extra connections used for transfers (1..=8).
     pub transfer_connections: usize,
