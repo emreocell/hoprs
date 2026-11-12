@@ -125,3 +125,91 @@ async fn connection_drop_closes_shell() {
     }
     assert!(shell.output().recv().await.is_none());
 }
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn close_yields_closed_then_none() {
+    let (_s, mut shell, _d) = open().await;
+    shell.close().await.unwrap();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        match timeout(deadline - Instant::now(), shell.output().recv())
+            .await
+            .expect("timed out waiting for Closed")
+        {
+            Some(ShellOutput::Closed) => break,
+            Some(_) => {}
+            None => panic!("output ended without Closed"),
+        }
+    }
+    assert!(shell.output().recv().await.is_none());
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn write_after_connection_drop_is_network_error() {
+    let (_s, mut shell, _d) = open().await;
+    kill_ssh_sessions();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        match timeout(deadline - Instant::now(), shell.output().recv())
+            .await
+            .expect("timed out waiting for Closed")
+        {
+            Some(ShellOutput::Closed) => break,
+            Some(_) => {}
+            None => panic!("output ended without Closed"),
+        }
+    }
+    let e = shell.write(b"x").await.unwrap_err();
+    assert_eq!(e.kind, hoprs_core::ErrorKind::Network, "{e:?}");
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn stalled_consumer_does_not_block_connection() {
+    let (session, mut shell, _d) = open().await;
+    // 64 MiB of output, far above the pending cap; nobody reads it.
+    shell
+        .write(b"yes hoprs | head -c 67108864; exit\n")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // The connection must stay usable meanwhile.
+    let mut other = timeout(Duration::from_secs(10), session.open_channel())
+        .await
+        .expect("open_channel blocked")
+        .unwrap();
+    timeout(Duration::from_secs(10), other.exec(true, "printf ok-%s 7"))
+        .await
+        .expect("exec blocked")
+        .unwrap();
+    let mut out = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !String::from_utf8_lossy(&out).contains("ok-7") {
+        match timeout(deadline - Instant::now(), other.wait())
+            .await
+            .expect("second channel starved")
+        {
+            Some(russh::ChannelMsg::Data { data }) => out.extend_from_slice(&data),
+            Some(_) => {}
+            None => panic!("second channel ended early: {out:?}"),
+        }
+    }
+
+    // Draining eventually reaches Closed (torn down at the cap, or the shell exited).
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut total = 0usize;
+    loop {
+        match timeout(deadline - Instant::now(), shell.output().recv())
+            .await
+            .unwrap_or_else(|_| panic!("shell never closed; drained {total} bytes"))
+        {
+            Some(ShellOutput::Closed) => break,
+            Some(ShellOutput::Data(d)) => total += d.len(),
+            Some(_) => {}
+            None => panic!("output ended without Closed"),
+        }
+    }
+}
