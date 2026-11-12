@@ -1,6 +1,7 @@
 //! Integration tests against the OpenSSH container in `docker/compose.yml`.
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -387,8 +388,13 @@ impl TestAgent {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(agent.socket.exists(), "ssh-agent did not create its socket");
+        // ssh-add refuses keys that are group/world readable, and git does not keep the
+        // fixture's mode: add a 0600 copy.
+        let copy = agent._dir.path().join("key");
+        fs::copy(fixture(key), &copy).unwrap();
+        fs::set_permissions(&copy, fs::Permissions::from_mode(0o600)).unwrap();
         let status = Command::new("ssh-add")
-            .arg(fixture(key))
+            .arg(&copy)
             .env("SSH_AUTH_SOCK", &agent.socket)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

@@ -252,9 +252,10 @@ async fn keyboard_interactive<H: client::Handler>(
         };
         let answers: Vec<String> = if prompts.is_empty() {
             Vec::new()
-        } else if let (Some(password), [only]) = (auto_password.take(), prompts.as_slice())
+        } else if let ([only], Some(password)) = (prompts.as_slice(), auto_password)
             && !only.echo
         {
+            auto_password = None;
             vec![password.expose_secret().to_owned()]
         } else {
             let shown: Vec<KbdPrompt> = prompts
