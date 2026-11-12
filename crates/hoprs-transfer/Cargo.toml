@@ -4,6 +4,9 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
+[lib]
+bench = false
+
 [dependencies]
 hoprs-core = { path = "../hoprs-core" }
 hoprs-remote = { path = "../hoprs-remote" }
@@ -16,3 +19,8 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync
 tempfile = { workspace = true }
 async-trait = { workspace = true }
 hoprs-remote = { path = "../hoprs-remote", features = ["testing"] }
+criterion = { workspace = true }
+
+[[bench]]
+name = "engine"
+harness = false
