@@ -123,7 +123,27 @@ pub fn bars<'a>(tab: TabId, side: Side, pane: &'a Pane) -> Vec<Element<'a, Messa
     if let Some(error) = &pane.action_error {
         bars.push(error_bar(error, msg(PaneMsg::DismissError)));
     }
+    if let Some(note) = &pane.note {
+        bars.push(note_bar(note, msg(PaneMsg::DismissError)));
+    }
     bars
+}
+
+/// A muted note above the table (a saved folder that is gone) and Dismiss.
+fn note_bar(note: &str, dismiss: Message) -> Element<'_, Message> {
+    bar(row![
+        text(note)
+            .size(theme::TEXT_XS)
+            .color(palette().muted)
+            .width(Length::Fill),
+        button(text(strings::DISMISS).size(theme::TEXT_XS))
+            .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
+            .style(theme::button_text)
+            .on_press(dismiss),
+    ]
+    .spacing(theme::SPACE_XS)
+    .align_y(Alignment::Center)
+    .into())
 }
 
 /// The row above the list where a new folder's name is typed.

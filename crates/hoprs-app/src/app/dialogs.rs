@@ -199,6 +199,20 @@ impl App {
         }
     }
 
+    /// The window is closing: every dialog, shown or waiting, is answered Cancel (as
+    /// closing it would) and none is shown any more.
+    pub(super) fn cancel_all_prompts(&mut self) -> Vec<Effect> {
+        let shown = self.dialogs.current.take().map(|d| d.request.id);
+        shown
+            .into_iter()
+            .chain(self.dialogs.queue.drain(..).map(|r| r.id))
+            .map(|id| Effect::AnswerPrompt {
+                id,
+                answer: PromptAnswer::Cancel,
+            })
+            .collect()
+    }
+
     /// Shows `request`, focusing its first field if it has one.
     fn show(&mut self, request: PromptRequest) -> Vec<Effect> {
         let dialog = Dialog::new(request);

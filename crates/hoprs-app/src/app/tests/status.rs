@@ -464,8 +464,8 @@ async fn close_request_saves_then_shuts_down_in_order() {
     assert_eq!(tabs[0].1[0].remote_dir.as_deref(), Some("/var/www"));
     assert!(app.closing);
     assert_eq!(status::line(&app).state, strings::CLOSING);
-    // A second request while closing starts nothing new.
-    assert!(app.update(Message::CloseRequested(window)).is_empty());
+    // (A second request while closing force-closes: see
+    // `panicking_shutdown_and_second_request_still_exit`.)
 
     let backend: Arc<dyn BackendApi> = fake.clone();
     let outcome = effects::shutdown(backend.clone(), save.clone(), effects::SHUTDOWN_LIMIT).await;
@@ -531,4 +531,330 @@ async fn close_times_out_after_5s() {
         app.update(Message::ShutdownDone(window))[..],
         [Effect::ExitWindow(w)] if w == window
     ));
+}
+
+/// The `List` effect for one pane: its request and folder.
+fn list_effect(effects: &[Effect], tab: TabId, side: Side) -> (RequestId, RemotePath) {
+    effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::List {
+                tab: t,
+                side: s,
+                request_id,
+                path,
+                ..
+            } if *t == tab && *s == side => Some((*request_id, path.clone())),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no listing for {side:?} in {effects:?}"))
+}
+
+fn listed(
+    app: &mut App,
+    tab: TabId,
+    side: Side,
+    request_id: RequestId,
+    result: Result<Vec<RemoteEntry>, Error>,
+) -> Vec<Effect> {
+    app.update(Message::Listed {
+        tab,
+        side,
+        request_id,
+        result,
+    })
+}
+
+fn gone() -> Error {
+    Error::new(ErrorKind::NotFound, "No such folder")
+}
+
+/// A save that hangs gets 2 s; the engine shutdown and the session closes still run,
+/// and the window still closes.
+#[tokio::test(start_paused = true)]
+async fn hanging_save_still_shuts_down() {
+    let a = site("a", "a.example", "u", Protocol::Ssh);
+    let ws = workspace("Shop", &[&a.id]);
+    let fake = Arc::new(
+        FakeBackend::new()
+            .with_site(a.clone())
+            .with_workspace(ws.clone()),
+    );
+    let session = fake.connect(a.id.clone()).await.unwrap().session;
+    fake.hang_save_tabs();
+    let backend: Arc<dyn BackendApi> = fake.clone();
+    let started = tokio::time::Instant::now();
+    let save = Some((ws.id.clone(), vec![(a.id.clone(), Vec::new())]));
+    let outcome = effects::shutdown(backend, save, effects::SHUTDOWN_LIMIT).await;
+    assert_eq!(outcome, effects::ShutdownOutcome::Done);
+    let waited = started.elapsed();
+    assert_eq!(effects::SAVE_LIMIT, Duration::from_secs(2));
+    assert!(
+        waited >= effects::SAVE_LIMIT && waited < Duration::from_millis(2100),
+        "{waited:?}"
+    );
+    assert_eq!(
+        fake.calls(),
+        vec![
+            Call::SaveTabs(ws.id.clone()),
+            Call::Shutdown,
+            Call::Close(session)
+        ]
+    );
+    let mut app = App::new();
+    let window = iced::window::Id::unique();
+    app.update(Message::CloseRequested(window));
+    assert!(matches!(
+        app.update(Message::ShutdownDone(window))[..],
+        [Effect::ExitWindow(w)] if w == window
+    ));
+}
+
+/// A shutdown that panics still ends in `ShutdownDone` (an outcome, not a lost
+/// message), and a second close request closes at once.
+#[tokio::test]
+async fn panicking_shutdown_and_second_request_still_exit() {
+    let fake = Arc::new(FakeBackend::new());
+    fake.panic_shutdown();
+    let backend: Arc<dyn BackendApi> = fake.clone();
+    let outcome = effects::shutdown(backend, None, effects::SHUTDOWN_LIMIT).await;
+    assert_eq!(outcome, effects::ShutdownOutcome::Failed);
+    assert_eq!(fake.calls(), vec![Call::Shutdown]);
+
+    let mut app = App::new();
+    let window = iced::window::Id::unique();
+    assert!(matches!(
+        app.update(Message::CloseRequested(window))[..],
+        [Effect::Shutdown { .. }]
+    ));
+    // The shutdown never reported back; the user closes again: force close.
+    assert!(matches!(
+        app.update(Message::CloseRequested(window))[..],
+        [Effect::ExitWindow(w)] if w == window
+    ));
+}
+
+/// Closing with a security dialog open: every dialog, shown or queued, is answered
+/// Cancel; new ones are cancelled unseen; the user's input starts nothing new; results
+/// of running work still land.
+#[tokio::test]
+async fn close_request_cancels_dialogs_and_ignores_input() {
+    use crate::backend::broker::{PromptKind, PromptRequest};
+    use crate::backend::{BrokerEvent, PromptAnswer, PromptId};
+
+    let a = site("a", "a.example", "u", Protocol::Ssh);
+    let b = site("b", "b.example", "u", Protocol::Ssh);
+    let ws = workspace("Shop", &[&a.id]);
+    let fake = Arc::new(
+        FakeBackend::new()
+            .with_site(a.clone())
+            .with_site(b.clone())
+            .with_workspace(ws.clone()),
+    );
+    let mut app = loaded(&fake).await;
+    let sites = connect_effect(app.update(Message::ConnectSite(a.id.clone())));
+    drive(&mut app, &fake, sites).await;
+    let session = session_of(&app, &a.id);
+    let request = |id: u64| PromptRequest {
+        id: PromptId(id),
+        session,
+        key: "a.example:22".into(),
+        kind: PromptKind::Password {
+            user: "u".into(),
+            host: "a.example".into(),
+        },
+    };
+    app.update(Message::Prompt(BrokerEvent::Request(request(1))));
+    app.update(Message::Prompt(BrokerEvent::Request(request(2))));
+    assert!(app.dialogs.is_open());
+
+    let window = iced::window::Id::unique();
+    let effects = app.update(Message::CloseRequested(window));
+    let cancelled: Vec<PromptId> = effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::AnswerPrompt {
+                id,
+                answer: PromptAnswer::Cancel,
+            } => Some(*id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cancelled, vec![PromptId(1), PromptId(2)]);
+    assert!(matches!(effects.last(), Some(Effect::Shutdown { .. })));
+    assert!(!app.dialogs.is_open());
+    assert_eq!(app.dialogs.queued().count(), 0);
+
+    // A dialog arriving now is cancelled without being shown.
+    let effects = app.update(Message::Prompt(BrokerEvent::Request(request(3))));
+    assert!(matches!(
+        effects[..],
+        [Effect::AnswerPrompt {
+            id: PromptId(3),
+            answer: PromptAnswer::Cancel
+        }]
+    ));
+    assert!(!app.dialogs.is_open());
+
+    // Nothing new starts.
+    let tab = app.tabs[0].id;
+    for input in [
+        Message::ConnectSite(b.id.clone()),
+        Message::OpenWorkspace(ws.id.clone()),
+        Message::NewSite,
+        Message::Queue(QueueMsg::ClearFinished),
+        Message::Pane {
+            tab,
+            side: Side::Remote,
+            msg: PaneMsg::Transfer,
+        },
+        Message::Pane {
+            tab,
+            side: Side::Local,
+            msg: PaneMsg::Navigate(path("/elsewhere")),
+        },
+        Message::CloseTab(tab),
+        Message::FileDropped(PathBuf::from("/tmp/x")),
+    ] {
+        let shown = format!("{input:?}");
+        assert!(app.update(input).is_empty(), "{shown}");
+    }
+    assert!(app.form.is_none());
+    assert_eq!(app.tabs.len(), 1);
+    assert_ne!(app.tabs[0].local.path, path("/elsewhere"));
+
+    // Results still land.
+    state(
+        &mut app,
+        session,
+        ConnectionState::Reconnecting { attempt: 1 },
+    );
+    assert!(matches!(
+        app.tabs[0].conn,
+        Some(ConnectionState::Reconnecting { attempt: 1 })
+    ));
+    assert!(matches!(
+        app.update(Message::ShutdownDone(window))[..],
+        [Effect::ExitWindow(_)]
+    ));
+}
+
+/// A restored folder that is gone falls back to its parent, then home (local) or `/`,
+/// with a note; a pane whose listing failed keeps its previously saved folder.
+#[tokio::test]
+async fn restored_folder_gone_falls_back_and_failed_sides_keep_the_saved_folder() {
+    let a = site("a", "a.example", "u", Protocol::Ssh);
+    let mut ws = workspace("Shop", &[&a.id]);
+    ws.sites[0].tabs = vec![files_tab(Some("/gone/deep"), Some("/srv/old"))];
+    let fake = Arc::new(
+        FakeBackend::new()
+            .with_site(a.clone())
+            .with_workspace(ws.clone()),
+    );
+    let mut app = loaded(&fake).await;
+    app.home = Some(path("/home/me"));
+    let effects = app.update(Message::OpenWorkspace(ws.id.clone()));
+    let tab = app.tabs[0].id;
+
+    // Local: /gone/deep is gone, then /gone too: home, with the note.
+    let (request, at) = list_effect(&effects, tab, Side::Local);
+    assert_eq!(at, path("/gone/deep"));
+    let effects = listed(&mut app, tab, Side::Local, request, Err(gone()));
+    let (request, at) = list_effect(&effects, tab, Side::Local);
+    assert_eq!(at, path("/gone"));
+    let note = strings::saved_folder_gone("/gone/deep");
+    assert_eq!(app.tabs[0].local.note.as_deref(), Some(note.as_str()));
+    let effects = listed(&mut app, tab, Side::Local, request, Err(gone()));
+    let (request, at) = list_effect(&effects, tab, Side::Local);
+    assert_eq!(at, path("/home/me"));
+    listed(&mut app, tab, Side::Local, request, Ok(Vec::new()));
+    assert_eq!(app.tabs[0].local.listing, files::Listing::Loaded);
+    assert_eq!(app.tabs[0].local.note.as_deref(), Some(note.as_str()));
+    assert_eq!(app.tabs[0].local.restore, None);
+
+    // Remote: /srv/old is gone, /srv is there.
+    let session_effects = app.update(Message::SiteConnected {
+        site: a.id.clone(),
+        result: fake.connect(a.id.clone()).await,
+    });
+    let (request, at) = list_effect(&session_effects, tab, Side::Remote);
+    assert_eq!(at, path("/srv/old"));
+    let effects = listed(&mut app, tab, Side::Remote, request, Err(gone()));
+    let (request, at) = list_effect(&effects, tab, Side::Remote);
+    assert_eq!(at, path("/srv"));
+    listed(&mut app, tab, Side::Remote, request, Ok(Vec::new()));
+    assert!(app.tabs[0].remote.note.is_some());
+    // Dismiss clears the note.
+    app.update(Message::Pane {
+        tab,
+        side: Side::Remote,
+        msg: PaneMsg::DismissError,
+    });
+    assert_eq!(app.tabs[0].remote.note, None);
+
+    // A later failure (not a restore) is shown as usual and never saved.
+    let effects = app.update(Message::Pane {
+        tab,
+        side: Side::Local,
+        msg: PaneMsg::Navigate(path("/locked")),
+    });
+    let (request, _) = list_effect(&effects, tab, Side::Local);
+    let denied = Error::new(ErrorKind::Permission, "Permission denied");
+    listed(&mut app, tab, Side::Local, request, Err(denied.clone()));
+    assert_eq!(app.tabs[0].local.listing, files::Listing::Failed(denied));
+    let effects = without_panes(app.update(Message::CloseWorkspace(ws.id.clone())));
+    let Some(Effect::SaveTabs { tabs, .. }) = effects.first() else {
+        panic!("{effects:?}");
+    };
+    assert_eq!(
+        tabs[0].1,
+        vec![files_tab(Some("/gone/deep"), Some("/srv"))],
+        "the failed local side keeps its saved folder; the remote side saves /srv"
+    );
+}
+
+/// The saved local folder round-trips through `local_fs_path` / `local_path`.
+#[test]
+fn local_dir_round_trips() {
+    for dir in ["/home/me/shop", "/", "/with space/ünï"] {
+        let remote = path(dir);
+        let local = files::local_fs_path(&remote);
+        assert_eq!(files::local_path(&local), Some(remote), "{dir}");
+    }
+}
+
+/// A connect result for the session the tab already watches (same id) keeps what its
+/// feed reported: the feed sends only changes from then on.
+#[tokio::test]
+async fn same_session_connect_keeps_the_feed_state() {
+    let a = site("a", "a.example", "u", Protocol::Ssh);
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    let mut app = loaded(&fake).await;
+    let sites = connect_effect(app.update(Message::ConnectSite(a.id.clone())));
+    drive(&mut app, &fake, sites).await;
+    let session = session_of(&app, &a.id);
+    app.update(Message::SessionState {
+        session,
+        state: ConnectionState::Connected,
+        auth: Some(AuthMethod::Password),
+    });
+    app.update(Message::SiteConnected {
+        site: a.id.clone(),
+        result: Ok(Connected {
+            session,
+            keyring_unavailable: false,
+        }),
+    });
+    assert_eq!(app.tabs[0].auth, Some(AuthMethod::Password));
+    assert_eq!(app.tabs[0].conn, Some(ConnectionState::Connected));
+    // A new session starts over.
+    app.update(Message::SiteConnected {
+        site: a.id.clone(),
+        result: Ok(Connected {
+            session: SessionId(99),
+            keyring_unavailable: false,
+        }),
+    });
+    assert_eq!(app.tabs[0].auth, None);
+    assert_eq!(app.tabs[0].conn, None);
 }

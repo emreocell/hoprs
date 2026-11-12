@@ -32,7 +32,8 @@
 //! when started, then what each attempt gives; [`FakeBackend::drop_connection`] makes it
 //! `Disconnected` and a close drops it (ending the watch). [`FakeBackend::calls`] records
 //! tab saves, reconnects, shutdown and closes in order; a shutdown closes every session,
-//! or hangs forever after [`FakeBackend::hang_shutdown`].
+//! or hangs forever after [`FakeBackend::hang_shutdown`] (panics after
+//! [`FakeBackend::panic_shutdown`]); [`FakeBackend::hang_save_tabs`] makes tab saves hang.
 //!
 //! `save_site` keeps the backend-owned fields of a stored site (`has_*`, and the FTPS pin
 //! by the vault's [`merged_pin`](super::vault::merged_pin) rule), and
@@ -129,6 +130,8 @@ struct State {
     /// The next `save_workspace_tabs` calls fail with these.
     save_tab_failures: VecDeque<Error>,
     hang_shutdown: bool,
+    hang_save_tabs: bool,
+    panic_shutdown: bool,
 }
 
 impl Default for FakeBackend {
@@ -326,6 +329,16 @@ impl FakeBackend {
     /// The next `save_workspace_tabs` fails with `error`.
     pub fn fail_next_save_tabs(&self, error: Error) {
         self.state().save_tab_failures.push_back(error);
+    }
+
+    /// From now on `save_workspace_tabs` never returns.
+    pub fn hang_save_tabs(&self) {
+        self.state().hang_save_tabs = true;
+    }
+
+    /// From now on `shutdown` panics.
+    pub fn panic_shutdown(&self) {
+        self.state().panic_shutdown = true;
     }
 
     /// From now on `shutdown` never returns.
@@ -552,8 +565,15 @@ impl BackendApi for FakeBackend {
     }
 
     async fn save_workspace_tabs(&self, workspace: WorkspaceId, tabs: WorkspaceTabs) -> Result<()> {
+        let hang = {
+            let mut state = self.state();
+            state.calls.push(Call::SaveTabs(workspace.clone()));
+            state.hang_save_tabs
+        };
+        if hang {
+            std::future::pending::<()>().await;
+        }
         let mut state = self.state();
-        state.calls.push(Call::SaveTabs(workspace.clone()));
         if let Some(error) = state.save_tab_failures.pop_front() {
             return Err(error);
         }
@@ -642,11 +662,12 @@ impl BackendApi for FakeBackend {
     }
 
     async fn shutdown(&self) {
-        let hang = {
+        let (hang, panic) = {
             let mut state = self.state();
             state.calls.push(Call::Shutdown);
-            state.hang_shutdown
+            (state.hang_shutdown, state.panic_shutdown)
         };
+        assert!(!panic, "the fake's shutdown panics, as asked");
         if hang {
             std::future::pending::<()>().await;
         }

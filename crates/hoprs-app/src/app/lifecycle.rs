@@ -2,19 +2,24 @@
 //! feed reports (status bar, reconnect banner), the tabs a workspace saves when it
 //! closes, and the orderly shutdown when the window closes (Review Focus 5).
 //!
+//! The *open* workspace is the one "Open workspace" opened last: opening another saves
+//! the first one's tabs and makes the new one open (the first one's tabs stay). It is
+//! the one whose tabs the window close saves. "Close tabs" on it saves its tabs, then
+//! closes every tab of its sites, also a tab opened from "All sites" for one of them.
+//!
 //! Closing the window: the app asks for one [`Effect::Shutdown`], which saves the open
 //! workspace's tabs, shuts the transfer engine down (its running items keep their stored
 //! state and reopen paused on the next start), then closes the sessions, all within
-//! 5 s. Only its [`Message::ShutdownDone`] closes the window. A failed save is logged and
-//! the shutdown goes on; a backend that hangs is abandoned when the 5 s run out.
-
-use std::path::PathBuf;
+//! 5 s (the save gets 2 s of them). Only its [`Message::ShutdownDone`] closes the window,
+//! whatever the outcome. A failed or slow save is logged and the shutdown goes on; a
+//! backend that hangs or panics is abandoned. Meanwhile the dialogs are answered Cancel
+//! and the user's input is ignored; a second close request closes at once.
 
 use hoprs_core::{ConnectionState, Error, ReconnectPolicy, SavedTab, TabKind, WorkspaceId};
 
-use super::{App, Effect, TabState};
-use crate::app::files::{Listing, TabId};
-use crate::backend::{AuthMethod, SessionId, Side, WorkspaceTabs};
+use super::{App, Effect, Message, TabState};
+use crate::app::files::{Listing, TabId, local_fs_path};
+use crate::backend::{AuthMethod, BrokerEvent, PromptAnswer, SessionId, Side, WorkspaceTabs};
 
 /// What the status bar says about a tab's connection.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -67,11 +72,22 @@ impl super::Tab {
     }
 
     /// The tab as a workspace saves it: a files tab at its two folders.
-    fn saved(&self) -> SavedTab {
+    /// A side whose listing failed keeps what `previous` saved for it: a folder that
+    /// could not be read is not worth restoring.
+    fn saved(&self, previous: Option<&SavedTab>) -> SavedTab {
+        let failed = |side: Side| matches!(self.pane(side).listing, Listing::Failed(_));
         SavedTab {
             kind: TabKind::Files,
-            remote_dir: Some(self.remote.path.as_str().to_owned()),
-            local_dir: Some(PathBuf::from(self.local.path.as_str())),
+            remote_dir: if failed(Side::Remote) {
+                previous.and_then(|t| t.remote_dir.clone())
+            } else {
+                Some(self.remote.path.as_str().to_owned())
+            },
+            local_dir: if failed(Side::Local) {
+                previous.and_then(|t| t.local_dir.clone())
+            } else {
+                Some(local_fs_path(&self.local.path))
+            },
         }
     }
 }
@@ -194,8 +210,8 @@ impl App {
                 let tab = &self.tabs[self.tab_of(&entry.site)?];
                 let mut saved = entry.tabs.clone();
                 match saved.iter_mut().find(|t| t.kind == TabKind::Files) {
-                    Some(slot) => *slot = tab.saved(),
-                    None => saved.push(tab.saved()),
+                    Some(slot) => *slot = tab.saved(Some(slot)),
+                    None => saved.push(tab.saved(None)),
                 }
                 Some((entry.site.clone(), saved))
             })
@@ -243,17 +259,66 @@ impl App {
         }
     }
 
-    /// The window asks to close: one orderly shutdown (see the module docs). A second
-    /// request meanwhile changes nothing: the shutdown ends within 5 s anyway.
+    /// The window asks to close: one orderly shutdown (see the module docs). The dialogs
+    /// open or waiting are answered Cancel first, so no prompt holds a connect while the
+    /// backend stops. A second request while closing closes at once (force close): the
+    /// user insists, or the shutdown never reported back.
     pub(super) fn close_requested(&mut self, window: iced::window::Id) -> Vec<Effect> {
         if self.closing {
-            return Vec::new();
+            tracing::warn!("close requested again while shutting down; closing now");
+            return vec![Effect::ExitWindow(window)];
         }
         self.closing = true;
+        let mut effects = self.cancel_all_prompts();
         let save = self
             .open_workspace
             .clone()
             .and_then(|id| self.workspace_tabs(&id).map(|tabs| (id, tabs)));
-        vec![Effect::Shutdown { save, window }]
+        effects.push(Effect::Shutdown { save, window });
+        effects
+    }
+
+    /// While closing, what a message does instead of its usual effect, if anything: the
+    /// user's input is ignored (nothing new may start once the engine stops: no connect,
+    /// transfer, file operation or form), and a new dialog is answered Cancel unseen.
+    /// Results of work already running (listings, connects, engine events...) and the
+    /// shutdown's own messages go through as usual.
+    pub(super) fn while_closing(&self, msg: &Message) -> Option<Vec<Effect>> {
+        match msg {
+            Message::Prompt(BrokerEvent::Request(request)) => Some(vec![Effect::AnswerPrompt {
+                id: request.id,
+                answer: PromptAnswer::Cancel,
+            }]),
+            Message::ToggleQueue
+            | Message::FilterSites(_)
+            | Message::ReloadProfiles
+            | Message::ToggleWorkspace(_)
+            | Message::OpenWorkspace(_)
+            | Message::ConnectSite(_)
+            | Message::SelectTab(_)
+            | Message::NewSite
+            | Message::EditSite(_)
+            | Message::NewWorkspace
+            | Message::EditWorkspace(_)
+            | Message::SiteForm(_)
+            | Message::WorkspaceForm(_)
+            | Message::OpenProfileFolder
+            | Message::CloseTab(_)
+            | Message::Pane { .. }
+            | Message::KeyPressed { .. }
+            | Message::Key { .. }
+            | Message::Modifiers(_)
+            | Message::Queue(_)
+            | Message::FileDropped(_)
+            | Message::FilesHovered(_)
+            | Message::DragEnd
+            | Message::DragCancel
+            | Message::Dialog(_)
+            | Message::KnownHosts { .. }
+            | Message::RestartSession(_)
+            | Message::ReconnectSession(_)
+            | Message::CloseWorkspace(_) => Some(Vec::new()),
+            _ => None,
+        }
     }
 }

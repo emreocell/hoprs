@@ -143,50 +143,95 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
                 Message::ShutdownDone(window)
             })
         }
-        Effect::ExitWindow(window) => iced::window::close(window),
+        Effect::ExitWindow(window) => {
+            exit_watchdog();
+            iced::window::close(window)
+        }
     }
 }
 
 /// The longest the window waits for the backend to shut down once asked to close.
 pub const SHUTDOWN_LIMIT: Duration = Duration::from_secs(5);
+/// The part of [`SHUTDOWN_LIMIT`] the tab save may take: the engine always gets the rest.
+pub const SAVE_LIMIT: Duration = Duration::from_secs(2);
+/// After the window is asked to close, the process ends at the latest this much later,
+/// even if something still holds the runtime (an abandoned blocking save, for one).
+pub const EXIT_GRACE: Duration = Duration::from_secs(2);
 
-/// How [`shutdown`] ended.
+/// How [`shutdown`] ended. The window closes whatever it is.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ShutdownOutcome {
     Done,
     /// `limit` ran out first; what was left is abandoned (the process exits).
     TimedOut,
+    /// The backend's shutdown panicked.
+    Failed,
 }
 
 /// The window is closing (Review Focus 5), in this order and within `limit` in all:
-/// 1. saves the open workspace's tabs (`save`), through the vault's atomic write; a
-///    failure is logged and the shutdown goes on;
+/// 1. saves the open workspace's tabs (`save`), through the vault's atomic write, within
+///    [`SAVE_LIMIT`]; a failure, a panic or a save that takes too long is logged and
+///    abandoned (never waited for), and the shutdown goes on;
 /// 2. shuts the transfer engine down, so its running items reopen paused next time;
-/// 3. closes the sessions ([`BackendApi::shutdown`] does 2 and 3).
+/// 3. closes the sessions ([`BackendApi::shutdown`] does 2 and 3), in what is left of
+///    `limit`.
 ///
-/// The caller closes the window when this returns, whatever the outcome.
+/// Each step runs in its own task, so a panic becomes an outcome instead of a lost
+/// message. The caller closes the window when this returns, whatever the outcome.
 pub async fn shutdown(
     backend: Arc<dyn BackendApi>,
     save: Option<(WorkspaceId, WorkspaceTabs)>,
     limit: Duration,
 ) -> ShutdownOutcome {
-    let steps = async move {
-        if let Some((workspace, tabs)) = save
-            && let Err(error) = backend.save_workspace_tabs(workspace, tabs).await
-        {
-            tracing::warn!(%error, "cannot save the workspace's tabs on close");
+    let deadline = tokio::time::Instant::now() + limit;
+    if let Some((workspace, tabs)) = save {
+        let saver = backend.clone();
+        let mut saving =
+            tokio::spawn(async move { saver.save_workspace_tabs(workspace, tabs).await });
+        match tokio::time::timeout(SAVE_LIMIT.min(limit), &mut saving).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(error))) => {
+                tracing::warn!(%error, "cannot save the workspace's tabs on close");
+            }
+            Ok(Err(error)) => {
+                tracing::error!(%error, "saving the workspace's tabs on close panicked");
+            }
+            Err(_) => {
+                saving.abort();
+                tracing::warn!(limit = ?SAVE_LIMIT, "saving the workspace's tabs on close took too long; skipped");
+            }
         }
-        backend.shutdown().await;
-    };
-    match tokio::time::timeout(limit, steps).await {
-        Ok(()) => ShutdownOutcome::Done,
+    }
+    let mut stopping = tokio::spawn(async move { backend.shutdown().await });
+    match tokio::time::timeout_at(deadline, &mut stopping).await {
+        Ok(Ok(())) => ShutdownOutcome::Done,
+        Ok(Err(error)) => {
+            tracing::error!(%error, "the backend's shutdown panicked; closing anyway");
+            ShutdownOutcome::Failed
+        }
         Err(_) => {
+            stopping.abort();
             tracing::warn!(
                 ?limit,
                 "the backend did not shut down in time; closing anyway"
             );
             ShutdownOutcome::TimedOut
         }
+    }
+}
+
+/// Ends the process [`EXIT_GRACE`] from now unless it ended already: closing the window
+/// ends iced's loop, but dropping the runtime waits for blocking tasks still running.
+fn exit_watchdog() {
+    let spawned = std::thread::Builder::new()
+        .name("exit-watchdog".into())
+        .spawn(|| {
+            std::thread::sleep(EXIT_GRACE);
+            tracing::warn!("still running after the window closed; exiting");
+            std::process::exit(0);
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "cannot start the exit watchdog");
     }
 }
 

@@ -471,6 +471,11 @@ impl App {
     }
 
     fn apply(&mut self, msg: Message) -> Vec<Effect> {
+        if self.closing
+            && let Some(effects) = self.while_closing(&msg)
+        {
+            return effects;
+        }
         if self.blocked_by_dialog(&msg) {
             return Vec::new();
         }
@@ -681,10 +686,14 @@ impl App {
         };
         let tab = &mut self.tabs[index];
         tab.known_hosts = KnownHostsFix::Idle;
-        // The session's feed tells its state and login from now on.
-        tab.conn = None;
-        tab.auth = None;
-        tab.reconnecting = false;
+        // A new session's feed tells its state and login from now on. The session already
+        // watched keeps what its feed said: the feed only reports changes from here.
+        let same = matches!(&result, Ok(c) if tab.session() == Some(c.session));
+        if !same {
+            tab.conn = None;
+            tab.auth = None;
+            tab.reconnecting = false;
+        }
         match result {
             Ok(connected) => {
                 self.queue.site_restored(&site);

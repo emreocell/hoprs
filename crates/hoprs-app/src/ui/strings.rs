@@ -247,8 +247,13 @@ pub const CONNECTING: &str = "Connecting…";
 pub const CONNECTED: &str = "Connected";
 pub const WAITING_FOR_YOU: &str = "Waiting for you";
 pub const CLOSING: &str = "Saving tabs and closing…";
-pub const CLOSE_WORKSPACE: &str = "Close";
+pub const CLOSE_WORKSPACE: &str = "Close tabs";
 pub const RECONNECTING_NOW: &str = "Reconnecting…";
+
+/// A workspace's saved folder is gone; the pane shows a folder above it instead.
+pub fn saved_folder_gone(saved: &str) -> String {
+    format!("The saved folder {saved} is gone; showing the nearest folder instead.")
+}
 
 /// "Reconnecting (2/5)".
 pub fn reconnecting(attempt: u32, of: u32) -> String {

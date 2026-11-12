@@ -8,7 +8,9 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use hoprs_core::{ConnectionState, EntryKind, Error, RemoteEntry, RemotePath, SavedTab, SiteId};
+use hoprs_core::{
+    ConnectionState, EntryKind, Error, ErrorKind, RemoteEntry, RemotePath, SavedTab, SiteId,
+};
 
 use super::actions::{Busy, PaneAction};
 use super::{App, Effect, TabState};
@@ -141,6 +143,20 @@ pub struct Pane {
     pub action_error: Option<Error>,
     /// The entry to select once the folder is listed again (a new or renamed one).
     pub select_after: Option<String>,
+    /// The folder came from a workspace's saved tab and has not listed yet: if it is
+    /// gone, the pane falls back (parent, then home or `/`) instead of failing.
+    pub restore: Option<Restore>,
+    /// An inline note above the table (a saved folder that is gone), until dismissed.
+    pub note: Option<String>,
+}
+
+/// Where a pane is in its fallback from a saved folder that is gone.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Restore {
+    /// Listing the saved folder itself.
+    Saved,
+    /// Listing the saved folder's parent; `saved` is the folder that is gone.
+    Parent { saved: RemotePath },
 }
 
 impl Pane {
@@ -159,6 +175,8 @@ impl Pane {
             busy: None,
             action_error: None,
             select_after: None,
+            restore: None,
+            note: None,
         }
     }
 
@@ -420,6 +438,12 @@ pub fn local_path(path: &std::path::Path) -> Option<RemotePath> {
     RemotePath::new(path.to_str()?).ok()
 }
 
+/// The inverse of [`local_path`]: a local pane's folder as a filesystem path (what a
+/// workspace saves as `local_dir`).
+pub fn local_fs_path(path: &RemotePath) -> std::path::PathBuf {
+    std::path::PathBuf::from(path.as_str())
+}
+
 impl App {
     pub fn tab_index(&self, id: TabId) -> Option<usize> {
         self.tabs.iter().position(|t| t.id == id)
@@ -471,6 +495,18 @@ impl App {
             auth: None,
             reconnecting: false,
         };
+        // A folder from the saved tab may be gone since: its first listing falls back.
+        let from_saved = |dir: Option<bool>| dir.unwrap_or(false).then_some(Restore::Saved);
+        tab.local.restore = from_saved(
+            restored
+                .and_then(|t| t.local_dir.as_deref())
+                .map(|d| local_path(d).as_ref() == Some(&tab.local.path)),
+        );
+        tab.remote.restore = from_saved(
+            restored
+                .and_then(|t| t.remote_dir.as_deref())
+                .map(|d| RemotePath::new(d).ok().as_ref() == Some(&tab.remote.path)),
+        );
         tab.local.listing = Listing::Loading;
         tab.local.request = Some(request_id);
         let effect = Effect::List {
@@ -531,6 +567,8 @@ impl App {
         pane.action = None;
         pane.action_error = None;
         pane.select_after = None;
+        pane.restore = None;
+        pane.note = None;
         self.request_listing(index, side)
     }
 
@@ -636,7 +674,10 @@ impl App {
                 return Vec::new();
             }
             PaneMsg::ApplyPermissions => return self.apply_permissions(index, side),
-            PaneMsg::DismissError => pane.action_error = None,
+            PaneMsg::DismissError => {
+                pane.action_error = None;
+                pane.note = None;
+            }
             PaneMsg::Transfer => {
                 self.tabs[index].focus = side;
                 return self.transfer_selection(index, side);
@@ -669,6 +710,13 @@ impl App {
         pane.request = None;
         pane.selection = Selection::default();
         pane.hovered = None;
+        if let Err(error) = &result
+            && error.kind == ErrorKind::NotFound
+            && let Some(restore) = pane.restore.take()
+        {
+            return self.restore_fallback(index, side, restore);
+        }
+        pane.restore = None;
         let listed = result.is_ok();
         match result {
             Ok(mut entries) => {
@@ -690,6 +738,33 @@ impl App {
             self.select_new_entry(index, side)
         } else {
             Vec::new()
+        }
+    }
+
+    /// A restored folder is gone: the pane goes to its parent, and if that is gone too,
+    /// to home (local) or `/`, with a note naming the saved folder. Past that, a failure
+    /// shows as usual.
+    fn restore_fallback(&mut self, index: usize, side: Side, restore: Restore) -> Vec<Effect> {
+        let path = self.tabs[index].pane(side).path.clone();
+        let (saved, target, next) = match restore {
+            Restore::Saved => match path.parent() {
+                Some(parent) => (path.clone(), parent, Some(Restore::Parent { saved: path })),
+                None => (path, self.fallback_dir(side), None),
+            },
+            Restore::Parent { saved } => (saved, self.fallback_dir(side), None),
+        };
+        let effects = self.navigate(index, side, target);
+        let pane = self.tabs[index].pane_mut(side);
+        pane.restore = next;
+        pane.note = Some(crate::ui::strings::saved_folder_gone(saved.as_str()));
+        effects
+    }
+
+    /// Where a pane goes when nothing better is known: home on the local side, else `/`.
+    fn fallback_dir(&self, side: Side) -> RemotePath {
+        match side {
+            Side::Local => self.home.clone().unwrap_or_else(RemotePath::root),
+            Side::Remote => RemotePath::root(),
         }
     }
 
