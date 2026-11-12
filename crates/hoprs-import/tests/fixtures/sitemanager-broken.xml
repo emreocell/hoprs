@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<FileZilla3 version="3.66.0" platform="*nix">
+	<Servers>
+		<Server>
+			<Host>broken.example.test</Host>
+			<Port>22</Protocol>
+		</Server>
+	</Servers>
+</FileZilla3>

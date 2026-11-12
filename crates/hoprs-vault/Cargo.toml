@@ -1,0 +1,29 @@
+[package]
+name = "hoprs-vault"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hoprs-core = { path = "../hoprs-core" }
+serde = { workspace = true }
+toml = { workspace = true, features = ["preserve_order"] }
+dirs = { workspace = true }
+secrecy = { workspace = true }
+keyring-core = { workspace = true }
+argon2 = { workspace = true, features = ["zeroize"] }
+chacha20poly1305 = { workspace = true, features = ["zeroize"] }
+serde_json = { workspace = true }
+zeroize = { workspace = true }
+
+# Secret Service platforms: the store is built directly (see
+# `KeyringStore::new`), with the same features `keyring` uses.
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
+zbus-secret-service-keyring-store = { workspace = true }
+
+# Elsewhere (macOS, Windows): through `keyring`'s platform store.
+[target.'cfg(not(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")))))'.dependencies]
+keyring = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<FileZilla3 version="3.66.0" platform="*nix">
+	<Servers>
+		<Server>
+			<Host>locked.example.test</Host>
+			<Port>22</Port>
+			<Protocol>1</Protocol>
+			<User>alice</User>
+			<Pass encoding="crypt" pubkey="AAAAfictionalpubkeyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=">AAAAfictionalciphertextAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==</Pass>
+			<Logontype>1</Logontype>
+			<Name>Locked</Name>
+		</Server>
+	</Servers>
+</FileZilla3>

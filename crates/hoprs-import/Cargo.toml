@@ -1,0 +1,20 @@
+[package]
+name = "hoprs-import"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hoprs-core = { path = "../hoprs-core" }
+hoprs-vault = { path = "../hoprs-vault" }
+quick-xml = { workspace = true }
+base64 = { workspace = true }
+secrecy = { workspace = true }
+zeroize = { workspace = true }
+dirs = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = { workspace = true }

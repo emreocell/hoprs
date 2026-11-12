@@ -6,3 +6,8 @@ license.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+serde.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+toml.workspace = true

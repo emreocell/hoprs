@@ -10,15 +10,16 @@ Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI), open source (MIT OR Apa
 - Plan 1 (foundation + transfer engine): `docs/superpowers/plans/2026-11-11-01-foundation-transfer-engine.md`
 - Plan 2 (SSH + SFTP): `docs/superpowers/plans/2026-11-12-02-ssh-sftp.md`
 - Plan 3 (FTP + FTPS): `docs/superpowers/plans/2026-11-12-03-ftp-ftps.md`
+- Plan 4 (vault + FileZilla import): `docs/superpowers/plans/2026-11-12-04-vault-import.md`
 - Deferred follow-ups: `docs/superpowers/plans/2026-11-12-01-followups.md`
 
 ## Current status (2026-11-12)
 
-- Plans 1 (hoprs-core, hoprs-remote, hoprs-transfer) and 2 (hoprs-ssh, `SftpFs`, Docker OpenSSH test env) merged to `main`.
-- Plan 3 (FTP + FTPS: `FtpFs`, `FtpSession` pool/keepalive/reconnect, explicit and implicit FTPS with certificate pinning, protocol-neutral `Connection` + `spawn_site_watcher`, Docker vsftpd test env) implemented on branch `plan-3-ftp-ftps`; every task reviewed, whole-branch review pending.
+- Plans 1 (hoprs-core, hoprs-remote, hoprs-transfer), 2 (hoprs-ssh, `SftpFs`, Docker OpenSSH test env) and 3 (FTP + FTPS: `FtpFs`, `FtpSession` pool/keepalive/reconnect, certificate pinning, protocol-neutral `Connection` + `spawn_site_watcher`, Docker vsftpd test env) merged to `main`.
 - Deferred follow-ups for later plans: `docs/superpowers/plans/2026-11-12-01-followups.md` (per plan: before Plan 5/6, perf, Windows, Later).
-- **Next step:** merge Plan 3, then write Plan 4 (vault + FileZilla import) from the real signatures; it implements `FtpPrompter::store_pin` by saving the pin into the site profile (`crates/hoprs-remote/src/ftp/prompt.rs`).
-- Plans 4–6 are written only after the previous plan is done, using the real signatures it produced.
+- Plan 4 (hoprs-vault: profiles TOML, keyring secrets, encrypted export/import; hoprs-import: FileZilla `sitemanager.xml` parser and `apply`) implemented on branch `plan-4-vault-import`; every task reviewed, whole-branch review pending.
+- **Next step:** merge Plan 4, then write Plan 5 (iced app) from the real signatures (`Vault`, `SshSession`, `SftpFs`, `FtpFs`, `TransferEngine`, `spawn_site_watcher`).
+- Plans 5-6 are written only after the previous plan is done, using the real signatures it produced.
 - Docker integration tests: `docker compose -f docker/compose.yml up -d --build --wait`, then `cargo test --workspace --all-features -- --ignored --test-threads=1`.
 
 ## Decisions already made (do not re-litigate)

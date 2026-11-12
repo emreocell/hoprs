@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>
+<FileZilla3 version="3.40.0" platform="*nix">
+	<Servers>
+		<Folder expanded="1">Work
+			<Server>
+				<Host>alpha.example.test</Host>
+				<Port>22</Port>
+				<Protocol>1</Protocol>
+				<Type>0</Type>
+				<User>alice</User>
+				<Pass encoding="base64">aHVudGVyMi1maWN0aW9uYWw=</Pass>
+				<Logontype>1</Logontype>
+				<PasvMode>MODE_DEFAULT</PasvMode>
+				<EncodingType>Auto</EncodingType>
+				<BypassProxy>0</BypassProxy>
+				Alpha
+			</Server>
+			<Folder expanded="0">Clientes de Produção
+				<Server>
+					<Host>beta.example.test</Host>
+					<Protocol>4</Protocol>
+					<User>bob</User>
+					<Logontype>1</Logontype>
+					Beta
+				</Server>
+				<Folder expanded="0">Deep
+					<Server>
+						<Host>gamma.example.test</Host>
+						<Protocol>6</Protocol>
+						<Logontype>0</Logontype>
+						Gamma
+					</Server>
+				</Folder>
+			</Folder>
+		</Folder>
+		<Server>
+			<Host>top.example.test</Host>
+			<Protocol>1</Protocol>
+			<User>carol</User>
+			<Logontype>2</Logontype>
+			Top level
+		</Server>
+	</Servers>
+</FileZilla3>
