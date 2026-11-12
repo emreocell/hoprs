@@ -9,7 +9,10 @@
 use std::sync::LazyLock;
 
 use iced::border::Radius;
-use iced::widget::{button, container, rule, text_input};
+use iced::widget::overlay::menu;
+use iced::widget::{
+    button, checkbox as iced_checkbox, container, pick_list as iced_pick_list, rule, text_input,
+};
 use iced::{Background, Border, Color, Font, Shadow, Theme, font};
 
 /// Corner radius of every rounded surface.
@@ -362,6 +365,69 @@ pub fn search(_: &Theme, status: text_input::Status) -> text_input::Style {
         placeholder: p.muted,
         value: p.ink,
         selection: p.rule_2,
+    }
+}
+
+/// A drop-down (protocol, open as, transfer mode): like the text fields.
+pub fn pick_list(_: &Theme, status: iced_pick_list::Status) -> iced_pick_list::Style {
+    let p = palette();
+    let border = match status {
+        iced_pick_list::Status::Active => p.rule_2,
+        iced_pick_list::Status::Hovered => p.muted,
+        iced_pick_list::Status::Opened { .. } => p.accent,
+    };
+    iced_pick_list::Style {
+        text_color: p.ink,
+        placeholder_color: p.muted,
+        handle_color: p.muted,
+        background: Background::Color(p.paper),
+        border: Border {
+            color: border,
+            width: HAIRLINE,
+            radius: radius(),
+        },
+    }
+}
+
+/// The open list of a drop-down: `paper_3`, 1 px rule, no shadow.
+pub fn menu(_: &Theme) -> menu::Style {
+    let p = palette();
+    menu::Style {
+        background: Background::Color(p.paper_3),
+        border: Border {
+            color: p.rule_2,
+            width: HAIRLINE,
+            radius: radius(),
+        },
+        text_color: p.ink_2,
+        selected_text_color: p.ink,
+        selected_background: Background::Color(p.accent_wash),
+        shadow: Shadow::default(),
+    }
+}
+
+/// A checkbox: white when checked (the accent marks selection).
+pub fn checkbox(_: &Theme, status: iced_checkbox::Status) -> iced_checkbox::Style {
+    let p = palette();
+    let (checked, hovered, disabled) = match status {
+        iced_checkbox::Status::Active { is_checked } => (is_checked, false, false),
+        iced_checkbox::Status::Hovered { is_checked } => (is_checked, true, false),
+        iced_checkbox::Status::Disabled { is_checked } => (is_checked, false, true),
+    };
+    let border = match (checked, hovered) {
+        (true, _) => p.accent,
+        (false, true) => p.muted,
+        (false, false) => p.rule_2,
+    };
+    iced_checkbox::Style {
+        background: Background::Color(if checked { p.accent } else { p.paper }),
+        icon_color: p.accent_ink,
+        border: Border {
+            color: border,
+            width: HAIRLINE,
+            radius: radius(),
+        },
+        text_color: Some(if disabled { p.muted } else { p.ink_2 }),
     }
 }
 

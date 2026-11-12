@@ -70,7 +70,7 @@ struct Hoprs {
     backend: Arc<dyn BackendApi>,
 }
 
-fn boot() -> Hoprs {
+fn boot() -> (Hoprs, Task<Message>) {
     let backend = match open_backend() {
         Ok(backend) => backend,
         Err(err) => {
@@ -80,10 +80,10 @@ fn boot() -> Hoprs {
             std::process::exit(1);
         }
     };
-    Hoprs {
-        app: App::new(),
-        backend: Arc::new(backend),
-    }
+    let backend: Arc<dyn BackendApi> = Arc::new(backend);
+    let (app, effects) = App::boot();
+    let task = run_effects(&backend, effects);
+    (Hoprs { app, backend }, task)
 }
 
 /// The real backend at the standard locations, secrets in the system keyring.
@@ -97,10 +97,14 @@ fn open_backend() -> hoprs_core::Result<Backend> {
 /// Thin wrapper: the pure update decides, `effects::run` performs.
 fn update(state: &mut Hoprs, message: Message) -> Task<Message> {
     let effects = state.app.update(message);
+    run_effects(&state.backend, effects)
+}
+
+fn run_effects(backend: &Arc<dyn BackendApi>, effects: Vec<app::Effect>) -> Task<Message> {
     Task::batch(
         effects
             .into_iter()
-            .map(|effect| effects::run(Arc::clone(&state.backend), effect)),
+            .map(|effect| effects::run(Arc::clone(backend), effect)),
     )
 }
 

@@ -20,11 +20,14 @@ use hoprs_transfer::{
     EngineConfig, QueueStore, Resolution, TransferEngine, TransferId, TransferSpec,
 };
 use hoprs_vault::{SecretStore, Vault};
+use secrecy::SecretString;
 use tokio::sync::mpsc;
 
 pub use broker::{BrokerEvent, PromptAnswer, PromptBroker, PromptId};
-pub use sessions::{ConnectError, Connected, SessionConfig, SessionId, SessionManager};
-pub use vault::{LazyKeyringStore, VaultHandle};
+pub use sessions::{
+    ConnectError, ConnectResult, Connected, SessionConfig, SessionId, SessionManager,
+};
+pub use vault::{LazyKeyringStore, ProfileSnapshot, VaultHandle};
 
 /// Which pane of a files tab.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -48,7 +51,17 @@ pub enum ControlOp {
 pub trait BackendApi: Send + Sync {
     async fn sites(&self) -> Result<Vec<Site>>;
     async fn workspaces(&self) -> Result<Vec<Workspace>>;
+    /// Sites, workspaces and unreadable entries, read together.
+    async fn profiles(&self) -> Result<ProfileSnapshot>;
+    /// The directory holding `sites.toml` ("Open sites.toml folder").
+    fn profile_dir(&self) -> PathBuf;
+    /// Saves a site edited in the UI. Fields the backend owns are kept from the stored
+    /// copy: the FTPS pin and `has_password`/`has_key_passphrase` (see
+    /// [`VaultHandle::save_site`]).
     async fn save_site(&self, site: Site) -> Result<()>;
+    /// Stores (`Some`) or deletes (`None`) the site's password in the keyring, which also
+    /// sets or clears its `has_password`.
+    async fn set_password(&self, site: SiteId, password: Option<SecretString>) -> Result<()>;
     /// Also removes the site from every workspace and deletes its secrets.
     async fn delete_site(&self, id: SiteId) -> Result<()>;
     async fn save_workspace(&self, workspace: Workspace) -> Result<()>;
@@ -56,12 +69,15 @@ pub trait BackendApi: Send + Sync {
 
     /// Connects a saved site; see [`SessionManager::connect`].
     async fn connect(&self, site: SiteId) -> std::result::Result<Connected, ConnectError>;
-    /// Connects several sites, reading their secrets as one batch ("Open workspace"); see
-    /// [`SessionManager::connect_many`].
-    async fn connect_many(
+    /// Open workspace: connects `sites` in parallel, reading their secrets as one batch
+    /// (at most one keyring unlock prompt), and sends each site's result on `results` as
+    /// soon as it is known. Returns when every site is done; see
+    /// [`SessionManager::connect_batch`].
+    async fn connect_batch(
         &self,
         sites: Vec<SiteId>,
-    ) -> Vec<(SiteId, std::result::Result<Connected, ConnectError>)>;
+        results: mpsc::UnboundedSender<(SiteId, ConnectResult)>,
+    );
     /// Retries a `Disconnected` session; see [`SessionManager::reconnect`].
     async fn reconnect(&self, session: SessionId) -> Result<()>;
     async fn close(&self, session: SessionId);
@@ -107,6 +123,7 @@ impl BackendConfig {
 
 /// The real backend.
 pub struct Backend {
+    profile_dir: PathBuf,
     vault: VaultHandle,
     engine: TransferEngine,
     sessions: SessionManager,
@@ -132,6 +149,7 @@ impl Backend {
             config.sessions,
         );
         Ok(Backend {
+            profile_dir: config.profile_dir,
             vault,
             engine,
             sessions,
@@ -169,8 +187,20 @@ impl BackendApi for Backend {
         self.vault.workspaces().await
     }
 
+    async fn profiles(&self) -> Result<ProfileSnapshot> {
+        self.vault.snapshot().await
+    }
+
+    fn profile_dir(&self) -> PathBuf {
+        self.profile_dir.clone()
+    }
+
     async fn save_site(&self, site: Site) -> Result<()> {
-        self.vault.upsert_site(site).await
+        self.vault.save_site(site).await
+    }
+
+    async fn set_password(&self, site: SiteId, password: Option<SecretString>) -> Result<()> {
+        self.vault.set_password(site, password).await
     }
 
     async fn delete_site(&self, id: SiteId) -> Result<()> {
@@ -189,11 +219,12 @@ impl BackendApi for Backend {
         self.sessions.connect(site).await
     }
 
-    async fn connect_many(
+    async fn connect_batch(
         &self,
         sites: Vec<SiteId>,
-    ) -> Vec<(SiteId, std::result::Result<Connected, ConnectError>)> {
-        self.sessions.connect_many(sites).await
+        results: mpsc::UnboundedSender<(SiteId, ConnectResult)>,
+    ) {
+        self.sessions.connect_batch(sites, results).await;
     }
 
     async fn reconnect(&self, session: SessionId) -> Result<()> {
@@ -279,12 +310,14 @@ mod tests {
 
         // Open workspace with a site that no longer exists: it fails alone, inline.
         let gone = SiteId::new();
-        let results = backend.connect_many(vec![gone.clone()]).await;
-        assert_eq!(results[0].0, gone);
-        assert_eq!(
-            results[0].1.as_ref().unwrap_err().error.kind,
-            ErrorKind::NotFound
-        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        backend.connect_batch(vec![gone.clone()], tx).await;
+        let (site_id, result) = rx.recv().await.unwrap();
+        assert_eq!(site_id, gone);
+        assert_eq!(result.unwrap_err().error.kind, ErrorKind::NotFound);
+        assert!(rx.recv().await.is_none(), "one result per site");
+        assert_eq!(backend.profile_dir(), dir.path().join("profiles"));
+        assert_eq!(backend.profiles().await.unwrap().sites, vec![site.clone()]);
         assert_eq!(
             backend.reconnect(SessionId(99)).await.unwrap_err().kind,
             ErrorKind::NotFound

@@ -12,23 +12,37 @@
 //!   the site again, or `reconnect`, retries it with the next outcome, while a connected
 //!   session is returned as is;
 //! - with the keyring "locked" ([`FakeBackend::lock_keyring`]), sessions of sites with a
-//!   stored secret report `keyring_unavailable`.
+//!   stored secret report `keyring_unavailable`;
+//! - secrets are read like the real `SecretBatch`: every site with a stored secret costs
+//!   one keyring read ([`FakeBackend::keyring_reads`]), except that within one
+//!   `connect_batch` a locked keyring is read once and the remaining sites are marked
+//!   without asking it again;
+//! - `connect_batch` runs the sites concurrently and sends each result as it finishes; a
+//!   site's connect can be held back with [`FakeBackend::hold_connect`].
+//!
+//! `save_site` keeps the backend-owned fields of a stored site (FTPS pin, `has_*`), and
+//! `set_password` records the password and sets `has_password`, like the vault.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
 use hoprs_core::{
     Error, ErrorKind, RemoteEntry, RemotePath, Result, Site, SiteId, Workspace, WorkspaceId,
 };
 use hoprs_remote::{MemFs, RemoteFs};
 use hoprs_transfer::{TransferId, TransferSpec};
-use tokio::sync::mpsc;
+use hoprs_vault::UnreadableEntry;
+use secrecy::SecretString;
+use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    BackendApi, BrokerEvent, ConnectError, Connected, ControlOp, PromptAnswer, PromptId, SessionId,
-    Side,
+    BackendApi, BrokerEvent, ConnectError, ConnectResult, Connected, ControlOp, ProfileSnapshot,
+    PromptAnswer, PromptId, SessionId, Side,
 };
 
 /// See the module docs.
@@ -44,6 +58,13 @@ pub struct FakeBackend {
 struct State {
     sites: Vec<Site>,
     workspaces: Vec<Workspace>,
+    unreadable: Vec<UnreadableEntry>,
+    /// Stored passwords, by site.
+    passwords: HashMap<SiteId, SecretString>,
+    /// Keyring reads made to fetch connect secrets.
+    keyring_reads: u32,
+    /// Connects of these sites wait until the sender is used or dropped.
+    holds: HashMap<SiteId, oneshot::Receiver<()>>,
     /// Scripted outcomes of the next connects of a site; empty means success.
     connects: HashMap<SiteId, VecDeque<std::result::Result<(), Error>>>,
     sessions: HashMap<SessionId, SiteId>,
@@ -90,6 +111,28 @@ impl FakeBackend {
     pub fn with_workspace(self, workspace: Workspace) -> Self {
         self.state().workspaces.push(workspace);
         self
+    }
+
+    pub fn with_unreadable(self, entry: UnreadableEntry) -> Self {
+        self.state().unreadable.push(entry);
+        self
+    }
+
+    /// Keyring reads made so far to fetch connect secrets.
+    pub fn keyring_reads(&self) -> u32 {
+        self.state().keyring_reads
+    }
+
+    /// The stored password of `site`, if any.
+    pub fn password(&self, site: &SiteId) -> Option<SecretString> {
+        self.state().passwords.get(site).cloned()
+    }
+
+    /// The next connect of `site` waits until the returned sender is used or dropped.
+    pub fn hold_connect(&self, site: &SiteId) -> oneshot::Sender<()> {
+        let (release, held) = oneshot::channel();
+        self.state().holds.insert(site.clone(), held);
+        release
     }
 
     /// The next connect of `site` fails with `error` (scripts queue up in order).
@@ -164,6 +207,83 @@ impl FakeBackend {
         outcome
     }
 
+    async fn connect_one(&self, site: SiteId, keyring_down: &mut bool) -> ConnectResult {
+        let started = self.start(&site, keyring_down)?;
+        self.finish(&site, started).await
+    }
+
+    /// Reads the site's secrets (see the module docs) and finds or starts its session.
+    fn start(
+        &self,
+        site: &SiteId,
+        keyring_down: &mut bool,
+    ) -> std::result::Result<(SessionId, bool), ConnectError> {
+        let mut state = self.state();
+        let Some(found) = state.sites.iter().find(|s| &s.id == site) else {
+            return Err(ConnectError {
+                session: None,
+                error: Self::not_found("Unknown site"),
+                keyring_unavailable: false,
+            });
+        };
+        let has_secret = found.has_password || found.has_key_passphrase;
+        let mut unavailable = false;
+        if has_secret {
+            if *keyring_down {
+                unavailable = true;
+            } else {
+                state.keyring_reads += 1;
+                if state.keyring_locked {
+                    *keyring_down = true;
+                    unavailable = true;
+                }
+            }
+        }
+        let existing = state
+            .sessions
+            .iter()
+            .find(|(_, s)| *s == site)
+            .map(|(id, _)| *id);
+        let id = match existing {
+            Some(id) => id,
+            None => {
+                let id = SessionId(self.next_session.fetch_add(1, Ordering::SeqCst));
+                state.sessions.insert(id, site.clone());
+                state.remotes.entry(site.clone()).or_default();
+                if unavailable {
+                    state.keyring_unavailable.insert(id);
+                }
+                id
+            }
+        };
+        let keyring_unavailable = state.keyring_unavailable.contains(&id);
+        Ok((id, keyring_unavailable))
+    }
+
+    /// Waits for a hold on the site, then makes the connection attempt.
+    async fn finish(
+        &self,
+        site: &SiteId,
+        (id, keyring_unavailable): (SessionId, bool),
+    ) -> ConnectResult {
+        let held = self.state().holds.remove(site);
+        if let Some(held) = held {
+            let _ = held.await;
+        }
+        let mut state = self.state();
+        match Self::attempt(&mut state, id, site) {
+            Ok(()) => Ok(Connected {
+                session: id,
+                keyring_unavailable,
+            }),
+            Err(error) => Err(ConnectError {
+                session: Some(id),
+                error,
+                keyring_unavailable,
+            }),
+        }
+    }
+
     fn not_found(what: &str) -> Error {
         Error::new(ErrorKind::NotFound, what.to_owned())
     }
@@ -179,12 +299,49 @@ impl BackendApi for FakeBackend {
         Ok(self.state().workspaces.clone())
     }
 
-    async fn save_site(&self, site: Site) -> Result<()> {
+    async fn profiles(&self) -> Result<ProfileSnapshot> {
+        let state = self.state();
+        Ok(ProfileSnapshot {
+            sites: state.sites.clone(),
+            workspaces: state.workspaces.clone(),
+            unreadable: state.unreadable.clone(),
+        })
+    }
+
+    fn profile_dir(&self) -> PathBuf {
+        PathBuf::from("fake-profiles")
+    }
+
+    async fn save_site(&self, mut site: Site) -> Result<()> {
         let mut state = self.state();
         match state.sites.iter_mut().find(|s| s.id == site.id) {
-            Some(slot) => *slot = site,
-            None => state.sites.push(site),
+            Some(slot) => {
+                site.ftp.pinned_fingerprint = slot.ftp.pinned_fingerprint.clone();
+                site.has_password = slot.has_password;
+                site.has_key_passphrase = slot.has_key_passphrase;
+                *slot = site;
+            }
+            None => {
+                site.has_password = false;
+                site.has_key_passphrase = false;
+                state.sites.push(site);
+            }
         }
+        Ok(())
+    }
+
+    async fn set_password(&self, site: SiteId, password: Option<SecretString>) -> Result<()> {
+        let mut state = self.state();
+        let slot = state
+            .sites
+            .iter_mut()
+            .find(|s| s.id == site)
+            .ok_or_else(|| Self::not_found("Unknown site"))?;
+        slot.has_password = password.is_some();
+        match password {
+            Some(password) => state.passwords.insert(site, password),
+            None => state.passwords.remove(&site),
+        };
         Ok(())
     }
 
@@ -220,57 +377,38 @@ impl BackendApi for FakeBackend {
         Ok(())
     }
 
-    async fn connect(&self, site: SiteId) -> std::result::Result<Connected, ConnectError> {
-        let mut state = self.state();
-        let Some(found) = state.sites.iter().find(|s| s.id == site) else {
-            return Err(ConnectError {
-                session: None,
-                error: Self::not_found("Unknown site"),
-                keyring_unavailable: false,
-            });
-        };
-        let has_secret = found.has_password || found.has_key_passphrase;
-        let existing = state
-            .sessions
-            .iter()
-            .find(|(_, s)| **s == site)
-            .map(|(id, _)| *id);
-        let id = match existing {
-            Some(id) => id,
-            None => {
-                let id = SessionId(self.next_session.fetch_add(1, Ordering::SeqCst));
-                state.sessions.insert(id, site.clone());
-                state.remotes.entry(site.clone()).or_default();
-                if state.keyring_locked && has_secret {
-                    state.keyring_unavailable.insert(id);
-                }
-                id
-            }
-        };
-        let keyring_unavailable = state.keyring_unavailable.contains(&id);
-        match Self::attempt(&mut state, id, &site) {
-            Ok(()) => Ok(Connected {
-                session: id,
-                keyring_unavailable,
-            }),
-            Err(error) => Err(ConnectError {
-                session: Some(id),
-                error,
-                keyring_unavailable,
-            }),
-        }
+    async fn connect(&self, site: SiteId) -> ConnectResult {
+        let mut keyring_down = false;
+        self.connect_one(site, &mut keyring_down).await
     }
 
-    async fn connect_many(
+    async fn connect_batch(
         &self,
         sites: Vec<SiteId>,
-    ) -> Vec<(SiteId, std::result::Result<Connected, ConnectError>)> {
-        let mut out = Vec::new();
-        for site in sites {
-            let result = self.connect(site.clone()).await;
-            out.push((site, result));
+        results: mpsc::UnboundedSender<(SiteId, ConnectResult)>,
+    ) {
+        // One secret batch: the reads all happen first, as in `sites_with_secrets`.
+        let mut keyring_down = false;
+        let prepared: Vec<_> = sites
+            .into_iter()
+            .map(|site| {
+                let start = self.start(&site, &mut keyring_down);
+                (site, start)
+            })
+            .collect();
+        let mut pending: FuturesUnordered<_> = prepared
+            .into_iter()
+            .map(|(site, start)| async move {
+                let result = match start {
+                    Ok(started) => self.finish(&site, started).await,
+                    Err(error) => Err(error),
+                };
+                (site, result)
+            })
+            .collect();
+        while let Some(result) = pending.next().await {
+            let _ = results.send(result);
         }
-        out
     }
 
     async fn reconnect(&self, session: SessionId) -> Result<()> {
@@ -412,9 +550,10 @@ mod tests {
         );
 
         // Sites and workspaces.
-        let results = fake.connect_many(vec![site.id.clone()]).await;
-        assert!(results[0].1.is_ok());
-        fake.close(results[0].1.as_ref().unwrap().session).await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        fake.connect_batch(vec![site.id.clone()], tx).await;
+        let (_, result) = rx.recv().await.unwrap();
+        fake.close(result.unwrap().session).await;
         fake.save_workspace(ws.clone()).await.unwrap();
         assert_eq!(fake.workspaces().await.unwrap().len(), 1);
         fake.delete_site(site.id.clone()).await.unwrap();

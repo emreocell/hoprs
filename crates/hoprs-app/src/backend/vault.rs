@@ -4,10 +4,21 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use hoprs_core::{Error, ErrorKind, Result, Site, SiteId, Workspace, WorkspaceId};
-use hoprs_vault::{KeyringStore, SecretKind, SecretStore, Vault, is_keyring_unavailable};
+use hoprs_vault::{
+    KeyringStore, SecretKind, SecretStore, UnreadableEntry, Vault, is_keyring_unavailable,
+};
 use secrecy::SecretString;
 
 use super::mapping::SiteSecrets;
+
+/// Everything the sidebar shows, read in one vault call (a consistent view).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ProfileSnapshot {
+    pub sites: Vec<Site>,
+    pub workspaces: Vec<Workspace>,
+    /// Entries this version cannot read (written by a newer hoprs?), kept on disk.
+    pub unreadable: Vec<UnreadableEntry>,
+}
 
 /// Shared handle to the vault. Every call runs on tokio's blocking pool.
 #[derive(Clone)]
@@ -52,6 +63,41 @@ impl VaultHandle {
 
     pub async fn upsert_site(&self, site: Site) -> Result<()> {
         self.call(move |v| v.upsert_site(site)).await
+    }
+
+    pub async fn snapshot(&self) -> Result<ProfileSnapshot> {
+        self.call(|v| {
+            Ok(ProfileSnapshot {
+                sites: v.sites().to_vec(),
+                workspaces: v.workspaces().to_vec(),
+                unreadable: v.unreadable_entries().to_vec(),
+            })
+        })
+        .await
+    }
+
+    /// Saves a site edited in the UI without overwriting what the backend owns: the
+    /// FTPS pin (written by the prompt broker, maybe while the form was open) is taken
+    /// from the vault's current copy, and `has_password`/`has_key_passphrase` are kept by
+    /// [`Vault::upsert_site`] itself. A new site keeps the pin it brings (none from the UI).
+    pub async fn save_site(&self, mut site: Site) -> Result<()> {
+        self.call(move |v| {
+            if let Some(current) = v.site(&site.id) {
+                site.ftp.pinned_fingerprint = current.ftp.pinned_fingerprint.clone();
+            }
+            v.upsert_site(site)
+        })
+        .await
+    }
+
+    /// Stores (`Some`) or deletes (`None`) the site's password in the keyring; the vault
+    /// sets or clears `has_password` with it.
+    pub async fn set_password(&self, site: SiteId, password: Option<SecretString>) -> Result<()> {
+        self.call(move |v| match password {
+            Some(password) => v.set_secret(&site, SecretKind::Password, &password),
+            None => v.delete_secret(&site, SecretKind::Password),
+        })
+        .await
     }
 
     pub async fn remove_site(&self, id: SiteId) -> Result<()> {
@@ -291,6 +337,51 @@ pub(crate) mod tests {
         assert!(!first.keyring_unavailable);
         let none = batch.read(&plain);
         assert!(none.password.is_none() && !none.keyring_unavailable);
+    }
+
+    /// The site form's copy is older than the vault's: the pin the broker wrote meanwhile
+    /// and the secret flags survive the save; the edited fields are taken.
+    #[tokio::test]
+    async fn save_site_keeps_backend_owned_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, sites) = vault_with_sites(dir.path(), Arc::new(MemoryStore::new()), 1);
+        let handle = VaultHandle::new(vault);
+        let mut form_copy = sites[0].clone();
+        handle
+            .set_ftps_pin(form_copy.id.clone(), "SHA256:PIN".into())
+            .await
+            .unwrap();
+
+        form_copy.host = "new-host".into();
+        form_copy.has_password = false;
+        form_copy.ftp.pinned_fingerprint = None;
+        handle.save_site(form_copy.clone()).await.unwrap();
+
+        let saved = handle.site(form_copy.id.clone()).await.unwrap().unwrap();
+        assert_eq!(saved.host, "new-host");
+        assert_eq!(saved.ftp.pinned_fingerprint.as_deref(), Some("SHA256:PIN"));
+        assert!(saved.has_password);
+
+        // The password itself: set, then forgotten.
+        let id = saved.id.clone();
+        handle
+            .set_password(id.clone(), Some(SecretString::from("new")))
+            .await
+            .unwrap();
+        let stored = handle
+            .call({
+                let id = id.clone();
+                move |v| v.secret(&id, SecretKind::Password)
+            })
+            .await
+            .unwrap();
+        assert_eq!(stored.as_ref().map(|p| p.expose_secret()), Some("new"));
+        handle.set_password(id.clone(), None).await.unwrap();
+        assert!(!handle.site(id).await.unwrap().unwrap().has_password);
+
+        let snapshot = handle.snapshot().await.unwrap();
+        assert_eq!(snapshot.sites.len(), 1);
+        assert!(snapshot.unreadable.is_empty());
     }
 
     #[tokio::test]

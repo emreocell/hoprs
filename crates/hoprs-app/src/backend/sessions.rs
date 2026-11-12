@@ -24,11 +24,14 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use futures_util::future::BoxFuture;
+use futures_util::stream::FuturesUnordered;
+use futures_util::{FutureExt, StreamExt};
 use hoprs_core::{ConnectionState, Error, ErrorKind, Protocol, Result, Site, SiteId};
 use hoprs_remote::{Connection, FtpFs, LocalFs, RemoteFs, SftpConfig, SftpFs};
 use hoprs_ssh::SshSession;
 use hoprs_transfer::{SiteEndpoints, TransferEngine, spawn_site_watcher};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use super::broker::{PromptBroker, SessionPrompter};
@@ -48,6 +51,9 @@ pub struct Connected {
     /// locked keyring apart from no stored secret.
     pub keyring_unavailable: bool,
 }
+
+/// What connecting one site gives.
+pub type ConnectResult = std::result::Result<Connected, ConnectError>;
 
 /// A failed connect. `session` is `Some` when the session exists (its first connection
 /// failed): [`SessionManager::reconnect`] retries it, [`SessionManager::close`] drops it.
@@ -204,7 +210,7 @@ impl SessionManager {
     }
 
     /// Connects the saved site `site` (see the module docs).
-    pub async fn connect(&self, site: SiteId) -> std::result::Result<Connected, ConnectError> {
+    pub async fn connect(&self, site: SiteId) -> ConnectResult {
         let (_, result) = self
             .connect_many(vec![site])
             .await
@@ -213,38 +219,64 @@ impl SessionManager {
         result
     }
 
-    /// Connects several sites at once (Open workspace). Their secrets are read with one
-    /// [`SecretBatch`](super::vault::SecretBatch): a locked keyring raises at most one
-    /// unlock prompt, and the sites after it ask for their passwords instead. Results come
-    /// in the order of `sites`; a site missing from the vault is `NotFound`.
-    pub async fn connect_many(
+    /// Connects several sites at once and returns when all are done. Their secrets are
+    /// read with one [`SecretBatch`](super::vault::SecretBatch): a locked keyring raises at
+    /// most one unlock prompt, and the sites after it ask for their passwords instead.
+    /// Results come in the order of `sites`; a site missing from the vault is `NotFound`.
+    pub async fn connect_many(&self, sites: Vec<SiteId>) -> Vec<(SiteId, ConnectResult)> {
+        futures_util::future::join_all(self.site_connects(sites).await).await
+    }
+
+    /// Open workspace: like [`connect_many`](Self::connect_many) (one secret batch, every
+    /// site in parallel), but each site's result is sent on `results` as soon as that site
+    /// finishes, so one slow or failing site never holds back the others. Returns once
+    /// every result was sent (or the receiver is gone).
+    pub async fn connect_batch(
         &self,
         sites: Vec<SiteId>,
-    ) -> Vec<(SiteId, std::result::Result<Connected, ConnectError>)> {
+        results: mpsc::UnboundedSender<(SiteId, ConnectResult)>,
+    ) {
+        let mut pending: FuturesUnordered<_> =
+            self.site_connects(sites).await.into_iter().collect();
+        while let Some(result) = pending.next().await {
+            // A closed receiver means nobody waits for the rest; finishing the connects
+            // keeps their sessions consistent all the same.
+            let _ = results.send(result);
+        }
+    }
+
+    /// Reads the secrets of `sites` as one batch, then one connect future per site.
+    async fn site_connects(
+        &self,
+        sites: Vec<SiteId>,
+    ) -> Vec<BoxFuture<'_, (SiteId, ConnectResult)>> {
         let read = match self.inner.vault.sites_with_secrets(sites.clone()).await {
             Ok(read) => read,
             Err(error) => {
                 return sites
                     .into_iter()
-                    .map(|site| (site, Err(ConnectError::before_start(error.clone()))))
+                    .map(|site| {
+                        let result = Err(ConnectError::before_start(error.clone()));
+                        futures_util::future::ready((site, result)).boxed()
+                    })
                     .collect();
             }
         };
-        let connects = read.into_iter().map(|(id, found)| async move {
-            let result = match found {
-                Ok((site, secrets)) => self.connect_site(site, secrets).await,
-                Err(error) => Err(ConnectError::before_start(error)),
-            };
-            (id, result)
-        });
-        futures_util::future::join_all(connects).await
+        read.into_iter()
+            .map(|(id, found)| {
+                async move {
+                    let result = match found {
+                        Ok((site, secrets)) => self.connect_site(site, secrets).await,
+                        Err(error) => Err(ConnectError::before_start(error)),
+                    };
+                    (id, result)
+                }
+                .boxed()
+            })
+            .collect()
     }
 
-    async fn connect_site(
-        &self,
-        site: Site,
-        secrets: SiteSecrets,
-    ) -> std::result::Result<Connected, ConnectError> {
+    async fn connect_site(&self, site: Site, secrets: SiteSecrets) -> ConnectResult {
         let site_lock = self.site_lock(&site.id);
         let _turn = site_lock.lock().await;
         let existing = lock(&self.inner.sessions)
@@ -747,6 +779,56 @@ mod tests {
         let again = f.manager.connect(locked.id.clone()).await.unwrap_err();
         assert_eq!(again.session, locked_err.session);
         assert!(again.keyring_unavailable);
+        answer.abort();
+    }
+
+    /// Open workspace: every site's result is sent on its own, a missing site included,
+    /// and a locked keyring is asked once for the whole batch.
+    #[tokio::test]
+    async fn connect_batch_sends_each_result_with_one_secret_batch() {
+        let store = Arc::new(super::super::vault::tests::LockedStore::default());
+        let f = fixture_with(store.clone());
+        let mut ids = Vec::new();
+        for name in ["a", "b", "c"] {
+            let mut site = Site::new(name, "127.0.0.1", "u", Protocol::Ftp);
+            site.port = 1;
+            f.vault.upsert_site(site.clone()).await.unwrap();
+            let id = site.id.clone();
+            f.vault
+                .call(move |v| v.set_secret(&id, SecretKind::Password, &SecretString::from("x")))
+                .await
+                .unwrap();
+            ids.push(site.id);
+        }
+        let missing = SiteId::new();
+        ids.insert(1, missing.clone());
+        let (answer, _) = answer_passwords(&f.broker);
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        f.manager.connect_batch(ids.clone(), tx).await;
+        let mut got = Vec::new();
+        while let Some(result) = rx.recv().await {
+            got.push(result);
+        }
+        assert_eq!(got.len(), 4);
+        let mut sites: Vec<_> = got.iter().map(|(id, _)| id.clone()).collect();
+        sites.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut expected = ids.clone();
+        expected.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(sites, expected, "one result per site");
+        for (id, result) in &got {
+            let err = result.as_ref().unwrap_err();
+            if *id == missing {
+                assert_eq!(err.error.kind, ErrorKind::NotFound);
+            } else {
+                assert!(err.keyring_unavailable, "{err:?}");
+            }
+        }
+        assert_eq!(
+            store.gets.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one keyring call for the whole batch"
+        );
         answer.abort();
     }
 
