@@ -3,12 +3,16 @@
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use async_trait::async_trait;
 
 use hoprs_core::{Error, ErrorKind};
 use hoprs_ssh::testing::{fixture, test_config};
-use hoprs_ssh::{KeySource, Prompter, ScriptedPrompter, SshConfig, SshSession};
+use hoprs_ssh::{KbdPrompt, KeySource, Prompter, ScriptedPrompter, SshConfig, SshSession};
 use secrecy::SecretString;
 use tempfile::TempDir;
+use tokio::net::TcpListener;
 
 async fn connect(cfg: SshConfig, prompter: &Arc<ScriptedPrompter>) -> Result<SshSession, Error> {
     SshSession::connect(cfg, prompter.clone() as Arc<dyn Prompter>).await
@@ -236,4 +240,117 @@ async fn connection_refused_is_network() {
     };
     assert_eq!(e.kind, ErrorKind::Network, "{e:?}");
     assert_eq!(p.calls().host, 0);
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn passphrase_cancelled_falls_back_to_password() {
+    let dir = trusted_dir().await;
+    let mut cfg = test_config("alice", dir.path());
+    cfg.auth.key = KeySource::File {
+        path: fixture("id_ed25519_pp"),
+        passphrase: None,
+    };
+    let p = Arc::new(
+        ScriptedPrompter::new()
+            .with_passphrase(None)
+            .with_password(Some("alice-pass")),
+    );
+    connect(cfg, &p).await.unwrap().disconnect().await;
+    assert_eq!(p.calls().passphrase, 1);
+    assert_eq!(p.calls().password, 1);
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn skipped_key_is_reported() {
+    let dir = trusted_dir().await;
+    let key = fixture("id_ed25519_pp");
+    let mut cfg = test_config("alice", dir.path());
+    cfg.auth.key = KeySource::File {
+        path: key.clone(),
+        passphrase: Some(SecretString::from("not-the-pp")),
+    };
+    cfg.auth.password = Some(SecretString::from("not-alices-pass"));
+    let p = Arc::new(ScriptedPrompter::new());
+    let e = assert_err(
+        connect(cfg, &p).await,
+        ErrorKind::Auth,
+        "Authentication failed",
+    );
+    let detail = e.detail.clone().unwrap_or_default();
+    let expected = format!("publickey (skipped {}: wrong passphrase)", key.display());
+    assert!(detail.contains(&expected), "{detail}");
+    assert!(detail.contains("password"), "{detail}");
+    let shown = format!("{e:?}");
+    assert!(!shown.contains("not-the-pp") && !shown.contains("not-alices-pass"));
+}
+
+#[tokio::test]
+async fn silent_server_times_out() {
+    // Accepts TCP and never speaks, like an HTTP or database port.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((sock, _)) = listener.accept().await {
+            held.push(sock);
+        }
+    });
+    let dir = TempDir::new().unwrap();
+    let mut cfg = test_config("bob", dir.path());
+    cfg.port = port;
+    cfg.connect_timeout = Duration::from_millis(500);
+    let p = Arc::new(ScriptedPrompter::new().accept_host(true));
+
+    let start = Instant::now();
+    let result = tokio::time::timeout(Duration::from_secs(5), connect(cfg, &p))
+        .await
+        .expect("connect hung on a silent server");
+    assert_err(result, ErrorKind::Network, "Connection timed out");
+    assert!(
+        start.elapsed() < Duration::from_millis(1500),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+/// Accepts every host key after a delay longer than the connect timeout.
+struct SlowHostPrompter;
+
+#[async_trait]
+impl Prompter for SlowHostPrompter {
+    async fn confirm_host_key(&self, _: &str, _: u16, _: &str, _: &str) -> bool {
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        true
+    }
+    async fn password(&self, _: &str, _: &str) -> Option<SecretString> {
+        None
+    }
+    async fn key_passphrase(&self, _: &Path) -> Option<SecretString> {
+        None
+    }
+    async fn keyboard_interactive(
+        &self,
+        _: &str,
+        _: &str,
+        _: &[KbdPrompt],
+    ) -> Option<Vec<SecretString>> {
+        None
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn slow_prompt_does_not_time_out() {
+    let dir = TempDir::new().unwrap();
+    let mut cfg = test_config("bob", dir.path());
+    cfg.auth.password = Some(SecretString::from("bob-pass"));
+    cfg.connect_timeout = Duration::from_millis(500);
+    SshSession::connect(cfg, Arc::new(SlowHostPrompter))
+        .await
+        .unwrap()
+        .disconnect()
+        .await;
+    assert_eq!(known_hosts_lines(dir.path()).len(), 1);
 }

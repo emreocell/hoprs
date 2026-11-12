@@ -2,6 +2,8 @@
 //!
 //! Each step runs only if the server's last reply still lists its method.
 
+use std::fmt;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -10,6 +12,7 @@ use russh::client::{self, AuthResult};
 use russh::keys::{self, PrivateKey, PrivateKeyWithHashAlg};
 use russh::{MethodKind, MethodSet};
 use secrecy::{ExposeSecret, SecretString};
+use zeroize::Zeroizing;
 
 use crate::config::{KeySource, SshConfig};
 use crate::prompt::Prompter;
@@ -36,6 +39,7 @@ pub(crate) async fn authenticate<H: client::Handler>(
         } => remaining_methods,
     };
     let mut tried: Vec<&'static str> = Vec::new();
+    let mut skipped: Vec<(PathBuf, SkipReason)> = Vec::new();
 
     if methods.contains(&MethodKind::PublicKey) {
         for path in key_files(&cfg.auth.key) {
@@ -43,8 +47,12 @@ pub(crate) async fn authenticate<H: client::Handler>(
                 KeySource::File { passphrase, .. } => passphrase.as_ref(),
                 _ => None,
             };
-            let Some(key) = load_key(&path, configured, prompter).await else {
-                continue;
+            let key = match load_key(&path, configured, prompter).await {
+                Ok(key) => key,
+                Err(reason) => {
+                    skipped.push((path, reason));
+                    continue;
+                }
             };
             note(&mut tried, MethodKind::PublicKey);
             let hash_alg = if key.algorithm().is_rsa() {
@@ -93,7 +101,7 @@ pub(crate) async fn authenticate<H: client::Handler>(
         return Err(Error::new(ErrorKind::Network, "Connection lost"));
     }
     Err(Error::new(ErrorKind::Auth, "Authentication failed")
-        .with_detail(failure_detail(&tried, &methods)))
+        .with_detail(failure_detail(&tried, &skipped, &methods)))
 }
 
 fn cancelled() -> Error {
@@ -120,14 +128,61 @@ fn note(tried: &mut Vec<&'static str>, method: MethodKind) {
     }
 }
 
-fn failure_detail(tried: &[&str], methods: &MethodSet) -> String {
-    let offered: Vec<&'static str> = methods.iter().map(<&'static str>::from).collect();
-    let tried = if tried.is_empty() {
+/// `tried: publickey (skipped /k: wrong passphrase), password; server offers: ...`.
+/// Method names and key paths only; never secrets.
+fn failure_detail(
+    tried: &[&'static str],
+    skipped: &[(PathBuf, SkipReason)],
+    methods: &MethodSet,
+) -> String {
+    let publickey: &'static str = (&MethodKind::PublicKey).into();
+    let mut names = tried.to_vec();
+    if !skipped.is_empty() && !names.contains(&publickey) {
+        names.insert(0, publickey);
+    }
+    let parts: Vec<String> = names
+        .iter()
+        .map(|&name| {
+            if name == publickey && !skipped.is_empty() {
+                let why: Vec<String> = skipped
+                    .iter()
+                    .map(|(path, reason)| format!("skipped {}: {reason}", path.display()))
+                    .collect();
+                format!("{name} ({})", why.join("; "))
+            } else {
+                name.to_owned()
+            }
+        })
+        .collect();
+    let tried = if parts.is_empty() {
         "none".to_owned()
     } else {
-        tried.join(", ")
+        parts.join(", ")
     };
+    let offered: Vec<&'static str> = methods.iter().map(<&'static str>::from).collect();
     format!("tried: {tried}; server offers: {}", offered.join(", "))
+}
+
+/// Why a key file of the "key" step was not offered to the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SkipReason {
+    MissingFile,
+    Unreadable,
+    Unparseable,
+    PassphraseCancelled,
+    WrongPassphrase,
+}
+
+impl fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::MissingFile => "missing file",
+            Self::Unreadable => "unreadable",
+            Self::Unparseable => "unparseable",
+            Self::PassphraseCancelled => "passphrase cancelled",
+            Self::WrongPassphrase => "wrong passphrase",
+        })
+    }
 }
 
 /// Key files of the "key" step, in order.
@@ -147,22 +202,115 @@ fn key_files(source: &KeySource) -> Vec<PathBuf> {
     }
 }
 
-/// Loads a private key; encrypted keys use `configured` or ask once. `None` skips the key.
+/// Loads a private key; encrypted keys use `configured` or ask once. `Err` skips the key.
 async fn load_key(
     path: &Path,
     configured: Option<&SecretString>,
     prompter: &dyn Prompter,
-) -> Option<PrivateKey> {
-    let text = std::fs::read_to_string(path).ok()?;
+) -> std::result::Result<PrivateKey, SkipReason> {
+    let text = read_key_text(path).map_err(|e| match e.kind() {
+        io::ErrorKind::NotFound => SkipReason::MissingFile,
+        _ => SkipReason::Unreadable,
+    })?;
     match keys::decode_secret_key(&text, None) {
-        Ok(key) => Some(key),
+        Ok(key) => Ok(key),
         Err(keys::Error::KeyIsEncrypted) => {
             let passphrase = match configured {
                 Some(p) => p.clone(),
-                None => prompter.key_passphrase(path).await?,
+                None => prompter
+                    .key_passphrase(path)
+                    .await
+                    .ok_or(SkipReason::PassphraseCancelled)?,
             };
-            keys::decode_secret_key(&text, Some(passphrase.expose_secret())).ok()
+            keys::decode_secret_key(&text, Some(passphrase.expose_secret()))
+                .map_err(|_| SkipReason::WrongPassphrase)
         }
-        Err(_) => None,
+        Err(_) => Err(SkipReason::Unparseable),
+    }
+}
+
+/// Reads the key file into a buffer sized up front (no reallocation) and wiped on drop.
+fn read_key_text(path: &Path) -> io::Result<Zeroizing<String>> {
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len() as usize;
+    let mut text = Zeroizing::new(String::with_capacity(len + 1));
+    file.read_to_string(&mut text)?;
+    Ok(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detail_names_skipped_keys() {
+        let methods = MethodSet::from(&[MethodKind::PublicKey, MethodKind::Password][..]);
+        let skipped = vec![
+            (PathBuf::from("/k/a"), SkipReason::WrongPassphrase),
+            (PathBuf::from("/k/b"), SkipReason::MissingFile),
+        ];
+        assert_eq!(
+            failure_detail(&["password"], &skipped, &methods),
+            "tried: publickey (skipped /k/a: wrong passphrase; skipped /k/b: missing file), \
+             password; server offers: publickey, password"
+        );
+        assert_eq!(
+            failure_detail(&[], &[], &methods),
+            "tried: none; server offers: publickey, password"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_key_reasons() {
+        struct NoPrompt;
+        #[async_trait::async_trait]
+        impl Prompter for NoPrompt {
+            async fn confirm_host_key(&self, _: &str, _: u16, _: &str, _: &str) -> bool {
+                false
+            }
+            async fn password(&self, _: &str, _: &str) -> Option<SecretString> {
+                None
+            }
+            async fn key_passphrase(&self, _: &Path) -> Option<SecretString> {
+                None
+            }
+            async fn keyboard_interactive(
+                &self,
+                _: &str,
+                _: &str,
+                _: &[crate::KbdPrompt],
+            ) -> Option<Vec<SecretString>> {
+                None
+            }
+        }
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docker/fixtures");
+        let dir = tempfile::TempDir::new().unwrap();
+        let garbage = dir.path().join("garbage");
+        std::fs::write(&garbage, "not a key").unwrap();
+        let pp = fixtures.join("id_ed25519_pp");
+        let wrong = SecretString::from("wrong");
+
+        let reason = |r: std::result::Result<PrivateKey, SkipReason>| r.err();
+        assert_eq!(
+            reason(load_key(&dir.path().join("none"), None, &NoPrompt).await),
+            Some(SkipReason::MissingFile)
+        );
+        assert_eq!(
+            reason(load_key(&garbage, None, &NoPrompt).await),
+            Some(SkipReason::Unparseable)
+        );
+        assert_eq!(
+            reason(load_key(&pp, None, &NoPrompt).await),
+            Some(SkipReason::PassphraseCancelled)
+        );
+        assert_eq!(
+            reason(load_key(&pp, Some(&wrong), &NoPrompt).await),
+            Some(SkipReason::WrongPassphrase)
+        );
+        assert!(
+            load_key(&fixtures.join("id_ed25519"), None, &NoPrompt)
+                .await
+                .is_ok()
+        );
     }
 }

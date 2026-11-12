@@ -11,6 +11,7 @@ use tokio::net::TcpStream;
 use crate::config::SshConfig;
 use crate::known_hosts::{self, HostKeyStatus};
 use crate::prompt::Prompter;
+use crate::watchdog::{self, WatchedPrompter};
 
 /// A connected, authenticated SSH session. Cheap to clone.
 #[derive(Clone)]
@@ -65,20 +66,33 @@ impl SshSession {
 }
 
 /// One full connection attempt: TCP, key exchange with host key check, authentication.
+///
+/// Bounded by `cfg.connect_timeout` of network time; time spent in prompts does not count
+/// (see [`crate::watchdog`]). On timeout the attempt future is dropped. If russh had already
+/// spawned its session task (key exchange started), that task may linger until the server
+/// closes the socket or russh's own timeouts end it; it holds no handle we expose.
 pub(crate) async fn establish(
     cfg: &SshConfig,
     prompter: &Arc<dyn Prompter>,
 ) -> Result<client::Handle<ClientHandler>> {
-    let addr = (cfg.host.as_str(), cfg.port);
-    let stream = match tokio::time::timeout(cfg.connect_timeout, TcpStream::connect(addr)).await {
-        Err(_) => return Err(Error::new(ErrorKind::Network, "Connection timed out")),
-        Ok(Err(e)) => {
-            return Err(
-                Error::new(ErrorKind::Network, "Connection failed").with_detail(e.to_string())
-            );
+    let watched = Arc::new(WatchedPrompter::new(prompter.clone()));
+    tokio::select! {
+        result = attempt(cfg, watched.clone()) => result,
+        _ = watchdog::expired(&watched, cfg.connect_timeout) => {
+            Err(Error::new(ErrorKind::Network, "Connection timed out"))
         }
-        Ok(Ok(stream)) => stream,
-    };
+    }
+}
+
+async fn attempt(
+    cfg: &SshConfig,
+    prompter: Arc<WatchedPrompter>,
+) -> Result<client::Handle<ClientHandler>> {
+    let stream = TcpStream::connect((cfg.host.as_str(), cfg.port))
+        .await
+        .map_err(|e| {
+            Error::new(ErrorKind::Network, "Connection failed").with_detail(e.to_string())
+        })?;
     // Nagle only delays interactive traffic; a failure here is harmless.
     let _ = stream.set_nodelay(true);
 
@@ -105,7 +119,7 @@ pub(crate) struct ClientHandler {
     host: String,
     port: u16,
     known_hosts: std::path::PathBuf,
-    prompter: Arc<dyn Prompter>,
+    prompter: Arc<WatchedPrompter>,
 }
 
 /// Handler error: always carries the final `hoprs_core::Error`.

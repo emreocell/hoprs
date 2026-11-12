@@ -1,7 +1,7 @@
 //! Helpers for the Docker integration tests (`docker/compose.yml`). Test-only.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus, Stdio};
 
 use crate::config::{KeySource, SshConfig};
 
@@ -12,22 +12,39 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// Runs `docker compose -f <repo>/docker/compose.yml <args>`; panics if it fails.
-pub fn docker(args: &[&str]) {
-    let compose = repo_root().join("docker/compose.yml");
-    let status = Command::new("docker")
+/// Compose project name; matches `name:` in `docker/compose.yml`.
+const PROJECT: &str = "hoprs-test";
+
+fn compose(args: &[&str]) -> ExitStatus {
+    let file = repo_root().join("docker/compose.yml");
+    Command::new("docker")
         .arg("compose")
+        .arg("-p")
+        .arg(PROJECT)
         .arg("-f")
-        .arg(&compose)
+        .arg(&file)
         .args(args)
+        .stdin(Stdio::null())
         .status()
-        .expect("failed to run docker");
+        .expect("failed to run docker")
+}
+
+/// Runs `docker compose -p hoprs-test -f <repo>/docker/compose.yml <args>`; panics if it fails.
+pub fn docker(args: &[&str]) {
+    let status = compose(args);
     assert!(status.success(), "docker compose {args:?} failed: {status}");
 }
 
 /// Kills every authenticated sshd session process, dropping client connections.
+/// Having no session to kill is not an error.
 pub fn kill_ssh_sessions() {
-    docker(&["exec", "-T", "sshd", "pkill", "-f", "sshd: .*@"]);
+    let args = ["exec", "-T", "sshd", "pkill", "-f", "sshd: .*@"];
+    let status = compose(&args);
+    // pkill exits 1 when nothing matched.
+    assert!(
+        matches!(status.code(), Some(0 | 1)),
+        "docker compose {args:?} failed: {status}"
+    );
 }
 
 /// Config for `user` on the test container, with `known_hosts` inside `known_hosts_dir`.

@@ -7,6 +7,7 @@ pub mod prompt;
 mod session;
 #[cfg(feature = "testing")]
 pub mod testing;
+mod watchdog;
 
 pub use config::{AuthConfig, KeySource, ReconnectPolicy, SshConfig};
 pub use prompt::{KbdPrompt, Prompter};
