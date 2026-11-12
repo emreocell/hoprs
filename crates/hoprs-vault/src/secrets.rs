@@ -63,6 +63,10 @@ impl KeyringStore {
     /// On macOS and Windows it goes through `keyring` v4, which initializes
     /// the platform store once per process (a `LazyLock`) and caches the
     /// outcome: a failure there is final until the app restarts.
+    ///
+    /// Blocking: connecting does D-Bus round trips (and so does every call
+    /// on the store); call it from `spawn_blocking`, not on the async
+    /// runtime or the UI thread.
     pub fn new() -> Result<Self> {
         Self::platform_store().map(|store| Self { store })
     }

@@ -23,7 +23,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::Path;
 
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -44,6 +44,9 @@ const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
 const HEADER_LEN: usize = MAGIC.len() + 2 + 3 * 4 + SALT_LEN + NONCE_LEN;
 const TAG_LEN: usize = 16;
+
+/// Largest backup file accepted for import.
+const MAX_BACKUP_BYTES: u64 = 64 * 1024 * 1024;
 const KEY_LEN: usize = 32;
 
 /// Largest accepted Argon2 memory cost: 1 GiB, in KiB.
@@ -80,6 +83,9 @@ pub struct ExportReport {
     pub secrets: usize,
     /// Entries this version of hoprs cannot read; they are not exported.
     pub skipped_unreadable: Vec<UnreadableEntry>,
+    /// Names of sites flagged as having a secret that the store no longer
+    /// holds; the backup has the site without that secret.
+    pub missing_secrets: Vec<String>,
 }
 
 /// How a backup is applied to the vault.
@@ -147,17 +153,18 @@ impl Header {
         out
     }
 
-    /// Parses and validates the header of `file`, without any expensive
-    /// work: Argon2 only runs once this succeeds.
-    fn decode(file: &[u8]) -> Result<Header> {
-        if file.len() < MAGIC.len() || &file[..MAGIC.len()] != MAGIC {
+    /// Parses and validates a header: `prefix` is the start of a file of
+    /// `file_len` bytes (up to [`HEADER_LEN`] of it). No expensive work:
+    /// Argon2 only runs once this succeeds.
+    fn decode(prefix: &[u8], file_len: u64) -> Result<Header> {
+        if prefix.len() < MAGIC.len() || &prefix[..MAGIC.len()] != MAGIC {
             return Err(Error::new(ErrorKind::Protocol, "Not a hoprs backup"));
         }
-        if file.len() < HEADER_LEN + TAG_LEN {
+        if prefix.len() < HEADER_LEN || file_len < (HEADER_LEN + TAG_LEN) as u64 {
             return Err(Error::new(ErrorKind::Protocol, "Backup file is truncated")
-                .with_detail(format!("{} bytes", file.len())));
+                .with_detail(format!("{file_len} bytes")));
         }
-        let header = &file[..HEADER_LEN];
+        let header = &prefix[..HEADER_LEN];
         let u16_at = |at: usize| u16::from_be_bytes([header[at], header[at + 1]]);
         let u32_at = |at: usize| {
             u32::from_be_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]])
@@ -232,16 +239,55 @@ fn seal(plaintext: &[u8], password: &SecretString, params: ExportParams) -> Resu
     Ok(out)
 }
 
-/// Authenticates and decrypts a backup file.
-fn unseal(file: &[u8], password: &SecretString) -> Result<Zeroizing<Vec<u8>>> {
-    let header = Header::decode(file)?;
-    let cipher = cipher(password, &header)?;
-    let (aad, ciphertext) = file.split_at(HEADER_LEN);
-    let mut buffer = Zeroizing::new(ciphertext.to_vec());
-    cipher
-        .decrypt_in_place(&XNonce::from(header.nonce), aad, &mut *buffer)
+/// Authenticates and decrypts `body` (the file minus its header) in place.
+fn decrypt(
+    header: &Header,
+    aad: &[u8],
+    mut body: Zeroizing<Vec<u8>>,
+    password: &SecretString,
+) -> Result<Zeroizing<Vec<u8>>> {
+    cipher(password, header)?
+        .decrypt_in_place(&XNonce::from(header.nonce), aad, &mut *body)
         .map_err(|_| Error::new(ErrorKind::Auth, "Wrong password or damaged file"))?;
-    Ok(buffer)
+    Ok(body)
+}
+
+/// Authenticates and decrypts a backup held in memory.
+#[cfg(test)]
+fn unseal(file: &[u8], password: &SecretString) -> Result<Zeroizing<Vec<u8>>> {
+    let header = Header::decode(&file[..file.len().min(HEADER_LEN)], file.len() as u64)?;
+    let (aad, body) = file.split_at(HEADER_LEN);
+    decrypt(&header, aad, Zeroizing::new(body.to_vec()), password)
+}
+
+/// Reads and decrypts the backup at `path`. The header is read and checked
+/// first, then the size against [`MAX_BACKUP_BYTES`]; only then is the rest
+/// read, into one exactly-sized buffer that is decrypted in place.
+fn read_backup(path: &Path, password: &SecretString) -> Result<Zeroizing<Vec<u8>>> {
+    let mut file = fs::File::open(path)?;
+    let mut prefix = [0u8; HEADER_LEN];
+    let mut filled = 0;
+    while filled < HEADER_LEN {
+        match file.read(&mut prefix[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+    let file_len = file.metadata()?.len();
+    let header = Header::decode(&prefix[..filled], file_len)?;
+    if file_len > MAX_BACKUP_BYTES {
+        return Err(Error::new(ErrorKind::Protocol, "Backup file is too large")
+            .with_detail(format!("{file_len} bytes (limit {MAX_BACKUP_BYTES})")));
+    }
+    // At most MAX_BACKUP_BYTES, so it fits in usize on every target.
+    let body_len = usize::try_from(file_len).unwrap_or(usize::MAX) - HEADER_LEN;
+    let mut body = Zeroizing::new(Vec::with_capacity(body_len));
+    // Bounded even if the file grows meanwhile.
+    file.take((MAX_BACKUP_BYTES as usize - HEADER_LEN) as u64)
+        .read_to_end(&mut body)?;
+    decrypt(&header, &prefix, body, password)
 }
 
 /// The encrypted JSON document. No `Debug`: it holds secret values.
@@ -327,6 +373,11 @@ fn invalid_content(detail: impl Into<String>) -> Error {
 
 /// Parses the plaintext. Error details carry positions only: serde_json's
 /// messages can quote the offending value, which may be a secret.
+///
+/// Known gap: string values containing escapes (`\"`, `\\`, `\uXXXX`...)
+/// are unescaped through serde_json's internal scratch buffer, which is not
+/// zeroized; a secret with such characters may leave a copy in freed memory.
+/// Values without escapes are copied once, straight into `BackupSecret`.
 fn from_json(json: &[u8]) -> Result<Backup> {
     serde_json::from_slice(json).map_err(|e| {
         invalid_content(format!(
@@ -388,21 +439,31 @@ impl Vault {
     /// written. Entries this version cannot read
     /// ([`Vault::unreadable_entries`]) are not exported: they are listed in
     /// the report, and workspace references to such sites are dropped from
-    /// the backup.
+    /// the backup. A site flagged as having a secret the store no longer
+    /// holds is exported without it and listed in `missing_secrets`.
+    ///
+    /// An empty `password` is refused with `Protocol`.
+    ///
+    /// Blocking: runs Argon2id (64 MiB of memory with the default
+    /// parameters) and keyring calls; call it from `spawn_blocking`.
     pub fn export(
         &self,
         path: &Path,
         password: &SecretString,
         params: ExportParams,
     ) -> Result<ExportReport> {
+        if password.expose_secret().is_empty() {
+            return Err(Error::new(ErrorKind::Protocol, "Backup password is empty"));
+        }
         argon_params(params)?;
+        let mut missing_secrets = Vec::new();
         let mut backup = Backup {
             sites: Vec::with_capacity(self.sites().len()),
             workspaces: Vec::with_capacity(self.workspaces().len()),
             secrets: Vec::new(),
         };
-        for site in self.sites() {
-            let mut site = site.clone();
+        for original in self.sites() {
+            let mut site = original.clone();
             for kind in KINDS {
                 let value = if flag(&site, kind) {
                     self.secrets.get(&site.id, kind).map_err(|err| {
@@ -423,6 +484,10 @@ impl Vault {
                     });
                 }
             }
+            let lost = KINDS.iter().any(|&k| flag(original, k) && !flag(&site, k));
+            if lost {
+                missing_secrets.push(site.name.clone());
+            }
             backup.sites.push(site);
         }
         let exported: HashSet<&SiteId> = self.sites().iter().map(|s| &s.id).collect();
@@ -437,6 +502,7 @@ impl Vault {
             workspaces: backup.workspaces.len(),
             secrets: backup.secrets.len(),
             skipped_unreadable: self.unreadable_entries().to_vec(),
+            missing_secrets,
         };
         let json = to_json(&backup)?;
         drop(backup);
@@ -448,11 +514,17 @@ impl Vault {
     /// Restores a backup written by [`Vault::export`].
     ///
     /// The file is authenticated, decrypted, parsed and validated before
-    /// anything changes. Then the profiles are applied (one save per file;
+    /// anything changes; a file over 64 MiB is refused (`Protocol`) after
+    /// its header is checked and before the rest is read. Then the profiles
+    /// are applied (one save per file, imported sites without secret flags;
     /// if `workspaces.toml` cannot be saved, `sites.toml` is put back), and
     /// then the secrets. A secret the store refuses does not fail the
     /// import: its site stays without the flag and the failure is listed in
-    /// `secret_errors`.
+    /// `secret_errors`. `sites.toml` is therefore written twice: once with
+    /// the profiles, once more with the flags of the restored secrets.
+    ///
+    /// Blocking: runs Argon2id with the file's parameters (up to 1 GiB) and
+    /// keyring calls; call it from `spawn_blocking`.
     ///
     /// - [`ImportMode::Merge`] adds the sites and workspaces whose id is new
     ///   (with their secrets) and lists the others as skipped.
@@ -460,15 +532,16 @@ impl Vault {
     ///   workspaces, unknown fields and unreadable entries not in it are
     ///   dropped, and every secret the backup does not carry is deleted from
     ///   the store (for sites that disappear, unreadable ones included, and
-    ///   for kept ids whose backup lacks that secret).
+    ///   for kept ids whose backup lacks that secret). If a backup secret of
+    ///   a kept id cannot be stored, the old local value of that kind is
+    ///   deleted too (best effort), so it is not mistaken for the backup's.
     pub fn import_backup(
         &mut self,
         path: &Path,
         password: &SecretString,
         mode: ImportMode,
     ) -> Result<BackupImportReport> {
-        let file = fs::read(path)?;
-        let json = unseal(&file, password)?;
+        let json = read_backup(path, password)?;
         let backup = from_json(&json)?;
         drop(json);
         validate(&backup)?;
@@ -559,6 +632,16 @@ impl Vault {
             }
         }
 
+        // Replace: ids that already had local secrets (readable or not).
+        let kept: HashSet<SiteId> = if replace {
+            old.sites
+                .iter()
+                .map(|s| s.id.clone())
+                .chain(old.unreadable_sites().into_iter().map(|(id, _)| SiteId(id)))
+                .collect()
+        } else {
+            HashSet::new()
+        };
         let mut restored = Vec::new();
         for secret in &backup.secrets {
             if !imported.contains(&secret.site) {
@@ -568,12 +651,23 @@ impl Vault {
             let value = SecretString::from(secret.value.as_str());
             match self.secrets.set(&secret.site, kind, &value) {
                 Ok(()) => restored.push((secret.site.clone(), kind)),
-                Err(err) => report.secret_errors.push(format!(
-                    "{}: {} not restored: {}",
-                    names.get(&secret.site).copied().unwrap_or_default(),
-                    kind.account(),
-                    describe(&err)
-                )),
+                Err(err) => {
+                    let name = names.get(&secret.site).copied().unwrap_or_default();
+                    report.secret_errors.push(format!(
+                        "{name}: {} not restored: {}",
+                        kind.account(),
+                        describe(&err)
+                    ));
+                    if kept.contains(&secret.site)
+                        && let Err(err) = self.secrets.delete(&secret.site, kind)
+                    {
+                        report.secret_errors.push(format!(
+                            "{name}: old {} not deleted: {}",
+                            kind.account(),
+                            describe(&err)
+                        ));
+                    }
+                }
             }
         }
         if !restored.is_empty() {
@@ -767,6 +861,7 @@ mod tests {
                 workspaces: 1,
                 secrets: 2,
                 skipped_unreadable: vec![],
+                missing_secrets: vec![],
             }
         );
 
@@ -1269,5 +1364,148 @@ mod tests {
             assert!(vault.sites().is_empty());
             assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 0);
         }
+    }
+
+    #[test]
+    fn oversized_file_is_refused_before_reading_it() {
+        let src = source();
+        let out = tempfile::tempdir().unwrap();
+        let path = export_to(&src.vault, out.path());
+        // Valid header, then a sparse tail past the cap: nothing is allocated
+        // for it, and the import must not try to.
+        let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(MAX_BACKUP_BYTES + 1).unwrap();
+        drop(file);
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vault = Vault::open(tmp.path(), Arc::new(MemoryStore::new())).unwrap();
+        let err = vault
+            .import_backup(&path, &pw("correct horse"), ImportMode::Merge)
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Protocol);
+        assert_eq!(err.message, "Backup file is too large");
+
+        // A huge file that is not a backup at all is refused by its magic.
+        let other = out.path().join("huge.bin");
+        let file = fs::File::create(&other).unwrap();
+        file.set_len(16 * 1024 * 1024 * 1024).unwrap();
+        drop(file);
+        let err = vault
+            .import_backup(&other, &pw("correct horse"), ImportMode::Merge)
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Protocol);
+        assert_eq!(err.message, "Not a hoprs backup");
+        assert!(vault.sites().is_empty());
+    }
+
+    #[test]
+    fn header_is_bound_as_associated_data() {
+        let header = Header {
+            params: LOW,
+            salt: [7; SALT_LEN],
+            nonce: [9; NONCE_LEN],
+        };
+        let aad = header.encode();
+        let cipher = cipher(&pw("pw"), &header).unwrap();
+        let nonce = XNonce::from(header.nonce);
+        let sealed = cipher
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: b"payload",
+                    aad: &aad,
+                },
+            )
+            .unwrap();
+
+        // Same key, same nonce: only the associated data differs.
+        let mut other = aad;
+        other[8 + 1] ^= 0x01;
+        for wrong in [&[][..], &other[..], &aad[..HEADER_LEN - 1]] {
+            let mut buffer = sealed.clone();
+            assert!(cipher.decrypt_in_place(&nonce, wrong, &mut buffer).is_err());
+        }
+        let mut buffer = sealed.clone();
+        cipher.decrypt_in_place(&nonce, &aad, &mut buffer).unwrap();
+        assert_eq!(buffer, b"payload");
+    }
+
+    #[test]
+    fn export_reports_missing_secrets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let mut vault = Vault::open(tmp.path(), store.clone()).unwrap();
+        let a = ssh_site("Alpha");
+        let b = ssh_site("Bravo");
+        vault.upsert_site(a.clone()).unwrap();
+        vault.upsert_site(b.clone()).unwrap();
+        vault
+            .set_secret(&a.id, SecretKind::Password, &pw("alpha-secret-1"))
+            .unwrap();
+        vault
+            .set_secret(&b.id, SecretKind::Password, &pw("bravo-secret-2"))
+            .unwrap();
+        // Lost behind the vault's back (e.g. removed in the keyring UI).
+        store.delete(&a.id, SecretKind::Password).unwrap();
+
+        let out = tempfile::tempdir().unwrap();
+        let report = vault
+            .export(&out.path().join("b.hoprs"), &pw("correct horse"), LOW)
+            .unwrap();
+        assert_eq!(report.secrets, 1);
+        assert_eq!(report.missing_secrets, ["Alpha"]);
+    }
+
+    #[test]
+    fn empty_export_password_is_refused() {
+        let src = source();
+        let out = tempfile::tempdir().unwrap();
+        let path = out.path().join("b.hoprs");
+        let err = src.vault.export(&path, &pw(""), LOW).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Protocol);
+        assert_eq!(err.message, "Backup password is empty");
+        assert!(!path.exists());
+    }
+
+    /// Never stores anything; reads and deletes work.
+    struct NoSetStore(MemoryStore);
+
+    impl SecretStore for NoSetStore {
+        fn get(&self, site: &SiteId, kind: SecretKind) -> Result<Option<SecretString>> {
+            self.0.get(site, kind)
+        }
+        fn set(&self, _: &SiteId, _: SecretKind, _: &SecretString) -> Result<()> {
+            Err(unavailable())
+        }
+        fn delete(&self, site: &SiteId, kind: SecretKind) -> Result<()> {
+            self.0.delete(site, kind)
+        }
+    }
+
+    #[test]
+    fn replace_drops_old_secret_when_backup_one_cannot_be_stored() {
+        let src = source();
+        let out = tempfile::tempdir().unwrap();
+        let path = export_to(&src.vault, out.path());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(NoSetStore(MemoryStore::new()));
+        let mut vault = Vault::open(tmp.path(), store.clone()).unwrap();
+        let mut mine = src.a.clone();
+        mine.name = "My Alpha".into();
+        vault.upsert_site(mine.clone()).unwrap();
+        store
+            .0
+            .set(&mine.id, SecretKind::Password, &pw("old-local-pw"))
+            .unwrap();
+
+        let report = vault
+            .import_backup(&path, &pw("correct horse"), ImportMode::Replace)
+            .unwrap();
+        // Alpha's password and Bravo's passphrase could not be stored.
+        assert_eq!(report.secret_errors.len(), 2, "{:?}", report.secret_errors);
+        assert_eq!(report.secrets_restored, 0);
+        // The old local value does not survive under the backup's site.
+        assert_eq!(stored(&*store, &mine.id, SecretKind::Password), None);
+        assert!(!vault.site(&mine.id).unwrap().has_password);
     }
 }
