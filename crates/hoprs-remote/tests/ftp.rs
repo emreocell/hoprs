@@ -1,16 +1,20 @@
 //! FTP control connections and sessions against the containers in `docker/compose.yml`.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use hoprs_core::{ConnectionState, Error, ErrorKind, ReconnectPolicy};
+use hoprs_core::{
+    ConnectionState, EntryKind, Error, ErrorKind, ReconnectPolicy, RemoteEntry, RemotePath,
+};
 use hoprs_remote::testing::{
     FtpSession, OtherCertificate, TestControl, ftp_config, ftps_fixture, kill_ftp_sessions,
-    open_test_control, pooled_quote, server_fingerprint, session_command, session_quote,
+    open_test_control, pooled_quote, server_fingerprint, session_command,
+    session_disconnect_inside_command, session_fail, session_quote,
 };
 use hoprs_remote::{
-    CertProblem, Connection, FtpConfig, FtpPrompter, FtpSecurity, ScriptedFtpPrompter,
-    cert_fingerprint,
+    CertProblem, Connection, FtpConfig, FtpFs, FtpPrompter, FtpSecurity, RemoteFs,
+    ScriptedFtpPrompter, cert_fingerprint,
 };
 use hoprs_ssh::testing::docker;
 use rustls::pki_types::CertificateDer;
@@ -728,41 +732,66 @@ async fn supervisor_ends_when_last_handle_drops() {
 }
 
 /// A minimal FTP server on 127.0.0.1 that logs anyone in and accepts any number of
-/// connections. It answers `NOOP` and `PWD`, answers `DATA425` with `425`, and never answers
-/// `HANG`. Returns its port.
+/// connections. It answers `NOOP` and `PWD`, answers `DATA425` with `425`, never answers
+/// `HANG`, and answers `PASV` with a port nobody listens on. Returns its port.
 async fn fake_server() -> u16 {
+    fake_server_with(false).await.0
+}
+
+/// [`fake_server`]; with `hang_noop` it never answers `NOOP` either. Also returns the number
+/// of client connections currently open.
+async fn fake_server_with(hang_noop: bool) -> (u16, Arc<AtomicUsize>) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
+    // A port that refuses connections: bound once, then closed.
+    let closed = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let pasv = format!(
+        "227 Entering Passive Mode (127,0,0,1,{},{}).\r\n",
+        closed / 256,
+        closed % 256
+    );
+    let live = Arc::new(AtomicUsize::new(0));
+    let open = live.clone();
     tokio::spawn(async move {
         while let Ok((sock, _)) = listener.accept().await {
+            let pasv = pasv.clone();
+            let live = live.clone();
+            live.fetch_add(1, Ordering::SeqCst);
             tokio::spawn(async move {
                 let (read, mut write) = sock.into_split();
-                if write.write_all(b"220 fake\r\n").await.is_err() {
-                    return;
-                }
-                let mut lines = BufReader::new(read).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    let verb = line.split(' ').next().unwrap_or("").to_ascii_uppercase();
-                    let reply: &[u8] = match verb.as_str() {
-                        "USER" => b"331 Password please.\r\n",
-                        "PASS" => b"230 Logged in.\r\n",
-                        "TYPE" => b"200 Binary.\r\n",
-                        "NOOP" => b"200 NOOP ok.\r\n",
-                        "PWD" => b"257 \"/\"\r\n",
-                        "DATA425" => b"425 Can't open data connection.\r\n",
-                        "HANG" => continue,
-                        _ => b"502 Not implemented.\r\n",
-                    };
-                    if write.write_all(reply).await.is_err() {
-                        break;
+                if write.write_all(b"220 fake\r\n").await.is_ok() {
+                    let mut lines = BufReader::new(read).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let verb = line.split(' ').next().unwrap_or("").to_ascii_uppercase();
+                        let reply: &[u8] = match verb.as_str() {
+                            "USER" => b"331 Password please.\r\n",
+                            "PASS" => b"230 Logged in.\r\n",
+                            "TYPE" => b"200 Binary.\r\n",
+                            "NOOP" if hang_noop => continue,
+                            "NOOP" => b"200 NOOP ok.\r\n",
+                            "PWD" => b"257 \"/\"\r\n",
+                            "PASV" => pasv.as_bytes(),
+                            "DATA425" => b"425 Can't open data connection.\r\n",
+                            "HANG" => continue,
+                            _ => b"502 Not implemented.\r\n",
+                        };
+                        if write.write_all(reply).await.is_err() {
+                            break;
+                        }
                     }
                 }
+                live.fetch_sub(1, Ordering::SeqCst);
             });
         }
     });
-    port
+    (port, open)
 }
 
 /// A session on [`fake_server`] with the given command timeout and no keepalive in sight.
@@ -876,4 +905,493 @@ async fn pooled_connection_loss_probes_control() {
     .await;
     assert_eq!(s.generation(), 2);
     s.disconnect().await;
+}
+
+/// Waits until `live` (open connections on a fake server) reaches `want`; panics after 3 s.
+async fn wait_live(live: &AtomicUsize, want: usize) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while live.load(Ordering::SeqCst) != want {
+        assert!(
+            Instant::now() < deadline,
+            "{} connections open, expected {want}",
+            live.load(Ordering::SeqCst)
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// A TLS failure inside a control command (the data channel handshake runs after the server's
+/// `150`, so its final reply is still unread) discards the control connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tls_error_inside_command_is_control_loss() {
+    let s = fake_session(Duration::from_secs(5)).await;
+    let rec = record_until(s.state(), |st| *st == ConnectionState::Connected);
+    let e = session_fail(&s, Error::new(ErrorKind::Tls, "TLS failed: data")).await;
+    assert_eq!(e.unwrap_err().kind, ErrorKind::Tls);
+    let states = recorded(rec).await;
+    assert_eq!(
+        states,
+        vec![
+            ConnectionState::Reconnecting { attempt: 1 },
+            ConnectionState::Connected
+        ]
+    );
+    assert_eq!(s.generation(), 2);
+}
+
+/// A passive data connection that cannot be opened is a data channel error: `Network` for
+/// the caller, but the control connection stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refused_data_connection_keeps_session() {
+    let mut cfg = session_config();
+    cfg.port = fake_server().await;
+    cfg.keepalive_interval = Duration::from_secs(60);
+    let p = Arc::new(ScriptedFtpPrompter::new());
+    let fs = FtpFs::connect(cfg, p as Arc<dyn FtpPrompter>)
+        .await
+        .unwrap();
+    let mut rx = Connection::state(&fs);
+    rx.mark_unchanged();
+    let e = fs.list(&RemotePath::new("/x").unwrap()).await.unwrap_err();
+    assert_eq!(e.kind, ErrorKind::Network, "{e:?}");
+    assert!(
+        e.detail
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("data channel: "),
+        "{e:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !rx.has_changed().unwrap(),
+        "state changed: {:?}",
+        *rx.borrow()
+    );
+    assert_eq!(Connection::generation(&fs), 1);
+    fs.disconnect().await;
+}
+
+/// `disconnect` does not wait for a keepalive `NOOP` the server never answers, and closes
+/// the control connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disconnect_during_keepalive() {
+    let (port, live) = fake_server_with(true).await;
+    let mut cfg = session_config();
+    cfg.port = port;
+    cfg.keepalive_interval = Duration::from_millis(200);
+    cfg.connect_timeout = Duration::from_secs(20);
+    let (s, _p) = session_with(cfg).await;
+    wait_live(&live, 1).await;
+    // The keepalive NOOP is now waiting for its reply.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    tokio::time::timeout(Duration::from_secs(1), s.disconnect())
+        .await
+        .expect("disconnect waited for the keepalive NOOP");
+    let by_user =
+        ConnectionState::Disconnected(Error::new(ErrorKind::Network, "Disconnected by user"));
+    assert_eq!(*s.state().borrow(), by_user);
+    wait_live(&live, 0).await;
+}
+
+/// A command that finishes while the session is being disconnected does not keep the control
+/// connection open.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reply_racing_disconnect_closes_control() {
+    let (port, live) = fake_server_with(false).await;
+    let mut cfg = session_config();
+    cfg.port = port;
+    cfg.keepalive_interval = Duration::from_secs(60);
+    let (s, _p) = session_with(cfg).await;
+    wait_live(&live, 1).await;
+    let _ = session_disconnect_inside_command(&s).await;
+    assert!(matches!(
+        *s.state().borrow(),
+        ConnectionState::Disconnected(_)
+    ));
+    wait_live(&live, 0).await;
+}
+
+// ---------------------------------------------------------------------------------------
+// FtpFs: the RemoteFs contract (mirrors tests/sftp.rs). Every test works in its own
+// directory, `/home/frank/t-<nanos>-<counter>`, created through `FtpFs` and removed (best
+// effort) when the test ends. FIFOs, symlinks and fixture files are made in the container as
+// frank.
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn ftp_fs_is_clone_send_sync() {
+    fn check<T: Clone + Send + Sync + 'static>() {}
+    check::<FtpFs>();
+}
+
+fn path(s: &str) -> RemotePath {
+    RemotePath::new(s).unwrap()
+}
+
+/// Removes the work directory when dropped. Never panics.
+struct Cleanup(String);
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        let dir = self.0.clone();
+        if std::panic::catch_unwind(|| docker(&["exec", "-T", "ftp", "rm", "-rf", &dir])).is_err() {
+            eprintln!("could not remove {dir}");
+        }
+    }
+}
+
+struct Ctx {
+    fs: FtpFs,
+    work: RemotePath,
+    _cleanup: Cleanup,
+}
+
+impl Ctx {
+    /// `work` joined with a relative path.
+    fn at(&self, rel: &str) -> RemotePath {
+        path(&format!("{}/{rel}", self.work))
+    }
+
+    /// Runs `cmd` as frank inside the work directory.
+    fn sh(&self, cmd: &str) {
+        let script = format!("cd {} && {cmd}", self.work);
+        docker(&["exec", "-T", "ftp", "su", "frank", "-c", &script]);
+    }
+}
+
+/// A name no other test uses: `<nanos>-<counter>`.
+fn unique() -> String {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    format!("{nanos}-{n}")
+}
+
+async fn setup() -> Ctx {
+    let p = Arc::new(ScriptedFtpPrompter::new());
+    let fs = FtpFs::connect(ftp_config(FtpSecurity::Plain), p as Arc<dyn FtpPrompter>)
+        .await
+        .unwrap();
+    let work = format!("/home/frank/t-{}", unique());
+    let cleanup = Cleanup(work.clone());
+    fs.mkdir(&path(&work)).await.unwrap();
+    Ctx {
+        fs,
+        work: path(&work),
+        _cleanup: cleanup,
+    }
+}
+
+fn names(list: &[RemoteEntry]) -> Vec<String> {
+    let mut v: Vec<String> = list.iter().map(|e| e.name.clone()).collect();
+    v.sort();
+    v
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn list_returns_direct_children_without_dot_entries() {
+    let c = setup().await;
+    c.fs.mkdir(&c.at("a")).await.unwrap();
+    c.fs.mkdir(&c.at("a/sub")).await.unwrap();
+    c.sh("printf hello > a/f.txt && : > a/sub/deep");
+    let list = c.fs.list(&c.at("a")).await.unwrap();
+    assert_eq!(names(&list), ["f.txt", "sub"]);
+    let f = list.iter().find(|e| e.name == "f.txt").unwrap();
+    assert_eq!(f.path, c.at("a/f.txt"));
+    assert_eq!(f.kind, EntryKind::File);
+    assert_eq!(f.size, 5);
+    assert!(f.modified.is_some());
+    assert_eq!(f.mode, Some(0o644));
+    let sub = list.iter().find(|e| e.name == "sub").unwrap();
+    assert_eq!(sub.kind, EntryKind::Dir);
+    assert_eq!(sub.path, c.at("a/sub"));
+
+    let st = c.fs.stat(&c.at("a/f.txt")).await.unwrap();
+    assert_eq!(st.name, "f.txt");
+    assert_eq!(st.path, c.at("a/f.txt"));
+    assert_eq!(st.kind, EntryKind::File);
+    assert_eq!(st.size, 5);
+    let st = c.fs.stat(&c.at("a/sub")).await.unwrap();
+    assert_eq!((st.name.as_str(), st.kind), ("sub", EntryKind::Dir));
+    let root = c.fs.stat(&RemotePath::root()).await.unwrap();
+    assert_eq!(root.kind, EntryKind::Dir);
+    assert_eq!(root.name, "/");
+    assert!(!c.fs.list(&RemotePath::root()).await.unwrap().is_empty());
+    // An empty directory.
+    c.fs.mkdir(&c.at("empty")).await.unwrap();
+    assert!(c.fs.list(&c.at("empty")).await.unwrap().is_empty());
+}
+
+/// `stat` reports a file's exact modification time (`MDTM`), even when the listing only
+/// shows a day.
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn stat_has_exact_mtime() {
+    let c = setup().await;
+    c.sh("printf x > old && touch -d @1000003 old");
+    let st = c.fs.stat(&c.at("old")).await.unwrap();
+    assert_eq!(
+        st.modified,
+        Some(UNIX_EPOCH + Duration::from_secs(1_000_003))
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn stat_missing_is_not_found() {
+    let c = setup().await;
+    let missing = c.at("nope");
+    let e = c.fs.stat(&missing).await.unwrap_err();
+    assert_eq!(e.kind, ErrorKind::NotFound);
+    assert!(e.message.contains(missing.as_str()), "{e:?}");
+    assert_eq!(
+        c.fs.stat(&c.at("nope/deeper")).await.unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+    assert_eq!(
+        c.fs.list(&missing).await.unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+    assert_eq!(
+        c.fs.list(&c.at("nope/deeper")).await.unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+    assert_eq!(
+        c.fs.chmod(&missing, 0o600).await.unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+    assert_eq!(
+        c.fs.remove_file(&missing).await.unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+    assert_eq!(
+        c.fs.remove_dir(&missing).await.unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+    assert_eq!(
+        c.fs.rename(&missing, &c.at("z")).await.unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+    // vsftpd has no MFMT: setting the time is a no-op, even for a missing file.
+    c.fs.set_modified(&missing, UNIX_EPOCH).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn list_on_file_is_io() {
+    let c = setup().await;
+    c.sh(": > f");
+    let e = c.fs.list(&c.at("f")).await.unwrap_err();
+    assert_eq!(e.kind, ErrorKind::Io, "{e:?}");
+    assert!(e.message.contains(c.at("f").as_str()), "{e:?}");
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn mkdir_existing_ok() {
+    let c = setup().await;
+    c.fs.mkdir(&c.at("d")).await.unwrap();
+    c.fs.mkdir(&c.at("d")).await.unwrap();
+    assert_eq!(c.fs.stat(&c.at("d")).await.unwrap().kind, EntryKind::Dir);
+    c.sh(": > f");
+    assert_eq!(
+        c.fs.mkdir(&c.at("f")).await.unwrap_err().kind,
+        ErrorKind::Io
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn mkdir_missing_parent_not_found() {
+    let c = setup().await;
+    assert_eq!(
+        c.fs.mkdir(&c.at("x/y")).await.unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn rename_file_and_dir() {
+    let c = setup().await;
+    c.sh("printf x > a.txt");
+    c.fs.rename(&c.at("a.txt"), &c.at("b.txt")).await.unwrap();
+    assert_eq!(
+        c.fs.stat(&c.at("a.txt")).await.unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+    assert_eq!(c.fs.stat(&c.at("b.txt")).await.unwrap().size, 1);
+
+    // vsftpd uses rename(2): an existing target is replaced.
+    c.sh("printf abc > c.txt");
+    c.fs.rename(&c.at("c.txt"), &c.at("b.txt")).await.unwrap();
+    assert_eq!(c.fs.stat(&c.at("b.txt")).await.unwrap().size, 3);
+    assert_eq!(
+        c.fs.stat(&c.at("c.txt")).await.unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+
+    c.fs.mkdir(&c.at("d")).await.unwrap();
+    c.fs.mkdir(&c.at("d/e")).await.unwrap();
+    c.sh("printf y > d/e/f.txt");
+    c.fs.rename(&c.at("d"), &c.at("g")).await.unwrap();
+    assert_eq!(c.fs.stat(&c.at("g/e/f.txt")).await.unwrap().size, 1);
+    assert_eq!(
+        c.fs.stat(&c.at("d")).await.unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+    assert_eq!(
+        c.fs.rename(&c.at("nope"), &c.at("z"))
+            .await
+            .unwrap_err()
+            .kind,
+        ErrorKind::NotFound
+    );
+    assert_eq!(
+        c.fs.rename(&c.at("b.txt"), &c.at("nope/z"))
+            .await
+            .unwrap_err()
+            .kind,
+        ErrorKind::NotFound
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn remove_dir_non_empty_is_io() {
+    let c = setup().await;
+    c.fs.mkdir(&c.at("d")).await.unwrap();
+    c.sh(": > d/f");
+    assert_eq!(
+        c.fs.remove_dir(&c.at("d")).await.unwrap_err().kind,
+        ErrorKind::Io
+    );
+    assert_eq!(
+        c.fs.remove_file(&c.at("d")).await.unwrap_err().kind,
+        ErrorKind::Io
+    );
+    assert_eq!(
+        c.fs.remove_dir(&c.at("d/f")).await.unwrap_err().kind,
+        ErrorKind::Io
+    );
+    c.fs.remove_file(&c.at("d/f")).await.unwrap();
+    c.fs.remove_dir(&c.at("d")).await.unwrap();
+    assert_eq!(
+        c.fs.remove_file(&c.at("d/f")).await.unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+    assert_eq!(
+        c.fs.stat(&c.at("d")).await.unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn chmod_roundtrip() {
+    let c = setup().await;
+    c.sh("printf data > m");
+    c.fs.chmod(&c.at("m"), 0o640).await.unwrap();
+    assert_eq!(c.fs.stat(&c.at("m")).await.unwrap().mode, Some(0o640));
+    c.sh("test \"$(stat -c %a m)\" = 640");
+    c.fs.mkdir(&c.at("d")).await.unwrap();
+    c.fs.chmod(&c.at("d"), 0o700).await.unwrap();
+    assert_eq!(c.fs.stat(&c.at("d")).await.unwrap().mode, Some(0o700));
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn symlink_listed_not_followed() {
+    let c = setup().await;
+    c.fs.mkdir(&c.at("target")).await.unwrap();
+    c.sh(
+        ": > target/inside && ln -s target link && ln -s missing dangling && ln -s /etc/passwd pw",
+    );
+    let list = c.fs.list(&c.work).await.unwrap();
+    assert_eq!(names(&list), ["dangling", "link", "pw", "target"]);
+    for name in ["link", "dangling", "pw"] {
+        let e = list.iter().find(|e| e.name == name).unwrap();
+        assert_eq!(e.kind, EntryKind::Symlink, "{name}");
+        assert_eq!(e.size, 0, "{name}");
+    }
+    for name in ["link", "dangling"] {
+        assert_eq!(
+            c.fs.stat(&c.at(name)).await.unwrap().kind,
+            EntryKind::Symlink,
+            "{name}"
+        );
+    }
+    // Listing through a symlink to a directory shows the target's children; a symlink to a
+    // file is not a directory.
+    assert_eq!(names(&c.fs.list(&c.at("link")).await.unwrap()), ["inside"]);
+    let e = c.fs.list(&c.at("pw")).await.unwrap_err();
+    assert_eq!(e.kind, ErrorKind::Io, "{e:?}");
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn special_files_hidden() {
+    let c = setup().await;
+    c.sh("mkfifo fifo && : > plain");
+    let list = c.fs.list(&c.work).await.unwrap();
+    assert_eq!(names(&list), ["plain"]);
+    let e = c.fs.stat(&c.at("fifo")).await.unwrap_err();
+    assert_eq!(e.kind, ErrorKind::Io, "{e:?}");
+    assert!(e.message.contains("Not a regular file"), "{e:?}");
+    assert!(e.message.contains(c.at("fifo").as_str()), "{e:?}");
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn names_roundtrip_through_list() {
+    let c = setup().await;
+    c.sh("printf 1 > 'relatório final.pdf' && printf 22 > .env && printf 333 > 'a b'");
+    c.fs.mkdir(&c.at("pasta ção")).await.unwrap();
+    let list = c.fs.list(&c.work).await.unwrap();
+    assert_eq!(
+        names(&list),
+        [".env", "a b", "pasta ção", "relatório final.pdf"]
+    );
+    for (name, size) in [(".env", 2), ("a b", 3), ("relatório final.pdf", 1)] {
+        let st = c.fs.stat(&c.at(name)).await.unwrap();
+        assert_eq!((st.name.as_str(), st.size), (name, size));
+        assert_eq!(st.kind, EntryKind::File);
+    }
+    let inside = c.at("pasta ção");
+    c.fs.mkdir(&inside.join("sub dir")).await.unwrap();
+    assert_eq!(names(&c.fs.list(&inside).await.unwrap()), ["sub dir"]);
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn lists_2k_entries() {
+    let c = setup().await;
+    c.fs.mkdir(&c.at("big")).await.unwrap();
+    c.sh("cd big && seq -f 'f%g' 1 2000 | xargs touch");
+    let list = c.fs.list(&c.at("big")).await.unwrap();
+    assert_eq!(list.len(), 2000);
+    let mut n = names(&list);
+    n.dedup();
+    assert_eq!(n.len(), 2000);
+    assert!(list.iter().all(|e| e.kind == EntryKind::File));
+}
+
+/// vsftpd lists an unreadable directory as its own entry (it falls back to listing the
+/// parent filtered by the name); that is reported as `Permission`, not as a child.
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn unreadable_dir_is_permission() {
+    let c = setup().await;
+    c.fs.mkdir(&c.at("nr")).await.unwrap();
+    c.fs.chmod(&c.at("nr"), 0o000).await.unwrap();
+    let e = c.fs.list(&c.at("nr")).await.unwrap_err();
+    assert_eq!(e.kind, ErrorKind::Permission, "{e:?}");
+    // A readable directory holding one directory of the same name is listed normally.
+    c.fs.mkdir(&c.at("same")).await.unwrap();
+    c.fs.mkdir(&c.at("same/same")).await.unwrap();
+    assert_eq!(names(&c.fs.list(&c.at("same")).await.unwrap()), ["same"]);
 }

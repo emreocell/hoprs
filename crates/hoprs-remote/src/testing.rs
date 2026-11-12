@@ -116,7 +116,7 @@ impl TestControl {
 
     /// Sends a raw command and returns the reply's code and text, whatever the code.
     pub async fn quote(&mut self, command: &str) -> Result<(u32, String)> {
-        quote(&mut self.0.stream, command).await
+        quote(&mut self.0.stream, command, "raw command").await
     }
 }
 
@@ -127,13 +127,15 @@ pub use crate::ftp::session::{FtpSession, PooledConn};
 pub async fn session_quote(session: &FtpSession, command: &str) -> Result<(u32, String)> {
     let command = command.to_owned();
     session
-        .with_control(move |c| Box::pin(async move { quote(&mut c.stream, &command).await }))
+        .with_control(move |c| {
+            Box::pin(async move { quote(&mut c.stream, &command, "raw command").await })
+        })
         .await
 }
 
 /// Sends a raw command on a pooled transfer connection.
 pub async fn pooled_quote(conn: &mut PooledConn, command: &str) -> Result<(u32, String)> {
-    quote(conn.stream(), command).await
+    quote(conn.stream(), command, "raw command").await
 }
 
 /// Sends a raw command on the session's control connection; a reply of 400 or more is an
@@ -143,10 +145,33 @@ pub async fn session_command(session: &FtpSession, command: &str) -> Result<Stri
     session
         .with_control(move |c| {
             Box::pin(async move {
-                let (code, text) = quote(&mut c.stream, &command).await?;
+                let (code, text) = quote(&mut c.stream, &command, "raw command").await?;
                 if code >= 400 {
                     return Err(crate::ftp::errors::map_reply(code, &text, &command));
                 }
+                Ok(text)
+            })
+        })
+        .await
+}
+
+/// Runs a command on the session's control connection that fails with `error`, as if the
+/// command itself had returned it.
+pub async fn session_fail(session: &FtpSession, error: hoprs_core::Error) -> Result<()> {
+    session
+        .with_control(move |_| Box::pin(async move { Err(error) }))
+        .await
+}
+
+/// Sends `PWD` on the control connection, then calls [`FtpSession::disconnect`] *before the
+/// command returns*: the command's reply and the disconnection race.
+pub async fn session_disconnect_inside_command(session: &FtpSession) -> Result<String> {
+    let handle = session.clone();
+    session
+        .with_control(move |c| {
+            Box::pin(async move {
+                let (_, text) = quote(&mut c.stream, "PWD", "raw command").await?;
+                handle.disconnect().await;
                 Ok(text)
             })
         })

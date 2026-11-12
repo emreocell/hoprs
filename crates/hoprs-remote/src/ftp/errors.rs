@@ -1,5 +1,8 @@
 //! FTP replies and suppaftp errors → [`hoprs_core::Error`].
 
+use std::fmt;
+use std::net::SocketAddr;
+
 use hoprs_core::{Error, ErrorKind};
 use suppaftp::FtpError;
 use suppaftp::types::Response;
@@ -47,12 +50,53 @@ pub(crate) fn is_control_loss(e: &Error) -> bool {
             .is_some_and(|d| d.starts_with(DATA_CHANNEL))
 }
 
+/// Why a passive data connection could not be opened. Carried inside the
+/// `FtpError::ConnectionError` of [`data_connect_failed`] so that [`map_ftp_error`] can tell it
+/// from a failure of the control connection.
+#[derive(Debug)]
+struct DataConnectFailed {
+    addr: SocketAddr,
+    source: std::io::Error,
+}
+
+impl fmt::Display for DataConnectFailed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "connect to {}: {}", self.addr, self.source)
+    }
+}
+
+impl std::error::Error for DataConnectFailed {}
+
+/// The error for a passive data connection to `addr` that failed with `source`. suppaftp
+/// connects it after reading the `PASV` reply and before sending the transfer command, so the
+/// control connection is in sync: it maps to a data channel error, not a control loss.
+pub(crate) fn data_connect_failed(addr: SocketAddr, source: std::io::Error) -> FtpError {
+    let kind = source.kind();
+    FtpError::ConnectionError(std::io::Error::new(
+        kind,
+        DataConnectFailed { addr, source },
+    ))
+}
+
 /// Maps any suppaftp error. Replies go through [`map_reply`].
 pub(crate) fn map_ftp_error(err: FtpError, context: &str) -> Error {
     match err {
         FtpError::UnexpectedResponse(reply) => {
             let (code, text) = reply_parts(&reply);
             map_reply(code, &text, context)
+        }
+        FtpError::ConnectionError(e)
+            if e.get_ref()
+                .is_some_and(|inner| inner.is::<DataConnectFailed>()) =>
+        {
+            Error::new(
+                ErrorKind::Network,
+                format!("Cannot open data connection: {context}"),
+            )
+            .with_detail(format!(
+                "{DATA_CHANNEL}{}",
+                e.get_ref().map(|i| i.to_string()).unwrap_or_default()
+            ))
         }
         FtpError::ConnectionError(e) => {
             Error::new(ErrorKind::Network, format!("Connection lost: {context}"))
@@ -134,6 +178,25 @@ mod tests {
         ] {
             assert!(!is_control_loss(&e), "{e:?}");
         }
+    }
+
+    #[test]
+    fn failed_data_connect_is_not_control_loss() {
+        let addr: SocketAddr = "127.0.0.1:30001".parse().unwrap();
+        let io = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+        let e = map_ftp_error(data_connect_failed(addr, io), "/a");
+        assert_eq!(e.kind, ErrorKind::Network, "{e:?}");
+        assert!(!is_control_loss(&e), "{e:?}");
+        assert!(e.message.contains("/a"), "{e:?}");
+        let detail = e.detail.as_deref().unwrap_or("");
+        assert!(detail.starts_with("data channel: "), "{e:?}");
+        assert!(detail.contains("127.0.0.1:30001"), "{e:?}");
+        // A plain socket error still is.
+        let io = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+        assert!(is_control_loss(&map_ftp_error(
+            FtpError::ConnectionError(io),
+            "/a"
+        )));
     }
 
     #[test]
