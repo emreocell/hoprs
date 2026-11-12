@@ -562,16 +562,23 @@ async fn write_from_offset_continues() {
     let src = data(1_000_000, 4);
     let f = c.at("f");
     upload(&c.fs, &f, 0, &src[..400_000]).await;
-    upload(&c.fs, &f, 400_000, &src[400_000..]).await;
+    let mut w = c.fs.open_write(&f, 400_000).await.unwrap();
+    assert_eq!(c.fs.stat(&f).await.unwrap().size, 400_000);
+    w.write_all(&src[400_000..]).await.unwrap();
+    w.shutdown().await.unwrap();
     assert_eq!(c.fs.stat(&f).await.unwrap().size, src.len() as u64);
     assert!(download(&c.fs, &f, 0).await == src);
 
-    // A longer destination is cut back to `offset` before writing.
+    // A longer destination is cut back to `offset` before `open_write` returns.
     let g = c.at("g");
     let mut junk = src[..400_000].to_vec();
     junk.extend_from_slice(&data(300_000, 5));
     upload(&c.fs, &g, 0, &junk).await;
-    upload(&c.fs, &g, 400_000, &src[400_000..450_000]).await;
+    assert_eq!(c.fs.stat(&g).await.unwrap().size, 700_000);
+    let mut w = c.fs.open_write(&g, 400_000).await.unwrap();
+    assert_eq!(c.fs.stat(&g).await.unwrap().size, 400_000);
+    w.write_all(&src[400_000..450_000]).await.unwrap();
+    w.shutdown().await.unwrap();
     assert_eq!(c.fs.stat(&g).await.unwrap().size, 450_000);
     assert!(download(&c.fs, &g, 0).await == src[..450_000]);
 }

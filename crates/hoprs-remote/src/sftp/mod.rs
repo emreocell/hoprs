@@ -31,6 +31,18 @@ mod pipeline;
 
 use pipeline::{PipelinedReader, PipelinedWriter, SftpIo};
 
+/// russh-sftp request timeout on stream channels. The clock starts when a request is
+/// queued, not when it reaches the wire: with `MAX_IN_FLIGHT` x `CHUNK` (2 MiB) per stream and
+/// several streams on one SSH connection, a request can wait behind many MiB of queued data
+/// on a slow link. A short timeout would turn slowness into `Network` errors and pause the
+/// site in a loop. A dead connection is detected by SSH keepalive instead, and the closed
+/// channel then fails every request with `Network`.
+const STREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+/// russh-sftp request timeout on the metadata channel: small requests that never queue
+/// behind file data, but a big `list` or a slow server still needs more than the default
+/// 10 s. Keepalive covers dead connections here too.
+const META_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
 const POSIX_RENAME: &str = "posix-rename@openssh.com";
 /// How long the server may take to answer the `sftp` subsystem request.
 const SUBSYSTEM_TIMEOUT: Duration = Duration::from_secs(10);
@@ -80,12 +92,20 @@ struct SftpChannel {
     posix_rename: bool,
     /// Set after a connection error on this channel.
     dead: AtomicBool,
-    /// File handles opened on this channel and not yet closed.
+    /// File handles opened on this channel that we still track: incremented on open,
+    /// decremented once the close was answered (or failed), or when a dropped stream finds
+    /// no runtime to close on. In that last case the server handle stays open until the
+    /// channel closes.
     open_handles: AtomicUsize,
+    /// russh-sftp per-request timeout set on this channel (after `init`). russh-sftp has no
+    /// getter, so the tests read the value back from here.
+    #[cfg(test)]
+    request_timeout: Duration,
 }
 
 impl SftpChannel {
-    async fn open(session: &SshSession) -> Result<SftpChannel> {
+    /// Opens an SFTP channel whose requests (after `init`) time out after `request_timeout`.
+    async fn open(session: &SshSession, request_timeout: Duration) -> Result<SftpChannel> {
         let (mut channel, generation) = session.open_channel_tagged().await?;
         channel
             .request_subsystem(true, "sftp")
@@ -116,6 +136,7 @@ impl SftpChannel {
             .init()
             .await
             .map_err(|e| start_error().with_detail(e.to_string()))?;
+        sftp.set_timeout(request_timeout.as_secs());
         let posix_rename = version
             .extensions
             .get(POSIX_RENAME)
@@ -126,6 +147,8 @@ impl SftpChannel {
             posix_rename,
             dead: AtomicBool::new(false),
             open_handles: AtomicUsize::new(0),
+            #[cfg(test)]
+            request_timeout,
         })
     }
 
@@ -157,13 +180,11 @@ impl SftpChannel {
     /// `NoSuchFile` also covers `ENOTDIR` on OpenSSH: when `err` is `NotFound` but `path`
     /// exists and is not a directory, the real problem is that `path` is not a directory.
     async fn not_a_dir_or(&self, path: &RemotePath, err: Error) -> Error {
-        if err.kind == ErrorKind::NotFound
-            && let Ok(attrs) = self.lstat(path).await
-            && entry_kind(&attrs) != Some(EntryKind::Dir)
-        {
-            return Error::new(ErrorKind::Io, format!("Not a directory: {path}"));
+        if err.kind != ErrorKind::NotFound {
+            return err;
         }
-        err
+        let lstat = self.lstat(path).await;
+        not_a_dir_error(err, lstat, path)
     }
 
     /// Opens `path` as an [`SftpFile`] and counts the handle.
@@ -259,6 +280,19 @@ impl Drop for SftpFile {
     }
 }
 
+/// Decision for [`SftpChannel::not_a_dir_or`]: `err` becomes "Not a directory" only when it
+/// is `NotFound` and `lstat` found an entry that is not a directory.
+fn not_a_dir_error(err: Error, lstat: Result<FileAttributes>, path: &RemotePath) -> Error {
+    match lstat {
+        Ok(attrs)
+            if err.kind == ErrorKind::NotFound && entry_kind(&attrs) != Some(EntryKind::Dir) =>
+        {
+            Error::new(ErrorKind::Io, format!("Not a directory: {path}"))
+        }
+        _ => err,
+    }
+}
+
 fn start_error() -> Error {
     Error::new(ErrorKind::Network, "Could not start SFTP")
 }
@@ -310,6 +344,19 @@ fn ensure_regular(attrs: &FileAttributes, path: &RemotePath) -> Result<()> {
     }
 }
 
+/// The file's size, or `Io` if it is shorter than `offset` (a resume there would leave a
+/// gap of zero bytes).
+fn check_resume_size(attrs: &FileAttributes, offset: u64, path: &RemotePath) -> Result<u64> {
+    let size = attrs.size.unwrap_or(0);
+    if size < offset {
+        return Err(Error::new(
+            ErrorKind::Io,
+            format!("Cannot resume at {offset}: {path} has only {size} bytes"),
+        ));
+    }
+    Ok(size)
+}
+
 /// File type from the `S_IFMT` bits of the permissions. `None` for FIFOs, sockets and
 /// devices. No type information (no permissions, or no type bits) counts as a file.
 fn entry_kind(attrs: &FileAttributes) -> Option<EntryKind> {
@@ -347,7 +394,7 @@ impl SftpFs {
     /// Opens the metadata channel (`sftp` subsystem) on `session`.
     pub async fn new(session: SshSession, config: SftpConfig) -> Result<SftpFs> {
         let streams = config.stream_channels.clamp(1, 8);
-        let meta = SftpChannel::open(&session).await?;
+        let meta = SftpChannel::open(&session, META_REQUEST_TIMEOUT).await?;
         Ok(SftpFs {
             inner: Arc::new(Inner {
                 state: session.state(),
@@ -377,7 +424,7 @@ impl SftpFs {
             return Ok(chan.clone());
         }
         *slot = None;
-        let chan = Arc::new(SftpChannel::open(&self.inner.session).await?);
+        let chan = Arc::new(SftpChannel::open(&self.inner.session, META_REQUEST_TIMEOUT).await?);
         *slot = Some(chan.clone());
         Ok(chan)
     }
@@ -398,7 +445,7 @@ impl SftpFs {
             return Ok(chan.clone());
         }
         pool[index] = None;
-        let chan = Arc::new(SftpChannel::open(&self.inner.session).await?);
+        let chan = Arc::new(SftpChannel::open(&self.inner.session, STREAM_REQUEST_TIMEOUT).await?);
         pool[index] = Some(chan.clone());
         Ok(chan)
     }
@@ -486,14 +533,14 @@ impl RemoteFs for SftpFs {
                 Err(e) => return Err(e),
             };
             ensure_regular(&attrs, path)?;
-            let size = attrs.size.unwrap_or(0);
-            if size < offset {
-                return Err(Error::new(
-                    ErrorKind::Io,
-                    format!("Cannot resume at {offset}: {path} has only {size} bytes"),
-                ));
-            }
+            check_resume_size(&attrs, offset, path)?;
             let file = chan.open_file(path, OpenFlags::WRITE).await?;
+            // The file may have changed since `lstat`: decide on what was opened. On error
+            // `file` is dropped, which closes the handle.
+            let opened = chan.sftp.fstat(file.handle.as_str()).await;
+            let attrs = chan.check(opened, path)?.attrs;
+            ensure_regular(&attrs, path)?;
+            let size = check_resume_size(&attrs, offset, path)?;
             if size > offset {
                 let attrs = FileAttributes {
                     size: Some(offset),
@@ -658,6 +705,50 @@ mod tests {
         }
         assert_eq!(entry_kind(&attrs(None)), Some(EntryKind::File));
         assert_eq!(entry_kind(&attrs(Some(0o644))), Some(EntryKind::File));
+    }
+
+    #[test]
+    fn not_a_dir_decision() {
+        let path = RemotePath::new("/a/b").unwrap();
+        let not_found = || Error::new(ErrorKind::NotFound, "No such file or directory: /a/b");
+        let attrs = |permissions| FileAttributes {
+            permissions: Some(permissions),
+            ..FileAttributes::empty()
+        };
+        let missing = Err(not_found());
+        let e = not_a_dir_error(not_found(), missing, &path);
+        assert_eq!(e.kind, ErrorKind::NotFound, "{e:?}");
+        let e = not_a_dir_error(not_found(), Ok(attrs(0o040_755)), &path);
+        assert_eq!(e.kind, ErrorKind::NotFound, "{e:?}");
+        let e = not_a_dir_error(not_found(), Ok(attrs(0o100_644)), &path);
+        assert_eq!(e.kind, ErrorKind::Io, "{e:?}");
+        assert_eq!(e.message, "Not a directory: /a/b");
+        // Only NotFound is reinterpreted.
+        let denied = Error::new(ErrorKind::Permission, "Permission denied: /a/b");
+        let e = not_a_dir_error(denied, Ok(attrs(0o100_644)), &path);
+        assert_eq!(e.kind, ErrorKind::Permission, "{e:?}");
+    }
+
+    #[test]
+    fn request_timeouts() {
+        assert_eq!(STREAM_REQUEST_TIMEOUT, Duration::from_secs(600));
+        assert_eq!(META_REQUEST_TIMEOUT, Duration::from_secs(60));
+    }
+
+    #[tokio::test]
+    #[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+    async fn channels_use_their_request_timeouts() {
+        let (session, _dir) = alice().await;
+        let fs = SftpFs::new(session.clone(), SftpConfig::default())
+            .await
+            .unwrap();
+        let meta = fs.meta().await.unwrap();
+        assert_eq!(meta.request_timeout, META_REQUEST_TIMEOUT);
+        for _ in 0..4 {
+            let chan = fs.stream_channel().await.unwrap();
+            assert_eq!(chan.request_timeout, STREAM_REQUEST_TIMEOUT);
+        }
+        session.disconnect().await;
     }
 
     #[test]
