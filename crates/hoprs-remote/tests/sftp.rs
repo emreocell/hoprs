@@ -1,8 +1,8 @@
-//! `SftpFs` metadata operations against the container in `docker/compose.yml`.
+//! `SftpFs` against the container in `docker/compose.yml`.
 //!
 //! Every test works in its own directory, `/home/alice/t-<nanos>-<counter>`, created through
-//! `SftpFs` and removed (best effort) when the test ends. Files, FIFOs and symlinks are made
-//! inside the container with `su alice -c ...`, since `open_write` is not part of this task.
+//! `SftpFs` and removed (best effort) when the test ends. FIFOs, symlinks and fixture files
+//! are made inside the container with `su alice -c ...`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -13,6 +13,7 @@ use hoprs_remote::{RemoteFs, SftpConfig, SftpFs};
 use hoprs_ssh::testing::{docker, fixture, kill_ssh_sessions, test_config};
 use hoprs_ssh::{KeySource, Prompter, ReconnectPolicy, ScriptedPrompter, SessionState, SshSession};
 use tempfile::TempDir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::watch;
 
 fn p(s: &str) -> RemotePath {
@@ -70,18 +71,25 @@ async fn connect(reconnect: Option<ReconnectPolicy>) -> (SshSession, TempDir) {
     (session, dir)
 }
 
-async fn setup_with(reconnect: Option<ReconnectPolicy>) -> Ctx {
+/// A name no other test uses: `<nanos>-<counter>`.
+fn unique() -> String {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
-    let (session, known_hosts) = connect(reconnect).await;
-    let fs = SftpFs::new(session.clone(), SftpConfig::default())
-        .await
-        .unwrap();
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let work = format!("/home/alice/t-{nanos}-{n}");
+    format!("{nanos}-{n}")
+}
+
+async fn setup_with(reconnect: Option<ReconnectPolicy>) -> Ctx {
+    setup_full(reconnect, SftpConfig::default()).await
+}
+
+async fn setup_full(reconnect: Option<ReconnectPolicy>, config: SftpConfig) -> Ctx {
+    let (session, known_hosts) = connect(reconnect).await;
+    let fs = SftpFs::new(session.clone(), config).await.unwrap();
+    let work = format!("/home/alice/t-{}", unique());
     let cleanup = Cleanup(work.clone());
     fs.mkdir(&p(&work)).await.unwrap();
     Ctx {
@@ -415,4 +423,242 @@ async fn reopens_channels_after_reconnect() {
     assert_eq!(c.session.generation(), 2);
     assert_eq!(names(&c.fs.list(&c.work).await.unwrap()), ["d"]);
     assert_eq!(c.fs.stat(&c.at("d")).await.unwrap().kind, EntryKind::Dir);
+}
+
+/// Deterministic pseudo-random bytes (xorshift64).
+fn data(len: usize, seed: u64) -> Vec<u8> {
+    let mut x = seed | 1;
+    (0..len)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        })
+        .collect()
+}
+
+async fn upload(fs: &SftpFs, path: &RemotePath, offset: u64, bytes: &[u8]) {
+    let mut w = fs.open_write(path, offset).await.unwrap();
+    w.write_all(bytes).await.unwrap();
+    w.shutdown().await.unwrap();
+}
+
+async fn download(fs: &SftpFs, path: &RemotePath, offset: u64) -> Vec<u8> {
+    let mut r = fs.open_read(path, offset).await.unwrap();
+    let mut out = Vec::new();
+    r.read_to_end(&mut out).await.unwrap();
+    out
+}
+
+const MIB: usize = 1024 * 1024;
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn roundtrip_8mib_random() {
+    let c = setup().await;
+    let src = data(8 * MIB, 0x1234_5678);
+    let f = c.at("big.bin");
+    upload(&c.fs, &f, 0, &src).await;
+    assert_eq!(c.fs.stat(&f).await.unwrap().size, src.len() as u64);
+    let back = download(&c.fs, &f, 0).await;
+    assert!(back == src, "downloaded bytes differ");
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn read_from_offset() {
+    let c = setup().await;
+    let src = data(MIB + 123, 2);
+    let f = c.at("f.bin");
+    upload(&c.fs, &f, 0, &src).await;
+    for off in [1usize, 32 * 1024, 300_001, MIB + 122] {
+        let back = download(&c.fs, &f, off as u64).await;
+        assert!(back == src[off..], "offset {off}");
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn read_past_eof_is_empty() {
+    let c = setup().await;
+    let f = c.at("f");
+    upload(&c.fs, &f, 0, &data(1000, 3)).await;
+    assert!(download(&c.fs, &f, 1000).await.is_empty());
+    assert!(download(&c.fs, &f, 5000).await.is_empty());
+    let empty = c.at("empty");
+    upload(&c.fs, &empty, 0, &[]).await;
+    assert_eq!(c.fs.stat(&empty).await.unwrap().size, 0);
+    assert!(download(&c.fs, &empty, 0).await.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn read_dir_is_io() {
+    let c = setup().await;
+    c.fs.mkdir(&c.at("d")).await.unwrap();
+    let e = c.fs.open_read(&c.at("d"), 0).await.err().unwrap();
+    assert_eq!(e.kind, ErrorKind::Io, "{e:?}");
+    assert!(e.message.contains(c.at("d").as_str()), "{e:?}");
+    for off in [0, 1] {
+        let e = c.fs.open_write(&c.at("d"), off).await.err().unwrap();
+        assert_eq!(e.kind, ErrorKind::Io, "{e:?}");
+    }
+    assert_eq!(
+        c.fs.open_read(&c.at("nope"), 0).await.err().unwrap().kind,
+        ErrorKind::NotFound
+    );
+    assert_eq!(c.fs.stat(&c.at("d")).await.unwrap().kind, EntryKind::Dir);
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn special_files_are_never_opened() {
+    let c = setup().await;
+    c.sh("mkfifo fifo && printf abc > target && ln -s target link");
+    for name in ["fifo", "link"] {
+        let path = c.at(name);
+        let r = tokio::time::timeout(Duration::from_secs(5), c.fs.open_read(&path, 0))
+            .await
+            .expect("open_read hung");
+        let e = r.err().unwrap();
+        assert_eq!(e.kind, ErrorKind::Io, "{name}: {e:?}");
+        assert!(e.message.contains("Not a regular file"), "{e:?}");
+        assert!(e.message.contains(path.as_str()), "{e:?}");
+        for off in [0, 1] {
+            let w = tokio::time::timeout(Duration::from_secs(5), c.fs.open_write(&path, off))
+                .await
+                .expect("open_write hung");
+            assert_eq!(w.err().unwrap().kind, ErrorKind::Io, "{name} at {off}");
+        }
+    }
+    // Nothing was replaced or truncated.
+    c.sh("test -p fifo && test -L link && test \"$(cat target)\" = abc");
+    // The channel is still responsive (a blocked open would hang sftp-server).
+    assert_eq!(download(&c.fs, &c.at("target"), 0).await, b"abc");
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn write_offset_zero_truncates_before_return() {
+    let c = setup().await;
+    c.sh("head -c 1000 /dev/urandom > f");
+    let f = c.at("f");
+    assert_eq!(c.fs.stat(&f).await.unwrap().size, 1000);
+    let w = c.fs.open_write(&f, 0).await.unwrap();
+    assert_eq!(c.fs.stat(&f).await.unwrap().size, 0);
+    drop(w);
+    // A missing file is created at once.
+    let g = c.at("g");
+    let w = c.fs.open_write(&g, 0).await.unwrap();
+    assert_eq!(c.fs.stat(&g).await.unwrap().kind, EntryKind::File);
+    drop(w);
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn write_from_offset_continues() {
+    let c = setup().await;
+    let src = data(1_000_000, 4);
+    let f = c.at("f");
+    upload(&c.fs, &f, 0, &src[..400_000]).await;
+    upload(&c.fs, &f, 400_000, &src[400_000..]).await;
+    assert_eq!(c.fs.stat(&f).await.unwrap().size, src.len() as u64);
+    assert!(download(&c.fs, &f, 0).await == src);
+
+    // A longer destination is cut back to `offset` before writing.
+    let g = c.at("g");
+    let mut junk = src[..400_000].to_vec();
+    junk.extend_from_slice(&data(300_000, 5));
+    upload(&c.fs, &g, 0, &junk).await;
+    upload(&c.fs, &g, 400_000, &src[400_000..450_000]).await;
+    assert_eq!(c.fs.stat(&g).await.unwrap().size, 450_000);
+    assert!(download(&c.fs, &g, 0).await == src[..450_000]);
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn write_offset_beyond_size_is_io() {
+    let c = setup().await;
+    let f = c.at("f");
+    upload(&c.fs, &f, 0, &data(1000, 6)).await;
+    let e = c.fs.open_write(&f, 1001).await.err().unwrap();
+    assert_eq!(e.kind, ErrorKind::Io, "{e:?}");
+    assert!(e.message.contains(f.as_str()), "{e:?}");
+    assert_eq!(c.fs.stat(&f).await.unwrap().size, 1000);
+    let e = c.fs.open_write(&c.at("missing"), 10).await.err().unwrap();
+    assert_eq!(e.kind, ErrorKind::Io, "{e:?}");
+    assert_eq!(
+        c.fs.stat(&c.at("missing")).await.unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn shutdown_means_bytes_are_there() {
+    let c = setup().await;
+    let src = data(5 * MIB, 7);
+    let f = c.at("f");
+    let mut w = c.fs.open_write(&f, 0).await.unwrap();
+    w.write_all(&src).await.unwrap();
+    w.shutdown().await.unwrap();
+    assert_eq!(c.fs.stat(&f).await.unwrap().size, src.len() as u64);
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn unicode_and_dot_names() {
+    let c = setup().await;
+    for (name, seed) in [("relatório final.pdf", 8), (".env", 9)] {
+        let src = data(70_000, seed);
+        let f = c.at(name);
+        upload(&c.fs, &f, 0, &src).await;
+        assert!(download(&c.fs, &f, 0).await == src, "{name}");
+    }
+    assert_eq!(
+        names(&c.fs.list(&c.work).await.unwrap()),
+        [".env", "relatório final.pdf"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn concurrent_streams_share_pool() {
+    let c = setup_full(None, SftpConfig { stream_channels: 2 }).await;
+    let mut tasks = tokio::task::JoinSet::new();
+    for i in 0..8u64 {
+        let fs = c.fs.clone();
+        let path = c.at(&format!("f{i}"));
+        tasks.spawn(async move {
+            let src = data(MIB, 100 + i);
+            upload(&fs, &path, 0, &src).await;
+            (path, src)
+        });
+    }
+    let done = tasks.join_all().await;
+    assert_eq!(done.len(), 8);
+    for (path, src) in done {
+        assert!(download(&c.fs, &path, 0).await == src, "{path}");
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn disk_full_is_io_not_network() {
+    let c = setup().await;
+    let f = p(&format!("/home/alice/small/full-{}", unique()));
+    let _cleanup = Cleanup(f.to_string());
+    let src = data(2 * MIB, 10);
+    let mut w = c.fs.open_write(&f, 0).await.unwrap();
+    let err = match w.write_all(&src).await {
+        Err(e) => e,
+        Ok(()) => w.shutdown().await.expect_err("2 MiB fit in a 1 MiB tmpfs"),
+    };
+    let e = hoprs_core::Error::from(err);
+    assert_eq!(e.kind, ErrorKind::Io, "{e:?}");
+    drop(w);
+    // The connection is fine.
+    assert_eq!(c.fs.stat(&f).await.unwrap().kind, EntryKind::File);
+    assert_eq!(*c.session.state().borrow(), SessionState::Connected);
 }

@@ -52,6 +52,10 @@ enum ReadState {
 /// in order. A short reply is followed by a request for the rest of its range
 /// before anything past it is delivered. An empty reply is EOF: requests
 /// still in flight are dropped. After an error every read fails again.
+///
+/// On EOF or on the first error the handle is closed (once) before that
+/// outcome is reported; the outcome of the close is ignored. A reader dropped
+/// earlier leaves closing to the `SftpIo` implementation.
 pub struct PipelinedReader<T: SftpIo> {
     io: Arc<T>,
     /// Offset of the next request to issue.
@@ -61,6 +65,8 @@ pub struct PipelinedReader<T: SftpIo> {
     buf: Vec<u8>,
     pos: usize,
     state: ReadState,
+    /// The pending close, started on EOF or error.
+    closing: Option<BoxFut<()>>,
 }
 
 impl<T: SftpIo> PipelinedReader<T> {
@@ -72,6 +78,7 @@ impl<T: SftpIo> PipelinedReader<T> {
             buf: Vec::new(),
             pos: 0,
             state: ReadState::Active,
+            closing: None,
         }
     }
 
@@ -94,9 +101,14 @@ impl<T: SftpIo> PipelinedReader<T> {
         }
     }
 
-    fn fail(&mut self, err: Error) {
+    /// Ends the stream: drops the requests in flight and starts the close.
+    fn finish(&mut self, state: ReadState) {
         self.in_flight = FuturesOrdered::new();
-        self.state = ReadState::Failed(err);
+        self.state = state;
+        let io = Arc::clone(&self.io);
+        self.closing = Some(Box::pin(async move {
+            let _ = io.close().await;
+        }));
     }
 }
 
@@ -117,6 +129,10 @@ impl<T: SftpIo> AsyncRead for PipelinedReader<T> {
                 this.pos += n;
                 return Poll::Ready(Ok(()));
             }
+            if let Some(closing) = this.closing.as_mut() {
+                ready!(closing.as_mut().poll(cx));
+                this.closing = None;
+            }
             match &this.state {
                 ReadState::Active => {}
                 ReadState::Eof => return Poll::Ready(Ok(())),
@@ -125,15 +141,12 @@ impl<T: SftpIo> AsyncRead for PipelinedReader<T> {
             this.fill();
             let Some((offset, len, res)) = ready!(this.in_flight.poll_next_unpin(cx)) else {
                 // Only reachable when offsets ran out at u64::MAX.
-                this.state = ReadState::Eof;
+                this.finish(ReadState::Eof);
                 continue;
             };
             match res {
-                Err(e) => this.fail(e),
-                Ok(data) if data.is_empty() => {
-                    this.in_flight = FuturesOrdered::new();
-                    this.state = ReadState::Eof;
-                }
+                Err(e) => this.finish(ReadState::Failed(e)),
+                Ok(data) if data.is_empty() => this.finish(ReadState::Eof),
                 Ok(mut data) => {
                     data.truncate(len as usize);
                     let got = data.len() as u32;
@@ -553,6 +566,45 @@ mod tests {
         let mut buf = [0u8; 16];
         let again = r.read(&mut buf).await.unwrap_err();
         assert_eq!(Error::from(again).kind, ErrorKind::Network);
+    }
+
+    #[tokio::test]
+    async fn reader_closes_once_at_eof() {
+        let src = data(BIG, 14);
+        let io = Arc::new(FakeIo::new(src.clone()));
+        let mut r = PipelinedReader::new(Arc::clone(&io), 0);
+        let mut out = Vec::new();
+        r.read_to_end(&mut out).await.unwrap();
+        assert_eq!(out, src);
+        assert_eq!(io.closes(), 1);
+        let mut buf = [0u8; 16];
+        assert_eq!(r.read(&mut buf).await.unwrap(), 0);
+        assert_eq!(io.closes(), 1);
+        // Past EOF from the start, too.
+        let io = Arc::new(FakeIo::new(data(10, 15)));
+        assert!(read_all(&io, 10).await.is_empty());
+        assert_eq!(io.closes(), 1);
+    }
+
+    #[tokio::test]
+    async fn reader_closes_once_on_error() {
+        let io = Arc::new(FakeIo::new(data(BIG, 16)).fail_at(3, ErrorKind::Io));
+        let mut r = PipelinedReader::new(Arc::clone(&io), 0);
+        let mut out = Vec::new();
+        assert!(r.read_to_end(&mut out).await.is_err());
+        assert_eq!(io.closes(), 1);
+        let mut buf = [0u8; 16];
+        assert!(r.read(&mut buf).await.is_err());
+        assert_eq!(io.closes(), 1);
+    }
+
+    #[tokio::test]
+    async fn reader_does_not_close_mid_stream() {
+        let io = Arc::new(FakeIo::new(data(BIG, 17)));
+        let mut r = PipelinedReader::new(Arc::clone(&io), 0);
+        let mut buf = vec![0u8; 100_000];
+        r.read_exact(&mut buf).await.unwrap();
+        assert_eq!(io.closes(), 0);
     }
 
     async fn write_all(io: &Arc<FakeIo>, offset: u64, bytes: &[u8]) {

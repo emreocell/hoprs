@@ -7,6 +7,11 @@
 //! generation (or one that failed with a connection error) is dropped and reopened. Nothing
 //! waits for a reconnection: while the session is not `Connected`, operations fail at once
 //! with `ErrorKind::Network`.
+//!
+//! An open file keeps the channel it was opened on for its whole life, even if the pool
+//! later replaces that channel; after a reconnection its requests fail with `Network`.
+//! Each file handle is closed exactly once: by the writer's `shutdown`, by the reader on
+//! EOF or error, or else in the background when the stream is dropped.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -17,14 +22,14 @@ use hoprs_core::{EntryKind, Error, ErrorKind, RemoteEntry, RemotePath, Result};
 use hoprs_ssh::{SessionState, SshSession};
 use russh_sftp::client::RawSftpSession;
 use russh_sftp::client::error::Error as SftpError;
-use russh_sftp::protocol::{FileAttributes, Packet, Status, StatusCode};
+use russh_sftp::protocol::{FileAttributes, OpenFlags, Packet, Status, StatusCode};
 use tokio::sync::{Mutex, watch};
 
 use crate::{BoxAsyncRead, BoxAsyncWrite, RemoteFs};
 
-// Used by `SftpFs` (next task); until then only the tests exercise it.
-#[allow(dead_code)]
 mod pipeline;
+
+use pipeline::{PipelinedReader, PipelinedWriter, SftpIo};
 
 const POSIX_RENAME: &str = "posix-rename@openssh.com";
 /// How long the server may take to answer the `sftp` subsystem request.
@@ -75,6 +80,8 @@ struct SftpChannel {
     posix_rename: bool,
     /// Set after a connection error on this channel.
     dead: AtomicBool,
+    /// File handles opened on this channel and not yet closed.
+    open_handles: AtomicUsize,
 }
 
 impl SftpChannel {
@@ -118,6 +125,7 @@ impl SftpChannel {
             generation,
             posix_rename,
             dead: AtomicBool::new(false),
+            open_handles: AtomicUsize::new(0),
         })
     }
 
@@ -147,12 +155,107 @@ impl SftpChannel {
     }
 
     /// `NoSuchFile` also covers `ENOTDIR` on OpenSSH: when `err` is `NotFound` but `path`
-    /// exists, the real problem is that `path` is not a directory.
+    /// exists and is not a directory, the real problem is that `path` is not a directory.
     async fn not_a_dir_or(&self, path: &RemotePath, err: Error) -> Error {
-        if err.kind == ErrorKind::NotFound && self.lstat(path).await.is_ok() {
+        if err.kind == ErrorKind::NotFound
+            && let Ok(attrs) = self.lstat(path).await
+            && entry_kind(&attrs) != Some(EntryKind::Dir)
+        {
             return Error::new(ErrorKind::Io, format!("Not a directory: {path}"));
         }
         err
+    }
+
+    /// Opens `path` as an [`SftpFile`] and counts the handle.
+    async fn open_file(
+        self: &Arc<Self>,
+        path: &RemotePath,
+        flags: OpenFlags,
+    ) -> Result<Arc<SftpFile>> {
+        let opened = self
+            .sftp
+            .open(path.as_str(), flags, FileAttributes::empty())
+            .await;
+        let handle = self.check(opened, path)?.handle;
+        self.open_handles.fetch_add(1, Ordering::SeqCst);
+        Ok(Arc::new(SftpFile {
+            chan: Arc::clone(self),
+            handle,
+            path: path.clone(),
+            closed: AtomicBool::new(false),
+        }))
+    }
+}
+
+/// An open remote file: positioned I/O for the pipelined streams.
+struct SftpFile {
+    chan: Arc<SftpChannel>,
+    handle: String,
+    path: RemotePath,
+    /// Set once a close was sent (or is about to be).
+    closed: AtomicBool,
+}
+
+impl SftpFile {
+    /// Sends the close and waits for the reply; the handle counts as closed either way.
+    async fn close_handle(
+        chan: Arc<SftpChannel>,
+        handle: String,
+    ) -> std::result::Result<Status, SftpError> {
+        let result = chan.sftp.close(handle).await;
+        chan.open_handles.fetch_sub(1, Ordering::SeqCst);
+        result
+    }
+}
+
+#[async_trait]
+impl SftpIo for SftpFile {
+    async fn read(&self, offset: u64, len: u32) -> Result<Vec<u8>> {
+        match self.chan.sftp.read(self.handle.as_str(), offset, len).await {
+            Ok(data) => Ok(data.data),
+            Err(SftpError::Status(s)) if s.status_code == StatusCode::Eof => Ok(Vec::new()),
+            Err(e) => self.chan.check(Err(e), &self.path),
+        }
+    }
+
+    async fn write(&self, offset: u64, data: Vec<u8>) -> Result<()> {
+        // Resolves on the server's status reply for this request.
+        let result = self
+            .chan
+            .sftp
+            .write(self.handle.as_str(), offset, data)
+            .await;
+        self.chan.check(result, &self.path).map(|_| ())
+    }
+
+    async fn close(&self) -> Result<()> {
+        if self.closed.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+        let result = SftpFile::close_handle(Arc::clone(&self.chan), self.handle.clone()).await;
+        self.chan.check(result, &self.path).map(|_| ())
+    }
+}
+
+impl Drop for SftpFile {
+    /// Closes a handle the stream never closed, in the background (never blocks).
+    fn drop(&mut self) {
+        if self.closed.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let chan = Arc::clone(&self.chan);
+        let handle = std::mem::take(&mut self.handle);
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => {
+                rt.spawn(async move {
+                    let _ = SftpFile::close_handle(chan, handle).await;
+                });
+            }
+            // No runtime: the handle lives until the channel closes.
+            Err(_) => {
+                chan.open_handles.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
     }
 }
 
@@ -192,6 +295,18 @@ fn map_error(err: SftpError, path: &RemotePath) -> Error {
             Error::new(ErrorKind::Io, format!("SFTP operation failed: {path}"))
                 .with_detail(err.to_string())
         }
+    }
+}
+
+/// Fails unless `attrs` describe a regular file (no type information counts as one).
+fn ensure_regular(attrs: &FileAttributes, path: &RemotePath) -> Result<()> {
+    match entry_kind(attrs) {
+        Some(EntryKind::File) => Ok(()),
+        Some(EntryKind::Dir) => Err(Error::new(ErrorKind::Io, format!("Is a directory: {path}"))),
+        Some(EntryKind::Symlink) | None => Err(Error::new(
+            ErrorKind::Io,
+            format!("Not a regular file: {path}"),
+        )),
     }
 }
 
@@ -269,8 +384,6 @@ impl SftpFs {
 
     /// The next stream channel, round-robin. After a reconnection every pooled channel is
     /// dropped; slots are (re)opened when picked.
-    // Used by open_read/open_write (next task).
-    #[allow(dead_code)]
     async fn stream_channel(&self) -> Result<Arc<SftpChannel>> {
         self.ensure_connected()?;
         let generation = self.inner.session.generation();
@@ -339,18 +452,59 @@ impl RemoteFs for SftpFs {
         Ok(make_entry(name, path.clone(), kind, &attrs))
     }
 
-    async fn open_read(&self, path: &RemotePath, _offset: u64) -> Result<BoxAsyncRead> {
-        Err(Error::new(
-            ErrorKind::Io,
-            format!("SFTP downloads are not implemented yet: {path}"),
-        ))
+    /// Refuses anything but a regular file (checked with `lstat` before opening, so a
+    /// FIFO is never opened).
+    async fn open_read(&self, path: &RemotePath, offset: u64) -> Result<BoxAsyncRead> {
+        let chan = self.stream_channel().await?;
+        ensure_regular(&chan.lstat(path).await?, path)?;
+        let file = chan.open_file(path, OpenFlags::READ).await?;
+        Ok(Box::new(PipelinedReader::new(file, offset)))
     }
 
-    async fn open_write(&self, path: &RemotePath, _offset: u64) -> Result<BoxAsyncWrite> {
-        Err(Error::new(
-            ErrorKind::Io,
-            format!("SFTP uploads are not implemented yet: {path}"),
-        ))
+    /// Offset 0 creates or truncates (an existing non-regular file is refused). A larger
+    /// offset needs an existing regular file at least that long; a longer one is cut back to
+    /// `offset` before writing.
+    async fn open_write(&self, path: &RemotePath, offset: u64) -> Result<BoxAsyncWrite> {
+        let chan = self.stream_channel().await?;
+        let file = if offset == 0 {
+            match chan.lstat(path).await {
+                Ok(attrs) => ensure_regular(&attrs, path)?,
+                Err(e) if e.kind == ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+            let flags = OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE;
+            chan.open_file(path, flags).await?
+        } else {
+            let attrs = match chan.lstat(path).await {
+                Ok(attrs) => attrs,
+                Err(e) if e.kind == ErrorKind::NotFound => {
+                    return Err(Error::new(
+                        ErrorKind::Io,
+                        format!("Cannot resume a missing file: {path}"),
+                    ));
+                }
+                Err(e) => return Err(e),
+            };
+            ensure_regular(&attrs, path)?;
+            let size = attrs.size.unwrap_or(0);
+            if size < offset {
+                return Err(Error::new(
+                    ErrorKind::Io,
+                    format!("Cannot resume at {offset}: {path} has only {size} bytes"),
+                ));
+            }
+            let file = chan.open_file(path, OpenFlags::WRITE).await?;
+            if size > offset {
+                let attrs = FileAttributes {
+                    size: Some(offset),
+                    ..FileAttributes::empty()
+                };
+                let cut = chan.sftp.fsetstat(file.handle.as_str(), attrs).await;
+                chan.check(cut, path)?;
+            }
+            file
+        };
+        Ok(Box::new(PipelinedWriter::new(file, offset)))
     }
 
     async fn mkdir(&self, path: &RemotePath) -> Result<()> {
@@ -606,6 +760,66 @@ mod tests {
         assert!(!Arc::ptr_eq(&c, &d));
         // The old channels are gone for good.
         assert_eq!(a.lstat(&root).await.unwrap_err().kind, ErrorKind::Network);
+        session.disconnect().await;
+    }
+
+    async fn wait_no_open_handles(chan: &SftpChannel) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while chan.open_handles.load(Ordering::SeqCst) != 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{} handles still open",
+                chan.open_handles.load(Ordering::SeqCst)
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+    async fn every_handle_is_closed_once() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (session, _dir) = alice().await;
+        let config = SftpConfig { stream_channels: 1 };
+        let fs = SftpFs::new(session.clone(), config).await.unwrap();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = RemotePath::new(&format!("/home/alice/handles-{nanos}")).unwrap();
+        let chan = fs.stream_channel().await.unwrap();
+
+        // Shutdown closes the writer's handle.
+        let mut w = fs.open_write(&path, 0).await.unwrap();
+        assert_eq!(chan.open_handles.load(Ordering::SeqCst), 1);
+        w.write_all(&[7u8; 100_000]).await.unwrap();
+        w.shutdown().await.unwrap();
+        assert_eq!(chan.open_handles.load(Ordering::SeqCst), 0);
+        drop(w);
+
+        // Dropping without reading closes it in the background.
+        for _ in 0..200 {
+            let r = fs.open_read(&path, 0).await.unwrap();
+            assert!(chan.open_handles.load(Ordering::SeqCst) >= 1);
+            drop(r);
+        }
+        wait_no_open_handles(&chan).await;
+
+        // Reaching EOF closes it, before the reader is dropped.
+        let mut r = fs.open_read(&path, 0).await.unwrap();
+        let mut out = Vec::new();
+        r.read_to_end(&mut out).await.unwrap();
+        assert_eq!(out.len(), 100_000);
+        assert_eq!(chan.open_handles.load(Ordering::SeqCst), 0);
+        drop(r);
+
+        // A writer dropped without shutdown is closed too.
+        let mut w = fs.open_write(&path, 0).await.unwrap();
+        w.write_all(b"abc").await.unwrap();
+        drop(w);
+        wait_no_open_handles(&chan).await;
+
+        fs.remove_file(&path).await.unwrap();
         session.disconnect().await;
     }
 }
