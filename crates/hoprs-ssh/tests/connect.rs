@@ -1,7 +1,8 @@
 //! Integration tests against the OpenSSH container in `docker/compose.yml`.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -353,4 +354,169 @@ async fn slow_prompt_does_not_time_out() {
         .disconnect()
         .await;
     assert_eq!(known_hosts_lines(dir.path()).len(), 1);
+}
+
+/// A private `ssh-agent` holding one fixture key; killed on drop.
+struct TestAgent {
+    child: Child,
+    socket: PathBuf,
+    _dir: TempDir,
+}
+
+impl TestAgent {
+    fn start(key: &str) -> Self {
+        let dir = TempDir::new().unwrap();
+        let socket = dir.path().join("agent.sock");
+        let child = Command::new("ssh-agent")
+            .arg("-D")
+            .arg("-a")
+            .arg(&socket)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("ssh-agent is required for the agent tests");
+        let agent = Self {
+            child,
+            socket,
+            _dir: dir,
+        };
+        for _ in 0..100 {
+            if agent.socket.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(agent.socket.exists(), "ssh-agent did not create its socket");
+        let status = Command::new("ssh-add")
+            .arg(fixture(key))
+            .env("SSH_AUTH_SOCK", &agent.socket)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("ssh-add is required for the agent tests");
+        assert!(status.success(), "ssh-add failed: {status}");
+        agent
+    }
+}
+
+impl Drop for TestAgent {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn agent_auth() {
+    let dir = trusted_dir().await;
+    let agent = TestAgent::start("id_ed25519");
+    let mut cfg = test_config("alice", dir.path());
+    cfg.auth.use_agent = true;
+    cfg.auth.agent_socket = Some(agent.socket.clone());
+    let p = Arc::new(ScriptedPrompter::new());
+    connect(cfg, &p).await.unwrap().disconnect().await;
+    assert_eq!(p.calls().passphrase, 0);
+    assert_eq!(p.calls().password, 0);
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn agent_missing_falls_through() {
+    let dir = trusted_dir().await;
+    let mut cfg = test_config("bob", dir.path());
+    cfg.auth.use_agent = true;
+    cfg.auth.agent_socket = Some(dir.path().join("no-such-agent.sock"));
+    cfg.auth.password = Some(SecretString::from("bob-pass"));
+    let p = Arc::new(ScriptedPrompter::new());
+    connect(cfg, &p).await.unwrap().disconnect().await;
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn order_is_agent_key_password() {
+    let dir = trusted_dir().await;
+    let agent = TestAgent::start("id_ed25519");
+    let mut cfg = test_config("alice", dir.path());
+    cfg.auth.use_agent = true;
+    cfg.auth.agent_socket = Some(agent.socket.clone());
+    // Wrong on purpose: only reaching the password step would fail the login.
+    cfg.auth.password = Some(SecretString::from("not-alices-pass"));
+    cfg.auth.key = KeySource::File {
+        path: fixture("id_ed25519_pp"),
+        passphrase: None,
+    };
+    let p = Arc::new(ScriptedPrompter::new());
+    connect(cfg, &p).await.unwrap().disconnect().await;
+    assert_eq!(p.calls().password, 0);
+    assert_eq!(p.calls().passphrase, 0, "key step must not run after agent");
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn keyboard_interactive_prompted() {
+    let dir = trusted_dir().await;
+    let mut cfg = test_config("carol", dir.path());
+    cfg.auth.allow_keyboard_interactive = true;
+    let p = Arc::new(ScriptedPrompter::new().with_kbd_answers(Some(vec!["carol-pass"])));
+    connect(cfg, &p).await.unwrap().disconnect().await;
+    assert!(p.calls().kbd >= 1);
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn keyboard_interactive_uses_configured_password() {
+    let dir = trusted_dir().await;
+    let mut cfg = test_config("carol", dir.path());
+    cfg.auth.allow_keyboard_interactive = true;
+    cfg.auth.password = Some(SecretString::from("carol-pass"));
+    let p = Arc::new(ScriptedPrompter::new());
+    connect(cfg, &p).await.unwrap().disconnect().await;
+    assert_eq!(p.calls().kbd, 0);
+    assert_eq!(p.calls().password, 0);
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn keyboard_interactive_cancelled() {
+    let dir = trusted_dir().await;
+    let mut cfg = test_config("carol", dir.path());
+    cfg.auth.allow_keyboard_interactive = true;
+    let p = Arc::new(ScriptedPrompter::new().with_kbd_answers(None));
+    assert_err(connect(cfg, &p).await, ErrorKind::Auth, "Cancelled by user");
+    assert_eq!(p.calls().kbd, 1);
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn keyboard_interactive_disabled_is_not_tried() {
+    let dir = trusted_dir().await;
+    let cfg = test_config("carol", dir.path());
+    let p = Arc::new(ScriptedPrompter::new().with_kbd_answers(Some(vec!["carol-pass"])));
+    let e = assert_err(
+        connect(cfg, &p).await,
+        ErrorKind::Auth,
+        "Authentication failed",
+    );
+    assert_eq!(p.calls().kbd, 0);
+    let detail = e.detail.unwrap_or_default();
+    assert!(detail.contains("keyboard-interactive"), "{detail}");
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn keyboard_interactive_wrong_answer_fails() {
+    let dir = trusted_dir().await;
+    let mut cfg = test_config("carol", dir.path());
+    cfg.auth.allow_keyboard_interactive = true;
+    let p = Arc::new(ScriptedPrompter::new().with_kbd_answers(Some(vec!["nope"])));
+    let e = assert_err(
+        connect(cfg, &p).await,
+        ErrorKind::Auth,
+        "Authentication failed",
+    );
+    let detail = e.detail.unwrap_or_default();
+    assert!(detail.contains("tried: keyboard-interactive"), "{detail}");
+    assert!(!detail.contains("nope"), "{detail}");
 }
