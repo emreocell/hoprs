@@ -1390,6 +1390,27 @@ async fn unreadable_dir_is_permission() {
     c.fs.chmod(&c.at("nr"), 0o000).await.unwrap();
     let e = c.fs.list(&c.at("nr")).await.unwrap_err();
     assert_eq!(e.kind, ErrorKind::Permission, "{e:?}");
+    // Children of an unreadable directory cannot be looked up: Permission, never NotFound
+    // (the transfer engine would take NotFound as "absent") nor the parent's own entry.
+    c.sh("chmod 700 nr && : > nr/x && mkdir nr/nr && chmod 000 nr");
+    for child in ["nr/x", "nr/nr", "nr/missing"] {
+        let e = c.fs.stat(&c.at(child)).await.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Permission, "{child}: {e:?}");
+    }
+    for e in [
+        c.fs.remove_file(&c.at("nr/x")).await.unwrap_err(),
+        c.fs.chmod(&c.at("nr/x"), 0o600).await.unwrap_err(),
+        c.fs.rename(&c.at("nr/x"), &c.at("y")).await.unwrap_err(),
+    ] {
+        assert_eq!(e.kind, ErrorKind::Permission, "{e:?}");
+    }
+    c.sh("chmod 700 nr");
+    // A child of a file does not exist (SftpFs: NoSuchFile, NotFound), even one named like it.
+    c.sh(": > f");
+    for child in ["f/x", "f/f"] {
+        let e = c.fs.stat(&c.at(child)).await.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::NotFound, "{child}: {e:?}");
+    }
     // A readable directory holding one directory of the same name is listed normally.
     c.fs.mkdir(&c.at("same")).await.unwrap();
     c.fs.mkdir(&c.at("same/same")).await.unwrap();

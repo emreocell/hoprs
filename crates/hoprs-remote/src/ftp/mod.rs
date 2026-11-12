@@ -128,13 +128,16 @@ impl FtpFs {
     }
 
     /// Turns an ambiguous failure (`Io` or `NotFound`, the usual bare `550`) on `path` into
-    /// `NotFound` when `path` does not exist; anything else is returned as is.
+    /// `NotFound` when `path` does not exist. When the `stat` itself fails with `Network` or
+    /// `Permission` (an unreadable parent), that error is the better answer. Anything else is
+    /// returned as is.
     async fn explain(&self, path: &RemotePath, err: Error) -> Error {
         if !matches!(err.kind, ErrorKind::Io | ErrorKind::NotFound) {
             return err;
         }
         match self.stat(path).await {
             Err(e) if e.kind == ErrorKind::NotFound => not_found(path, &err),
+            Err(e) if is_definite(&e) => e,
             _ => err,
         }
     }
@@ -185,6 +188,11 @@ fn not_found(path: &RemotePath, cause: &Error) -> Error {
         Some(detail) => e.with_detail(detail.clone()),
         None => e,
     }
+}
+
+/// A `stat` failure that explains a vague reply better than the reply itself.
+fn is_definite(e: &Error) -> bool {
+    matches!(e.kind, ErrorKind::Network | ErrorKind::Permission)
 }
 
 fn not_a_dir(path: &RemotePath) -> Error {
@@ -242,6 +250,7 @@ impl RemoteFs for FtpFs {
                 // `MLSD` on a file or a missing path, or a server that refuses `LIST` there.
                 return Err(match self.stat(path).await {
                     Err(st) if st.kind == ErrorKind::NotFound => not_found(path, &e),
+                    Err(st) if is_definite(&st) => st,
                     Ok(st) if !matches!(st.kind, EntryKind::Dir | EntryKind::Symlink) => {
                         not_a_dir(path)
                     }
@@ -296,8 +305,11 @@ impl RemoteFs for FtpFs {
                 mode: None,
             });
         };
-        // A listing without a `.` entry is fine here: only `name` is looked up.
-        let Listing { entries, mlsd, .. } = match self.entries(&parent).await {
+        let Listing {
+            entries,
+            is_dir,
+            mlsd,
+        } = match self.entries(&parent).await {
             Ok(listing) => listing,
             // `MLSD` refused: the parent is missing or not a directory.
             Err(e) if matches!(e.kind, ErrorKind::Io | ErrorKind::NotFound) => {
@@ -305,6 +317,39 @@ impl RemoteFs for FtpFs {
             }
             Err(e) => return Err(e),
         };
+        // Without a `.` entry the listing may be the parent's own line (vsftpd lists a file, or
+        // a directory it cannot open, that way): never look the child up in it.
+        if !is_dir
+            && let [only] = entries.as_slice()
+            && Some(only.name.as_str()) == parent.file_name()
+        {
+            let up = self.stat(&parent).await?;
+            match up.kind {
+                // The same check as `list`: the directory's own entry, so it is unreadable.
+                EntryKind::Dir
+                    if only.kind == Some(EntryKind::Dir)
+                        && only.mode == up.mode
+                        && only.modified == up.modified =>
+                {
+                    return Err(Error::new(
+                        ErrorKind::Permission,
+                        format!("Permission denied: {path}"),
+                    ));
+                }
+                // A real child that happens to share the directory's name.
+                EntryKind::Dir => {}
+                // Nothing lives under a file (SftpFs: `NoSuchFile`). A symlink listed as its
+                // own entry points to a file or to a directory that cannot be opened; it is
+                // taken as a file.
+                EntryKind::File | EntryKind::Symlink => {
+                    return Err(Error::new(
+                        ErrorKind::NotFound,
+                        format!("No such file or directory: {path}"),
+                    )
+                    .with_detail(format!("{parent} is not a directory")));
+                }
+            }
+        }
         let Some(listed) = entries.into_iter().find(|e| e.name == name) else {
             return Err(Error::new(
                 ErrorKind::NotFound,
@@ -406,6 +451,7 @@ impl RemoteFs for FtpFs {
         }
         match self.stat(path).await {
             Err(e) if e.kind == ErrorKind::NotFound => Err(not_found(path, &err)),
+            Err(e) if is_definite(&e) => Err(e),
             Ok(st) if st.kind == EntryKind::Dir => {
                 Err(Error::new(ErrorKind::Io, format!("Is a directory: {path}"))
                     .with_detail(err.detail.unwrap_or_default()))
@@ -425,6 +471,7 @@ impl RemoteFs for FtpFs {
         }
         match self.stat(path).await {
             Err(e) if e.kind == ErrorKind::NotFound => Err(not_found(path, &err)),
+            Err(e) if is_definite(&e) => Err(e),
             Ok(st) if st.kind != EntryKind::Dir => Err(not_a_dir(path)),
             // Most likely not empty.
             Ok(_) => {

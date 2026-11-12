@@ -507,16 +507,22 @@ impl FtpSession {
             guard.slot.take();
             return Err(not_connected());
         };
-        // Disconnected while the reply came in: `close` could not take the busy connection.
-        if matches!(*shared.state.borrow(), ConnectionState::Disconnected(_)) {
-            guard.slot.take();
-            return result;
-        }
         if let Err(e) = &result
             && (is_control_loss(e) || e.kind == ErrorKind::Tls)
         {
             guard.slot.take();
             let _ = shared.lost.send((generation, e.clone()));
+        }
+        drop(guard);
+        // Disconnected while the command ran or finished: `close` could not take the busy
+        // connection, so it is taken here, after the lock is released (a disconnect landing
+        // between a check and the release would otherwise be missed). `Disconnected` is final,
+        // so nothing newer can be in the slot. If someone else holds the lock, they run this
+        // same check once they release it.
+        if matches!(*shared.state.borrow(), ConnectionState::Disconnected(_))
+            && let Ok(mut slot) = shared.control.try_lock()
+        {
+            slot.take();
         }
         result
     }

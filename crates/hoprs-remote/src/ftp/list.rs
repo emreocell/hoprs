@@ -173,11 +173,10 @@ fn parse_list_time(month: u32, day: u32, s: &str, now: SystemTime) -> Option<Sys
             i64::try_from(now.duration_since(UNIX_EPOCH).ok()?.as_secs() / 86_400).ok()?,
         )
         .0;
-        let this_year = to_system_time(year, month, day, h, m, 0)?;
-        if this_year > now + FUTURE_SLACK {
-            to_system_time(year - 1, month, day, h, m, 0)
-        } else {
-            Some(this_year)
+        // Last year when this year's date would be in the future, or does not exist (Feb 29).
+        match to_system_time(year, month, day, h, m, 0) {
+            Some(this_year) if this_year <= now + FUTURE_SLACK => Some(this_year),
+            _ => to_system_time(year - 1, month, day, h, m, 0),
         }
     } else if s.len() == 4 {
         to_system_time(s.parse().ok()?, month, day, 0, 0, 0)
@@ -186,11 +185,12 @@ fn parse_list_time(month: u32, day: u32, s: &str, now: SystemTime) -> Option<Sys
     }
 }
 
-/// Parses one `MLSD` line (`fact=value;...; name`). `None` for `cdir`/`pdir`, `.`, `..` and
-/// malformed lines. A line without a `type` fact is a file; unknown types are special.
+/// Parses one `MLSD` line (`fact=value;...; name`; the facts end at the first `"; "`, so
+/// fact values may hold spaces). `None` for `cdir`/`pdir`, `.`, `..` and malformed lines. A
+/// line without a `type` fact is a file; unknown types are special.
 pub(crate) fn parse_mlsd_line(line: &str) -> Option<ListedEntry> {
     let line = line.trim_end_matches(['\r', '\n']);
-    let (facts, name) = line.split_once(' ')?;
+    let (facts, name) = line.split_once("; ")?;
     if name.is_empty() || name == "." || name == ".." || !facts.contains('=') {
         return None;
     }
@@ -389,6 +389,18 @@ mod tests {
     }
 
     #[test]
+    fn leap_day_without_year_falls_back_to_last_year() {
+        // In 2025, "Feb 29 10:00" can only be 2024.
+        let now = at(2025, 1, 10, 0, 0, 0);
+        let e = parse_list_line("-rw-r--r--    1 u g 1 Feb 29 10:00 f", now).unwrap();
+        assert_eq!(e.modified, Some(at(2024, 2, 29, 10, 0, 0)));
+        // In 2028 (leap year) it is this year.
+        let now = at(2028, 3, 10, 0, 0, 0);
+        let e = parse_list_line("-rw-r--r--    1 u g 1 Feb 29 10:00 f", now).unwrap();
+        assert_eq!(e.modified, Some(at(2028, 2, 29, 10, 0, 0)));
+    }
+
+    #[test]
     fn date_with_year() {
         let e = parse("-rw-r--r--    1 u g 1 Jan 12  1970 f");
         assert_eq!(e.modified, Some(at(1970, 1, 12, 0, 0, 0)));
@@ -479,6 +491,11 @@ mod tests {
         assert_eq!((e.name.as_str(), e.kind), (".env", Some(EntryKind::File)));
         let e = parse_mlsd_line("type=file;size=1;  lead").unwrap();
         assert_eq!(e.name, " lead");
+        // Facts end at the first "; " (RFC 3659), not at the first space.
+        let e = parse_mlsd_line("type=file;UNIX.owner=John Smith;size=7;UNIX.mode=0600; my file")
+            .unwrap();
+        assert_eq!(e.name, "my file");
+        assert_eq!((e.size, e.mode), (7, Some(0o600)));
 
         for line in [
             "type=cdir; /home/frank",
