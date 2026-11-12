@@ -25,7 +25,7 @@ const INITIAL_WINDOW: iced::Size = iced::Size::new(1280.0, 800.0);
 
 /// The default filter, used when `RUST_LOG` is unset or empty.
 const DEFAULT_LOG_FILTER: &str = "info,suppaftp=warn";
-/// suppaftp's own default; added when `RUST_LOG` doesn't mention it.
+/// suppaftp's own default; added unless `RUST_LOG` sets plain `suppaftp`.
 const SUPPAFTP_DEFAULT: &str = "suppaftp=warn";
 /// The most suppaftp may ever log at: at trace it logs `PASS <password>`.
 const SUPPAFTP_CAP: &str = "debug";
@@ -34,15 +34,15 @@ fn main() -> iced::Result {
     let filter = log_filter(std::env::var("RUST_LOG").ok().as_deref());
     init_logging(&filter);
 
-    let _instance = match acquire_instance_lock(&instance_lock_path()) {
+    let _instance = match acquire_first_instance_lock(&instance_lock_paths()) {
         Ok(Some(lock)) => Some(lock),
         Ok(None) => {
             println!("{}", ui::strings::ALREADY_RUNNING);
             std::process::exit(0);
         }
         Err(err) => {
-            // A broken runtime dir must not keep the app from starting.
-            tracing::warn!(%err, "could not take the single-instance lock");
+            // No usable location at all: start anyway, unprotected.
+            tracing::warn!(%err, "could not take the single-instance lock anywhere");
             None
         }
     };
@@ -91,12 +91,35 @@ fn view(state: &Hoprs) -> iced::Element<'_, Message> {
     ui::layout::view(&state.app)
 }
 
-/// `$XDG_RUNTIME_DIR/hoprs/instance.lock`, else the config directory.
-fn instance_lock_path() -> PathBuf {
-    let base = dirs::runtime_dir()
-        .or_else(dirs::config_dir)
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("hoprs").join("instance.lock")
+/// Where the lock may live, in order: `$XDG_RUNTIME_DIR/hoprs/`, the
+/// config directory, the temp directory.
+fn instance_lock_paths() -> Vec<PathBuf> {
+    [
+        dirs::runtime_dir(),
+        dirs::config_dir(),
+        Some(std::env::temp_dir()),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|base| base.join("hoprs").join("instance.lock"))
+    .collect()
+}
+
+/// Takes the lock at the first location that works. A location that fails
+/// (can't be created, opened or locked) falls through to the next one;
+/// one held by another instance stops the search with `Ok(None)`.
+fn acquire_first_instance_lock(paths: &[PathBuf]) -> io::Result<Option<File>> {
+    let mut last_err = io::Error::new(io::ErrorKind::NotFound, "no lock location");
+    for path in paths {
+        match acquire_instance_lock(path) {
+            Ok(lock) => return Ok(lock),
+            Err(err) => {
+                tracing::warn!(%err, path = %path.display(), "lock location unusable; trying the next");
+                last_err = err;
+            }
+        }
+    }
+    Err(last_err)
 }
 
 /// Takes the exclusive lock at `path`, creating its directory.
@@ -159,8 +182,10 @@ fn log_filter(rust_log: Option<&str>) -> LogFilter {
         let is_suppaftp = target == "suppaftp" || target.starts_with("suppaftp::");
         // A span-only directive (`[span]=level`) matches every target.
         let reaches_suppaftp = is_suppaftp || (target.is_empty() && selector.contains('['));
-        // An unparsable level is dropped by `EnvFilter`, so it sets nothing.
-        sets_suppaftp |= is_suppaftp && level.is_some();
+        // Only a plain `suppaftp=<valid level>` covers the whole target; a
+        // span-scoped or submodule directive leaves the rest of suppaftp at
+        // the global level. An unparsable level is dropped by `EnvFilter`.
+        sets_suppaftp |= selector == "suppaftp" && level.is_some();
 
         if reaches_suppaftp && level == Some(TRACE) {
             directives.push(format!("{selector}={SUPPAFTP_CAP}"));
@@ -169,7 +194,8 @@ fn log_filter(rust_log: Option<&str>) -> LogFilter {
             directives.push(directive.to_owned());
         }
     }
-    // Otherwise suppaftp would inherit the global level, trace included.
+    // Otherwise suppaftp (or the parts of it not covered by a scoped
+    // directive) would inherit the global level, trace included.
     if !sets_suppaftp {
         directives.push(SUPPAFTP_DEFAULT.to_owned());
     }
@@ -228,6 +254,78 @@ mod tests {
         );
     }
 
+    /// Whether the real `EnvFilter` built from `directives` lets a trace
+    /// event through for `target`.
+    fn trace_enabled(directives: &str, target: &str) -> bool {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let subscriber =
+            tracing_subscriber::registry().with(tracing_subscriber::EnvFilter::new(directives));
+        tracing::subscriber::with_default(subscriber, || match target {
+            "suppaftp" => tracing::enabled!(target: "suppaftp", tracing::Level::TRACE),
+            "suppaftp::async_ftp" => {
+                tracing::enabled!(target: "suppaftp::async_ftp", tracing::Level::TRACE)
+            }
+            "suppaftp::foo" => tracing::enabled!(target: "suppaftp::foo", tracing::Level::TRACE),
+            "hoprs_ssh" => tracing::enabled!(target: "hoprs_ssh", tracing::Level::TRACE),
+            other => panic!("no callsite for {other}"),
+        })
+    }
+
+    #[test]
+    fn real_env_filter_never_traces_suppaftp() {
+        let inputs = [
+            None,
+            Some("suppaftp=trace"),
+            Some("trace"),
+            Some("debug"),
+            Some("trace,suppaftp[cmd]=warn"),
+            Some("trace,suppaftp::foo=warn"),
+            Some("trace,suppaftp::foo=trace,suppaftp[cmd]=trace"),
+        ];
+        for input in inputs {
+            let directives = log_filter(input).directives;
+            for target in ["suppaftp", "suppaftp::async_ftp", "suppaftp::foo"] {
+                assert!(
+                    !trace_enabled(&directives, target),
+                    "{input:?} -> {directives:?} traces {target}"
+                );
+            }
+        }
+        // The check is not vacuous: other targets still trace.
+        assert!(trace_enabled(
+            &log_filter(Some("trace")).directives,
+            "hoprs_ssh"
+        ));
+        assert!(!trace_enabled(&log_filter(None).directives, "hoprs_ssh"));
+    }
+
+    #[test]
+    fn lock_falls_back_when_the_first_location_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        // A file where the runtime directory should be: create_dir_all fails.
+        let blocker = dir.path().join("not-a-dir");
+        fs::write(&blocker, b"").unwrap();
+        let broken = blocker.join("hoprs").join("instance.lock");
+        let fallback = dir
+            .path()
+            .join("config")
+            .join("hoprs")
+            .join("instance.lock");
+        let candidates = [broken, fallback.clone()];
+
+        let first = acquire_first_instance_lock(&candidates).unwrap();
+        assert!(first.is_some(), "the fallback location is locked");
+        assert!(fallback.exists());
+        assert!(
+            acquire_first_instance_lock(&candidates).unwrap().is_none(),
+            "a second instance hits the same fallback lock"
+        );
+
+        // Every location broken: the error is reported.
+        assert!(acquire_first_instance_lock(&candidates[..1]).is_err());
+    }
+
     #[test]
     fn trace_for_suppaftp_is_capped() {
         // Absent or empty: the default.
@@ -251,7 +349,7 @@ mod tests {
         let filter = log_filter(Some("suppaftp::async_ftp=TRACE,suppaftp[cmd]=5"));
         assert_eq!(
             filter.directives,
-            "suppaftp::async_ftp=debug,suppaftp[cmd]=debug"
+            "suppaftp::async_ftp=debug,suppaftp[cmd]=debug,suppaftp=warn"
         );
         assert!(filter.capped);
 
@@ -278,6 +376,13 @@ mod tests {
         assert_eq!(filter.directives, "suppaftp_ext=trace,suppaftp=warn");
         assert!(!filter.capped);
 
+        // Scoped suppaftp directives don't set the `suppaftp` target
+        // itself: the cap still applies to it and its other modules.
+        let filter = log_filter(Some("trace,suppaftp[cmd]=warn"));
+        assert_eq!(filter.directives, "trace,suppaftp[cmd]=warn,suppaftp=warn");
+        let filter = log_filter(Some("trace,suppaftp::foo=warn"));
+        assert_eq!(filter.directives, "trace,suppaftp::foo=warn,suppaftp=warn");
+
         // An unparsable level sets nothing, so the default still applies.
         let filter = log_filter(Some("trace,suppaftp=loud"));
         assert_eq!(filter.directives, "trace,suppaftp=loud,suppaftp=warn");
@@ -294,7 +399,7 @@ mod tests {
         }
         assert_eq!(
             log_filter(Some("suppaftp[cmd{id=1}]=trace")).directives,
-            "suppaftp[cmd{id=1}]=debug"
+            "suppaftp[cmd{id=1}]=debug,suppaftp=warn"
         );
     }
 }
