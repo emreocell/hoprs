@@ -6,7 +6,7 @@ use std::path::Path;
 use hoprs_core::{
     Error, ErrorKind, Protocol, Result, Site, SiteId, Workspace, WorkspaceId, WorkspaceSite,
 };
-use hoprs_vault::{SecretKind, Vault};
+use hoprs_vault::{SecretKind, Vault, is_keyring_unavailable};
 
 use crate::{ParsedEntry, ParsedPassword, ParsedSite, ParsedSiteManager};
 
@@ -59,6 +59,7 @@ pub fn apply(
     let mut report = ImportReport::default();
     let mut folders: Vec<(String, Vec<SiteId>)> = Vec::new();
     let mut path = Vec::new();
+    let mut keyring_down = false;
     walk(
         vault,
         parsed.entries,
@@ -66,6 +67,7 @@ pub fn apply(
         &mut path,
         &mut report,
         &mut folders,
+        &mut keyring_down,
     );
 
     for (name, ids) in folders {
@@ -98,6 +100,7 @@ fn walk(
     path: &mut Vec<String>,
     report: &mut ImportReport,
     folders: &mut Vec<(String, Vec<SiteId>)>,
+    keyring_down: &mut bool,
 ) {
     // Workspaces are created in XML (pre-)order: reserve this folder's slot.
     let slot = (!path.is_empty() && options.folders_as_workspaces).then(|| {
@@ -112,7 +115,7 @@ fn walk(
                 } else {
                     &path[..]
                 };
-                if let Some(id) = import_site(vault, site, prefix, report)
+                if let Some(id) = import_site(vault, site, prefix, report, keyring_down)
                     && let Some(slot) = slot
                 {
                     folders[slot].1.push(id);
@@ -120,7 +123,7 @@ fn walk(
             }
             ParsedEntry::Folder { name, entries } => {
                 path.push(name);
-                walk(vault, entries, options, path, report, folders);
+                walk(vault, entries, options, path, report, folders, keyring_down);
                 path.pop();
             }
         }
@@ -132,6 +135,7 @@ fn import_site(
     parsed: ParsedSite,
     prefix: &[String],
     report: &mut ImportReport,
+    keyring_down: &mut bool,
 ) -> Option<SiteId> {
     let name = if prefix.is_empty() {
         parsed.name.clone()
@@ -180,10 +184,15 @@ fn import_site(
     }
 
     let mut notes = parsed.notes;
-    if let ParsedPassword::Plain(password) = &parsed.password
-        && let Err(err) = vault.set_secret(&id, SecretKind::Password, password)
-    {
-        notes.push(format!("password not saved: {}", err.message));
+    if let ParsedPassword::Plain(password) = &parsed.password {
+        // Once the keyring is unavailable, stop asking: each attempt could
+        // raise another OS unlock prompt.
+        if *keyring_down {
+            notes.push("password not saved: keyring unavailable".to_owned());
+        } else if let Err(err) = vault.set_secret(&id, SecretKind::Password, password) {
+            *keyring_down = is_keyring_unavailable(&err);
+            notes.push(format!("password not saved: {}", err.message));
+        }
     }
     report.imported.push(ImportedSite {
         name,

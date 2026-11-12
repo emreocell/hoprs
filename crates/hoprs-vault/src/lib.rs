@@ -20,7 +20,7 @@ use secrecy::SecretString;
 
 pub use export::{BackupImportReport, ExportParams, ExportReport, ImportMode};
 pub use profiles::UnreadableEntry;
-pub use secrets::{KeyringStore, MemoryStore, SecretKind, SecretStore};
+pub use secrets::{KeyringStore, MemoryStore, SecretKind, SecretStore, is_keyring_unavailable};
 
 use profiles::Profiles;
 

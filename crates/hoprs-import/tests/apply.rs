@@ -222,6 +222,53 @@ fn keyring_failure_still_imports_site() {
     assert!(!vault.site(&legacy.id).unwrap().has_password);
 }
 
+#[derive(Default)]
+struct CountingFailingStore {
+    sets: std::sync::atomic::AtomicUsize,
+}
+
+impl SecretStore for CountingFailingStore {
+    fn get(&self, _: &SiteId, _: SecretKind) -> Result<Option<SecretString>> {
+        Ok(None)
+    }
+    fn set(&self, _: &SiteId, _: SecretKind, _: &SecretString) -> Result<()> {
+        self.sets.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(Error::new(ErrorKind::Io, "System keyring unavailable"))
+    }
+    fn delete(&self, _: &SiteId, _: SecretKind) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn unavailable_keyring_is_tried_once_per_import() {
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(CountingFailingStore::default());
+    let mut vault = Vault::open(dir.path(), store.clone()).unwrap();
+    let xml = format!(
+        "{}{}{}",
+        server("A", "a.test", true),
+        server("B", "b.test", true),
+        server("C", "c.test", true)
+    );
+    let report = apply(&mut vault, inline_xml(&xml), &FLAT).unwrap();
+    assert_eq!(report.imported.len(), 3);
+    assert_eq!(store.sets.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(
+        report.imported[0]
+            .notes
+            .contains(&"password not saved: System keyring unavailable".to_string())
+    );
+    for site in &report.imported[1..] {
+        assert!(
+            site.notes
+                .contains(&"password not saved: keyring unavailable".to_string()),
+            "{:?}",
+            site.notes
+        );
+    }
+}
+
 #[test]
 fn delete_source_only_deletes_filezilla_xml() {
     let dir = TempDir::new().unwrap();

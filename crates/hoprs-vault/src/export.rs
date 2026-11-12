@@ -46,6 +46,9 @@ const HEADER_LEN: usize = MAGIC.len() + 2 + 3 * 4 + SALT_LEN + NONCE_LEN;
 const TAG_LEN: usize = 16;
 
 /// Largest backup file accepted for import.
+/// Reason given for secrets not attempted after the keyring proved unavailable.
+const KEYRING_SKIPPED: &str = "keyring unavailable";
+
 const MAX_BACKUP_BYTES: u64 = 64 * 1024 * 1024;
 const KEY_LEN: usize = 32;
 
@@ -600,6 +603,12 @@ impl Vault {
             replace || report.added_workspaces > 0,
         )?;
 
+        // After the first "keyring unavailable" no more keyring calls are made:
+        // each one could raise another OS unlock prompt.
+        let mut keyring_down = false;
+        // Deletes are tried until one of them fails as unavailable; a failed
+        // write still gets its compensating delete (stale values must go).
+        let mut delete_down = false;
         if replace {
             let wanted: HashSet<(&SiteId, SecretKind)> = backup
                 .secrets
@@ -621,7 +630,16 @@ impl Vault {
                     if wanted.contains(&(id, kind)) {
                         continue;
                     }
+                    if keyring_down {
+                        report.secret_errors.push(format!(
+                            "{name}: old {} not deleted: {KEYRING_SKIPPED}",
+                            kind.account()
+                        ));
+                        continue;
+                    }
                     if let Err(err) = self.secrets.delete(id, kind) {
+                        delete_down = crate::secrets::is_keyring_unavailable(&err);
+                        keyring_down |= delete_down;
                         report.secret_errors.push(format!(
                             "{name}: old {} not deleted: {}",
                             kind.account(),
@@ -648,19 +666,29 @@ impl Vault {
                 continue;
             }
             let kind = SecretKind::from(secret.kind);
+            let name = names.get(&secret.site).copied().unwrap_or_default();
+            if keyring_down {
+                report.secret_errors.push(format!(
+                    "{name}: {} not restored: {KEYRING_SKIPPED}",
+                    kind.account()
+                ));
+                continue;
+            }
             let value = SecretString::from(secret.value.as_str());
             match self.secrets.set(&secret.site, kind, &value) {
                 Ok(()) => restored.push((secret.site.clone(), kind)),
                 Err(err) => {
-                    let name = names.get(&secret.site).copied().unwrap_or_default();
+                    keyring_down = crate::secrets::is_keyring_unavailable(&err);
                     report.secret_errors.push(format!(
                         "{name}: {} not restored: {}",
                         kind.account(),
                         describe(&err)
                     ));
                     if kept.contains(&secret.site)
+                        && !delete_down
                         && let Err(err) = self.secrets.delete(&secret.site, kind)
                     {
+                        delete_down = crate::secrets::is_keyring_unavailable(&err);
                         report.secret_errors.push(format!(
                             "{name}: old {} not deleted: {}",
                             kind.account(),
@@ -1272,6 +1300,54 @@ mod tests {
         assert!(!vault.site(&a.id).unwrap().has_password);
         let reopened = Vault::open(tmp.path(), Arc::new(FailingStore)).unwrap();
         assert!(!reopened.site(&a.id).unwrap().has_password);
+    }
+
+    /// Counts `set` calls; the backend is never reachable.
+    #[derive(Default)]
+    struct CountingFailingStore {
+        sets: std::sync::atomic::AtomicUsize,
+    }
+
+    impl SecretStore for CountingFailingStore {
+        fn get(&self, _: &SiteId, _: SecretKind) -> Result<Option<SecretString>> {
+            Err(unavailable())
+        }
+        fn set(&self, _: &SiteId, _: SecretKind, _: &SecretString) -> Result<()> {
+            self.sets.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(unavailable())
+        }
+        fn delete(&self, _: &SiteId, _: SecretKind) -> Result<()> {
+            Err(unavailable())
+        }
+    }
+
+    #[test]
+    fn restore_stops_writing_secrets_once_the_keyring_is_unavailable() {
+        let src = source();
+        let out = tempfile::tempdir().unwrap();
+        let path = export_to(&src.vault, out.path());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(CountingFailingStore::default());
+        let mut vault = Vault::open(tmp.path(), store.clone()).unwrap();
+        let report = vault
+            .import_backup(&path, &pw("correct horse"), ImportMode::Merge)
+            .unwrap();
+        assert_eq!(report.added_sites, 2);
+        assert_eq!(report.secrets_restored, 0);
+        // One real attempt; the second secret is not tried.
+        assert_eq!(store.sets.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(report.secret_errors.len(), 2, "{:?}", report.secret_errors);
+        assert!(
+            report.secret_errors[0].contains("System keyring unavailable"),
+            "{:?}",
+            report.secret_errors
+        );
+        assert!(
+            report.secret_errors[1].contains("keyring unavailable"),
+            "{:?}",
+            report.secret_errors
+        );
     }
 
     #[test]

@@ -138,9 +138,20 @@ impl SecretStore for KeyringStore {
     }
 }
 
+/// Message of the `Io` error that means the keyring backend cannot be reached.
+const UNAVAILABLE_MESSAGE: &str = "System keyring unavailable";
+
+/// True for the error a [`SecretStore`] returns when the keyring backend is
+/// unreachable (no session bus, locked and not unlocked, ...). Batch callers
+/// stop issuing secret operations after the first one, so a locked keyring
+/// raises one unlock prompt, not one per secret.
+pub fn is_keyring_unavailable(err: &Error) -> bool {
+    err.kind == ErrorKind::Io && err.message == UNAVAILABLE_MESSAGE
+}
+
 /// The keyring backend cannot be reached at all.
 fn unavailable(err: &keyring_core::Error) -> Error {
-    Error::new(ErrorKind::Io, "System keyring unavailable").with_detail(err.to_string())
+    Error::new(ErrorKind::Io, UNAVAILABLE_MESSAGE).with_detail(err.to_string())
 }
 
 /// Maps a keyring error to `Io`. The detail never carries secret bytes:
@@ -169,9 +180,7 @@ impl MemoryStore {
     pub fn new() -> Self {
         Self::default()
     }
-}
 
-impl MemoryStore {
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<(SiteId, SecretKind), SecretString>> {
         // A panic while holding the lock cannot leave the map half-updated.
         self.entries.lock().unwrap_or_else(|e| e.into_inner())
