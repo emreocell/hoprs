@@ -1463,7 +1463,7 @@ mod tests {
         // A huge file that is not a backup at all is refused by its magic.
         let other = out.path().join("huge.bin");
         let file = fs::File::create(&other).unwrap();
-        file.set_len(16 * 1024 * 1024 * 1024).unwrap();
+        file.set_len(MAX_BACKUP_BYTES + 1).unwrap();
         drop(file);
         let err = vault
             .import_backup(&other, &pw("correct horse"), ImportMode::Merge)
