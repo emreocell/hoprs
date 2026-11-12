@@ -26,7 +26,7 @@ use crate::{BoxAsyncRead, BoxAsyncWrite, Connection, RemoteFs};
 use errors::{is_control_loss, map_ftp_error, map_reply};
 use list::{
     ListedEntry, format_timeval, is_dot_line, parse_list_line, parse_mlsd_line, parse_stat_reply,
-    parse_timeval,
+    parse_timeval, unreadable_listing,
 };
 use session::{FtpSession, PooledConn};
 use stream::{FtpReader, FtpWriter, Timeouts, Transfer};
@@ -47,6 +47,10 @@ use stream::{FtpReader, FtpWriter, Timeouts, Transfer};
 ///   name; a directory or special file) it lists the parent directory and looks the name up:
 ///   directories, special files, missing paths, unreadable parents. `/` is a directory without
 ///   asking.
+/// - A `LIST` reply this parser cannot read (an MS-DOS style listing, IIS's default) is a
+///   `Protocol` error, "Cannot read the server's listing format", and so is a `stat` whose
+///   `SIZE` found the file when the listing does not show it: a listing that cannot be read
+///   never makes a directory look empty or an existing file look missing.
 /// - Servers answer most failures with a bare `550` (vsftpd: "Delete operation failed."), so
 ///   an ambiguous failure is explained with a `stat`: a missing path is `NotFound`, the wrong
 ///   kind of entry `Io`.
@@ -131,7 +135,8 @@ impl FtpFs {
             .await
     }
 
-    /// The parsed entries of `dir`, special files included.
+    /// The parsed entries of `dir`, special files included. A `LIST` reply in a format the
+    /// parser cannot read is a `Protocol` error, never an empty directory.
     async fn entries(&self, dir: &RemotePath) -> Result<Listing> {
         let (lines, mlsd) = self.listing(dir).await?;
         if mlsd {
@@ -142,6 +147,9 @@ impl FtpFs {
             });
         }
         let now = SystemTime::now();
+        if unreadable_listing(&lines, now) {
+            return Err(listing_format_error(dir, &lines));
+        }
         Ok(Listing {
             entries: lines
                 .iter()
@@ -392,8 +400,9 @@ fn root_entry() -> RemoteEntry {
 enum Probe {
     /// A regular file or a symlink, from `STAT <path>`.
     Found(ListedEntry),
-    /// Only a listing of the parent can tell.
-    List,
+    /// Only a listing of the parent can tell. `sized`: `SIZE` answered `213`, so the path
+    /// exists, and a listing that does not show it cannot be read.
+    List { sized: bool },
     /// `SIZE` was refused with this reply.
     Refused(u32, String),
 }
@@ -404,6 +413,21 @@ fn parse_size(code: u32, text: &str, path: &str) -> Result<u64> {
         Error::new(ErrorKind::Protocol, format!("Unexpected FTP reply: {path}"))
             .with_detail(format!("{code} {text}"))
     })
+}
+
+/// A listing this client cannot read (see [`unreadable_listing`]); the first line is the
+/// detail.
+fn listing_format_error(dir: &RemotePath, lines: &[String]) -> Error {
+    let first = lines.iter().find(|l| !l.trim().is_empty());
+    unreadable_listing_error(dir, first.map(String::as_str).unwrap_or(""))
+}
+
+fn unreadable_listing_error(path: &RemotePath, detail: &str) -> Error {
+    Error::new(
+        ErrorKind::Protocol,
+        "Cannot read the server's listing format",
+    )
+    .with_detail(format!("{path}: {}", detail.trim_end()))
 }
 
 fn not_found(path: &RemotePath, cause: &Error) -> Error {
@@ -577,7 +601,7 @@ impl RemoteFs for FtpFs {
                 Box::pin(async move {
                     let (code, text) = session::quote(&mut c.stream, &size, &context).await?;
                     if matches!(code, 500 | 502 | 550) {
-                        return Ok(Probe::List);
+                        return Ok(Probe::List { sized: false });
                     }
                     if code != 213 {
                         return Ok(Probe::Refused(code, text));
@@ -590,7 +614,7 @@ impl RemoteFs for FtpFs {
                         .then(|| parse_stat_reply(&listing, &name, SystemTime::now()))
                         .flatten();
                     let Some(mut listed) = listed else {
-                        return Ok(Probe::List);
+                        return Ok(Probe::List { sized: true });
                     };
                     match listed.kind {
                         Some(EntryKind::Symlink) => {}
@@ -605,7 +629,7 @@ impl RemoteFs for FtpFs {
                                 listed.modified = Some(t);
                             }
                         }
-                        _ => return Ok(Probe::List),
+                        _ => return Ok(Probe::List { sized: true }),
                     }
                     Ok(Probe::Found(listed))
                 })
@@ -615,7 +639,13 @@ impl RemoteFs for FtpFs {
             Probe::Found(listed) => to_entry(&parent, listed).ok_or_else(|| {
                 Error::new(ErrorKind::Protocol, format!("Unexpected FTP reply: {path}"))
             }),
-            Probe::List => self.stat_listed(path).await,
+            Probe::List { sized } => match self.stat_listed(path).await {
+                Err(e) if sized && e.kind == ErrorKind::NotFound => Err(unreadable_listing_error(
+                    path,
+                    "SIZE found the file, the listing did not",
+                )),
+                other => other,
+            },
             Probe::Refused(code, text) => Err(map_reply(code, &text, path.as_str())),
         }
     }

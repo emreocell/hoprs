@@ -2213,6 +2213,137 @@ async fn wait_connected(fs: &FtpFs) {
     .unwrap();
 }
 
+// A fake server for listings: what `stat` and `list` make of listings they cannot read.
+
+/// A fake FTP server without `MLSD` and `STAT <path>`. `LIST -a <dir>` sends the body
+/// `listings` gives for `dir` (`550` for any other directory); `SIZE` answers `213 5` for a
+/// path in `files` and `550` otherwise.
+async fn listing_server(
+    listings: &'static [(&'static str, &'static str)],
+    files: &'static [&'static str],
+) -> u16 {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((sock, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let (read, mut write) = sock.into_split();
+                let mut lines = BufReader::new(read).lines();
+                let mut data: Option<TcpListener> = None;
+                let _ = write.write_all(b"220 fake\r\n").await;
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let (verb, arg) = line.split_once(' ').unwrap_or((&line, ""));
+                    let reply = match verb.to_ascii_uppercase().as_str() {
+                        "USER" => "331 Password please.\r\n".to_owned(),
+                        "PASS" => "230 Logged in.\r\n".to_owned(),
+                        "TYPE" => "200 Binary.\r\n".to_owned(),
+                        "NOOP" => "200 NOOP ok.\r\n".to_owned(),
+                        "SIZE" if files.contains(&arg) => "213 5\r\n".to_owned(),
+                        "SIZE" => "550 Could not get file size.\r\n".to_owned(),
+                        "PASV" => {
+                            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                            let p = l.local_addr().unwrap().port();
+                            data = Some(l);
+                            format!(
+                                "227 Entering Passive Mode (127,0,0,1,{},{}).\r\n",
+                                p / 256,
+                                p % 256
+                            )
+                        }
+                        "LIST" => {
+                            let l = data.take().unwrap();
+                            let dir = arg.strip_prefix("-a ").unwrap_or(arg);
+                            match listings.iter().find(|(d, _)| *d == dir) {
+                                Some((_, body)) => {
+                                    let _ = write.write_all(b"150 Here it comes.\r\n").await;
+                                    let (mut d, _) = l.accept().await.unwrap();
+                                    let _ = d.write_all(body.as_bytes()).await;
+                                    let _ = d.shutdown().await;
+                                    drop(d);
+                                    "226 Directory send OK.\r\n".to_owned()
+                                }
+                                None => "550 Failed to open directory.\r\n".to_owned(),
+                            }
+                        }
+                        _ => "502 Not implemented.\r\n".to_owned(),
+                    };
+                    if write.write_all(reply.as_bytes()).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    port
+}
+
+const DOS_LISTING: &str = "11-12-26  03:04PM       <DIR>          sub\r\n\
+                           11-12-26  03:04PM                    5 file.txt\r\n";
+
+const ROOT_LISTING: &str = "drwxr-xr-x 2 u g 4096 Nov 12 15:06 .\r\n\
+                            drwxr-xr-x 2 u g 4096 Nov 12 15:06 dos\r\n\
+                            drwxr-xr-x 2 u g 4096 Nov 12 15:06 unix\r\n\
+                            drwxr-xr-x 2 u g 4096 Nov 12 15:06 empty\r\n";
+
+const UNIX_LISTING: &str = "total 8\r\n\
+                            drwxr-xr-x 2 u g 4096 Nov 12 15:06 .\r\n\
+                            -rw-r--r-- 1 u g 5 Nov 12 15:06 other\r\n";
+
+async fn listing_fs() -> FtpFs {
+    let port = listing_server(
+        &[
+            ("/", ROOT_LISTING),
+            ("/dos", DOS_LISTING),
+            ("/unix", UNIX_LISTING),
+            ("/empty", ""),
+        ],
+        &["/dos/file.txt", "/unix/ghost"],
+    )
+    .await;
+    transfer_fs(port, 1).await
+}
+
+fn assert_unreadable_listing<T: std::fmt::Debug>(result: Result<T, Error>) {
+    let e = result.unwrap_err();
+    assert_eq!(e.kind, ErrorKind::Protocol, "{e:?}");
+    assert_eq!(
+        e.message, "Cannot read the server's listing format",
+        "{e:?}"
+    );
+}
+
+/// Ruling R11: a listing in a format the parser cannot read (MS-DOS style, IIS's default) is a
+/// `Protocol` error, never an empty directory, and never makes a file `NotFound` (the engine
+/// would then overwrite a file the user asked to skip).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unreadable_listing_fails_loud() {
+    let fs = listing_fs().await;
+    assert_unreadable_listing(fs.list(&path("/dos")).await);
+    // `SIZE` says it exists, the listing cannot say anything.
+    assert_unreadable_listing(fs.stat(&path("/dos/file.txt")).await);
+    // `SIZE` says nothing, and neither can the listing.
+    assert_unreadable_listing(fs.stat(&path("/dos/new.txt")).await);
+    // A readable listing works as before; an empty one is an empty directory.
+    assert_eq!(names(&fs.list(&path("/unix")).await.unwrap()), ["other"]);
+    assert_eq!(
+        fs.stat(&path("/unix/nope")).await.unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+    assert!(fs.list(&path("/empty")).await.unwrap().is_empty());
+    fs.disconnect().await;
+}
+
+/// Ruling R11: `SIZE` answered `213`, so the file exists; a listing that does not show it
+/// means the listing cannot be trusted: `Protocol`, not `NotFound`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sized_file_missing_from_listing_is_protocol() {
+    let fs = listing_fs().await;
+    assert_unreadable_listing(fs.stat(&path("/unix/ghost")).await);
+    fs.disconnect().await;
+}
+
 /// Rulings R9/R10: `stat` of a regular file or of a symlink to one is `SIZE` + `STAT <path>`
 /// (+ `MDTM`), without listing the parent, even in a big directory. Directories, special
 /// files and missing paths still list it.

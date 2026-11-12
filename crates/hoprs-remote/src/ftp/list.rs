@@ -49,6 +49,26 @@ pub(crate) fn is_dot_line(line: &str, now: SystemTime) -> bool {
     parse_list_fields(line, now).is_some_and(|(name, ..)| name == ".")
 }
 
+/// Whether a `LIST` reply is in a format this parser cannot read (an MS-DOS style listing,
+/// IIS's default, say): it has lines, and not one of them, apart from `total N`, parses (`.`,
+/// `..` and special files count as parsed). An empty reply is an empty directory.
+pub(crate) fn unreadable_listing(lines: &[String], now: SystemTime) -> bool {
+    let mut lines = lines
+        .iter()
+        .map(|l| l.trim_end_matches(['\r', '\n']))
+        .filter(|l| !l.trim().is_empty() && !is_total_line(l))
+        .peekable();
+    lines.peek().is_some() && lines.all(|l| parse_list_fields(l, now).is_none())
+}
+
+/// `total N`, the block count `ls -l` prints first.
+fn is_total_line(line: &str) -> bool {
+    let mut words = line.split_whitespace();
+    words.next() == Some("total")
+        && words.next().is_some_and(|n| n.parse::<u64>().is_ok())
+        && words.next().is_none()
+}
+
 /// The single entry named `name` in the text of a `STAT <path>` reply (an `ls -l` of the path
 /// on the control connection: `Status follows:`, the lines, `End of status`). `None` when the
 /// reply lists nothing, more than one entry, an entry with another name, or a directory's
@@ -335,6 +355,34 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lines(text: &str) -> Vec<String> {
+        text.lines().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn dos_listing_is_unreadable() {
+        let dos = "11-12-26  03:04PM       <DIR>          sub\r\n\
+                   11-12-26  03:04PM                 1234 file.txt";
+        assert!(unreadable_listing(&lines(dos), now()));
+        assert!(unreadable_listing(&lines("total 8\nsomething odd"), now()));
+        // Empty: an empty directory. Only `total`: nothing to read.
+        assert!(!unreadable_listing(&[], now()));
+        assert!(!unreadable_listing(&lines("total 0"), now()));
+        assert!(!unreadable_listing(&lines("\r\n"), now()));
+        // `.`, `..` and special files are understood, even alone.
+        let dots = "total 8\n\
+                    drwxr-xr-x 2 u g 4096 Nov 12 15:06 .\n\
+                    drwxr-xr-x 3 u g 4096 Nov 12 15:06 ..";
+        assert!(!unreadable_listing(&lines(dots), now()));
+        assert!(!unreadable_listing(
+            &lines("prw-r--r-- 1 u g 0 Nov 12 15:06 fifo"),
+            now()
+        ));
+        // One readable line is enough: the others are skipped as before.
+        let mixed = "garbage\n-rw-r--r-- 1 u g 5 Nov 12 15:06 a";
+        assert!(!unreadable_listing(&lines(mixed), now()));
+    }
 
     #[test]
     fn stat_reply_file_symlink_and_others() {
