@@ -97,7 +97,7 @@ fn invalid_base64_password_is_noted() {
     assert!(matches!(s.password, ParsedPassword::None));
     assert_eq!(s.notes.len(), 2, "{:?}", s.notes); // password + remote dir type
     assert!(s.notes.iter().any(|n| n.contains("password")));
-    assert!(s.notes.iter().all(|n| !n.contains("not base64")));
+    assert!(s.notes.iter().any(|n| n.contains("not valid base64")));
 }
 
 #[test]

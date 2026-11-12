@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 hoprs-core = { path = "../hoprs-core" }
+hoprs-vault = { path = "../hoprs-vault" }
 quick-xml = { workspace = true }
 base64 = { workspace = true }
 secrecy = { workspace = true }
