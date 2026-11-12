@@ -8,7 +8,9 @@ mod watch;
 
 pub use conflict::{Decision, decide};
 pub use copy::{CopyOutcome, copy_file};
-pub use engine::{EngineConfig, Event, Resolution, ResolveAction, SiteEndpoints, TransferEngine};
+pub use engine::{
+    EngineConfig, Event, EventKind, Resolution, ResolveAction, SiteEndpoints, TransferEngine,
+};
 pub use model::{
     ConflictInfo, ConflictPolicy, Direction, TransferId, TransferItem, TransferSpec, TransferState,
 };

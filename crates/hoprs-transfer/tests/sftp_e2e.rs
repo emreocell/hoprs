@@ -16,8 +16,8 @@ use hoprs_remote::{BoxAsyncRead, BoxAsyncWrite, LocalFs, RemoteFs, SftpConfig, S
 use hoprs_ssh::testing::{docker, fixture, kill_ssh_sessions, test_config};
 use hoprs_ssh::{KeySource, Prompter, ScriptedPrompter, SessionState, SshSession};
 use hoprs_transfer::{
-    Direction, EngineConfig, Event, QueueStore, SiteEndpoints, TransferEngine, TransferId,
-    TransferSpec, TransferState, spawn_site_watcher,
+    Direction, EngineConfig, Event, EventKind, QueueStore, SiteEndpoints, TransferEngine,
+    TransferId, TransferSpec, TransferState, spawn_site_watcher,
 };
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -142,7 +142,8 @@ async fn start_engine(
     let engine = TransferEngine::start(
         QueueStore::open_in_memory().unwrap(),
         EngineConfig::default(),
-    );
+    )
+    .unwrap();
     let rx = engine.subscribe();
     engine
         .register_site(
@@ -178,8 +179,10 @@ async fn run_until_terminal(
         loop {
             match rx.recv().await {
                 Ok(ev) => {
-                    let terminal = match &ev {
-                        Event::StateChanged { id: i, state } if *i == id && state.is_terminal() => {
+                    let terminal = match &ev.kind {
+                        EventKind::StateChanged { id: i, state }
+                            if *i == id && state.is_terminal() =>
+                        {
                             Some(state.clone())
                         }
                         _ => None,
@@ -203,7 +206,7 @@ async fn run_until_terminal(
 fn site_paused_count(events: &[Event]) -> usize {
     events
         .iter()
-        .filter(|e| matches!(e, Event::SitePaused { .. }))
+        .filter(|e| matches!(&e.kind, EventKind::SitePaused { .. }))
         .count()
 }
 
@@ -212,8 +215,8 @@ fn failed(events: &[Event]) -> Vec<&Event> {
         .iter()
         .filter(|e| {
             matches!(
-                e,
-                Event::StateChanged {
+                &e.kind,
+                EventKind::StateChanged {
                     state: TransferState::Failed(_),
                     ..
                 }
@@ -457,7 +460,7 @@ async fn network_drop_pauses_and_resumes() {
     let first_progress = async {
         loop {
             let ev = rx.recv().await.unwrap();
-            let progressed = matches!(&ev, Event::Progress(us) if us.iter().any(|u| u.id == id && u.bytes_done > 0));
+            let progressed = matches!(&ev.kind, EventKind::Progress(us) if us.iter().any(|u| u.id == id && u.bytes_done > 0));
             events.push(ev);
             if progressed {
                 break;

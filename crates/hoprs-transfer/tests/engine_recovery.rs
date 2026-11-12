@@ -9,8 +9,8 @@ use common::*;
 use hoprs_core::{ErrorKind, SiteId};
 use hoprs_remote::{FaultFs, MemFs, Op};
 use hoprs_transfer::{
-    Direction, EngineConfig, Event, QueueStore, SiteEndpoints, TransferEngine, TransferId,
-    TransferItem, TransferSpec, TransferState,
+    Direction, EngineConfig, Event, EventKind, QueueStore, SiteEndpoints, TransferEngine,
+    TransferId, TransferItem, TransferSpec, TransferState,
 };
 use tokio::sync::broadcast::Receiver;
 use tokio::sync::broadcast::error::RecvError;
@@ -49,8 +49,8 @@ async fn wait_all_terminal(
 ) -> HashMap<TransferId, TransferState> {
     let mut done = HashMap::new();
     while done.len() < ids.len() {
-        if let Event::StateChanged { id, state } = wait_for(rx, |e| {
-            matches!(e, Event::StateChanged { id, state } if ids.contains(id) && state.is_terminal())
+        if let EventKind::StateChanged { id, state } = wait_for(rx, |e| {
+            matches!(e, EventKind::StateChanged { id, state } if ids.contains(id) && state.is_terminal())
         })
         .await
         {
@@ -62,12 +62,12 @@ async fn wait_all_terminal(
 
 /// Collects every event received during `window` (the one timing-based
 /// negative check: nothing must happen).
-async fn events_during(rx: &mut Receiver<Event>, window: Duration) -> Vec<Event> {
+async fn events_during(rx: &mut Receiver<Event>, window: Duration) -> Vec<EventKind> {
     let mut out = Vec::new();
     let _ = tokio::time::timeout(window, async {
         loop {
             match rx.recv().await {
-                Ok(ev) => out.push(ev),
+                Ok(ev) => out.push(ev.kind),
                 Err(RecvError::Lagged(_)) => {}
                 Err(RecvError::Closed) => break,
             }
@@ -77,10 +77,10 @@ async fn events_during(rx: &mut Receiver<Event>, window: Duration) -> Vec<Event>
     out
 }
 
-fn is_failed(e: &Event) -> bool {
+fn is_failed(e: &EventKind) -> bool {
     matches!(
         e,
-        Event::StateChanged {
+        EventKind::StateChanged {
             state: TransferState::Failed(_),
             ..
         }
@@ -124,11 +124,11 @@ async fn network_error_pauses_site() {
     let mut before = Vec::new();
     let paused = wait_for(&mut rx, |e| {
         before.push(e.clone());
-        matches!(e, Event::SitePaused { .. })
+        matches!(e, EventKind::SitePaused { .. })
     })
     .await;
     match paused {
-        Event::SitePaused { site: s, error } => {
+        EventKind::SitePaused { site: s, error } => {
             assert_eq!(s, site());
             assert_eq!(error.kind, ErrorKind::Network);
         }
@@ -138,7 +138,7 @@ async fn network_error_pauses_site() {
     assert!(
         !after.iter().any(|e| matches!(
             e,
-            Event::StateChanged {
+            EventKind::StateChanged {
                 state: TransferState::Active,
                 ..
             }
@@ -147,7 +147,9 @@ async fn network_error_pauses_site() {
     );
     assert!(!before.iter().chain(&after).any(is_failed));
     assert!(
-        !after.iter().any(|e| matches!(e, Event::SitePaused { .. })),
+        !after
+            .iter()
+            .any(|e| matches!(e, EventKind::SitePaused { .. })),
         "exactly one SitePaused"
     );
     assert!(
@@ -163,7 +165,9 @@ async fn network_error_pauses_site() {
         .iter()
         .chain(&after)
         .filter_map(|e| match e {
-            Event::StateChanged { id, state } if state.is_terminal() => Some((*id, state.clone())),
+            EventKind::StateChanged { id, state } if state.is_terminal() => {
+                Some((*id, state.clone()))
+            }
             _ => None,
         })
         .collect();
@@ -222,7 +226,7 @@ async fn other_sites_keep_running() {
     }
     wait_for(
         &mut rx,
-        |e| matches!(e, Event::SitePaused { site, .. } if *site == a),
+        |e| matches!(e, EventKind::SitePaused { site, .. } if *site == a),
     )
     .await;
 
@@ -265,9 +269,10 @@ async fn manual_pause_site_holds_dispatch_until_resume() {
         .unwrap();
     let during = events_during(&mut rx, Duration::from_millis(300)).await;
     assert!(
-        !during
-            .iter()
-            .any(|e| matches!(e, Event::StateChanged { .. } | Event::SitePaused { .. })),
+        !during.iter().any(|e| matches!(
+            e,
+            EventKind::StateChanged { .. } | EventKind::SitePaused { .. }
+        )),
         "a manually paused site dispatches nothing and emits no SitePaused: {during:?}"
     );
 
@@ -289,7 +294,7 @@ async fn engine_on_file(
     config: EngineConfig,
 ) -> (TransferEngine, Receiver<Event>) {
     let store = QueueStore::open(db).unwrap();
-    let engine = TransferEngine::start(store, config);
+    let engine = TransferEngine::start(store, config).unwrap();
     let rx = engine.subscribe();
     engine
         .register_site(
@@ -308,7 +313,7 @@ async fn engine_on_file(
 async fn wait_bytes(rx: &mut Receiver<Event>, id: TransferId) {
     wait_for(
         rx,
-        |e| matches!(e, Event::Progress(us) if us.iter().any(|u| u.id == id && u.bytes_done > 0)),
+        |e| matches!(e, EventKind::Progress(us) if us.iter().any(|u| u.id == id && u.bytes_done > 0)),
     )
     .await;
 }
@@ -343,7 +348,7 @@ async fn restart_recovers_as_paused() {
         .await
         .unwrap();
     wait_for(&mut rx, |e| {
-        matches!(e, Event::StateChanged { id, state: TransferState::AwaitingDecision(_) } if *id == asking)
+        matches!(e, EventKind::StateChanged { id, state: TransferState::AwaitingDecision(_) } if *id == asking)
     })
     .await;
     wait_bytes(&mut rx, active).await;
@@ -374,7 +379,7 @@ async fn restart_recovers_as_paused() {
 
     engine.resume(asking).await.unwrap();
     wait_for(&mut rx, |e| {
-        matches!(e, Event::StateChanged { id, state: TransferState::AwaitingDecision(_) } if *id == asking)
+        matches!(e, EventKind::StateChanged { id, state: TransferState::AwaitingDecision(_) } if *id == asking)
     })
     .await;
 }
@@ -405,7 +410,7 @@ async fn restart_keeps_expanded_folder_and_pauses_queued_items() {
     // The first child finishes while the others wait in the queue.
     wait_for(
         &mut rx,
-        |e| matches!(e, Event::StateChanged { id, state: TransferState::Done } if *id != root),
+        |e| matches!(e, EventKind::StateChanged { id, state: TransferState::Done } if *id != root),
     )
     .await;
     engine.shutdown().await;
@@ -446,30 +451,30 @@ async fn restart_keeps_expanded_folder_and_pauses_queued_items() {
 async fn events_until(
     rx: &mut Receiver<Event>,
     engine: &TransferEngine,
-    mut pred: impl FnMut(&[Event]) -> bool,
-) -> Vec<Event> {
+    mut pred: impl FnMut(&[EventKind]) -> bool,
+) -> Vec<EventKind> {
     let mut seen = Vec::new();
     while !pred(&seen) {
         let ev = wait_for(rx, |_| true).await;
         seen.push(ev);
     }
     engine.snapshot().await;
-    while let Ok(ev) = rx.try_recv() {
-        seen.push(ev);
+    while let Ok(Event { kind, .. }) = rx.try_recv() {
+        seen.push(kind);
     }
     seen
 }
 
-fn requeued(events: &[Event], id: TransferId) -> bool {
+fn requeued(events: &[EventKind], id: TransferId) -> bool {
     events.iter().any(
-        |e| matches!(e, Event::StateChanged { id: i, state: TransferState::Queued } if *i == id),
+        |e| matches!(e, EventKind::StateChanged { id: i, state: TransferState::Queued } if *i == id),
     )
 }
 
-fn site_paused_count(events: &[Event]) -> usize {
+fn site_paused_count(events: &[EventKind]) -> usize {
     events
         .iter()
-        .filter(|e| matches!(e, Event::SitePaused { .. }))
+        .filter(|e| matches!(e, EventKind::SitePaused { .. }))
         .count()
 }
 
@@ -494,7 +499,7 @@ async fn network_requeued_file_resumes_after_manual_pause() {
         .enqueue(spec(Direction::Upload, "/w/a", "/srv/a"))
         .await
         .unwrap();
-    wait_for(&mut rx, |e| matches!(e, Event::SitePaused { .. })).await;
+    wait_for(&mut rx, |e| matches!(e, EventKind::SitePaused { .. })).await;
     assert_eq!(
         remote_mem.read_file("/srv/a").map(|f| f.len()),
         Some(200_000),
@@ -536,7 +541,7 @@ async fn network_requeued_file_resumes_after_restart() {
         .enqueue(spec(Direction::Upload, "/w/a", "/srv/a"))
         .await
         .unwrap();
-    wait_for(&mut rx, |e| matches!(e, Event::SitePaused { .. })).await;
+    wait_for(&mut rx, |e| matches!(e, EventKind::SitePaused { .. })).await;
     engine.shutdown().await;
     assert_eq!(
         remote.read_file("/srv/a").map(|f| f.len()),
@@ -626,11 +631,11 @@ async fn site_pauses_again_after_resume() {
         .enqueue(spec(Direction::Upload, "/w/a", "/srv/a"))
         .await
         .unwrap();
-    wait_for(&mut rx, |e| matches!(e, Event::SitePaused { .. })).await;
+    wait_for(&mut rx, |e| matches!(e, EventKind::SitePaused { .. })).await;
 
     remote.fail_next(Op::OpenWrite, ErrorKind::Network);
     engine.resume_site(site()).await;
-    wait_for(&mut rx, |e| matches!(e, Event::SitePaused { .. })).await;
+    wait_for(&mut rx, |e| matches!(e, EventKind::SitePaused { .. })).await;
 
     engine.resume_site(site()).await;
     assert_eq!(wait_terminal(&mut rx, id).await, TransferState::Done);
@@ -641,7 +646,7 @@ async fn site_pauses_again_after_resume() {
 async fn wait_state(rx: &mut Receiver<Event>, id: TransferId, state: TransferState) {
     wait_for(
         rx,
-        |e| matches!(e, Event::StateChanged { id: i, state: s } if *i == id && *s == state),
+        |e| matches!(e, EventKind::StateChanged { id: i, state: s } if *i == id && *s == state),
     )
     .await;
 }
@@ -719,7 +724,7 @@ async fn network_override_survives_pause_while_preparing() {
         .enqueue(spec(Direction::Upload, "/w/a", "/srv/a"))
         .await
         .unwrap();
-    wait_for(&mut rx, |e| matches!(e, Event::SitePaused { .. })).await;
+    wait_for(&mut rx, |e| matches!(e, EventKind::SitePaused { .. })).await;
     assert_eq!(
         remote_mem.read_file("/srv/a").map(|f| f.len()),
         Some(200_000)
@@ -766,11 +771,11 @@ async fn requeued_folder_child_resumes_after_restart() {
         .unwrap();
     let child = match wait_for(
         &mut rx,
-        |e| matches!(e, Event::Progress(us) if us.iter().any(|u| u.id != root && u.bytes_done > 0)),
+        |e| matches!(e, EventKind::Progress(us) if us.iter().any(|u| u.id != root && u.bytes_done > 0)),
     )
     .await
     {
-        Event::Progress(us) => us.iter().find(|u| u.id != root).unwrap().id,
+        EventKind::Progress(us) => us.iter().find(|u| u.id != root).unwrap().id,
         _ => unreachable!(),
     };
     // Paused, then resumed before the copy stopped: the child is requeued,
@@ -813,7 +818,7 @@ struct UserPausedOutage {
     ids: [TransferId; 2],
     files: [Vec<u8>; 2],
     /// Events up to and including the `SitePaused`.
-    events: Vec<Event>,
+    events: Vec<EventKind>,
 }
 
 /// Starts a slow upload, pauses its site by hand while it copies, then
@@ -848,7 +853,7 @@ async fn network_failure_on_user_paused_site() -> UserPausedOutage {
     let mut events = Vec::new();
     wait_for(&mut rx, |e| {
         events.push(e.clone());
-        matches!(e, Event::SitePaused { .. })
+        matches!(e, EventKind::SitePaused { .. })
     })
     .await;
     UserPausedOutage {
@@ -872,7 +877,7 @@ async fn network_failure_while_user_paused_emits_site_paused() {
         events,
     } = network_failure_on_user_paused_site().await;
     match events.last() {
-        Some(Event::SitePaused { site: s, error }) => {
+        Some(EventKind::SitePaused { site: s, error }) => {
             assert_eq!(*s, site());
             assert_eq!(error.kind, ErrorKind::Network);
         }
@@ -909,7 +914,7 @@ async fn user_pause_survives_network_restore() {
     assert!(
         !during.iter().any(|e| matches!(
             e,
-            Event::StateChanged {
+            EventKind::StateChanged {
                 state: TransferState::Active,
                 ..
             }
@@ -954,7 +959,7 @@ async fn failed_and_cancelled_continuations_survive_restart() {
     let failing = FaultFs::new(remote.clone());
     // a.bin fails writing after 300 000 bytes (not a network error).
     failing.fail_io_after(300_000, ErrorKind::Io);
-    let engine = TransferEngine::start(QueueStore::open(&db).unwrap(), config.clone());
+    let engine = TransferEngine::start(QueueStore::open(&db).unwrap(), config.clone()).unwrap();
     let mut rx = engine.subscribe();
     engine
         .register_site(
@@ -972,11 +977,11 @@ async fn failed_and_cancelled_continuations_survive_restart() {
         .unwrap();
     let a = match wait_for(
         &mut rx,
-        |e| matches!(e, Event::StateChanged { id, state: TransferState::Failed(_) } if *id != root),
+        |e| matches!(e, EventKind::StateChanged { id, state: TransferState::Failed(_) } if *id != root),
     )
     .await
     {
-        Event::StateChanged {
+        EventKind::StateChanged {
             id,
             state: TransferState::Failed(e),
         } => {
@@ -1055,7 +1060,7 @@ async fn shutdown_with_deferred_write_error_overwrites_after_restart() {
     slow.set_stream_latency(Duration::from_millis(20));
     let remote = FaultFs::new(remote_mem.clone());
     remote.lose_write_after(100_000, ErrorKind::Io);
-    let engine = TransferEngine::start(QueueStore::open(&db).unwrap(), config.clone());
+    let engine = TransferEngine::start(QueueStore::open(&db).unwrap(), config.clone()).unwrap();
     engine
         .register_site(site(), endpoints_fault(slow, remote, 1))
         .await;
@@ -1077,7 +1082,7 @@ async fn shutdown_with_deferred_write_error_overwrites_after_restart() {
     engine.shutdown().await;
 
     let fault = FaultFs::new(local.clone());
-    let engine = TransferEngine::start(QueueStore::open(&db).unwrap(), config);
+    let engine = TransferEngine::start(QueueStore::open(&db).unwrap(), config).unwrap();
     let mut rx = engine.subscribe();
     engine
         .register_site(

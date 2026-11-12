@@ -9,8 +9,8 @@ use common::*;
 use hoprs_core::{ErrorKind, RemoteEntry, RemotePath, Result};
 use hoprs_remote::{BoxAsyncRead, BoxAsyncWrite, FaultFs, MemFs, RemoteFs};
 use hoprs_transfer::{
-    ConflictInfo, ConflictPolicy, Direction, EngineConfig, Event, QueueStore, SiteEndpoints,
-    TransferEngine, TransferId, TransferState,
+    ConflictInfo, ConflictPolicy, Direction, EngineConfig, Event, EventKind, QueueStore,
+    SiteEndpoints, TransferEngine, TransferId, TransferState,
 };
 use tokio::sync::broadcast::Receiver;
 
@@ -24,8 +24,8 @@ async fn collect_terminal(
     let mut active = HashSet::new();
     let mut max_active = 0;
     while done.len() < n {
-        if let Event::StateChanged { id, state } =
-            wait_for(rx, |e| matches!(e, Event::StateChanged { .. })).await
+        if let EventKind::StateChanged { id, state } =
+            wait_for(rx, |e| matches!(e, EventKind::StateChanged { .. })).await
         {
             if state == TransferState::Active {
                 active.insert(id);
@@ -144,8 +144,8 @@ async fn progress_is_throttled() {
     let mut progress_events = 0u128;
     loop {
         match wait_for(&mut rx, |_| true).await {
-            Event::Progress(_) => progress_events += 1,
-            Event::StateChanged { id: i, state } if i == id && state.is_terminal() => {
+            EventKind::Progress(_) => progress_events += 1,
+            EventKind::StateChanged { id: i, state } if i == id && state.is_terminal() => {
                 assert_eq!(state, TransferState::Done);
                 break;
             }
@@ -241,10 +241,10 @@ async fn ask_policy_awaits_decision_and_frees_worker() {
         .unwrap();
 
     let ev = wait_for(&mut rx, |e| {
-        matches!(e, Event::StateChanged { id, state: TransferState::AwaitingDecision(_) } if *id == a)
+        matches!(e, EventKind::StateChanged { id, state: TransferState::AwaitingDecision(_) } if *id == a)
     })
     .await;
-    let Event::StateChanged {
+    let EventKind::StateChanged {
         state: TransferState::AwaitingDecision(info),
         ..
     } = ev
@@ -291,7 +291,8 @@ async fn persists_items_and_emits_added() {
     let remote = MemFs::new();
     local.add_file("/w/a.bin", &data(70_000), mtime());
     remote.add_dir("/srv");
-    let engine = TransferEngine::start(QueueStore::open(&db).unwrap(), EngineConfig::default());
+    let engine =
+        TransferEngine::start(QueueStore::open(&db).unwrap(), EngineConfig::default()).unwrap();
     let mut rx = engine.subscribe();
     engine
         .register_site(
@@ -308,8 +309,8 @@ async fn persists_items_and_emits_added() {
         .enqueue(spec(Direction::Upload, "/w/a.bin", "/srv/a.bin"))
         .await
         .unwrap();
-    match wait_for(&mut rx, |e| matches!(e, Event::Added(_))).await {
-        Event::Added(item) => {
+    match wait_for(&mut rx, |e| matches!(e, EventKind::Added(_))).await {
+        EventKind::Added(item) => {
             assert_eq!(item.id, id);
             assert_eq!(item.state, TransferState::Queued);
             assert_eq!(item.spec, spec(Direction::Upload, "/w/a.bin", "/srv/a.bin"));
@@ -431,13 +432,13 @@ async fn slow_copy_emits_bounded_monotonic_progress() {
     let mut seen = Vec::new();
     loop {
         match wait_for(&mut rx, |_| true).await {
-            Event::Progress(updates) => {
+            EventKind::Progress(updates) => {
                 assert_eq!(updates.len(), 1);
                 assert_eq!(updates[0].id, id);
                 assert_eq!(updates[0].total, Some(1 << 20));
                 seen.push(updates[0].bytes_done);
             }
-            Event::StateChanged { id: i, state } if i == id && state.is_terminal() => {
+            EventKind::StateChanged { id: i, state } if i == id && state.is_terminal() => {
                 assert_eq!(state, TransferState::Done);
                 break;
             }

@@ -9,7 +9,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::{Event, TransferEngine};
+use crate::{Event, EventKind, TransferEngine};
 
 /// How long a `SitePaused` on a still-`Connected` connection waits before the engine is told
 /// the network is restored.
@@ -71,7 +71,10 @@ pub fn spawn_site_watcher(
                     }
                 }
                 event = events.recv() => match event {
-                    Ok(Event::SitePaused { site: paused, .. }) if paused == site => {
+                    Ok(Event {
+                        kind: EventKind::SitePaused { site: paused, .. },
+                        ..
+                    }) if paused == site => {
                         if gave_up {
                             // Only a resume from elsewhere (the user) lets the site pause again.
                             (restores, gave_up) = (0, false);
@@ -233,6 +236,7 @@ mod tests {
             QueueStore::open_in_memory().unwrap(),
             EngineConfig::default(),
         )
+        .unwrap()
     }
 
     /// An engine with one upload whose first attempt fails with a network error, watched by a
@@ -255,7 +259,11 @@ mod tests {
 
     async fn wait_paused(rx: &mut tokio::sync::broadcast::Receiver<Event>) {
         loop {
-            if let Ok(Event::SitePaused { .. }) = rx.recv().await {
+            if let Ok(Event {
+                kind: EventKind::SitePaused { .. },
+                ..
+            }) = rx.recv().await
+            {
                 return;
             }
         }
@@ -380,7 +388,10 @@ mod tests {
         let mut rx = rig.engine.subscribe();
         let id = rig.engine.enqueue(upload_spec(&other, "b")).await.unwrap();
         loop {
-            if let Ok(Event::SitePaused { site, .. }) = rx.recv().await
+            if let Ok(Event {
+                kind: EventKind::SitePaused { site, .. },
+                ..
+            }) = rx.recv().await
                 && site == other
             {
                 break;
@@ -403,7 +414,10 @@ mod tests {
         while pauses < 50 {
             match tokio::time::timeout(RESTORE_GRACE * 10, rx.recv()).await {
                 Err(_) => return pauses,
-                Ok(Ok(Event::SitePaused { site: s, .. })) if s == site() => pauses += 1,
+                Ok(Ok(Event {
+                    kind: EventKind::SitePaused { site: s, .. },
+                    ..
+                })) if s == site() => pauses += 1,
                 Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return pauses,
                 Ok(_) => {}
             }

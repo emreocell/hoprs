@@ -2,6 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use hoprs_core::Result;
+
 use crate::model::{TransferId, TransferItem, TransferState};
 use crate::store::QueueStore;
 
@@ -12,11 +14,10 @@ use crate::store::QueueStore;
 /// Returns every item of each tree that still has an unfinished item,
 /// finished ones included: an expanded directory counts all of its
 /// children when it is resumed, and is never listed again. Trees that are
-/// entirely finished are not loaded. A store error yields an empty queue.
-pub(super) fn recover(store: &mut QueueStore) -> Vec<TransferItem> {
-    let Ok(unfinished) = store.recover() else {
-        return Vec::new();
-    };
+/// entirely finished are not loaded. A store error (a corrupt queue) is
+/// returned as is.
+pub(super) fn recover(store: &mut QueueStore) -> Result<Vec<TransferItem>> {
+    let unfinished = store.recover()?;
     for item in unfinished
         .iter()
         .filter(|i| i.state == TransferState::Queued)
@@ -25,9 +26,7 @@ pub(super) fn recover(store: &mut QueueStore) -> Vec<TransferItem> {
         // and simply resumes under the global policy.
         let _ = store.set_state(item.id, &TransferState::Paused);
     }
-    let Ok(all) = store.list_all() else {
-        return Vec::new();
-    };
+    let all = store.list_all()?;
     // Parents are inserted before their children, so ids are ascending
     // down every tree.
     let mut root_of: HashMap<TransferId, TransferId> = HashMap::new();
@@ -43,7 +42,8 @@ pub(super) fn recover(store: &mut QueueStore) -> Vec<TransferItem> {
         .filter(|i| !i.state.is_terminal())
         .map(|i| root_of[&i.id])
         .collect();
-    all.into_iter()
+    Ok(all
+        .into_iter()
         .filter(|i| live.contains(&root_of[&i.id]))
         .map(|mut i| {
             if i.state == TransferState::Queued {
@@ -51,5 +51,5 @@ pub(super) fn recover(store: &mut QueueStore) -> Vec<TransferItem> {
             }
             i
         })
-        .collect()
+        .collect())
 }

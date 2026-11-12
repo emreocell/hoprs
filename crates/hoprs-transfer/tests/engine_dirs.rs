@@ -7,7 +7,7 @@ use std::time::Duration;
 use common::*;
 use hoprs_core::{EntryKind, ErrorKind, RemoteEntry, RemotePath, Result};
 use hoprs_remote::{BoxAsyncRead, BoxAsyncWrite, FaultFs, MemFs, Op, RemoteFs};
-use hoprs_transfer::{Direction, EngineConfig, Event, TransferItem, TransferState};
+use hoprs_transfer::{Direction, EngineConfig, Event, EventKind, TransferItem, TransferState};
 use tokio::sync::broadcast::error::RecvError;
 
 const SYMLINK_SKIP: &str = "symlinks are not followed";
@@ -107,8 +107,10 @@ async fn symlink_is_skipped() {
     let mut link_added = None;
     let root_state = loop {
         match wait_for(&mut rx, |_| true).await {
-            Event::Added(i) if i.spec.local.as_str() == "/w/site/link" => link_added = Some(i),
-            Event::StateChanged { id, state } if id == root && state.is_terminal() => break state,
+            EventKind::Added(i) if i.spec.local.as_str() == "/w/site/link" => link_added = Some(i),
+            EventKind::StateChanged { id, state } if id == root && state.is_terminal() => {
+                break state;
+            }
             _ => {}
         }
     };
@@ -239,14 +241,14 @@ async fn large_tree_is_lazy() {
     let mut added_at_first_file_done = None;
     let collect = async {
         loop {
-            match rx.recv().await {
-                Ok(Event::Added(i)) => {
+            match rx.recv().await.map(|e| e.kind) {
+                Ok(EventKind::Added(i)) => {
                     added += 1;
                     if i.is_dir == Some(false) {
                         files.insert(i.id);
                     }
                 }
-                Ok(Event::StateChanged { id, state }) => {
+                Ok(EventKind::StateChanged { id, state }) => {
                     if state == TransferState::Done
                         && files.contains(&id)
                         && added_at_first_file_done.is_none()

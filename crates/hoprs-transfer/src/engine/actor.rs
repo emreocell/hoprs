@@ -43,13 +43,13 @@ use tokio_util::sync::CancellationToken;
 use super::control::Control;
 use super::dirs::DirProgress;
 use super::worker::{self, Prepared, Route, WorkerMsg};
-use super::{EngineConfig, Event, SiteEndpoints};
+use super::{EngineConfig, Event, EventKind, SiteEndpoints};
 use crate::conflict::{Decision, decide};
 use crate::copy::CopyOutcome;
 use crate::model::{
     ConflictInfo, ConflictPolicy, TransferId, TransferItem, TransferSpec, TransferState,
 };
-use crate::progress::ProgressTracker;
+use crate::progress::{ProgressTracker, ProgressUpdate};
 use crate::store::QueueStore;
 
 const MAX_WORKERS: usize = 16;
@@ -89,7 +89,10 @@ pub(super) enum Command {
         reply: oneshot::Sender<()>,
     },
     Snapshot {
-        reply: oneshot::Sender<Vec<TransferItem>>,
+        reply: oneshot::Sender<(u64, Vec<TransferItem>)>,
+    },
+    ClearFinished {
+        reply: oneshot::Sender<Result<usize>>,
     },
     Control {
         id: TransferId,
@@ -187,6 +190,8 @@ pub(super) struct Actor {
     pub(super) buf_size: usize,
     pub(super) policy: ConflictPolicy,
     pub(super) events: broadcast::Sender<Event>,
+    /// `seq` of the last event emitted (0 before the first).
+    pub(super) seq: u64,
     pub(super) items: BTreeMap<TransferId, TransferItem>,
     pub(super) sites: HashMap<SiteId, Site>,
     /// Index of `Queued` items per site (registered or not).
@@ -216,6 +221,7 @@ pub(super) async fn run(
         buf_size: config.buf_size,
         policy: config.default_policy,
         events,
+        seq: 0,
         items: recovered.into_iter().map(|i| (i.id, i)).collect(),
         sites: HashMap::new(),
         queued: HashMap::new(),
@@ -249,8 +255,13 @@ pub(super) async fn run(
 }
 
 impl Actor {
-    fn emit(&self, event: Event) {
-        let _ = self.events.send(event);
+    /// Numbers `kind` with the next `seq` and broadcasts it.
+    fn emit(&mut self, kind: EventKind) {
+        self.seq += 1;
+        let _ = self.events.send(Event {
+            seq: self.seq,
+            kind,
+        });
     }
 
     fn handle_command(&mut self, cmd: Command) {
@@ -303,7 +314,10 @@ impl Actor {
                 let _ = reply.send(());
             }
             Command::Snapshot { reply } => {
-                let _ = reply.send(self.items.values().cloned().collect());
+                let _ = reply.send((self.seq, self.items.values().cloned().collect()));
+            }
+            Command::ClearFinished { reply } => {
+                let _ = reply.send(self.clear_finished());
             }
             Command::Control { id, op, reply } => {
                 let result = match self.items.get(&id).map(|i| i.state.clone()) {
@@ -380,7 +394,7 @@ impl Actor {
                 .push(item.id, item.is_dir == Some(true));
         }
         self.items.insert(item.id, item.clone());
-        self.emit(Event::Added(item));
+        self.emit(EventKind::Added(item));
     }
 
     /// Persists and applies `state`, then emits `StateChanged`. If persisting
@@ -420,7 +434,7 @@ impl Actor {
             item.state = state.clone();
         }
         let failed = matches!(state, TransferState::Failed(_));
-        self.emit(Event::StateChanged { id, state });
+        self.emit(EventKind::StateChanged { id, state });
         if let Some(parent) = finished_child_of {
             self.child_finished(parent, failed);
         }
@@ -540,7 +554,7 @@ impl Actor {
             && !site.network_paused
         {
             site.network_paused = true;
-            self.emit(Event::SitePaused {
+            self.emit(EventKind::SitePaused {
                 site: site_id,
                 error,
             });
@@ -608,10 +622,7 @@ impl Actor {
             }
             WorkerMsg::Copied { id, bytes, result } => {
                 let intent = self.intent(id);
-                self.tracker.unregister(id);
-                if let Some(item) = self.items.get_mut(&id) {
-                    item.bytes_done = bytes;
-                }
+                self.finish_progress(id, bytes);
                 let state = match (result, self.store.set_bytes_done(id, bytes)) {
                     (Ok(CopyOutcome::Completed), Ok(())) => TransferState::Done,
                     (Ok(CopyOutcome::Cancelled), Ok(())) => {
@@ -637,6 +648,63 @@ impl Actor {
                 self.release(id, state);
             }
         }
+    }
+
+    /// Ends the progress tracking of a copy run: records its final byte
+    /// count and emits it in a last `Progress` (rate 0, as the copy has
+    /// stopped), before the state change that ends the run.
+    fn finish_progress(&mut self, id: TransferId, bytes: u64) {
+        self.tracker.unregister(id);
+        let Some(item) = self.items.get_mut(&id) else {
+            return;
+        };
+        item.bytes_done = bytes;
+        let update = ProgressUpdate {
+            id,
+            bytes_done: bytes,
+            total: item.size,
+            bytes_per_sec: 0,
+        };
+        self.emit(EventKind::Progress(vec![update]));
+    }
+
+    /// Removes finished top-level items and their descendants from the
+    /// store and from every map of the actor; returns how many top-level
+    /// items the store removed (finished trees that were never loaded
+    /// included). A finished root with a descendant that is not finished
+    /// yet (still stopping) is kept, in the store and in memory.
+    fn clear_finished(&mut self) -> Result<usize> {
+        let children = self.children_index();
+        let mut keep = Vec::new();
+        let mut prune = Vec::new();
+        for root in self
+            .items
+            .values()
+            .filter(|i| i.parent.is_none() && i.state.is_terminal())
+        {
+            let tree = Self::subtree(&children, root.id);
+            let finished = tree.iter().all(|id| {
+                !self.running.contains_key(id)
+                    && self.items.get(id).is_some_and(|i| i.state.is_terminal())
+            });
+            if finished {
+                prune.extend(tree);
+            } else {
+                keep.push(root.id);
+            }
+        }
+        let removed = self.store.clear_finished_except(&keep)?;
+        for id in prune {
+            if let Some(item) = self.items.remove(&id)
+                && let Some(queue) = self.queued.get_mut(&item.spec.site)
+            {
+                queue.remove(id);
+            }
+            self.dirs.remove(&id);
+            self.overrides.remove(&id);
+            self.tracker.unregister(id);
+        }
+        Ok(removed)
     }
 
     fn on_file_prepared(
@@ -713,8 +781,9 @@ impl Actor {
         }
     }
 
-    /// The only place that emits `Event::Progress`. Byte counts are persisted
-    /// best-effort here; the final count is persisted (strictly) at completion.
+    /// Emits the periodic `EventKind::Progress` (a copy's final count is
+    /// emitted by `finish_progress`). Byte counts are persisted best-effort
+    /// here; the final count is persisted (strictly) at completion.
     fn tick(&mut self) {
         let updates = self.tracker.sample(Instant::now());
         if updates.is_empty() {
@@ -728,7 +797,7 @@ impl Actor {
             batch.push((u.id, u.bytes_done));
         }
         let _ = self.store.set_bytes_done_many(&batch);
-        self.emit(Event::Progress(updates));
+        self.emit(EventKind::Progress(updates));
     }
 }
 

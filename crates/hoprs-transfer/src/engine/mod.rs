@@ -65,9 +65,22 @@ pub struct Resolution {
     pub apply_to_all: bool,
 }
 
-/// Notifications broadcast by the engine.
+/// A notification broadcast by the engine.
+///
+/// `seq` numbers the events of one engine from 1, increasing by one per
+/// event emitted. A subscriber that lags (`RecvError::Lagged`) or starts
+/// late takes a [`snapshot_with_seq`](TransferEngine::snapshot_with_seq)
+/// and drops every event whose `seq` is at most the snapshot's: the
+/// snapshot already reflects them.
 #[derive(Clone, Debug)]
-pub enum Event {
+pub struct Event {
+    pub seq: u64,
+    pub kind: EventKind,
+}
+
+/// What an [`Event`] reports.
+#[derive(Clone, Debug)]
+pub enum EventKind {
     Added(TransferItem),
     StateChanged {
         id: TransferId,
@@ -95,9 +108,12 @@ impl TransferEngine {
     /// Spawns the engine actor. Must be called inside a tokio runtime.
     ///
     /// Items left unfinished by a previous run are recovered as `Paused`
-    /// (see `QueueStore::recover`); nothing resumes automatically.
-    pub fn start(mut store: QueueStore, config: EngineConfig) -> TransferEngine {
-        let recovered = recovery::recover(&mut store);
+    /// (see `QueueStore::recover`); nothing resumes automatically. A store
+    /// that cannot be read (a corrupt queue) is an error: the store is
+    /// dropped without writing over it, and the caller decides what to do
+    /// (for example, report it and run without a persistent queue).
+    pub fn start(mut store: QueueStore, config: EngineConfig) -> Result<TransferEngine> {
+        let recovered = recovery::recover(&mut store)?;
         let (commands, command_rx) = mpsc::channel(COMMAND_CAPACITY);
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         tokio::spawn(actor::run(
@@ -107,7 +123,7 @@ impl TransferEngine {
             command_rx,
             events.clone(),
         ));
-        TransferEngine { commands, events }
+        Ok(TransferEngine { commands, events })
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
@@ -210,7 +226,7 @@ impl TransferEngine {
     }
 
     /// Clears the network pause of `site` (set by a network error, announced
-    /// by `Event::SitePaused`). The site dispatches again unless the user
+    /// by `EventKind::SitePaused`). The site dispatches again unless the user
     /// also paused it (`pause_site`). Has no effect on an unknown site.
     ///
     /// Integration: run [`spawn_site_watcher`](crate::spawn_site_watcher) for every connected
@@ -252,6 +268,14 @@ impl TransferEngine {
 
     /// All items, ordered by id.
     pub async fn snapshot(&self) -> Vec<TransferItem> {
+        self.snapshot_with_seq().await.1
+    }
+
+    /// All items, ordered by id, with the `seq` of the last event emitted
+    /// before the snapshot was taken (0 if none). Events with a `seq` at
+    /// most that value are already reflected in the items; apply only the
+    /// later ones. Returns `(0, [])` if the engine has stopped.
+    pub async fn snapshot_with_seq(&self) -> (u64, Vec<TransferItem>) {
         let (reply, rx) = oneshot::channel();
         if self
             .commands
@@ -259,8 +283,23 @@ impl TransferEngine {
             .await
             .is_err()
         {
-            return Vec::new();
+            return (0, Vec::new());
         }
         rx.await.unwrap_or_default()
+    }
+
+    /// Removes every finished (terminal) top-level item with all of its
+    /// descendants, from the store and from memory, and returns how many
+    /// top-level items were removed. Removed items no longer appear in
+    /// snapshots; no event is emitted for them. A finished folder whose
+    /// descendants are still stopping (a cancelled folder whose running
+    /// child has not reported back yet) is kept until a later call.
+    pub async fn clear_finished(&self) -> Result<usize> {
+        let (reply, rx) = oneshot::channel();
+        self.commands
+            .send(Command::ClearFinished { reply })
+            .await
+            .map_err(|_| stopped())?;
+        rx.await.map_err(|_| stopped())?
     }
 }
