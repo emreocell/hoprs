@@ -63,9 +63,11 @@ use stream::{FtpReader, FtpWriter, Timeouts, Transfer};
 ///   it.
 /// - Known edge (R8): `SIZE` and `STOR` follow symlinks on the server, so a symlink to a file
 ///   is read or written like the file. Writing to a FIFO is left to the server (vsftpd
-///   refuses it with `553`; a server that opens it would block that transfer). `shutdown` flushes the 256 KiB
-///   buffer, closes the data connection and returns `Ok` only after the `226`. A refusal from
-///   the server (`451`, `452`, `552`: a full disk) is `Io`; a lost connection is `Network`.
+///   refuses it with `553`; a server that opens it would block that transfer).
+/// - A write stream's `shutdown` flushes the 256 KiB buffer, closes the data connection and
+///   returns `Ok` only after the `226`. A refusal from the server (`451`, `452`, `552`: a full
+///   disk) is `Io`; a lost connection is `Network`. A `STOR` refused (`550`, `553`) for a
+///   missing file in an existing directory is `Permission`.
 /// - Passive mode sends `PASV` (`EPSV` to an IPv6 server). With `pasv_nat_workaround` the
 ///   announced address is replaced by the control connection's peer. Active mode sends
 ///   `PORT`/`EPRT` with the control connection's local address.
@@ -402,8 +404,8 @@ fn is_definite(e: &Error) -> bool {
     matches!(e.kind, ErrorKind::Network | ErrorKind::Permission)
 }
 
-/// Only regular files are opened: a directory, a symlink (as a listing reports it) or a special file
-/// (which `stat` already refuses) is `Io`.
+/// Only regular files are opened: a directory, a symlink (as a listing reports it) or a
+/// special file (which `stat` already refuses) is `Io`.
 fn regular_file(st: &RemoteEntry, path: &RemotePath) -> Result<()> {
     match st.kind {
         EntryKind::File => Ok(()),
