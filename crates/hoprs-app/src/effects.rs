@@ -161,6 +161,15 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
             backend.set_workers(workers);
             Task::none()
         }
+        Effect::CheckExportTarget(path) => Task::future(async move {
+            // An error (no permission to look) counts as "not there": the export itself
+            // then reports what is wrong.
+            let probe = path.clone();
+            let exists = tokio::task::spawn_blocking(move || probe.try_exists())
+                .await
+                .is_ok_and(|found| found.unwrap_or(false));
+            Message::ExportTargetChecked { path, exists }
+        }),
         Effect::PickFile(target) => Task::perform(pick_file(target), move |path| {
             Message::FilePicked { target, path }
         }),

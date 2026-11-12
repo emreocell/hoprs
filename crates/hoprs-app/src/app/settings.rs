@@ -37,11 +37,15 @@ pub enum BackupMsg {
     /// "Choose…" for the export or the restore file.
     Choose(PickTarget),
     ExportPath(String),
-    ExportPassword(String),
-    ExportConfirm(String),
+    /// A typed password: its `Debug` never shows it.
+    ExportPassword(Password),
+    ExportConfirm(Password),
     Export,
+    /// "Overwrite" on the inline question about an existing export file.
+    ConfirmOverwrite,
+    CancelOverwrite,
     RestorePath(String),
-    RestorePassword(String),
+    RestorePassword(Password),
     RestoreMode(ImportMode),
     Restore,
     ConfirmReplace,
@@ -82,6 +86,12 @@ pub struct Backup {
     pub restore_mode: ImportMode,
     /// "Replace" asked once and waits for its confirmation.
     pub confirm_replace: bool,
+    /// The export path came from the save dialog (which already asked about overwriting).
+    pub export_path_picked: bool,
+    /// Whether the typed export file exists is being checked.
+    pub export_checking: bool,
+    /// The typed export file exists: "Overwrite?" waits for its answer.
+    pub confirm_overwrite: bool,
     /// What is wrong with the fields of the open panel.
     pub field_error: Option<&'static str>,
     pub export: BackupState<ExportReport>,
@@ -99,6 +109,9 @@ impl Default for Backup {
             restore_password: Password::default(),
             restore_mode: ImportMode::Merge,
             confirm_replace: false,
+            export_path_picked: false,
+            export_checking: false,
+            confirm_overwrite: false,
             field_error: None,
             export: BackupState::Idle,
             restore: BackupState::Idle,
@@ -112,11 +125,14 @@ impl Backup {
         self.export.running() || self.restore.running()
     }
 
-    /// Empties every password field.
-    fn forget_passwords(&mut self) {
+    /// Empties every password field, and drops the questions that would send one.
+    pub(super) fn forget_passwords(&mut self) {
         self.export_password = Password::default();
         self.export_confirm = Password::default();
         self.restore_password = Password::default();
+        self.confirm_replace = false;
+        self.confirm_overwrite = false;
+        self.export_checking = false;
     }
 }
 
@@ -177,33 +193,49 @@ impl App {
         }
     }
 
-    /// Saves the settings, unless the file was unreadable: it is never overwritten.
-    fn save_settings_effect(&self) -> Option<Effect> {
-        self.settings_load_error
-            .is_none()
-            .then_some(Effect::SaveSettings(self.settings))
+    /// Saves the settings, unless the file was unreadable: it is never overwritten. One
+    /// save at a time: a change made while one runs is saved when it ends, so the file
+    /// always ends up with the latest settings (two writes never race).
+    fn save_settings_effect(&mut self) -> Option<Effect> {
+        if self.settings_load_error.is_some() {
+            return None;
+        }
+        if self.settings_saving {
+            self.settings_dirty = true;
+            return None;
+        }
+        self.settings_saving = true;
+        Some(Effect::SaveSettings(self.settings))
     }
 
-    pub(super) fn settings_saved(&mut self, result: Result<(), Error>) {
+    pub(super) fn settings_saved(&mut self, result: Result<(), Error>) -> Vec<Effect> {
+        self.settings_saving = false;
         self.settings_save_error = result.err();
+        if std::mem::take(&mut self.settings_dirty) {
+            return self.save_settings_effect().into_iter().collect();
+        }
+        Vec::new()
     }
 
     fn backup_msg(&mut self, msg: BackupMsg) -> Vec<Effect> {
         let backup = &mut self.backup;
         match msg {
-            BackupMsg::OpenExport => {
-                backup.panel = BackupPanel::Export;
-                backup.field_error = None;
-                backup.confirm_replace = false;
-            }
-            BackupMsg::OpenRestore => {
-                backup.panel = BackupPanel::Restore;
+            BackupMsg::OpenExport | BackupMsg::OpenRestore => {
+                let panel = if matches!(msg, BackupMsg::OpenExport) {
+                    BackupPanel::Export
+                } else {
+                    BackupPanel::Restore
+                };
+                if backup.panel != panel {
+                    // A password typed for one panel never goes to the other.
+                    backup.forget_passwords();
+                }
+                backup.panel = panel;
                 backup.field_error = None;
             }
             BackupMsg::Cancel => {
                 backup.panel = BackupPanel::Closed;
                 backup.field_error = None;
-                backup.confirm_replace = false;
                 backup.forget_passwords();
             }
             BackupMsg::Choose(target) => {
@@ -211,11 +243,16 @@ impl App {
                     return vec![Effect::PickFile(target)];
                 }
             }
-            BackupMsg::ExportPath(path) => backup.export_path = path,
-            BackupMsg::ExportPassword(password) => backup.export_password = Password(password),
-            BackupMsg::ExportConfirm(password) => backup.export_confirm = Password(password),
+            BackupMsg::ExportPath(path) => {
+                backup.export_path = path;
+                backup.export_path_picked = false;
+                backup.export_checking = false;
+                backup.confirm_overwrite = false;
+            }
+            BackupMsg::ExportPassword(password) => backup.export_password = password,
+            BackupMsg::ExportConfirm(password) => backup.export_confirm = password,
             BackupMsg::Export => {
-                if backup.running() {
+                if backup.running() || backup.export_checking || backup.confirm_overwrite {
                     return Vec::new();
                 }
                 let path = match path_of(&backup.export_path) {
@@ -234,14 +271,25 @@ impl App {
                     return Vec::new();
                 }
                 backup.field_error = None;
-                // From here on only the effect holds the password.
-                let password = SecretString::from(std::mem::take(&mut backup.export_password.0));
-                backup.export_confirm = Password::default();
-                backup.export = BackupState::Running;
-                return vec![Effect::ExportBackup { path, password }];
+                if backup.export_path_picked {
+                    return self.start_export();
+                }
+                // A typed path: an existing file is overwritten only once confirmed.
+                backup.export_checking = true;
+                return vec![Effect::CheckExportTarget(path)];
             }
-            BackupMsg::RestorePath(path) => backup.restore_path = path,
-            BackupMsg::RestorePassword(password) => backup.restore_password = Password(password),
+            BackupMsg::ConfirmOverwrite => {
+                if backup.confirm_overwrite {
+                    backup.confirm_overwrite = false;
+                    return self.start_export();
+                }
+            }
+            BackupMsg::CancelOverwrite => backup.confirm_overwrite = false,
+            BackupMsg::RestorePath(path) => {
+                backup.restore_path = path;
+                backup.confirm_replace = false;
+            }
+            BackupMsg::RestorePassword(password) => backup.restore_password = password,
             BackupMsg::RestoreMode(mode) => {
                 backup.restore_mode = mode;
                 backup.confirm_replace = false;
@@ -275,6 +323,40 @@ impl App {
             BackupMsg::CancelReplace => backup.confirm_replace = false,
         }
         Vec::new()
+    }
+
+    /// Whether the typed export file exists came back.
+    pub(super) fn export_target_checked(&mut self, path: PathBuf, exists: bool) -> Vec<Effect> {
+        let backup = &mut self.backup;
+        // A path edited meanwhile (or the panel left) drops this answer.
+        if !backup.export_checking || path_of(&backup.export_path).ok() != Some(path) {
+            return Vec::new();
+        }
+        backup.export_checking = false;
+        if exists {
+            backup.confirm_overwrite = true;
+            return Vec::new();
+        }
+        self.start_export()
+    }
+
+    /// Sends the export with the typed password, which leaves the page.
+    fn start_export(&mut self) -> Vec<Effect> {
+        let backup = &mut self.backup;
+        let Ok(path) = path_of(&backup.export_path) else {
+            return Vec::new();
+        };
+        if backup.running()
+            || backup.export_password.0.is_empty()
+            || backup.export_password != backup.export_confirm
+        {
+            return Vec::new();
+        }
+        // From here on only the effect holds the password.
+        let password = SecretString::from(std::mem::take(&mut backup.export_password.0));
+        backup.export_confirm = Password::default();
+        backup.export = BackupState::Running;
+        vec![Effect::ExportBackup { path, password }]
     }
 
     /// Sends the restore with the typed password, which leaves the page.
@@ -335,8 +417,17 @@ impl App {
                 self.import.path = path;
                 self.import.path_error = None;
             }
-            PickTarget::ExportBackup => self.backup.export_path = path,
-            PickTarget::RestoreBackup => self.backup.restore_path = path,
+            PickTarget::ExportBackup => {
+                self.backup.export_path = path;
+                // The save dialog asked about an existing file already.
+                self.backup.export_path_picked = true;
+                self.backup.export_checking = false;
+                self.backup.confirm_overwrite = false;
+            }
+            PickTarget::RestoreBackup => {
+                self.backup.restore_path = path;
+                self.backup.confirm_replace = false;
+            }
         }
     }
 

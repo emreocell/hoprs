@@ -4,7 +4,7 @@ use hoprs_import::ImportReport;
 use iced::widget::{button, column, container, row, rule, scrollable, space, text, text_input};
 use iced::{Alignment, Element, Length, Padding};
 
-use crate::app::import::{ImportMsg, ImportStep, SourceDelete};
+use crate::app::import::{ImportMsg, ImportStep, KeepSource, SourceDelete};
 use crate::app::{App, Message};
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
@@ -231,7 +231,23 @@ fn report_view<'a>(
         column(report_sections(report).into_iter().map(section_view)).spacing(theme::SPACE_MD);
 
     let delete_row: Element<'a, Message> = match delete {
-        SourceDelete::Unavailable => muted(strings::IMPORT_FAILED_KEEP_SOURCE),
+        SourceDelete::Unavailable(KeepSource::NoReport) => space().into(),
+        SourceDelete::Unavailable(KeepSource::Failures) => {
+            muted(strings::IMPORT_FAILED_KEEP_SOURCE)
+        }
+        SourceDelete::Unavailable(KeepSource::PasswordsNotSaved(sites)) => column![
+            muted(strings::IMPORT_PASSWORDS_KEEP_SOURCE),
+            column(sites.iter().map(|name| {
+                text(name)
+                    .font(theme::MONO)
+                    .size(theme::TEXT_MONO)
+                    .color(palette().ink_2)
+                    .into()
+            }))
+            .spacing(theme::SPACE_3XS),
+        ]
+        .spacing(theme::SPACE_2XS)
+        .into(),
         SourceDelete::Offered => row![
             primary(strings::DONE, Some(msg(ImportMsg::Close))),
             space::horizontal(),

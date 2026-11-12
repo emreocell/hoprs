@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use secrecy::SecretString;
 
 use super::*;
-use crate::app::import::{ImportMsg, ImportStep, SourceDelete};
+use crate::app::import::{ImportMsg, ImportStep, KeepSource, SourceDelete};
 use crate::app::settings::{BackupMsg, BackupPanel, BackupState, SettingsMsg};
 use crate::backend::fake::BackupCall;
 use crate::settings::{Settings, SettingsLoad};
@@ -35,11 +35,13 @@ fn report() -> ImportReport {
                 name: "Prod".into(),
                 id: SiteId::new(),
                 notes: Vec::new(),
+                secret_not_saved: false,
             },
             ImportedSite {
                 name: "Legacy FTP".into(),
                 id: SiteId::new(),
                 notes: vec!["password not saved: keyring unavailable".into()],
+                secret_not_saved: true,
             },
         ],
         skipped: vec![SkippedSite {
@@ -50,6 +52,14 @@ fn report() -> ImportReport {
         skipped_workspaces: vec!["Work: a workspace with this name already exists".into()],
         failures: Vec::new(),
     }
+}
+
+/// [`report`] with every password saved: nothing keeps the source file.
+fn saved_report() -> ImportReport {
+    let mut report = report();
+    report.imported[1].notes = vec!["FileZilla used TLS only if available".into()];
+    report.imported[1].secret_not_saved = false;
+    report
 }
 
 /// An app with the import flow at its report, from `path`.
@@ -226,7 +236,7 @@ fn import_report_sections() {
 
 #[test]
 fn delete_source_needs_confirmation() {
-    let mut app = at_report("/home/me/sitemanager.xml", report());
+    let mut app = at_report("/home/me/sitemanager.xml", saved_report());
     assert_eq!(app.import.delete, SourceDelete::Offered);
 
     // The first click only asks; Keep backs out.
@@ -253,7 +263,7 @@ fn delete_source_needs_confirmation() {
     assert_eq!(app.import.delete, SourceDelete::Deleted);
 
     // A refusal (not a FileZilla file, a symlink…) shows inline.
-    let mut app = at_report("/x.xml", report());
+    let mut app = at_report("/x.xml", saved_report());
     import(&mut app, ImportMsg::Delete);
     import(&mut app, ImportMsg::ConfirmDelete);
     let error = Error::new(ErrorKind::Protocol, "not deleting: the path is a symlink");
@@ -261,12 +271,33 @@ fn delete_source_needs_confirmation() {
     assert_eq!(app.import.delete, SourceDelete::Failed(error));
 
     // A report with failures doesn't offer to delete the source.
-    let mut failed = report();
+    let mut failed = saved_report();
     failed.failures = vec!["A: disk full".into()];
     let mut app = at_report("/x.xml", failed);
-    assert_eq!(app.import.delete, SourceDelete::Unavailable);
+    assert_eq!(
+        app.import.delete,
+        SourceDelete::Unavailable(KeepSource::Failures)
+    );
     import(&mut app, ImportMsg::Delete);
     assert!(import(&mut app, ImportMsg::ConfirmDelete).is_empty());
+
+    // A password the keyring refused: the file is its only copy, so no delete. The
+    // reason names the sites (from the structured flag, not the note's text).
+    let mut app = at_report("/x.xml", report());
+    assert_eq!(
+        app.import.delete,
+        SourceDelete::Unavailable(KeepSource::PasswordsNotSaved(vec!["Legacy FTP".into()]))
+    );
+    assert!(import(&mut app, ImportMsg::Delete).is_empty());
+    assert!(import(&mut app, ImportMsg::ConfirmDelete).is_empty());
+    let mut flagged_without_note = saved_report();
+    flagged_without_note.imported[0].secret_not_saved = true;
+    let app = at_report("/x.xml", flagged_without_note);
+    assert_eq!(
+        app.import.delete,
+        SourceDelete::Unavailable(KeepSource::PasswordsNotSaved(vec!["Prod".into()]))
+    );
+    let _ = import_view::view(&app);
 }
 
 #[test]
@@ -290,8 +321,14 @@ fn export_refuses_empty_password_in_ui() {
     assert_eq!(app.backup.export, BackupState::Idle);
 
     // A confirmation that differs: refused too.
-    backup(&mut app, BackupMsg::ExportPassword("correct horse".into()));
-    backup(&mut app, BackupMsg::ExportConfirm("correct hose".into()));
+    backup(
+        &mut app,
+        BackupMsg::ExportPassword(Password("correct horse".into())),
+    );
+    backup(
+        &mut app,
+        BackupMsg::ExportConfirm(Password("correct hose".into())),
+    );
     assert!(backup(&mut app, BackupMsg::Export).is_empty());
     assert_eq!(
         app.backup.field_error,
@@ -299,7 +336,10 @@ fn export_refuses_empty_password_in_ui() {
     );
 
     // No file: refused.
-    backup(&mut app, BackupMsg::ExportConfirm("correct horse".into()));
+    backup(
+        &mut app,
+        BackupMsg::ExportConfirm(Password("correct horse".into())),
+    );
     backup(&mut app, BackupMsg::ExportPath(String::new()));
     assert!(backup(&mut app, BackupMsg::Export).is_empty());
     assert_eq!(app.backup.field_error, Some(strings::BACKUP_PATH_REQUIRED));
@@ -308,8 +348,25 @@ fn export_refuses_empty_password_in_ui() {
         BackupMsg::ExportPath("/home/me/hoprs.backup".into()),
     );
 
-    // The password leaves the UI state with the effect; its Debug never shows it.
+    // A typed path: whether the file exists is checked first (off the UI thread).
     let effects = backup(&mut app, BackupMsg::Export);
+    match &effects[..] {
+        [Effect::CheckExportTarget(path)] => {
+            assert_eq!(path, &PathBuf::from("/home/me/hoprs.backup"));
+        }
+        other => panic!("expected one CheckExportTarget, got {other:?}"),
+    }
+    assert!(!app.busy(), "nothing runs yet");
+    assert_eq!(
+        app.backup.export_password.0, "correct horse",
+        "kept until sent"
+    );
+
+    // The password leaves the UI state with the effect; its Debug never shows it.
+    let effects = app.update(Message::ExportTargetChecked {
+        path: PathBuf::from("/home/me/hoprs.backup"),
+        exists: false,
+    });
     match &effects[..] {
         [Effect::ExportBackup { path, password }] => {
             assert_eq!(path, &PathBuf::from("/home/me/hoprs.backup"));
@@ -325,8 +382,11 @@ fn export_refuses_empty_password_in_ui() {
     assert_eq!(app.backup.export, BackupState::Running);
     assert!(app.busy());
     // A second export while one runs: nothing.
-    backup(&mut app, BackupMsg::ExportPassword("again".into()));
-    backup(&mut app, BackupMsg::ExportConfirm("again".into()));
+    backup(
+        &mut app,
+        BackupMsg::ExportPassword(Password("again".into())),
+    );
+    backup(&mut app, BackupMsg::ExportConfirm(Password("again".into())));
     assert!(backup(&mut app, BackupMsg::Export).is_empty());
 
     // The report.
@@ -355,6 +415,183 @@ fn export_refuses_empty_password_in_ui() {
         path: Some(PathBuf::from("/media/usb/hoprs.backup")),
     });
     assert_eq!(app.backup.export_path, "/media/usb/hoprs.backup");
+    // A path from the save dialog (which asked about overwriting) exports at once.
+    backup(&mut app, BackupMsg::ExportPassword(Password("pw".into())));
+    backup(&mut app, BackupMsg::ExportConfirm(Password("pw".into())));
+    let effects = backup(&mut app, BackupMsg::Export);
+    assert!(
+        matches!(effects[..], [Effect::ExportBackup { .. }]),
+        "{effects:?}"
+    );
+}
+
+/// Review fix: a typed export path that already exists needs an inline "Overwrite?".
+#[test]
+fn export_over_an_existing_file_needs_confirmation() {
+    let mut app = App::new();
+    app.update(Message::OpenSettings);
+    backup(&mut app, BackupMsg::OpenExport);
+    backup(&mut app, BackupMsg::ExportPath("/b.hoprs".into()));
+    backup(&mut app, BackupMsg::ExportPassword(Password("pw".into())));
+    backup(&mut app, BackupMsg::ExportConfirm(Password("pw".into())));
+    assert!(matches!(
+        backup(&mut app, BackupMsg::Export)[..],
+        [Effect::CheckExportTarget(_)]
+    ));
+    // While it is checked, Export does nothing more.
+    assert!(backup(&mut app, BackupMsg::Export).is_empty());
+    let exists = |app: &mut App, path: &str| {
+        app.update(Message::ExportTargetChecked {
+            path: PathBuf::from(path),
+            exists: true,
+        })
+    };
+    // An answer for another path (edited meanwhile) is dropped.
+    assert!(exists(&mut app, "/other.hoprs").is_empty());
+    assert!(!app.backup.confirm_overwrite);
+    assert!(exists(&mut app, "/b.hoprs").is_empty());
+    assert!(app.backup.confirm_overwrite, "asked in place");
+    assert_eq!(app.backup.export, BackupState::Idle);
+    assert!(backup(&mut app, BackupMsg::Export).is_empty());
+
+    // Keep: nothing written; the question goes away.
+    assert!(backup(&mut app, BackupMsg::CancelOverwrite).is_empty());
+    assert!(!app.backup.confirm_overwrite);
+    assert!(backup(&mut app, BackupMsg::ConfirmOverwrite).is_empty());
+
+    // Again, and Overwrite.
+    backup(&mut app, BackupMsg::Export);
+    exists(&mut app, "/b.hoprs");
+    let effects = backup(&mut app, BackupMsg::ConfirmOverwrite);
+    assert!(
+        matches!(effects[..], [Effect::ExportBackup { .. }]),
+        "{effects:?}"
+    );
+    assert!(app.backup.export_password.0.is_empty());
+
+    // Editing the path drops a pending question.
+    let mut app = App::new();
+    app.update(Message::OpenSettings);
+    backup(&mut app, BackupMsg::OpenExport);
+    backup(&mut app, BackupMsg::ExportPath("/b.hoprs".into()));
+    backup(&mut app, BackupMsg::ExportPassword(Password("pw".into())));
+    backup(&mut app, BackupMsg::ExportConfirm(Password("pw".into())));
+    backup(&mut app, BackupMsg::Export);
+    exists(&mut app, "/b.hoprs");
+    backup(&mut app, BackupMsg::ExportPath("/c.hoprs".into()));
+    assert!(!app.backup.confirm_overwrite);
+    assert!(backup(&mut app, BackupMsg::ConfirmOverwrite).is_empty());
+}
+
+/// Review fixes: typed passwords travel redacted in messages, are forgotten whenever
+/// the page is left (any route) or the panel changes, and a pending "Replace" question is
+/// dropped when the restore file changes.
+#[test]
+fn backup_passwords_redacted_and_forgotten() {
+    let message = Message::Settings(SettingsMsg::Backup(BackupMsg::ExportPassword(Password(
+        "hunter2".into(),
+    ))));
+    let restore = BackupMsg::RestorePassword(Password("hunter3".into()));
+    let confirm = BackupMsg::ExportConfirm(Password("hunter4".into()));
+    let debug = format!("{message:?} {restore:?} {confirm:?}");
+    assert!(!debug.contains("hunter"), "{debug}");
+
+    let typed = |app: &mut App| {
+        backup(app, BackupMsg::ExportPassword(Password("e".into())));
+        backup(app, BackupMsg::ExportConfirm(Password("e".into())));
+        backup(app, BackupMsg::RestorePassword(Password("r".into())));
+    };
+    let empty = |app: &App| {
+        app.backup.export_password.0.is_empty()
+            && app.backup.export_confirm.0.is_empty()
+            && app.backup.restore_password.0.is_empty()
+    };
+    // Left through the sidebar (another page), a site click, or a tab.
+    let mut app = App::new();
+    for leave in [
+        Message::NewSite,
+        Message::OpenImport,
+        Message::NewWorkspace,
+        Message::ConnectSite(SiteId::new()),
+    ] {
+        app.update(Message::OpenSettings);
+        backup(&mut app, BackupMsg::OpenExport);
+        typed(&mut app);
+        assert!(!empty(&app));
+        app.update(leave.clone());
+        assert!(empty(&app), "{leave:?}");
+    }
+    // Switching panels.
+    app.update(Message::OpenSettings);
+    backup(&mut app, BackupMsg::OpenExport);
+    typed(&mut app);
+    backup(&mut app, BackupMsg::OpenRestore);
+    assert!(empty(&app));
+    // Re-opening the same panel keeps what is typed.
+    typed(&mut app);
+    backup(&mut app, BackupMsg::OpenRestore);
+    assert_eq!(app.backup.restore_password.0, "r");
+
+    // A new restore file, typed or chosen, drops the pending Replace question.
+    backup(&mut app, BackupMsg::RestorePath("/a.hoprs".into()));
+    backup(&mut app, BackupMsg::RestoreMode(ImportMode::Replace));
+    backup(&mut app, BackupMsg::Restore);
+    assert!(app.backup.confirm_replace);
+    backup(&mut app, BackupMsg::RestorePath("/b.hoprs".into()));
+    assert!(!app.backup.confirm_replace);
+    assert!(backup(&mut app, BackupMsg::ConfirmReplace).is_empty());
+    backup(&mut app, BackupMsg::Restore);
+    assert!(app.backup.confirm_replace);
+    app.update(Message::FilePicked {
+        target: PickTarget::RestoreBackup,
+        path: Some(PathBuf::from("/c.hoprs")),
+    });
+    assert!(!app.backup.confirm_replace);
+    assert!(backup(&mut app, BackupMsg::ConfirmReplace).is_empty());
+}
+
+/// Review fix: one settings save at a time; changes made meanwhile are saved (the latest
+/// values) once it ends, so two writes never race.
+#[test]
+fn settings_saves_are_coalesced() {
+    let mut app = App::new();
+    app.update(Message::OpenSettings);
+    let effects = settings(&mut app, SettingsMsg::Workers(5));
+    assert!(matches!(
+        effects[..],
+        [Effect::SetWorkers(5), Effect::SaveSettings(_)]
+    ));
+    // While it runs: applied at once, saved later.
+    let effects = settings(&mut app, SettingsMsg::Workers(6));
+    assert!(
+        matches!(effects[..], [Effect::SetWorkers(6)]),
+        "{effects:?}"
+    );
+    let effects = settings(&mut app, SettingsMsg::Policy(ConflictPolicy::Skip));
+    assert!(matches!(
+        effects[..],
+        [Effect::SetPolicy(ConflictPolicy::Skip)]
+    ));
+    // The first save ends (even failed): one more save, with the latest values.
+    let effects = app.update(Message::SettingsSaved(Err(Error::new(ErrorKind::Io, "x"))));
+    match &effects[..] {
+        [Effect::SaveSettings(saved)] => assert_eq!(
+            *saved,
+            Settings {
+                workers_per_site: 6,
+                default_policy: ConflictPolicy::Skip,
+            }
+        ),
+        other => panic!("{other:?}"),
+    }
+    // That one ends with nothing new: done.
+    assert!(app.update(Message::SettingsSaved(Ok(()))).is_empty());
+    assert_eq!(app.settings_save_error, None);
+    let effects = settings(&mut app, SettingsMsg::Workers(7));
+    assert!(matches!(
+        effects[..],
+        [Effect::SetWorkers(7), Effect::SaveSettings(_)]
+    ));
 }
 
 #[test]
@@ -369,7 +606,7 @@ fn restore_replace_needs_extra_confirmation() {
         app.backup.field_error,
         Some(strings::BACKUP_PASSWORD_REQUIRED)
     );
-    backup(&mut app, BackupMsg::RestorePassword("pw".into()));
+    backup(&mut app, BackupMsg::RestorePassword(Password("pw".into())));
 
     // Merge (the default) restores at once.
     assert_eq!(app.backup.restore_mode, ImportMode::Merge);
@@ -394,7 +631,7 @@ fn restore_replace_needs_extra_confirmation() {
 
     // Replace: the first click only asks.
     backup(&mut app, BackupMsg::RestoreMode(ImportMode::Replace));
-    backup(&mut app, BackupMsg::RestorePassword("pw2".into()));
+    backup(&mut app, BackupMsg::RestorePassword(Password("pw2".into())));
     assert!(backup(&mut app, BackupMsg::Restore).is_empty());
     assert!(app.backup.confirm_replace);
     assert_eq!(app.backup.restore_password.0, "pw2", "kept until confirmed");
@@ -433,7 +670,7 @@ fn restore_replace_needs_extra_confirmation() {
     assert_eq!(app.backup.restore, BackupState::Failed(error));
 
     // Switching back to Merge drops a pending Replace question.
-    backup(&mut app, BackupMsg::RestorePassword("pw3".into()));
+    backup(&mut app, BackupMsg::RestorePassword(Password("pw3".into())));
     backup(&mut app, BackupMsg::Restore);
     assert!(app.backup.confirm_replace);
     backup(&mut app, BackupMsg::RestoreMode(ImportMode::Merge));
@@ -470,12 +707,14 @@ fn settings_changes_apply_and_save() {
         }
         other => panic!("{other:?}"),
     }
+    app.update(Message::SettingsSaved(Ok(())));
     let effects = settings(&mut app, SettingsMsg::Workers(0));
     assert_eq!(app.settings.workers_per_site, 1);
     assert!(matches!(
         effects[..],
         [Effect::SetWorkers(1), Effect::SaveSettings(_)]
     ));
+    app.update(Message::SettingsSaved(Ok(())));
     // The same value again: nothing to do.
     assert!(settings(&mut app, SettingsMsg::Workers(1)).is_empty());
 
@@ -499,6 +738,7 @@ fn settings_changes_apply_and_save() {
     let error = Error::new(ErrorKind::Io, "Permission denied");
     app.update(Message::SettingsSaved(Err(error.clone())));
     assert_eq!(app.settings_save_error, Some(error));
+    settings(&mut app, SettingsMsg::Workers(2));
     app.update(Message::SettingsSaved(Ok(())));
     assert_eq!(app.settings_save_error, None);
 
@@ -584,5 +824,87 @@ async fn effects_reach_the_backend() {
             BackupCall::SetPolicy(ConflictPolicy::Skip),
             BackupCall::SetWorkers(3),
         ]
+    );
+}
+
+/// Review fix: new profiles (after a "Replace" restore, or any reload) reconcile the
+/// tabs: a site that is gone loses its tab and session, a site whose host or port changed
+/// loses its session, and a workspace that is gone is no longer the open one.
+#[tokio::test]
+async fn reloaded_profiles_reconcile_tabs() {
+    let a = site("a", "ha", "u", Protocol::Ssh);
+    let b = site("b", "hb", "u", Protocol::Ftp);
+    let c = site("c", "hc", "u", Protocol::Ftp);
+    let ws = workspace("w", &[&a.id, &b.id]);
+    let fake = Arc::new(
+        FakeBackend::new()
+            .with_site(a.clone())
+            .with_site(b.clone())
+            .with_site(c.clone())
+            .with_workspace(ws.clone()),
+    );
+    let mut app = loaded(&fake).await;
+    let sites = connect_effect(app.update(Message::OpenWorkspace(ws.id.clone())));
+    drive(&mut app, &fake, sites).await;
+    let sites = connect_effect(app.update(Message::ConnectSite(c.id.clone())));
+    drive(&mut app, &fake, sites).await;
+    let session = |app: &App, id: &SiteId| app.tabs[app.tab_of(id).unwrap()].session().unwrap();
+    let (sa, sb, sc) = (
+        session(&app, &a.id),
+        session(&app, &b.id),
+        session(&app, &c.id),
+    );
+    assert_eq!(app.open_workspace, Some(ws.id.clone()));
+
+    // The restored profiles: `a` and the workspace are gone, `b` moved to another host,
+    // `c` is as it was (a user change only: its session stays).
+    let mut moved = b.clone();
+    moved.host = "new-hb".into();
+    let mut renamed = c.clone();
+    renamed.name = "c renamed".into();
+    let effects = app.update(Message::ProfilesLoaded(Ok(ProfileSnapshot {
+        sites: vec![moved.clone(), renamed],
+        workspaces: Vec::new(),
+        unreadable: Vec::new(),
+    })));
+    let mut closed: Vec<SessionId> = effects
+        .iter()
+        .map(|e| match e {
+            Effect::CloseSession(s) => *s,
+            other => panic!("only closes expected, got {other:?}"),
+        })
+        .collect();
+    closed.sort_by_key(|s| s.0);
+    let mut expected = vec![sa, sb];
+    expected.sort_by_key(|s| s.0);
+    assert_eq!(closed, expected);
+    assert!(app.tab_of(&a.id).is_none(), "the gone site's tab is closed");
+    assert_eq!(app.open_workspace, None);
+    match tab_state(&app, &b.id) {
+        TabState::Failed(failure) => {
+            assert_eq!(failure.session, None, "a new session on reconnect");
+            assert_eq!(failure.error.message, strings::SITE_ENDPOINT_CHANGED);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(app.tabs[app.tab_of(&b.id).unwrap()].session(), None);
+    assert_eq!(session(&app, &c.id), sc, "unchanged endpoint: kept");
+    assert!(app.active_tab.is_some_and(|i| i < app.tabs.len()));
+
+    // Reconnect builds a new session on the saved endpoint.
+    let sites = connect_effect(app.update(Message::ConnectSite(b.id.clone())));
+    assert_eq!(sites, std::slice::from_ref(&b.id));
+
+    // The same reload again changes nothing.
+    let effects = app.update(Message::ProfilesLoaded(Ok(ProfileSnapshot {
+        sites: vec![moved],
+        workspaces: Vec::new(),
+        unreadable: Vec::new(),
+    })));
+    assert!(
+        effects
+            .iter()
+            .all(|e| matches!(e, Effect::CloseSession(s) if *s == sc)),
+        "only `c`, now gone, is closed: {effects:?}"
     );
 }

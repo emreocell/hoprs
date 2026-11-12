@@ -21,12 +21,22 @@ pub enum ImportStep {
     Report,
 }
 
+/// Why "Delete sitemanager.xml" is not offered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeepSource {
+    /// No report yet.
+    NoReport,
+    /// Some sites or workspaces could not be written: the file is their only copy.
+    Failures,
+    /// These sites' passwords could not be saved (keyring): the file is their only copy.
+    PasswordsNotSaved(Vec<String>),
+}
+
 /// "Delete sitemanager.xml" after the report.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SourceDelete {
-    /// Not offered: no report yet, or the import had failures (the file is still the only
-    /// copy of what could not be written).
-    Unavailable,
+    /// Not offered, and why.
+    Unavailable(KeepSource),
     Offered,
     /// Asked in place; nothing is deleted before the confirmation.
     Confirming,
@@ -78,12 +88,32 @@ impl ImportFlow {
             error: None,
             report: None,
             source: None,
-            delete: SourceDelete::Unavailable,
+            delete: SourceDelete::Unavailable(KeepSource::NoReport),
         }
     }
 
     pub fn running(&self) -> bool {
         self.step == ImportStep::Running
+    }
+}
+
+/// Whether the report allows deleting the source file. It never does while the file is
+/// the only copy of something: a site or workspace that failed, or a password the
+/// keyring refused.
+fn source_delete(report: &ImportReport) -> SourceDelete {
+    if !report.failures.is_empty() {
+        return SourceDelete::Unavailable(KeepSource::Failures);
+    }
+    let lost: Vec<String> = report
+        .imported
+        .iter()
+        .filter(|site| site.secret_not_saved)
+        .map(|site| site.name.clone())
+        .collect();
+    if lost.is_empty() {
+        SourceDelete::Offered
+    } else {
+        SourceDelete::Unavailable(KeepSource::PasswordsNotSaved(lost))
     }
 }
 
@@ -173,11 +203,7 @@ impl App {
         }
         match result {
             Ok(report) => {
-                flow.delete = if report.failures.is_empty() {
-                    SourceDelete::Offered
-                } else {
-                    SourceDelete::Unavailable
-                };
+                flow.delete = source_delete(&report);
                 flow.report = Some(report);
                 flow.step = ImportStep::Report;
                 vec![Effect::LoadProfiles]

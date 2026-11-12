@@ -13,6 +13,7 @@ use iced::{Alignment, Element, Length, Padding};
 use crate::app::settings::{Backup, BackupMsg, BackupPanel, BackupState, SettingsMsg};
 use crate::app::{App, Message, PickTarget};
 use crate::settings::{WORKERS_MAX, WORKERS_MIN};
+use crate::ui::site_form::Password;
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
 use crate::ui::widgets::{busy, confirm_with, failure, field};
@@ -292,7 +293,6 @@ fn field_error(backup: &Backup) -> Element<'_, Message> {
 }
 
 fn export_panel(backup: &Backup) -> Element<'_, Message> {
-    let running = backup.running();
     panel(
         column![
             heading(strings::EXPORT_BACKUP),
@@ -307,7 +307,7 @@ fn export_panel(backup: &Backup) -> Element<'_, Message> {
                 field(
                     strings::BACKUP_PASSWORD,
                     input(&backup.export_password.0, true, |v| {
-                        backup_msg(BackupMsg::ExportPassword(v))
+                        backup_msg(BackupMsg::ExportPassword(Password(v)))
                     })
                     .into(),
                     None,
@@ -315,7 +315,7 @@ fn export_panel(backup: &Backup) -> Element<'_, Message> {
                 field(
                     strings::BACKUP_PASSWORD_CONFIRM,
                     input(&backup.export_confirm.0, true, |v| {
-                        backup_msg(BackupMsg::ExportConfirm(v))
+                        backup_msg(BackupMsg::ExportConfirm(Password(v)))
                     })
                     .on_submit(backup_msg(BackupMsg::Export))
                     .into(),
@@ -324,18 +324,30 @@ fn export_panel(backup: &Backup) -> Element<'_, Message> {
             ]
             .spacing(theme::SPACE_SM),
             field_error(backup),
-            row![
-                primary(
-                    strings::EXPORT,
-                    (!running).then(|| backup_msg(BackupMsg::Export))
-                ),
-                plain(strings::CANCEL, Some(backup_msg(BackupMsg::Cancel))),
-            ]
-            .spacing(theme::SPACE_XS)
-            .align_y(Alignment::Center),
+            export_actions(backup),
         ]
         .spacing(theme::SPACE_SM),
     )
+}
+
+/// Export / Cancel, or the inline question about an existing file.
+fn export_actions(backup: &Backup) -> Element<'_, Message> {
+    if backup.confirm_overwrite {
+        return confirm_with(
+            strings::EXPORT_OVERWRITE_CONFIRM,
+            strings::OVERWRITE,
+            backup_msg(BackupMsg::ConfirmOverwrite),
+            backup_msg(BackupMsg::CancelOverwrite),
+        );
+    }
+    let idle = !backup.running() && !backup.export_checking;
+    row![
+        primary(strings::EXPORT, idle.then(|| backup_msg(BackupMsg::Export))),
+        plain(strings::CANCEL, Some(backup_msg(BackupMsg::Cancel))),
+    ]
+    .spacing(theme::SPACE_XS)
+    .align_y(Alignment::Center)
+    .into()
 }
 
 fn restore_panel(backup: &Backup) -> Element<'_, Message> {
@@ -382,7 +394,7 @@ fn restore_panel(backup: &Backup) -> Element<'_, Message> {
             field(
                 strings::BACKUP_PASSWORD,
                 input(&backup.restore_password.0, true, |v| {
-                    backup_msg(BackupMsg::RestorePassword(v))
+                    backup_msg(BackupMsg::RestorePassword(Password(v)))
                 })
                 .on_submit(backup_msg(BackupMsg::Restore))
                 .into(),

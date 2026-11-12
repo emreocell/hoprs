@@ -468,6 +468,10 @@ pub fn also_covers_other_hosts(lines: &[usize]) -> String {
     }
 }
 
+/// A connected tab whose site's host or port changed (an edit, a restore).
+pub const SITE_ENDPOINT_CHANGED: &str =
+    "The site's host or port changed: this session was closed. Reconnect to use the new settings.";
+
 // Import from FileZilla.
 pub const IMPORT_TITLE: &str = "Import from FileZilla";
 pub const IMPORT_STEP_FILE: &str = "1  File";
@@ -492,6 +496,8 @@ pub const IMPORT_FAILURES: &str = "Failures";
 pub const IMPORT_NONE: &str = "None";
 pub const IMPORT_FAILED_KEEP_SOURCE: &str =
     "Some entries could not be saved: keep sitemanager.xml and import again once fixed.";
+pub const IMPORT_PASSWORDS_KEEP_SOURCE: &str =
+    "The keyring refused the passwords of these sites: keep sitemanager.xml, it still has them.";
 pub const DELETE_SITEMANAGER: &str = "Delete sitemanager.xml";
 pub const DELETE_SITEMANAGER_CONFIRM: &str =
     "Delete FileZilla's sitemanager.xml? FileZilla will no longer have these sites.";
@@ -532,6 +538,8 @@ pub const BACKUP_PATH_REQUIRED: &str = "Choose a file";
 pub const BACKUP_PASSWORD_REQUIRED: &str = "Enter a password";
 pub const BACKUP_PASSWORDS_DIFFER: &str = "The passwords don't match";
 pub const EXPORT: &str = "Export";
+pub const EXPORT_OVERWRITE_CONFIRM: &str =
+    "This file already exists. Overwrite it with the new backup?";
 pub const RESTORE: &str = "Restore";
 pub const EXPORTING: &str = "Encrypting the backup… this takes a few seconds";
 pub const RESTORING: &str = "Decrypting the backup… this takes a few seconds";

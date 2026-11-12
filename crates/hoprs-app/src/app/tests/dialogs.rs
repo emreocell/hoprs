@@ -323,14 +323,19 @@ async fn remove_entry_warns_on_multi_host_line() {
     };
     let old_session = failure.session.expect("the failed session is kept");
     fake.set_known_host_entries(vec![entry(3, true), entry(7, false)]);
-    // The site is edited after the failure: the fix still works on the endpoint that
-    // failed.
+    // The site is edited after the failure: its failed session is dropped (its endpoint
+    // is no longer the site's), and the fix still works on the endpoint that failed.
     let mut edited = s.clone();
     edited.host = "elsewhere".into();
     edited.port = 22;
     let mut profiles = fake.profiles().await.unwrap();
     profiles.sites = vec![edited];
-    app.update(Message::ProfilesLoaded(Ok(profiles)));
+    let effects = app.update(Message::ProfilesLoaded(Ok(profiles)));
+    assert!(
+        matches!(effects[..], [Effect::CloseSession(closed)] if closed == old_session),
+        "{effects:?}"
+    );
+    fake.close(old_session).await;
     let backend: Arc<dyn BackendApi> = fake.clone();
 
     let effects = app.update(Message::KnownHosts {
@@ -400,12 +405,12 @@ async fn remove_entry_warns_on_multi_host_line() {
     let message = effects::remove_known_host(backend.clone(), tab, host, port, expected).await;
     let effects = app.update(message);
     assert_eq!(fake.known_host_removals(), [("h".to_owned(), 2222)]);
-    // The failed session is closed first, then a new one connects (a reused session
-    // would not check known_hosts the same way).
+    // A new session connects (a reused session would not check known_hosts the same
+    // way); the old one was already closed when the site changed.
     let Ok([Effect::RestartSite { close, site }]) = <[Effect; 1]>::try_from(effects) else {
         panic!("one RestartSite effect");
     };
-    assert_eq!((close, &site), (Some(old_session), &s.id));
+    assert_eq!((close, &site), (None, &s.id));
     assert_eq!(app.tabs[index].state, TabState::Connecting);
     assert_eq!(app.tabs[index].known_hosts, KnownHostsFix::Idle);
     let messages: Vec<Message> = effects::restart_site(backend.clone(), close, site)

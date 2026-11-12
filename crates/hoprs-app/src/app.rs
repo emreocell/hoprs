@@ -135,6 +135,10 @@ pub struct App {
     pub settings_load_error: Option<Error>,
     /// The last save of `settings.toml` failed.
     pub settings_save_error: Option<Error>,
+    /// A save of `settings.toml` runs.
+    settings_saving: bool,
+    /// The settings changed while a save ran: saved again when it ends.
+    settings_dirty: bool,
     pub backup: settings::Backup,
     /// Advances while something runs without a known end (import, backup): drives the
     /// indeterminate progress bar.
@@ -308,6 +312,11 @@ pub enum Message {
     },
     /// A frame of the indeterminate progress bar.
     BusyTick,
+    /// Whether the typed export file exists.
+    ExportTargetChecked {
+        path: PathBuf,
+        exists: bool,
+    },
 }
 
 /// The profile change a form asked for, carried back with its result.
@@ -444,6 +453,9 @@ pub enum Effect {
     SetPolicy(ConflictPolicy),
     /// Workers per site for the next connections.
     SetWorkers(usize),
+    /// Checks whether the typed export file exists; back as
+    /// [`Message::ExportTargetChecked`].
+    CheckExportTarget(PathBuf),
     /// Opens the system file dialog; back as [`Message::FilePicked`].
     PickFile(PickTarget),
     /// Imports a `sitemanager.xml`, off the UI thread; back as [`Message::Imported`].
@@ -496,6 +508,8 @@ impl App {
             settings: Settings::default(),
             settings_load_error: None,
             settings_save_error: None,
+            settings_saving: false,
+            settings_dirty: false,
             backup: settings::Backup::default(),
             busy_phase: 0,
             next_id: 0,
@@ -546,6 +560,10 @@ impl App {
     pub fn update(&mut self, msg: Message) -> Vec<Effect> {
         let shown = self.shown_tab();
         let mut effects = self.apply(msg);
+        // Typed backup passwords never outlive the settings page, however it was left.
+        if !matches!(self.form, Some(Form::Settings)) {
+            self.backup.forget_passwords();
+        }
         // The center now shows another tab (or a tab instead of a form): its lists'
         // scrollables must match the offsets the panes remember.
         if self.shown_tab() != shown && self.shown_tab().is_some() {
@@ -580,12 +598,7 @@ impl App {
                 self.load = Load::Loading;
                 return vec![Effect::LoadProfiles];
             }
-            Message::ProfilesLoaded(Ok(snapshot)) => {
-                self.sites = snapshot.sites;
-                self.workspaces = snapshot.workspaces;
-                self.unreadable = snapshot.unreadable;
-                self.load = Load::Loaded;
-            }
+            Message::ProfilesLoaded(Ok(snapshot)) => return self.profiles_loaded(snapshot),
             Message::ProfilesLoaded(Err(error)) => self.load = Load::Failed(error),
             Message::ToggleWorkspace(id) => {
                 if !self.expanded.remove(&id) {
@@ -699,7 +712,10 @@ impl App {
             Message::OpenSettings => return self.open_settings(),
             Message::Settings(msg) => return self.settings_msg(msg),
             Message::SettingsLoaded(loaded) => self.settings_loaded(loaded),
-            Message::SettingsSaved(result) => self.settings_saved(result),
+            Message::SettingsSaved(result) => return self.settings_saved(result),
+            Message::ExportTargetChecked { path, exists } => {
+                return self.export_target_checked(path, exists);
+            }
             Message::BackupExported(result) => self.backup_exported(result),
             Message::BackupRestored(result) => return self.backup_restored(result),
             Message::FilePicked { target, path } => self.file_picked(target, path),
@@ -896,6 +912,76 @@ impl App {
             ProfileOp::SaveWorkspace(_) | ProfileOp::DeleteWorkspace(_) => {}
         }
         effects
+    }
+
+    /// New profiles (after a form, an import or a restore). The tabs follow them:
+    /// - a site that is gone (deleted, or dropped by a "Replace" restore) loses its tab and
+    ///   session;
+    /// - a site whose host or port changed loses its session: a connected one is closed and
+    ///   its tab shows why, with Reconnect starting a new session on the saved endpoint; a
+    ///   failed one forgets it ([`drop_stale_session`](Self::drop_stale_session)). A
+    ///   connect already in flight finishes on the old endpoint;
+    /// - the open workspace is forgotten if it is gone.
+    fn profiles_loaded(&mut self, snapshot: ProfileSnapshot) -> Vec<Effect> {
+        let old = std::mem::replace(&mut self.sites, snapshot.sites);
+        self.workspaces = snapshot.workspaces;
+        self.unreadable = snapshot.unreadable;
+        self.load = Load::Loaded;
+        if let Some(open) = &self.open_workspace
+            && self.workspace(open).is_none()
+        {
+            self.open_workspace = None;
+        }
+
+        let mut effects = Vec::new();
+        let gone: Vec<SiteId> = self
+            .tabs
+            .iter()
+            .map(|tab| tab.site.clone())
+            .filter(|site| self.site(site).is_none())
+            .collect();
+        for site in gone {
+            effects.extend(self.close_site_tabs(&site));
+        }
+        let moved: Vec<SiteId> = self
+            .sites
+            .iter()
+            .filter(|new| {
+                old.iter()
+                    .any(|was| was.id == new.id && (was.host != new.host || was.port != new.port))
+            })
+            .map(|site| site.id.clone())
+            .collect();
+        for site in moved {
+            effects.extend(self.drop_moved_session(&site));
+        }
+        effects
+    }
+
+    /// The site's host or port changed: its tab's session no longer matches the profile.
+    fn drop_moved_session(&mut self, site: &SiteId) -> Option<Effect> {
+        let index = self.tab_of(site)?;
+        let tab = &mut self.tabs[index];
+        match &tab.state {
+            TabState::Connected(connected) => {
+                let session = connected.session;
+                tab.state = TabState::Failed(ConnectError {
+                    session: None,
+                    error: Error::new(
+                        hoprs_core::ErrorKind::Conflict,
+                        crate::ui::strings::SITE_ENDPOINT_CHANGED,
+                    ),
+                    keyring_unavailable: false,
+                });
+                tab.conn = None;
+                tab.auth = None;
+                tab.reconnecting = false;
+                self.forget_session(session);
+                Some(Effect::CloseSession(session))
+            }
+            TabState::Failed(_) => self.drop_stale_session(site),
+            TabState::Connecting => None,
+        }
     }
 
     /// The site's settings changed: a failed tab forgets its session (closed here), so
