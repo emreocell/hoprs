@@ -8,7 +8,7 @@ use iced::{Alignment, Element, Length, Padding};
 use crate::app::{App, Form, Message};
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
-use crate::ui::{dialogs, files, queue, sidebar, site_form, tabs, workspace_form};
+use crate::ui::{dialogs, files, queue, sidebar, site_form, status, tabs, workspace_form};
 
 pub const SIDEBAR_WIDTH: f32 = sidebar::WIDTH;
 /// 4 px above the 36 px tabs.
@@ -20,7 +20,7 @@ pub const STATUS_HEIGHT: f32 = 26.0;
 pub const UNDERLINE: f32 = 2.0;
 
 pub fn view(app: &App) -> Element<'_, Message> {
-    let right = column![center(app), queue::view(app), status_bar()].width(Length::Fill);
+    let right = column![center(app), queue::view(app), status::view(app)].width(Length::Fill);
     let body = row![sidebar::view(app), vrule(), right].height(Length::Fill);
 
     let base = container(column![top_bar(app), hrule(), body])
@@ -109,18 +109,5 @@ fn center(app: &App) -> Element<'_, Message> {
         .align_x(Alignment::Center),
     )
     .center(Length::Fill)
-    .into()
-}
-
-fn status_bar<'a>() -> Element<'a, Message> {
-    column![
-        hrule(),
-        container(text(strings::NOT_CONNECTED).size(theme::TEXT_XS))
-            .width(Length::Fill)
-            .height(STATUS_HEIGHT - theme::HAIRLINE)
-            .padding(Padding::ZERO.left(theme::SPACE_MD).right(theme::SPACE_MD))
-            .align_y(Alignment::Center)
-            .style(theme::status_bar),
-    ]
     .into()
 }

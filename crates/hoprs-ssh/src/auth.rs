@@ -39,6 +39,37 @@ const MAX_PUBLICKEY_ATTEMPTS: usize = 4;
 /// Most keyboard-interactive rounds answered before giving up.
 const MAX_KBD_ROUNDS: usize = 10;
 
+/// How a connection authenticated (the app's status bar shows it).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AuthMethod {
+    /// The server accepted the user without any method.
+    None,
+    /// A key held by the SSH agent; `key_type` as in `ed25519` (see [`key_type`]).
+    Agent {
+        key_type: String,
+    },
+    /// A key file; `key_type` as for the agent.
+    KeyFile {
+        key_type: String,
+    },
+    Password,
+    KeyboardInteractive,
+}
+
+/// A key algorithm as people name it: `ed25519`, `rsa`, `ecdsa`, `ed25519-sk`...
+pub fn key_type(algorithm: &keys::Algorithm) -> String {
+    use keys::Algorithm;
+    match algorithm {
+        Algorithm::Ed25519 => "ed25519".to_owned(),
+        Algorithm::Rsa { .. } => "rsa".to_owned(),
+        Algorithm::Ecdsa { .. } => "ecdsa".to_owned(),
+        Algorithm::Dsa => "dsa".to_owned(),
+        Algorithm::SkEd25519 => "ed25519-sk".to_owned(),
+        Algorithm::SkEcdsaSha2NistP256 => "ecdsa-sk".to_owned(),
+        other => other.as_str().trim_start_matches("ssh-").to_owned(),
+    }
+}
+
 /// A password or key passphrase the user typed at a prompt (never a configured one), kept
 /// in memory only, for the reconnections of the same session. A remembered secret that the
 /// server or the key file refuses is forgotten, so the next attempt asks again.
@@ -89,21 +120,22 @@ enum Source {
     Prompted,
 }
 
-/// Authenticates `cfg.user` on an established connection. Secrets prompted for are kept in
-/// `remembered` once they proved right (see [`Remembered`]).
+/// Authenticates `cfg.user` on an established connection and returns the method that
+/// succeeded. Secrets prompted for are kept in `remembered` once they proved right (see
+/// [`Remembered`]).
 pub(crate) async fn authenticate<H: client::Handler>(
     handle: &mut client::Handle<H>,
     cfg: &SshConfig,
     prompter: &dyn Prompter,
     remembered: &Remembered,
-) -> Result<()> {
+) -> Result<AuthMethod> {
     let user = cfg.user.as_str();
     let mut methods = match handle
         .authenticate_none(user)
         .await
         .map_err(map_russh_error)?
     {
-        AuthResult::Success => return Ok(()),
+        AuthResult::Success => return Ok(AuthMethod::None),
         AuthResult::Failure {
             remaining_methods, ..
         } => remaining_methods,
@@ -133,8 +165,8 @@ pub(crate) async fn authenticate<H: client::Handler>(
             &mut offers,
         )
         .await?;
-        if done {
-            return Ok(());
+        if let Some(method) = done {
+            return Ok(method);
         }
     }
 
@@ -177,13 +209,14 @@ pub(crate) async fn authenticate<H: client::Handler>(
             } else {
                 None
             };
+            let key_type = key_type(&key.algorithm());
             let key = PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg);
             let result = handle
                 .authenticate_publickey(user, key)
                 .await
                 .map_err(map_russh_error)?;
             if update(result, &mut methods) {
-                return Ok(());
+                return Ok(AuthMethod::KeyFile { key_type });
             }
             if !methods.contains(&MethodKind::PublicKey) {
                 break;
@@ -215,7 +248,7 @@ pub(crate) async fn authenticate<H: client::Handler>(
                 remembered.set_password(Some(password));
                 prompter.secret_accepted(AcceptedSecret::Password);
             }
-            return Ok(());
+            return Ok(AuthMethod::Password);
         }
         if source == Source::Remembered {
             remembered.set_password(None);
@@ -230,7 +263,7 @@ pub(crate) async fn authenticate<H: client::Handler>(
             cfg.auth.password.as_ref()
         };
         if keyboard_interactive(handle, user, auto_password, prompter, &mut methods).await? {
-            return Ok(());
+            return Ok(AuthMethod::KeyboardInteractive);
         }
     }
 
@@ -267,7 +300,7 @@ impl PublicKeyOffers {
 
 /// Offers the agent's identities by public key, at most `MAX_AGENT_IDENTITIES` and within
 /// the attempt budget. A missing socket, an unreachable agent or an identity the agent
-/// cannot sign with is skipped, never fatal. `true` means authenticated.
+/// cannot sign with is skipped, never fatal. `Some` means authenticated (with that key).
 #[cfg(unix)]
 async fn try_agent<H: client::Handler>(
     handle: &mut client::Handle<H>,
@@ -276,7 +309,7 @@ async fn try_agent<H: client::Handler>(
     tried: &mut Vec<&'static str>,
     agent_skipped: &mut Vec<(String, String)>,
     offers: &mut PublicKeyOffers,
-) -> Result<bool> {
+) -> Result<Option<AuthMethod>> {
     use russh::keys::agent::AgentIdentity;
     use russh::keys::agent::client::AgentClient;
 
@@ -284,14 +317,14 @@ async fn try_agent<H: client::Handler>(
         Some(path) => path.clone(),
         None => match std::env::var_os("SSH_AUTH_SOCK") {
             Some(path) if !path.is_empty() => PathBuf::from(path),
-            _ => return Ok(false),
+            _ => return Ok(None),
         },
     };
     let Ok(mut agent) = AgentClient::connect_uds(&socket).await else {
-        return Ok(false);
+        return Ok(None);
     };
     let Ok(identities) = agent.request_identities().await else {
-        return Ok(false);
+        return Ok(None);
     };
     let user = cfg.user.as_str();
     let mut offered = 0;
@@ -320,13 +353,14 @@ async fn try_agent<H: client::Handler>(
             None
         };
         let fingerprint = keys::PublicKey::fingerprint(&key, keys::HashAlg::Sha256).to_string();
+        let key_type = key_type(&key.algorithm());
         match handle
             .authenticate_publickey_with(user, key, hash_alg, &mut agent)
             .await
         {
             Ok(result) => {
                 if update(result, methods) {
-                    return Ok(true);
+                    return Ok(Some(AuthMethod::Agent { key_type }));
                 }
             }
             Err(russh::AgentAuthError::Send(_)) => {
@@ -337,7 +371,7 @@ async fn try_agent<H: client::Handler>(
             }
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
 #[cfg(not(unix))]
@@ -348,8 +382,8 @@ async fn try_agent<H: client::Handler>(
     _: &mut Vec<&'static str>,
     _: &mut Vec<(String, String)>,
     _: &mut PublicKeyOffers,
-) -> Result<bool> {
-    Ok(false)
+) -> Result<Option<AuthMethod>> {
+    Ok(None)
 }
 
 /// Runs the keyboard-interactive exchange. `auto_password` answers a single no-echo prompt
@@ -614,6 +648,27 @@ fn read_key_text(path: &Path) -> io::Result<Zeroizing<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn key_types_read_like_people_name_them() {
+        use keys::Algorithm;
+        use keys::{EcdsaCurve, HashAlg};
+        assert_eq!(key_type(&Algorithm::Ed25519), "ed25519");
+        assert_eq!(key_type(&Algorithm::Rsa { hash: None }), "rsa");
+        assert_eq!(
+            key_type(&Algorithm::Rsa {
+                hash: Some(HashAlg::Sha512)
+            }),
+            "rsa"
+        );
+        assert_eq!(
+            key_type(&Algorithm::Ecdsa {
+                curve: EcdsaCurve::NistP256
+            }),
+            "ecdsa"
+        );
+        assert_eq!(key_type(&Algorithm::SkEd25519), "ed25519-sk");
+    }
 
     #[test]
     fn detail_names_skipped_keys() {

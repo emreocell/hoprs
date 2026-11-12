@@ -242,6 +242,57 @@ pub fn skipped(reason: &str) -> String {
 // Status bar.
 pub const NOT_CONNECTED: &str = "Not connected";
 
+// Status bar and connection states.
+pub const CONNECTING: &str = "Connecting…";
+pub const CONNECTED: &str = "Connected";
+pub const WAITING_FOR_YOU: &str = "Waiting for you";
+pub const CLOSING: &str = "Saving tabs and closing…";
+pub const CLOSE_WORKSPACE: &str = "Close";
+pub const RECONNECTING_NOW: &str = "Reconnecting…";
+
+/// "Reconnecting (2/5)".
+pub fn reconnecting(attempt: u32, of: u32) -> String {
+    format!("Reconnecting ({attempt}/{of})")
+}
+
+/// "Disconnected — Connection lost".
+pub fn disconnected(reason: &str) -> String {
+    format!("Disconnected — {reason}")
+}
+
+/// `user@host:port`.
+pub fn endpoint(user: &str, host: &str, port: u16) -> String {
+    format!("{user}@{host}:{port}")
+}
+
+/// How an SSH session logged in: "ed25519 via ssh-agent", "rsa key", "password"...
+pub fn ssh_auth(method: &hoprs_ssh::AuthMethod) -> String {
+    use hoprs_ssh::AuthMethod;
+    match method {
+        AuthMethod::None => "no authentication".to_owned(),
+        AuthMethod::Agent { key_type } => format!("{key_type} via ssh-agent"),
+        AuthMethod::KeyFile { key_type } => format!("{key_type} key"),
+        AuthMethod::Password => "password".to_owned(),
+        AuthMethod::KeyboardInteractive => "keyboard-interactive".to_owned(),
+    }
+}
+
+/// An FTP site's security, in place of a login method.
+pub fn ftp_auth(protocol: hoprs_core::Protocol) -> Option<&'static str> {
+    use hoprs_core::Protocol;
+    match protocol {
+        Protocol::Ssh => None,
+        Protocol::Ftp => Some("FTP (unencrypted)"),
+        Protocol::FtpsExplicit => Some("FTPS explicit"),
+        Protocol::FtpsImplicit => Some("FTPS implicit"),
+    }
+}
+
+/// "3 of 3 sites in Shop".
+pub fn workspace_status(connected: usize, total: usize, name: &str) -> String {
+    format!("{connected} of {} in {name}", site_count(total))
+}
+
 // File actions.
 pub const NEW_FOLDER: &str = "New folder";
 pub const RENAME: &str = "Rename";

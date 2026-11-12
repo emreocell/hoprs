@@ -15,7 +15,9 @@ use async_trait::async_trait;
 
 use hoprs_core::{Error, ErrorKind};
 use hoprs_ssh::testing::{fixture, test_config};
-use hoprs_ssh::{KbdPrompt, KeySource, Prompter, ScriptedPrompter, SshConfig, SshSession};
+use hoprs_ssh::{
+    AuthMethod, KbdPrompt, KeySource, Prompter, ScriptedPrompter, SshConfig, SshSession,
+};
 use secrecy::SecretString;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
@@ -184,7 +186,9 @@ async fn password_auth_from_config() {
     let mut cfg = test_config("bob", dir.path());
     cfg.auth.password = Some(SecretString::from("bob-pass"));
     let p = Arc::new(ScriptedPrompter::new());
-    connect(cfg, &p).await.unwrap().disconnect().await;
+    let session = connect(cfg, &p).await.unwrap();
+    assert_eq!(session.auth_method(), Some(AuthMethod::Password));
+    session.disconnect().await;
     assert_eq!(p.calls().password, 0);
 }
 
@@ -235,7 +239,14 @@ async fn key_auth() {
         passphrase: None,
     };
     let p = Arc::new(ScriptedPrompter::new());
-    connect(cfg, &p).await.unwrap().disconnect().await;
+    let session = connect(cfg, &p).await.unwrap();
+    assert_eq!(
+        session.auth_method(),
+        Some(AuthMethod::KeyFile {
+            key_type: "ed25519".into()
+        })
+    );
+    session.disconnect().await;
     assert_eq!(p.calls().password, 0);
     assert_eq!(p.calls().passphrase, 0);
 }
@@ -488,7 +499,14 @@ async fn agent_auth() {
     cfg.auth.use_agent = true;
     cfg.auth.agent_socket = Some(agent.socket.clone());
     let p = Arc::new(ScriptedPrompter::new());
-    connect(cfg, &p).await.unwrap().disconnect().await;
+    let session = connect(cfg, &p).await.unwrap();
+    assert_eq!(
+        session.auth_method(),
+        Some(AuthMethod::Agent {
+            key_type: "ed25519".into()
+        })
+    );
+    session.disconnect().await;
     assert_eq!(p.calls().passphrase, 0);
     assert_eq!(p.calls().password, 0);
 }

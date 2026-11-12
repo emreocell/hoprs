@@ -10,6 +10,7 @@ mod shell;
 pub mod testing;
 mod watchdog;
 
+pub use auth::{AuthMethod, key_type};
 pub use config::{AuthConfig, KeySource, SshConfig};
 pub use hoprs_core::ReconnectPolicy;
 pub use prompt::{AcceptedSecret, KbdPrompt, Prompter};

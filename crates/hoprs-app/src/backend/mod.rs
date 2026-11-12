@@ -16,8 +16,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use hoprs_core::{Error, RemoteEntry, RemotePath, Result, Site, SiteId, Workspace, WorkspaceId};
+use hoprs_core::{
+    ConnectionState, Error, RemoteEntry, RemotePath, Result, SavedTab, Site, SiteId, Workspace,
+    WorkspaceId,
+};
 use hoprs_remote::RemoteFs;
+pub use hoprs_ssh::AuthMethod;
 pub use hoprs_ssh::known_hosts::KnownHostEntry;
 use hoprs_transfer::{
     EngineConfig, Event, QueueStore, Resolution, TransferEngine, TransferId, TransferItem,
@@ -25,7 +29,7 @@ use hoprs_transfer::{
 };
 use hoprs_vault::{SecretStore, Vault};
 use secrecy::SecretString;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 
 pub use broker::{BrokerEvent, PromptAnswer, PromptBroker, PromptId};
 pub use ops::DeleteTarget;
@@ -63,6 +67,9 @@ pub struct TransferSnapshot {
     pub workers: usize,
 }
 
+/// A workspace's saved tabs, by site (see [`BackendApi::save_workspace_tabs`]).
+pub type WorkspaceTabs = Vec<(SiteId, Vec<SavedTab>)>;
+
 /// What `effects::run` may call. Each later task adds the methods its effects need.
 #[async_trait]
 pub trait BackendApi: Send + Sync {
@@ -83,6 +90,10 @@ pub trait BackendApi: Send + Sync {
     async fn delete_site(&self, id: SiteId) -> Result<()>;
     async fn save_workspace(&self, workspace: Workspace) -> Result<()>;
     async fn delete_workspace(&self, id: WorkspaceId) -> Result<()>;
+    /// Replaces the saved tabs of the workspace's sites named in `tabs` (the others keep
+    /// theirs), reading the workspace as stored now: a form saved meanwhile is not undone.
+    /// One atomic write of `workspaces.toml`; `NotFound` if the workspace is gone.
+    async fn save_workspace_tabs(&self, workspace: WorkspaceId, tabs: WorkspaceTabs) -> Result<()>;
 
     /// Connects a saved site; see [`SessionManager::connect`].
     async fn connect(&self, site: SiteId) -> std::result::Result<Connected, ConnectError>;
@@ -98,6 +109,14 @@ pub trait BackendApi: Send + Sync {
     /// Retries a `Disconnected` session; see [`SessionManager::reconnect`].
     async fn reconnect(&self, session: SessionId) -> Result<()>;
     async fn close(&self, session: SessionId);
+    /// Watches a session's connection state; `None` once it is closed. The sender goes
+    /// away with the session, which ends the watch.
+    fn session_state(&self, session: SessionId) -> Option<watch::Receiver<ConnectionState>>;
+    /// How an SSH session logged in last; `None` for FTP, or before the first connection.
+    fn session_auth(&self, session: SessionId) -> Option<AuthMethod>;
+    /// The window is closing: shuts the transfer engine down (its running items keep their
+    /// stored state, so the next start reopens them paused), then closes every session.
+    async fn shutdown(&self);
 
     /// Lists `path` on the local disk, or on the remote side of `session` (an error
     /// without one).
@@ -311,6 +330,10 @@ impl BackendApi for Backend {
         self.vault.remove_workspace(id).await
     }
 
+    async fn save_workspace_tabs(&self, workspace: WorkspaceId, tabs: WorkspaceTabs) -> Result<()> {
+        self.vault.save_workspace_tabs(workspace, tabs).await
+    }
+
     async fn connect(&self, site: SiteId) -> std::result::Result<Connected, ConnectError> {
         self.sessions.connect(site).await
     }
@@ -329,6 +352,23 @@ impl BackendApi for Backend {
 
     async fn close(&self, session: SessionId) {
         self.sessions.close(session).await;
+    }
+
+    fn session_state(&self, session: SessionId) -> Option<watch::Receiver<ConnectionState>> {
+        self.sessions.state(session)
+    }
+
+    fn session_auth(&self, session: SessionId) -> Option<AuthMethod> {
+        self.sessions.auth(session)
+    }
+
+    /// The engine first: a session closed while the engine runs would pause its site,
+    /// and an item paused that way reopens as the user's pause. Stopped first, the
+    /// engine keeps each running item's stored state, which the next start recovers as
+    /// paused.
+    async fn shutdown(&self) {
+        self.engine.clone().shutdown().await;
+        self.sessions.close_all().await;
     }
 
     async fn list(
@@ -714,6 +754,105 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// Review Focus 5: closing stops the engine and the next start finds the unfinished
+    /// items paused (nothing resumes on its own).
+    #[tokio::test]
+    async fn shutdown_stops_the_engine_and_items_reopen_paused() {
+        use hoprs_transfer::{Direction, TransferState};
+
+        let dir = tempfile::tempdir().unwrap();
+        let backend = open(dir.path());
+        let id = backend
+            .enqueue(TransferSpec {
+                site: SiteId::new(),
+                direction: Direction::Upload,
+                local: RemotePath::new("/l").unwrap(),
+                remote: RemotePath::new("/r").unwrap(),
+            })
+            .await
+            .unwrap();
+        backend.shutdown().await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), backend.engine.stopped())
+            .await
+            .expect("the engine stopped");
+        // Calls after the shutdown neither hang nor panic.
+        backend.close(SessionId(1)).await;
+        drop(backend);
+
+        let reopened = open(dir.path());
+        let items = reopened.transfer_snapshot().await.items;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, id);
+        assert_eq!(items[0].state, TransferState::Paused);
+    }
+
+    /// The tabs of the named sites are replaced in the stored workspace; the rest of it
+    /// (a name changed meanwhile, other sites' tabs) is kept.
+    #[tokio::test]
+    async fn save_workspace_tabs_updates_only_the_named_sites() {
+        use hoprs_core::{SavedTab, TabKind};
+
+        let dir = tempfile::tempdir().unwrap();
+        let backend = open(dir.path());
+        let a = Site::new("a", "h", "u", Protocol::Ssh);
+        let b = Site::new("b", "h", "u", Protocol::Ftp);
+        backend.save_site(a.clone()).await.unwrap();
+        backend.save_site(b.clone()).await.unwrap();
+        let kept = SavedTab {
+            kind: TabKind::Files,
+            remote_dir: Some("/b".into()),
+            local_dir: None,
+        };
+        let mut workspace = Workspace {
+            id: WorkspaceId::new(),
+            name: "w".into(),
+            sites: vec![
+                WorkspaceSite {
+                    site: a.id.clone(),
+                    tabs: Vec::new(),
+                },
+                WorkspaceSite {
+                    site: b.id.clone(),
+                    tabs: vec![kept.clone()],
+                },
+            ],
+        };
+        backend.save_workspace(workspace.clone()).await.unwrap();
+        // Renamed in a form after the app read it.
+        workspace.name = "renamed".into();
+        backend.save_workspace(workspace.clone()).await.unwrap();
+
+        let saved = SavedTab {
+            kind: TabKind::Files,
+            remote_dir: Some("/var/www".into()),
+            local_dir: Some(PathBuf::from("/home/me")),
+        };
+        backend
+            .save_workspace_tabs(
+                workspace.id.clone(),
+                vec![(a.id.clone(), vec![saved.clone()])],
+            )
+            .await
+            .unwrap();
+        let stored = &backend.workspaces().await.unwrap()[0];
+        assert_eq!(stored.name, "renamed");
+        assert_eq!(stored.sites[0].tabs, vec![saved.clone()]);
+        assert_eq!(stored.sites[1].tabs, vec![kept]);
+        // On disk too (a fresh vault reads it back).
+        drop(backend);
+        let reopened = open(dir.path());
+        assert_eq!(
+            reopened.workspaces().await.unwrap()[0].sites[0].tabs,
+            vec![saved.clone()]
+        );
+
+        let err = reopened
+            .save_workspace_tabs(WorkspaceId::new(), vec![(a.id, vec![saved])])
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::NotFound);
     }
 
     #[tokio::test]

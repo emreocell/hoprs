@@ -500,6 +500,23 @@ impl SessionManager {
         drop(entry);
     }
 
+    /// Closes every session (the window is closing).
+    pub async fn close_all(&self) {
+        let mut ids: Vec<SessionId> = lock(&self.inner.sessions).keys().copied().collect();
+        ids.sort();
+        futures_util::future::join_all(ids.into_iter().map(|id| self.close(id))).await;
+    }
+
+    /// How an SSH session logged in last; `None` for FTP and before the first connection.
+    pub fn auth(&self, id: SessionId) -> Option<hoprs_ssh::AuthMethod> {
+        match &lock(&self.inner.sessions).get(&id)?.link {
+            Link::Ssh(session) => session.auth_method(),
+            Link::Ftp(_) => None,
+            #[cfg(test)]
+            Link::Fake(_) => None,
+        }
+    }
+
     /// The remote filesystem of a connected session.
     pub fn remote(&self, id: SessionId) -> Result<Arc<dyn RemoteFs>> {
         let sessions = lock(&self.inner.sessions);
@@ -681,6 +698,38 @@ mod tests {
         assert!(f.manager.state(id).is_none());
         // Closing twice is harmless.
         f.manager.close(id).await;
+    }
+
+    /// The window is closing: every session goes, its watch with it.
+    #[tokio::test]
+    async fn close_all_closes_every_session() {
+        let f = fixture();
+        let mut ids = Vec::new();
+        let mut conns = Vec::new();
+        for _ in 0..2 {
+            let (state, _) = watch::channel(ConnectionState::Connected);
+            let conn = Arc::new(FakeConn { state });
+            let id = f
+                .manager
+                .attach(SiteId::new(), conn.clone(), Arc::new(MemFs::new()))
+                .await
+                .unwrap();
+            ids.push(id);
+            conns.push(conn);
+        }
+        assert!(ids.iter().all(|id| f.manager.state(*id).is_some()));
+        // Not an SSH session: no login method to tell.
+        assert_eq!(f.manager.auth(ids[0]), None);
+        f.manager.close_all().await;
+        assert!(ids.iter().all(|id| f.manager.state(*id).is_none()));
+        assert!(f.manager.remote(ids[1]).is_err());
+        for conn in conns {
+            eventually("the watcher to drop the connection", || {
+                Arc::strong_count(&conn) == 1
+            })
+            .await;
+        }
+        assert_eq!(f.manager.auth(SessionId(999)), None);
     }
 
     #[tokio::test]
@@ -1115,6 +1164,13 @@ mod tests {
         // Connecting again returns the same session.
         let again = f.manager.connect(site.id.clone()).await.unwrap();
         assert_eq!(again.session, id);
+        // The status bar's login method.
+        assert_eq!(
+            f.manager.auth(id),
+            Some(hoprs_ssh::AuthMethod::KeyFile {
+                key_type: "ed25519".into()
+            })
+        );
 
         let state = f.manager.state(id).unwrap();
         f.manager.close(id).await;
@@ -1167,6 +1223,8 @@ mod tests {
             Some(hoprs_remote::testing::server_fingerprint())
         );
 
+        // FTP has no login method of its own: the status bar names the protocol.
+        assert_eq!(f.manager.auth(id), None);
         f.manager.close(id).await;
         prompts.abort();
     }

@@ -164,13 +164,54 @@ pub fn view<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> {
         .site(&tab.site)
         .map_or(strings::SITE_MISSING, |s| s.name.as_str());
     let this_year = format::current_year();
-    row![
+    let panes = row![
         pane(app, tab, Side::Local, strings::LOCAL, this_year),
         rule::vertical(theme::HAIRLINE).style(theme::rule_1px),
         pane(app, tab, Side::Remote, site_name, this_year),
     ]
-    .height(Length::Fill)
-    .into()
+    .height(Length::Fill);
+    match lost_banner(tab) {
+        Some(banner) => column![banner, hrule(), panes].into(),
+        None => panes.into(),
+    }
+}
+
+/// The connection of a connected tab was lost for good: a thin bar across the tab with
+/// the reason and "Reconnect" (the session's own reconnect), no modal.
+fn lost_banner(tab: &Tab) -> Option<Element<'_, Message>> {
+    let error = tab.lost_connection()?;
+    let p = palette();
+    let mut reason = row![text(strings::disconnected(&error.message)).color(p.error)]
+        .spacing(theme::SPACE_XS)
+        .align_y(Alignment::Center);
+    if let Some(detail) = &error.detail {
+        reason = reason.push(
+            text(detail)
+                .font(theme::MONO)
+                .size(theme::TEXT_MONO)
+                .color(p.muted),
+        );
+    }
+    let label = if tab.reconnecting {
+        strings::RECONNECTING_NOW
+    } else {
+        strings::RECONNECT
+    };
+    let reconnect = button(text(label))
+        .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
+        .style(theme::button_outline)
+        .on_press_maybe((!tab.reconnecting).then_some(Message::ReconnectSession(tab.id)));
+    Some(
+        container(
+            row![reason, space::horizontal(), reconnect]
+                .spacing(theme::SPACE_SM)
+                .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_MD]))
+        .style(theme::pane_bar)
+        .into(),
+    )
 }
 
 fn pane<'a>(

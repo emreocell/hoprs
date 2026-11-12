@@ -116,6 +116,38 @@ impl VaultHandle {
         self.call(move |v| v.upsert_workspace(workspace)).await
     }
 
+    /// See [`BackendApi::save_workspace_tabs`](super::BackendApi::save_workspace_tabs).
+    pub async fn save_workspace_tabs(
+        &self,
+        id: WorkspaceId,
+        tabs: super::WorkspaceTabs,
+    ) -> Result<()> {
+        self.call(move |v| {
+            let mut workspace = v
+                .workspaces()
+                .iter()
+                .find(|w| w.id == id)
+                .cloned()
+                .ok_or_else(|| {
+                    Error::new(ErrorKind::NotFound, "Unknown workspace").with_detail(id.0.clone())
+                })?;
+            let mut changed = false;
+            for (site, saved) in tabs {
+                if let Some(entry) = workspace.sites.iter_mut().find(|e| e.site == site)
+                    && entry.tabs != saved
+                {
+                    entry.tabs = saved;
+                    changed = true;
+                }
+            }
+            if changed {
+                v.upsert_workspace(workspace)?;
+            }
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn remove_workspace(&self, id: WorkspaceId) -> Result<()> {
         self.call(move |v| v.remove_workspace(&id)).await
     }

@@ -60,6 +60,8 @@ fn main() -> iced::Result {
         .window(iced::window::Settings {
             size: INITIAL_WINDOW,
             min_size: Some(MIN_WINDOW),
+            // A close request goes to `update`: tabs saved, backend shut down, then closed.
+            exit_on_close_request: false,
             ..iced::window::Settings::default()
         })
         .run()
@@ -114,9 +116,10 @@ fn view(state: &Hoprs) -> iced::Element<'_, Message> {
 }
 
 /// The keyboard for the file panes and dialogs, the mouse button and dropped files
-/// (drags), the transfer engine's events and the prompt broker's dialogs.
+/// (drags), the transfer engine's events, the prompt broker's dialogs, each connected
+/// session's state, and the window's close requests.
 fn subscription(state: &Hoprs) -> iced::Subscription<Message> {
-    iced::Subscription::batch([
+    let fixed = [
         iced::event::listen_with(ui::files::key_message),
         iced::event::listen_with(ui::queue::pointer_message),
         iced::Subscription::run_with(TransferFeed(Arc::clone(&state.backend)), |feed| {
@@ -125,7 +128,26 @@ fn subscription(state: &Hoprs) -> iced::Subscription<Message> {
         iced::Subscription::run_with(PromptFeed(Arc::clone(&state.backend)), |feed| {
             effects::prompt_feed(feed.0.as_ref())
         }),
-    ])
+        iced::window::close_requests().map(Message::CloseRequested),
+    ];
+    // One feed per session, keyed by its id: it starts when a tab connects and stops when
+    // the tab closes or fails (a new session is a new feed).
+    let sessions = state.app.watched_sessions().into_iter().map(|session| {
+        iced::Subscription::run_with(SessionFeed(session, Arc::clone(&state.backend)), |feed| {
+            effects::session_feed(Arc::clone(&feed.1), feed.0)
+        })
+    });
+    iced::Subscription::batch(fixed.into_iter().chain(sessions))
+}
+
+/// A session, as the identity of its state feed (the backend rides along).
+struct SessionFeed(backend::SessionId, Arc<dyn BackendApi>);
+
+impl std::hash::Hash for SessionFeed {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        "session-feed".hash(state);
+        self.0.hash(state);
+    }
 }
 
 /// The backend, as the identity of the dialogs' subscription (one for the whole run: the

@@ -28,6 +28,12 @@
 //! close drops it. `known_hosts` is a scripted list
 //! ([`FakeBackend::set_known_host_entries`]); removals are recorded.
 //!
+//! Each session has a connection state watch ([`BackendApi::session_state`]): `Connecting`
+//! when started, then what each attempt gives; [`FakeBackend::drop_connection`] makes it
+//! `Disconnected` and a close drops it (ending the watch). [`FakeBackend::calls`] records
+//! tab saves, reconnects, shutdown and closes in order; a shutdown closes every session,
+//! or hangs forever after [`FakeBackend::hang_shutdown`].
+//!
 //! `save_site` keeps the backend-owned fields of a stored site (`has_*`, and the FTPS pin
 //! by the vault's [`merged_pin`](super::vault::merged_pin) rule), and
 //! `set_password` records the password and sets `has_password`, like the vault.
@@ -41,20 +47,31 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use hoprs_core::{
-    Error, ErrorKind, RemoteEntry, RemotePath, Result, Site, SiteId, Workspace, WorkspaceId,
+    ConnectionState, Error, ErrorKind, RemoteEntry, RemotePath, Result, Site, SiteId, Workspace,
+    WorkspaceId,
 };
 use hoprs_remote::{MemFs, RemoteFs};
 use hoprs_transfer::{Event, TransferId, TransferItem, TransferSpec};
 use hoprs_vault::UnreadableEntry;
 use secrecy::SecretString;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use super::broker::{PromptKind, PromptRequest};
 use super::{
-    BackendApi, BrokerEvent, ConnectError, ConnectResult, Connected, ControlOp, DeleteTarget,
-    KnownHostEntry, ProfileSnapshot, PromptAnswer, PromptId, SessionId, Side, TransferSnapshot,
+    AuthMethod, BackendApi, BrokerEvent, ConnectError, ConnectResult, Connected, ControlOp,
+    DeleteTarget, KnownHostEntry, ProfileSnapshot, PromptAnswer, PromptId, SessionId, Side,
+    TransferSnapshot, WorkspaceTabs,
 };
 use hoprs_vault::SecretKind;
+
+/// A recorded backend call, in [`FakeBackend::calls`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum Call {
+    SaveTabs(WorkspaceId),
+    Reconnect(SessionId),
+    Shutdown,
+    Close(SessionId),
+}
 
 /// See the module docs.
 pub struct FakeBackend {
@@ -104,6 +121,14 @@ struct State {
     /// What `known_host_entries` returns.
     known_hosts: Vec<KnownHostEntry>,
     known_host_removals: Vec<(String, u16)>,
+    /// Each open session's connection state.
+    watches: HashMap<SessionId, watch::Sender<ConnectionState>>,
+    /// How each session logged in, as the test set it.
+    auth: HashMap<SessionId, AuthMethod>,
+    calls: Vec<Call>,
+    /// The next `save_workspace_tabs` calls fail with these.
+    save_tab_failures: VecDeque<Error>,
+    hang_shutdown: bool,
 }
 
 impl Default for FakeBackend {
@@ -279,6 +304,35 @@ impl FakeBackend {
         self.state().closed.clone()
     }
 
+    /// The tab saves, reconnects, shutdown and closes, in order.
+    pub fn calls(&self) -> Vec<Call> {
+        self.state().calls.clone()
+    }
+
+    /// The session's connection is lost for good: `Disconnected` with `error`.
+    pub fn drop_connection(&self, session: SessionId, error: Error) {
+        let mut state = self.state();
+        state.connected.remove(&session);
+        if let Some(watch) = state.watches.get(&session) {
+            watch.send_replace(ConnectionState::Disconnected(error));
+        }
+    }
+
+    /// What `session_auth` returns for `session`.
+    pub fn set_auth(&self, session: SessionId, auth: AuthMethod) {
+        self.state().auth.insert(session, auth);
+    }
+
+    /// The next `save_workspace_tabs` fails with `error`.
+    pub fn fail_next_save_tabs(&self, error: Error) {
+        self.state().save_tab_failures.push_back(error);
+    }
+
+    /// From now on `shutdown` never returns.
+    pub fn hang_shutdown(&self) {
+        self.state().hang_shutdown = true;
+    }
+
     /// The site a session belongs to, while it is open.
     pub fn session_site(&self, session: SessionId) -> Option<SiteId> {
         self.state().sessions.get(&session).cloned()
@@ -297,6 +351,12 @@ impl FakeBackend {
             .unwrap_or(Ok(()));
         if outcome.is_ok() {
             state.connected.insert(session);
+        }
+        if let Some(watch) = state.watches.get(&session) {
+            watch.send_replace(match &outcome {
+                Ok(()) => ConnectionState::Connected,
+                Err(error) => ConnectionState::Disconnected(error.clone()),
+            });
         }
         outcome
     }
@@ -343,6 +403,9 @@ impl FakeBackend {
             None => {
                 let id = SessionId(self.next_session.fetch_add(1, Ordering::SeqCst));
                 state.sessions.insert(id, site.clone());
+                state
+                    .watches
+                    .insert(id, watch::channel(ConnectionState::Connecting).0);
                 state.remotes.entry(site.clone()).or_default();
                 if unavailable {
                     state.keyring_unavailable.insert(id);
@@ -488,6 +551,25 @@ impl BackendApi for FakeBackend {
         Ok(())
     }
 
+    async fn save_workspace_tabs(&self, workspace: WorkspaceId, tabs: WorkspaceTabs) -> Result<()> {
+        let mut state = self.state();
+        state.calls.push(Call::SaveTabs(workspace.clone()));
+        if let Some(error) = state.save_tab_failures.pop_front() {
+            return Err(error);
+        }
+        let stored = state
+            .workspaces
+            .iter_mut()
+            .find(|w| w.id == workspace)
+            .ok_or_else(|| Self::not_found("Unknown workspace"))?;
+        for (site, saved) in tabs {
+            if let Some(entry) = stored.sites.iter_mut().find(|e| e.site == site) {
+                entry.tabs = saved;
+            }
+        }
+        Ok(())
+    }
+
     async fn connect(&self, site: SiteId) -> ConnectResult {
         let mut keyring_down = false;
         self.connect_one(site, &mut keyring_down).await
@@ -524,6 +606,7 @@ impl BackendApi for FakeBackend {
 
     async fn reconnect(&self, session: SessionId) -> Result<()> {
         let mut state = self.state();
+        state.calls.push(Call::Reconnect(session));
         let site = state
             .sessions
             .get(&session)
@@ -540,7 +623,37 @@ impl BackendApi for FakeBackend {
             state.connected.remove(&session);
             state.keyring_unavailable.remove(&session);
             state.pending_secrets.remove(&session);
+            state.watches.remove(&session);
+            state.auth.remove(&session);
             state.closed.push(session);
+            state.calls.push(Call::Close(session));
+        }
+    }
+
+    fn session_state(&self, session: SessionId) -> Option<watch::Receiver<ConnectionState>> {
+        self.state()
+            .watches
+            .get(&session)
+            .map(watch::Sender::subscribe)
+    }
+
+    fn session_auth(&self, session: SessionId) -> Option<AuthMethod> {
+        self.state().auth.get(&session).cloned()
+    }
+
+    async fn shutdown(&self) {
+        let hang = {
+            let mut state = self.state();
+            state.calls.push(Call::Shutdown);
+            state.hang_shutdown
+        };
+        if hang {
+            std::future::pending::<()>().await;
+        }
+        let mut sessions: Vec<SessionId> = self.state().sessions.keys().copied().collect();
+        sessions.sort();
+        for session in sessions {
+            self.close(session).await;
         }
     }
 

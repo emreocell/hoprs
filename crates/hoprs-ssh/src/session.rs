@@ -27,7 +27,7 @@ use russh::keys::{Algorithm, PublicKey, PublicKeyOrCertificate};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, watch};
 
-use crate::auth::Remembered;
+use crate::auth::{AuthMethod, Remembered};
 use crate::config::SshConfig;
 use crate::known_hosts::{self, HostKeyStatus};
 use crate::prompt::Prompter;
@@ -57,6 +57,8 @@ struct Shared {
     handle: RwLock<Option<(Arc<client::Handle<ClientHandler>>, u64)>>,
     generation: AtomicU64,
     state: watch::Sender<SessionState>,
+    /// How the latest connection authenticated; `None` until the first one.
+    auth: RwLock<Option<AuthMethod>>,
 }
 
 impl Shared {
@@ -77,7 +79,8 @@ impl Shared {
     }
 
     /// Publishes a new connection under the next generation.
-    fn install(&self, handle: client::Handle<ClientHandler>) {
+    fn install(&self, handle: client::Handle<ClientHandler>, auth: AuthMethod) {
+        *self.auth.write().unwrap_or_else(PoisonError::into_inner) = Some(auth);
         let mut slot = self.handle.write().unwrap_or_else(PoisonError::into_inner);
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         *slot = Some((Arc::new(handle), generation));
@@ -160,6 +163,7 @@ impl SshSession {
             handle: RwLock::new(None),
             generation: AtomicU64::new(0),
             state,
+            auth: RwLock::new(None),
         });
         let (commands, rx) = mpsc::unbounded_channel();
         let supervisor = Supervisor {
@@ -222,6 +226,17 @@ impl SshSession {
     /// [`open_channel_tagged`](Self::open_channel_tagged).
     pub fn generation(&self) -> u64 {
         self.inner.shared.generation.load(Ordering::SeqCst)
+    }
+
+    /// How the latest connection authenticated (the agent and its key type, a key file, a
+    /// password...); `None` until the first connection. Kept while reconnecting.
+    pub fn auth_method(&self) -> Option<AuthMethod> {
+        self.inner
+            .shared
+            .auth
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Like [`open_channel`](Self::open_channel), also returning the generation of the
@@ -339,7 +354,7 @@ impl Supervisor {
         match result {
             Ok(conn) => {
                 *host_key = Some(conn.host_key);
-                shared.install(conn.handle);
+                shared.install(conn.handle, conn.auth);
                 shared.set_state(SessionState::Connected);
                 Phase::Connected(conn.lost)
             }
@@ -418,7 +433,7 @@ impl Supervisor {
             };
             match result {
                 Ok(conn) => {
-                    shared.install(conn.handle);
+                    shared.install(conn.handle, conn.auth);
                     shared.set_state(SessionState::Connected);
                     return Phase::Connected(conn.lost);
                 }
@@ -486,6 +501,8 @@ pub(crate) struct Connection {
     pub(crate) handle: client::Handle<ClientHandler>,
     /// The server key that was verified.
     pub(crate) host_key: PublicKey,
+    /// How it authenticated.
+    pub(crate) auth: AuthMethod,
     /// Resolves (with the reason, or closed without one) when the session task ends.
     pub(crate) lost: oneshot::Receiver<Error>,
 }
@@ -569,20 +586,24 @@ async fn attempt(
         Error::new(ErrorKind::Protocol, "SSH protocol error")
             .with_detail("the server key was never verified")
     })?;
-    if let Err(e) = crate::auth::authenticate(&mut handle, cfg, prompter.as_ref(), remembered).await
-    {
-        if e.kind == ErrorKind::Network && handle.is_closed() {
-            // `lost` resolves once the handler has seen the end of the session.
-            let _ = tokio::time::timeout(Duration::from_secs(1), lost).await;
-            if server_disconnected.load(Ordering::SeqCst) {
-                return Err(closed_during_auth());
+    let auth =
+        match crate::auth::authenticate(&mut handle, cfg, prompter.as_ref(), remembered).await {
+            Ok(auth) => auth,
+            Err(e) => {
+                if e.kind == ErrorKind::Network && handle.is_closed() {
+                    // `lost` resolves once the handler has seen the end of the session.
+                    let _ = tokio::time::timeout(Duration::from_secs(1), lost).await;
+                    if server_disconnected.load(Ordering::SeqCst) {
+                        return Err(closed_during_auth());
+                    }
+                }
+                return Err(e);
             }
-        }
-        return Err(e);
-    }
+        };
     Ok(Connection {
         handle,
         host_key,
+        auth,
         lost,
     })
 }

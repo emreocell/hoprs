@@ -4,13 +4,15 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use hoprs_core::{Error, RemoteEntry, RemotePath, Site, SiteId, Workspace, WorkspaceId};
+use hoprs_core::{
+    ConnectionState, Error, RemoteEntry, RemotePath, SavedTab, Site, SiteId, Workspace, WorkspaceId,
+};
 use hoprs_transfer::{Event, TransferId, TransferSpec};
 use hoprs_vault::UnreadableEntry;
 
 use crate::backend::{
-    BrokerEvent, ConnectError, ConnectResult, Connected, ControlOp, KnownHostEntry,
-    ProfileSnapshot, PromptAnswer, PromptId, SessionId, Side, TransferSnapshot,
+    AuthMethod, BrokerEvent, ConnectError, ConnectResult, Connected, ControlOp, KnownHostEntry,
+    ProfileSnapshot, PromptAnswer, PromptId, SessionId, Side, TransferSnapshot, WorkspaceTabs,
 };
 use crate::ui::sidebar;
 use crate::ui::site_form::{PasswordChange, SiteForm, SiteFormMsg, SiteFormOutcome};
@@ -36,12 +38,14 @@ pub enum Form {
 pub mod actions;
 pub mod dialogs;
 pub mod files;
+pub mod lifecycle;
 pub mod queue;
 pub mod transfers;
 
 pub use actions::FileAction;
 pub use dialogs::{Dialog, DialogMsg, Dialogs, FailureAction, KnownHostsFix, KnownHostsMsg, Typed};
 pub use files::{FileKey, Mods, PaneMsg, RequestId, Tab, TabId};
+pub use lifecycle::ConnStatus;
 pub use queue::{Queue, QueueMsg, QueueTab, RowAction};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -96,6 +100,11 @@ pub struct App {
     pub os_drag: bool,
     /// The security and credential dialogs: the one shown and those waiting.
     pub dialogs: Dialogs,
+    /// The workspace "Open workspace" opened last, until it is closed: its tabs and
+    /// folders are saved when it closes or the window does.
+    pub open_workspace: Option<WorkspaceId>,
+    /// The window asked to close: the backend is shutting down.
+    pub closing: bool,
     /// The last tab or listing id handed out.
     next_id: u64,
 }
@@ -223,6 +232,28 @@ pub enum Message {
     },
     /// "Close and reconnect": the tab's failed session is closed and a new one started.
     RestartSession(TabId),
+    /// A session's connection state (and, for SSH, how it logged in), from its feed.
+    SessionState {
+        session: SessionId,
+        state: ConnectionState,
+        auth: Option<AuthMethod>,
+    },
+    /// "Reconnect" on a tab whose connection was lost.
+    ReconnectSession(TabId),
+    /// The backend's reconnect of `session` finished.
+    Reconnected {
+        tab: TabId,
+        session: SessionId,
+        result: Result<(), Error>,
+    },
+    /// Close the open workspace: its tabs are saved, then closed.
+    CloseWorkspace(WorkspaceId),
+    /// The workspace's tabs were saved (or not: logged only).
+    TabsSaved(Result<(), Error>),
+    /// The window's close button (or the window manager) asks to close.
+    CloseRequested(iced::window::Id),
+    /// The backend is shut down (or ran out of time): the window may close.
+    ShutdownDone(iced::window::Id),
 }
 
 /// The profile change a form asked for, carried back with its result.
@@ -332,6 +363,25 @@ pub enum Effect {
         close: Option<SessionId>,
         site: SiteId,
     },
+    /// Retries a lost session through the backend's reconnect; back as
+    /// [`Message::Reconnected`].
+    Reconnect {
+        tab: TabId,
+        session: SessionId,
+    },
+    /// Saves a workspace's tabs and folders; back as [`Message::TabsSaved`].
+    SaveTabs {
+        workspace: WorkspaceId,
+        tabs: WorkspaceTabs,
+    },
+    /// The window is closing: saves `save` (the open workspace's tabs), shuts the backend
+    /// down (engine, then sessions), all within 5 s; back as [`Message::ShutdownDone`].
+    Shutdown {
+        save: Option<(WorkspaceId, WorkspaceTabs)>,
+        window: iced::window::Id,
+    },
+    /// Closes the window, which ends the app.
+    ExitWindow(iced::window::Id),
 }
 
 impl App {
@@ -355,6 +405,8 @@ impl App {
             pointer: None,
             os_drag: false,
             dialogs: Dialogs::default(),
+            open_workspace: None,
+            closing: false,
             next_id: 0,
         }
     }
@@ -441,10 +493,10 @@ impl App {
                     self.expanded.insert(id);
                 }
             }
-            Message::OpenWorkspace(id) => return self.open_workspace(&id),
+            Message::OpenWorkspace(id) => return self.open_workspace_tabs(&id),
             Message::ConnectSite(site) => {
                 self.form = None;
-                return self.open_tabs(vec![site]);
+                return self.open_tabs(vec![(site, None)]);
             }
             Message::SiteConnected { site, result } => return self.site_connected(site, result),
             Message::SelectTab(index) => {
@@ -526,36 +578,64 @@ impl App {
                 return self.known_host_removed(tab, result);
             }
             Message::RestartSession(tab) => return self.restart_session(tab),
+            Message::SessionState {
+                session,
+                state,
+                auth,
+            } => return self.session_state(session, state, auth),
+            Message::ReconnectSession(tab) => return self.reconnect_session(tab),
+            Message::Reconnected {
+                tab,
+                session,
+                result,
+            } => return self.reconnected(tab, session, result),
+            Message::CloseWorkspace(id) => return self.close_workspace(&id),
+            Message::TabsSaved(result) => return self.tabs_saved(result),
+            Message::CloseRequested(window) => return self.close_requested(window),
+            Message::ShutdownDone(window) => return vec![Effect::ExitWindow(window)],
         }
         Vec::new()
     }
 
     /// Open workspace: a tab per site that still exists (missing ones are skipped and
-    /// shown inline in the sidebar), all connected in one batch.
-    fn open_workspace(&mut self, id: &WorkspaceId) -> Vec<Effect> {
+    /// shown inline in the sidebar), all connected in one batch. New tabs start at the
+    /// folders the workspace saved. Another workspace open until now has its tabs saved
+    /// first (they stay open).
+    fn open_workspace_tabs(&mut self, id: &WorkspaceId) -> Vec<Effect> {
         let Some(workspace) = self.workspace(id) else {
             return Vec::new();
         };
-        let sites: Vec<SiteId> = self
+        let sites: Vec<(SiteId, Option<SavedTab>)> = self
             .workspace_sites(workspace)
             .into_iter()
-            .filter_map(|row| match row {
-                WorkspaceRow::Site(site) => Some(site.id.clone()),
+            .zip(&workspace.sites)
+            .filter_map(|(row, entry)| match row {
+                WorkspaceRow::Site(site) => {
+                    Some((site.id.clone(), lifecycle::files_tab(&entry.tabs).cloned()))
+                }
                 WorkspaceRow::Missing(_) => None,
             })
             .collect();
+        let mut effects: Vec<Effect> = match self.open_workspace.replace(id.clone()) {
+            Some(previous) if &previous != id => {
+                self.save_tabs_effect(&previous).into_iter().collect()
+            }
+            _ => Vec::new(),
+        };
         self.form = None;
-        self.open_tabs(sites)
+        effects.extend(self.open_tabs(sites));
+        effects
     }
 
     /// Makes sure each site has a tab, focuses the first, and connects the sites that are
     /// neither connected nor already connecting (a failed tab is retried), as one batch.
-    /// A new tab also lists its local folder.
-    fn open_tabs(&mut self, sites: Vec<SiteId>) -> Vec<Effect> {
+    /// A new tab also lists its local folder; it starts at the saved tab's folders, if
+    /// any.
+    fn open_tabs(&mut self, sites: Vec<(SiteId, Option<SavedTab>)>) -> Vec<Effect> {
         let mut first = None;
         let mut connect = Vec::new();
         let mut listings = Vec::new();
-        for site in sites {
+        for (site, restored) in sites {
             let index = match self.tab_of(&site) {
                 Some(index) => {
                     let tab = &mut self.tabs[index];
@@ -566,7 +646,7 @@ impl App {
                     index
                 }
                 None => {
-                    let (tab, listing) = self.new_tab(site.clone());
+                    let (tab, listing) = self.new_tab(site.clone(), restored.as_ref());
                     self.tabs.push(tab);
                     listings.push(listing);
                     connect.push(site);
@@ -599,7 +679,12 @@ impl App {
             }
             return session.map(Effect::CloseSession).into_iter().collect();
         };
-        self.tabs[index].known_hosts = KnownHostsFix::Idle;
+        let tab = &mut self.tabs[index];
+        tab.known_hosts = KnownHostsFix::Idle;
+        // The session's feed tells its state and login from now on.
+        tab.conn = None;
+        tab.auth = None;
+        tab.reconnecting = false;
         match result {
             Ok(connected) => {
                 self.queue.site_restored(&site);

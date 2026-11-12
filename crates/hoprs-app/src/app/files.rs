@@ -8,11 +8,11 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use hoprs_core::{EntryKind, Error, RemoteEntry, RemotePath, SiteId};
+use hoprs_core::{ConnectionState, EntryKind, Error, RemoteEntry, RemotePath, SavedTab, SiteId};
 
 use super::actions::{Busy, PaneAction};
 use super::{App, Effect, TabState};
-use crate::backend::{SessionId, Side};
+use crate::backend::{AuthMethod, SessionId, Side};
 use crate::ui::virtual_list::ROW_HEIGHT;
 
 /// A tab's identity, stable while tabs open and close around it.
@@ -365,6 +365,12 @@ pub struct Tab {
     /// The site's `host:port` when its connect failed (the endpoint "Remove the old
     /// entry…" works on).
     pub failed_endpoint: Option<(String, u16)>,
+    /// The connected session's state, as its feed last reported it (`None` until then).
+    pub conn: Option<ConnectionState>,
+    /// How the session logged in (SSH), as its feed last reported it.
+    pub auth: Option<AuthMethod>,
+    /// The banner's "Reconnect" is in flight.
+    pub reconnecting: bool,
 }
 
 impl Tab {
@@ -424,18 +430,31 @@ impl App {
         self.next_id
     }
 
-    /// A new tab for `site`, its panes at the site's start folders (local: `local_dir`,
-    /// else home; remote: `remote_dir`, else `/`), and the local listing to run.
-    pub(super) fn new_tab(&mut self, site: SiteId) -> (Tab, Effect) {
+    /// A new tab for `site`, and the local listing to run. Its panes start at the folders
+    /// of `restored` (a workspace's saved tab), else at the site's (local: `local_dir`,
+    /// else home; remote: `remote_dir`, else `/`). A saved folder that is not a usable
+    /// absolute path falls back the same way.
+    pub(super) fn new_tab(&mut self, site: SiteId, restored: Option<&SavedTab>) -> (Tab, Effect) {
         let saved = self.site(&site);
-        let local = saved
-            .and_then(|s| s.local_dir.as_deref())
+        let remote_path = |dir: &str| RemotePath::new(dir).ok();
+        let local = restored
+            .and_then(|t| t.local_dir.as_deref())
             .and_then(local_path)
+            .or_else(|| {
+                saved
+                    .and_then(|s| s.local_dir.as_deref())
+                    .and_then(local_path)
+            })
             .or_else(|| self.home.clone())
             .unwrap_or_else(RemotePath::root);
-        let remote = saved
-            .and_then(|s| s.remote_dir.as_deref())
-            .and_then(|dir| RemotePath::new(dir).ok())
+        let remote = restored
+            .and_then(|t| t.remote_dir.as_deref())
+            .and_then(remote_path)
+            .or_else(|| {
+                saved
+                    .and_then(|s| s.remote_dir.as_deref())
+                    .and_then(remote_path)
+            })
             .unwrap_or_else(RemotePath::root);
         let id = TabId(self.next_id());
         let request_id = RequestId(self.next_id());
@@ -448,6 +467,9 @@ impl App {
             focus: Side::Local,
             known_hosts: super::KnownHostsFix::Idle,
             failed_endpoint: None,
+            conn: None,
+            auth: None,
+            reconnecting: false,
         };
         tab.local.listing = Listing::Loading;
         tab.local.request = Some(request_id);

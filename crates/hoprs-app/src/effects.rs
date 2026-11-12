@@ -3,14 +3,17 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::{Stream, StreamExt, stream};
-use hoprs_core::{Error, ErrorKind, RemotePath, Site, SiteId};
+use hoprs_core::{Error, ErrorKind, RemotePath, Site, SiteId, WorkspaceId};
 use hoprs_transfer::{Event, TransferSpec};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::app::{Effect, FileAction, Message, ProfileOp, RequestId, TabId};
-use crate::backend::{BackendApi, KnownHostEntry, PromptAnswer, PromptId, SessionId, Side};
+use crate::backend::{
+    BackendApi, KnownHostEntry, PromptAnswer, PromptId, SessionId, Side, WorkspaceTabs,
+};
 use crate::ui::site_form::PasswordChange;
 use crate::ui::{dialogs, files};
 
@@ -133,7 +136,104 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
             expected,
         } => Task::future(remove_known_host(backend, tab, host, port, expected)),
         Effect::RestartSite { close, site } => Task::run(restart_site(backend, close, site), |m| m),
+        Effect::Reconnect { tab, session } => Task::future(reconnect(backend, tab, session)),
+        Effect::SaveTabs { workspace, tabs } => Task::future(save_tabs(backend, workspace, tabs)),
+        Effect::Shutdown { save, window } => {
+            Task::perform(shutdown(backend, save, SHUTDOWN_LIMIT), move |_| {
+                Message::ShutdownDone(window)
+            })
+        }
+        Effect::ExitWindow(window) => iced::window::close(window),
     }
+}
+
+/// The longest the window waits for the backend to shut down once asked to close.
+pub const SHUTDOWN_LIMIT: Duration = Duration::from_secs(5);
+
+/// How [`shutdown`] ended.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ShutdownOutcome {
+    Done,
+    /// `limit` ran out first; what was left is abandoned (the process exits).
+    TimedOut,
+}
+
+/// The window is closing (Review Focus 5), in this order and within `limit` in all:
+/// 1. saves the open workspace's tabs (`save`), through the vault's atomic write; a
+///    failure is logged and the shutdown goes on;
+/// 2. shuts the transfer engine down, so its running items reopen paused next time;
+/// 3. closes the sessions ([`BackendApi::shutdown`] does 2 and 3).
+///
+/// The caller closes the window when this returns, whatever the outcome.
+pub async fn shutdown(
+    backend: Arc<dyn BackendApi>,
+    save: Option<(WorkspaceId, WorkspaceTabs)>,
+    limit: Duration,
+) -> ShutdownOutcome {
+    let steps = async move {
+        if let Some((workspace, tabs)) = save
+            && let Err(error) = backend.save_workspace_tabs(workspace, tabs).await
+        {
+            tracing::warn!(%error, "cannot save the workspace's tabs on close");
+        }
+        backend.shutdown().await;
+    };
+    match tokio::time::timeout(limit, steps).await {
+        Ok(()) => ShutdownOutcome::Done,
+        Err(_) => {
+            tracing::warn!(
+                ?limit,
+                "the backend did not shut down in time; closing anyway"
+            );
+            ShutdownOutcome::TimedOut
+        }
+    }
+}
+
+/// Saves a workspace's tabs and folders.
+pub async fn save_tabs(
+    backend: Arc<dyn BackendApi>,
+    workspace: WorkspaceId,
+    tabs: WorkspaceTabs,
+) -> Message {
+    Message::TabsSaved(backend.save_workspace_tabs(workspace, tabs).await)
+}
+
+/// The banner's Reconnect: the backend's reconnect of the session (`reconnect_now`, then
+/// the wait that also settles the secrets typed with "save").
+pub async fn reconnect(backend: Arc<dyn BackendApi>, tab: TabId, session: SessionId) -> Message {
+    let result = backend.reconnect(session).await;
+    Message::Reconnected {
+        tab,
+        session,
+        result,
+    }
+}
+
+/// One session's feed for its subscription: the state now, then each change, as
+/// [`Message::SessionState`] with how the session logged in. Ends when the session is
+/// closed (its watch goes away), or at once if it is already.
+pub fn session_feed(
+    backend: Arc<dyn BackendApi>,
+    session: SessionId,
+) -> impl Stream<Item = Message> + Send + 'static {
+    let watch = backend.session_state(session);
+    stream::unfold((watch, true), move |(watch, first)| {
+        let backend = backend.clone();
+        async move {
+            let mut watch = watch?;
+            if !first {
+                watch.changed().await.ok()?;
+            }
+            let state = watch.borrow_and_update().clone();
+            let message = Message::SessionState {
+                session,
+                state,
+                auth: backend.session_auth(session),
+            };
+            Some((message, (Some(watch), false)))
+        }
+    })
 }
 
 /// Delivers a dialog's answer (the effect's secret goes straight to the backend).

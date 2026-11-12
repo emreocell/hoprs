@@ -8,6 +8,7 @@ pub mod layout;
 pub mod queue;
 pub mod sidebar;
 pub mod site_form;
+pub mod status;
 pub mod strings;
 pub mod tabs;
 pub mod theme;
