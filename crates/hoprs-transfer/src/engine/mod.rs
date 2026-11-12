@@ -2,6 +2,9 @@
 //! dispatches per-site workers. `TransferEngine` is a cheap, cloneable handle.
 
 mod actor;
+mod control;
+mod dirs;
+mod recovery;
 mod worker;
 
 use std::sync::Arc;
@@ -15,7 +18,8 @@ use crate::model::{ConflictPolicy, TransferId, TransferItem, TransferSpec, Trans
 use crate::progress::ProgressUpdate;
 use crate::store::QueueStore;
 
-use actor::{Command, Control};
+use actor::Command;
+use control::Control;
 
 const EVENT_CAPACITY: usize = 1024;
 const COMMAND_CAPACITY: usize = 64;
@@ -93,7 +97,7 @@ impl TransferEngine {
     /// Items left unfinished by a previous run are recovered as `Paused`
     /// (see `QueueStore::recover`); nothing resumes automatically.
     pub fn start(mut store: QueueStore, config: EngineConfig) -> TransferEngine {
-        let recovered = actor::recover(&mut store);
+        let recovered = recovery::recover(&mut store);
         let (commands, command_rx) = mpsc::channel(COMMAND_CAPACITY);
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         tokio::spawn(actor::run(
