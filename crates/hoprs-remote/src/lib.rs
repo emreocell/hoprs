@@ -8,6 +8,7 @@ use hoprs_core::{RemoteEntry, RemotePath, Result};
 mod connection;
 #[cfg(feature = "testing")]
 mod fault;
+mod ftp;
 mod io_err;
 mod local;
 #[cfg(feature = "testing")]
@@ -17,8 +18,13 @@ pub use fault::{FaultFs, Op};
 #[cfg(feature = "testing")]
 pub use mem::MemFs;
 mod sftp;
+#[cfg(feature = "testing")]
+pub mod testing;
 
 pub use connection::Connection;
+pub use ftp::{CertProblem, FtpConfig, FtpPrompter, FtpSecurity, TransferMode};
+#[cfg(feature = "testing")]
+pub use ftp::{FtpPromptCalls, ScriptedFtpPrompter};
 pub use sftp::{SftpConfig, SftpFs};
 
 pub use local::LocalFs;

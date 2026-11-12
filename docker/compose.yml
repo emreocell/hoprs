@@ -20,5 +20,47 @@ services:
       retries: 30
       start_period: 2s
 
+  # Plain FTP + optional explicit FTPS. Host network so active mode works; loopback only.
+  ftp:
+    build:
+      context: .
+      dockerfile: vsftpd/Dockerfile
+    image: hoprs-test-vsftpd
+    command: ["plain"]
+    # vsftpd's listener crashes as PID 1 when it reaps orphaned session processes.
+    init: true
+    network_mode: host
+    tmpfs:
+      - /home/frank/small:size=1m
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "2121"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+
+  # Implicit FTPS; passive replies advertise an unreachable address (simulated NAT).
+  # FTPS_CERT=other serves an unrelated self-signed certificate instead of server.pem.
+  ftps-implicit:
+    build:
+      context: .
+      dockerfile: vsftpd/Dockerfile
+    image: hoprs-test-vsftpd
+    command: ["implicit"]
+    init: true
+    environment:
+      FTPS_CERT: ${FTPS_CERT:-server}
+    ports:
+      - "127.0.0.1:2990:990"
+      - "127.0.0.1:31000-31009:31000-31009"
+    tmpfs:
+      - /home/frank/small:size=1m
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "990"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+
 volumes:
   sshd-hostkeys:

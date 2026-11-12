@@ -1,0 +1,74 @@
+//! Helpers for the FTP Docker integration tests (`docker/compose.yml`). Test-only.
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use hoprs_core::Result;
+use hoprs_ssh::testing::docker;
+use secrecy::SecretString;
+
+use crate::ftp::session::{Control, open_control};
+use crate::ftp::{FtpConfig, FtpPrompter, FtpSecurity};
+
+/// Host port of the `ftp` service (plain FTP and explicit FTPS).
+pub const FTP_PORT: u16 = 2121;
+/// Host port of the `ftps-implicit` service.
+pub const FTPS_IMPLICIT_PORT: u16 = 2990;
+
+/// Config for `frank` on the test containers: the `ftps-implicit` service for
+/// [`FtpSecurity::ImplicitTls`], the `ftp` service otherwise. No extra roots, no pin.
+/// Keepalive every 2 s, well under vsftpd's `idle_session_timeout=8`.
+pub fn ftp_config(security: FtpSecurity) -> FtpConfig {
+    let port = match security {
+        FtpSecurity::ImplicitTls => FTPS_IMPLICIT_PORT,
+        FtpSecurity::Plain | FtpSecurity::ExplicitTls => FTP_PORT,
+    };
+    let mut cfg = FtpConfig::new("127.0.0.1", port, "frank", security);
+    cfg.password = Some(SecretString::from("frank-pass"));
+    cfg.keepalive_interval = Duration::from_secs(2);
+    cfg
+}
+
+/// Path of a file under `docker/fixtures/ftps`.
+pub fn ftps_fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docker/fixtures/ftps")
+        .join(name)
+}
+
+/// Kills every vsftpd session process in both FTP services, dropping client connections.
+/// The listener (the oldest vsftpd process) survives. Having no session is not an error.
+pub fn kill_ftp_sessions() {
+    const SCRIPT: &str = "l=$(pgrep -o -x vsftpd); for p in $(pgrep -x vsftpd); do \
+                          [ \"$p\" = \"$l\" ] || kill -9 \"$p\" 2>/dev/null; done; true";
+    for service in ["ftp", "ftps-implicit"] {
+        docker(&["exec", "-T", service, "sh", "-c", SCRIPT]);
+    }
+}
+
+/// A control connection opened by `open_control`, for tests that check the login itself.
+pub struct TestControl(Control);
+
+/// Runs the crate's `open_control`.
+pub async fn open_test_control(cfg: &FtpConfig, prompter: &dyn FtpPrompter) -> Result<TestControl> {
+    open_control(cfg, prompter).await.map(TestControl)
+}
+
+impl TestControl {
+    pub fn has_mfmt(&self) -> bool {
+        self.0.has_mfmt
+    }
+
+    pub fn has_mlsd(&self) -> bool {
+        self.0.has_mlsd
+    }
+
+    pub fn has_utf8(&self) -> bool {
+        self.0.has_utf8
+    }
+
+    /// Sends a raw command and returns the reply's code and text, whatever the code.
+    pub async fn quote(&mut self, command: &str) -> Result<(u32, String)> {
+        crate::ftp::session::quote(&mut self.0.stream, command).await
+    }
+}
