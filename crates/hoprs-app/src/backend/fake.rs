@@ -42,8 +42,8 @@ use secrecy::SecretString;
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    BackendApi, BrokerEvent, ConnectError, ConnectResult, Connected, ControlOp, ProfileSnapshot,
-    PromptAnswer, PromptId, SessionId, Side,
+    BackendApi, BrokerEvent, ConnectError, ConnectResult, Connected, ControlOp, DeleteTarget,
+    ProfileSnapshot, PromptAnswer, PromptId, SessionId, Side,
 };
 
 /// See the module docs.
@@ -285,6 +285,20 @@ impl FakeBackend {
         }
     }
 
+    /// The filesystem of one side: the shared local `MemFs`, or the remote one of the
+    /// session's site.
+    fn fs(&self, session: Option<SessionId>, side: Side) -> Result<MemFs> {
+        match side {
+            Side::Local => Ok(self.local_fs()),
+            Side::Remote => {
+                let site = session
+                    .and_then(|session| self.session_site(session))
+                    .ok_or_else(|| Self::not_found("Unknown session"))?;
+                Ok(self.remote_fs(&site))
+            }
+        }
+    }
+
     fn not_found(what: &str) -> Error {
         Error::new(ErrorKind::NotFound, what.to_owned())
     }
@@ -438,16 +452,42 @@ impl BackendApi for FakeBackend {
         side: Side,
         path: RemotePath,
     ) -> Result<Vec<RemoteEntry>> {
-        let fs = match side {
-            Side::Local => self.local_fs(),
-            Side::Remote => {
-                let site = session
-                    .and_then(|session| self.session_site(session))
-                    .ok_or_else(|| Self::not_found("Unknown session"))?;
-                self.remote_fs(&site)
-            }
-        };
-        fs.list(&path).await
+        self.fs(session, side)?.list(&path).await
+    }
+
+    async fn mkdir(&self, session: Option<SessionId>, side: Side, path: RemotePath) -> Result<()> {
+        self.fs(session, side)?.mkdir(&path).await
+    }
+
+    async fn rename(
+        &self,
+        session: Option<SessionId>,
+        side: Side,
+        from: RemotePath,
+        to: RemotePath,
+    ) -> Result<()> {
+        self.fs(session, side)?.rename(&from, &to).await
+    }
+
+    async fn delete(
+        &self,
+        session: Option<SessionId>,
+        side: Side,
+        targets: Vec<DeleteTarget>,
+        progress: mpsc::UnboundedSender<u64>,
+    ) -> Result<u64> {
+        let fs = self.fs(session, side)?;
+        super::ops::delete_all(&fs, targets, &progress).await
+    }
+
+    async fn chmod(
+        &self,
+        session: Option<SessionId>,
+        side: Side,
+        path: RemotePath,
+        mode: u32,
+    ) -> Result<()> {
+        self.fs(session, side)?.chmod(&path, mode).await
     }
 
     async fn enqueue(&self, spec: TransferSpec) -> Result<TransferId> {

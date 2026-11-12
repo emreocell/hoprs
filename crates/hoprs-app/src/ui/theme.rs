@@ -407,7 +407,13 @@ pub fn header_cell(_: &Theme, status: button::Status) -> button::Style {
 }
 
 /// A file row: hovered on `paper_2`, selected on the accent wash (mockup `tbody tr`).
-pub fn file_row(selected: bool, hovered: bool) -> impl Fn(&Theme) -> container::Style {
+/// The keyboard cursor of the focused pane gets a 1 px `muted` outline, which shows on
+/// selected and plain rows alike.
+pub fn file_row(
+    selected: bool,
+    hovered: bool,
+    cursor: bool,
+) -> impl Fn(&Theme) -> container::Style {
     move |_| {
         let p = palette();
         let (background, text_color) = match (selected, hovered) {
@@ -418,8 +424,34 @@ pub fn file_row(selected: bool, hovered: bool) -> impl Fn(&Theme) -> container::
         container::Style {
             text_color: Some(text_color),
             background: background.map(Background::Color),
+            border: if cursor {
+                Border {
+                    color: p.muted,
+                    width: HAIRLINE,
+                    radius: Radius::default(),
+                }
+            } else {
+                Border::default()
+            },
             ..container::Style::default()
         }
+    }
+}
+
+/// The 1 px line on top of a pane: the accent on the focused pane, the ground on the
+/// other (so both keep the same height).
+pub fn pane_focus(focused: bool) -> impl Fn(&Theme) -> container::Style {
+    move |_| {
+        let p = palette();
+        surface(if focused { p.accent } else { p.paper })
+    }
+}
+
+/// The thin bars above a pane's table (error, confirmation, permissions): `paper_2`.
+pub fn pane_bar(_: &Theme) -> container::Style {
+    container::Style {
+        text_color: Some(palette().ink_2),
+        ..surface(palette().paper_2)
     }
 }
 

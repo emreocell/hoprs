@@ -8,6 +8,7 @@ pub mod broker;
 #[cfg(test)]
 pub mod fake;
 pub mod mapping;
+pub mod ops;
 pub mod sessions;
 pub mod vault;
 
@@ -16,6 +17,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use hoprs_core::{Error, RemoteEntry, RemotePath, Result, Site, SiteId, Workspace, WorkspaceId};
+use hoprs_remote::RemoteFs;
 use hoprs_transfer::{
     EngineConfig, QueueStore, Resolution, TransferEngine, TransferId, TransferSpec,
 };
@@ -24,6 +26,7 @@ use secrecy::SecretString;
 use tokio::sync::mpsc;
 
 pub use broker::{BrokerEvent, PromptAnswer, PromptBroker, PromptId};
+pub use ops::DeleteTarget;
 pub use sessions::{
     ConnectError, ConnectResult, Connected, SessionConfig, SessionId, SessionManager,
 };
@@ -90,6 +93,31 @@ pub trait BackendApi: Send + Sync {
         side: Side,
         path: RemotePath,
     ) -> Result<Vec<RemoteEntry>>;
+    /// Creates the folder `path` (its parent must exist) on the side's filesystem.
+    async fn mkdir(&self, session: Option<SessionId>, side: Side, path: RemotePath) -> Result<()>;
+    async fn rename(
+        &self,
+        session: Option<SessionId>,
+        side: Side,
+        from: RemotePath,
+        to: RemotePath,
+    ) -> Result<()>;
+    /// Deletes `targets`, folders with everything in them (see [`ops::delete_all`]),
+    /// sending the running count of removed items on `progress`. Returns the count.
+    async fn delete(
+        &self,
+        session: Option<SessionId>,
+        side: Side,
+        targets: Vec<DeleteTarget>,
+        progress: mpsc::UnboundedSender<u64>,
+    ) -> Result<u64>;
+    async fn chmod(
+        &self,
+        session: Option<SessionId>,
+        side: Side,
+        path: RemotePath,
+        mode: u32,
+    ) -> Result<()>;
 
     async fn enqueue(&self, spec: TransferSpec) -> Result<TransferId>;
     async fn control(&self, id: TransferId, op: ControlOp) -> Result<()>;
@@ -161,6 +189,18 @@ impl Backend {
             sessions,
             broker,
         })
+    }
+}
+
+impl Backend {
+    /// The filesystem of one side: the local disk, or the remote side of `session` (an
+    /// error without one).
+    fn fs(&self, session: Option<SessionId>, side: Side) -> Result<Arc<dyn RemoteFs>> {
+        match (side, session) {
+            (Side::Local, _) => Ok(self.sessions.local()),
+            (Side::Remote, Some(session)) => self.sessions.remote(session),
+            (Side::Remote, None) => Err(not_connected()),
+        }
     }
 }
 
@@ -247,12 +287,42 @@ impl BackendApi for Backend {
         side: Side,
         path: RemotePath,
     ) -> Result<Vec<RemoteEntry>> {
-        let fs = match (side, session) {
-            (Side::Local, _) => self.sessions.local(),
-            (Side::Remote, Some(session)) => self.sessions.remote(session)?,
-            (Side::Remote, None) => return Err(not_connected()),
-        };
-        fs.list(&path).await
+        self.fs(session, side)?.list(&path).await
+    }
+
+    async fn mkdir(&self, session: Option<SessionId>, side: Side, path: RemotePath) -> Result<()> {
+        self.fs(session, side)?.mkdir(&path).await
+    }
+
+    async fn rename(
+        &self,
+        session: Option<SessionId>,
+        side: Side,
+        from: RemotePath,
+        to: RemotePath,
+    ) -> Result<()> {
+        self.fs(session, side)?.rename(&from, &to).await
+    }
+
+    async fn delete(
+        &self,
+        session: Option<SessionId>,
+        side: Side,
+        targets: Vec<DeleteTarget>,
+        progress: mpsc::UnboundedSender<u64>,
+    ) -> Result<u64> {
+        let fs = self.fs(session, side)?;
+        ops::delete_all(fs.as_ref(), targets, &progress).await
+    }
+
+    async fn chmod(
+        &self,
+        session: Option<SessionId>,
+        side: Side,
+        path: RemotePath,
+        mode: u32,
+    ) -> Result<()> {
+        self.fs(session, side)?.chmod(&path, mode).await
     }
 
     async fn enqueue(&self, spec: TransferSpec) -> Result<TransferId> {
@@ -393,6 +463,73 @@ mod tests {
         let listed = backend.list(None, Side::Local, path).await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].name, "a.txt");
+    }
+
+    /// The file actions reach the local disk without a session; the remote side needs
+    /// one.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_file_actions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let backend = open(dir.path());
+        let local = tempfile::tempdir().unwrap();
+        let root = RemotePath::new(local.path().to_str().unwrap()).unwrap();
+        let disk = |name: &str| local.path().join(name);
+
+        backend
+            .mkdir(None, Side::Local, root.join("new"))
+            .await
+            .unwrap();
+        assert!(disk("new").is_dir());
+        std::fs::write(disk("new").join("a.txt"), b"a").unwrap();
+        backend
+            .rename(None, Side::Local, root.join("new"), root.join("old"))
+            .await
+            .unwrap();
+        assert!(disk("old").join("a.txt").is_file());
+        backend
+            .chmod(None, Side::Local, root.join("old").join("a.txt"), 0o600)
+            .await
+            .unwrap();
+        let mode = std::fs::metadata(disk("old").join("a.txt"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        // A link to a folder is removed as a link; its target stays.
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("keep.txt"), b"k").unwrap();
+        std::os::unix::fs::symlink(outside.path(), disk("old").join("link")).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let removed = backend
+            .delete(
+                None,
+                Side::Local,
+                vec![DeleteTarget {
+                    path: root.join("old"),
+                    kind: hoprs_core::EntryKind::Dir,
+                }],
+                tx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(removed, 3, "a.txt, link, old/");
+        assert!(!disk("old").exists());
+        assert!(outside.path().join("keep.txt").is_file());
+        let mut last = 0;
+        while let Some(n) = rx.recv().await {
+            last = n;
+        }
+        assert_eq!(last, 3);
+
+        let err = backend
+            .mkdir(None, Side::Remote, root.join("x"))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::NotFound);
     }
 
     #[tokio::test]

@@ -28,8 +28,10 @@ pub enum Form {
     Workspace(WorkspaceForm),
 }
 
+pub mod actions;
 pub mod files;
 
+pub use actions::FileAction;
 pub use files::{FileKey, Mods, PaneMsg, RequestId, Tab, TabId};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -125,12 +127,32 @@ pub enum Message {
         request_id: RequestId,
         result: Result<Vec<RemoteEntry>, Error>,
     },
-    /// A key no widget took, for the focused pane.
+    /// A key from the keyboard subscription. Unless it is Escape, it reaches the panes
+    /// (as [`Message::Key`]) only if no text field has the focus.
+    KeyPressed {
+        key: FileKey,
+        shift: bool,
+    },
+    /// A key for the focused pane: no widget took it and no text field has the focus.
     Key {
         key: FileKey,
         shift: bool,
     },
     Modifiers(Mods),
+    /// A delete's running count of removed items.
+    FileOpProgress {
+        tab: TabId,
+        side: Side,
+        op: RequestId,
+        done: u64,
+    },
+    /// A file operation finished; dropped unless it is the pane's operation in flight.
+    FileOpDone {
+        tab: TabId,
+        side: Side,
+        op: RequestId,
+        result: Result<(), Error>,
+    },
 }
 
 /// The profile change a form asked for, carried back with its result.
@@ -176,6 +198,29 @@ pub enum Effect {
         tab: TabId,
         side: Side,
         offset_y: f32,
+    },
+    /// A new folder, rename, delete or chmod in one pane; progress comes back as
+    /// [`Message::FileOpProgress`], the end as [`Message::FileOpDone`]. The remote side
+    /// needs `session`.
+    FileOp {
+        tab: TabId,
+        side: Side,
+        op: RequestId,
+        session: Option<SessionId>,
+        action: FileAction,
+    },
+    /// Focuses the pane's inline name editor and selects its first `select_end`
+    /// characters.
+    FocusEdit {
+        tab: TabId,
+        side: Side,
+        select_end: usize,
+    },
+    /// Sends [`Message::Key`] unless a text field has the focus (the sidebar filter keeps
+    /// its arrows, Tab, F2, F7…).
+    KeyUnlessTyping {
+        key: FileKey,
+        shift: bool,
     },
 }
 
@@ -321,8 +366,21 @@ impl App {
                 request_id,
                 result,
             } => return self.listed(tab, side, request_id, result),
+            Message::KeyPressed { key, shift } => return self.key_pressed(key, shift),
             Message::Key { key, shift } => return self.file_key(key, shift),
             Message::Modifiers(mods) => self.mods = mods,
+            Message::FileOpProgress {
+                tab,
+                side,
+                op,
+                done,
+            } => return self.file_op_progress(tab, side, op, done),
+            Message::FileOpDone {
+                tab,
+                side,
+                op,
+                result,
+            } => return self.file_op_done(tab, side, op, result),
         }
         Vec::new()
     }

@@ -8,7 +8,7 @@ use futures_util::{Stream, StreamExt, stream};
 use hoprs_core::{Error, ErrorKind, RemotePath, Site, SiteId};
 use tokio::sync::mpsc;
 
-use crate::app::{Effect, Message, ProfileOp, RequestId, TabId};
+use crate::app::{Effect, FileAction, Message, ProfileOp, RequestId, TabId};
 use crate::backend::{BackendApi, SessionId, Side};
 use crate::ui::files;
 use crate::ui::site_form::PasswordChange;
@@ -76,7 +76,100 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
                 y: Some(offset_y),
             },
         ),
+        // Never cancelled either: the result finds its pane by `op`, or is dropped.
+        Effect::FileOp {
+            tab,
+            side,
+            op,
+            session,
+            action,
+        } => Task::run(file_op(backend, tab, side, op, session, action), |m| m),
+        Effect::FocusEdit {
+            tab,
+            side,
+            select_end,
+        } => {
+            let id = files::edit_id(tab, side);
+            iced::widget::operation::focus(id.clone())
+                .chain(iced::widget::operation::select_range(id, 0, select_end))
+        }
+        Effect::KeyUnlessTyping { key, shift } => {
+            iced::advanced::widget::operate(files::text_focused()).then(move |typing| {
+                if typing {
+                    Task::none()
+                } else {
+                    Task::done(Message::Key { key, shift })
+                }
+            })
+        }
     }
+}
+
+/// Runs one file operation: a delete's progress as it goes, then
+/// [`Message::FileOpDone`] (last).
+pub fn file_op(
+    backend: Arc<dyn BackendApi>,
+    tab: TabId,
+    side: Side,
+    op: RequestId,
+    session: Option<SessionId>,
+    action: FileAction,
+) -> impl Stream<Item = Message> + Send + 'static {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let done = async move {
+        let result = match action {
+            FileAction::Mkdir(path) => backend.mkdir(session, side, path).await,
+            FileAction::Rename { from, to } => backend.rename(session, side, from, to).await,
+            FileAction::Delete(targets) => {
+                backend.delete(session, side, targets, tx).await.map(|_| ())
+            }
+            FileAction::Chmod { paths, mode } => {
+                chmod_all(&*backend, session, side, paths, mode).await
+            }
+        };
+        Message::FileOpDone {
+            tab,
+            side,
+            op,
+            result,
+        }
+    };
+    // The progress sender lives in the operation, so the progress stream ends with it,
+    // before the final message.
+    let progress = stream::unfold(rx, move |mut rx| async move {
+        rx.recv().await.map(|done| {
+            (
+                Message::FileOpProgress {
+                    tab,
+                    side,
+                    op,
+                    done,
+                },
+                rx,
+            )
+        })
+    });
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    let driver = stream::once(async move {
+        let _ = result_tx.send(done.await);
+    })
+    .filter_map(|()| std::future::ready(None));
+    let last = stream::once(result_rx).filter_map(|r| std::future::ready(r.ok()));
+    stream::select(driver, progress.chain(last))
+}
+
+/// The same mode on each path, stopping at the first failure.
+async fn chmod_all(
+    backend: &dyn BackendApi,
+    session: Option<SessionId>,
+    side: Side,
+    paths: Vec<RemotePath>,
+    mode: u32,
+) -> Result<(), Error> {
+    for path in paths {
+        backend.chmod(session, side, path, mode).await?;
+    }
+    Ok(())
 }
 
 /// Saves the site, then stores or forgets its password (the site must exist first).

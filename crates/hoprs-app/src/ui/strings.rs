@@ -158,3 +158,60 @@ pub const NO_TRANSFERS: &str = "No transfers";
 
 // Status bar.
 pub const NOT_CONNECTED: &str = "Not connected";
+
+// File actions.
+pub const NEW_FOLDER: &str = "New folder";
+pub const RENAME: &str = "Rename";
+pub const PERMISSIONS: &str = "Permissions…";
+pub const KEY_NEW_FOLDER: &str = "F7";
+pub const KEY_RENAME: &str = "F2";
+pub const KEY_DELETE: &str = "Del";
+/// The name a new folder starts with.
+pub const NEW_FOLDER_NAME: &str = "New folder";
+pub const NAME_EMPTY: &str = "The name can't be empty";
+pub const NAME_INVALID: &str = "The name can't contain / or be . or ..";
+pub const NAME_TAKEN: &str = "Something with this name is already here";
+pub const DISMISS: &str = "Dismiss";
+pub const CREATING_FOLDER: &str = "Creating folder…";
+pub const RENAMING: &str = "Renaming…";
+pub const CHANGING_PERMISSIONS: &str = "Changing permissions…";
+pub const DELETE_FOLDERS_NOTE: &str = "Folders are deleted with everything in them.";
+pub const PERMISSIONS_TITLE: &str = "Permissions";
+pub const PERM_OWNER: &str = "Owner";
+pub const PERM_GROUP: &str = "Group";
+pub const PERM_OTHERS: &str = "Others";
+pub const PERM_READ: &str = "Read";
+pub const PERM_WRITE: &str = "Write";
+pub const PERM_EXECUTE: &str = "Execute";
+pub const PERM_OCTAL: &str = "Octal";
+pub const OCTAL_INVALID: &str = "Three or four digits from 0 to 7";
+pub const APPLY: &str = "Apply";
+/// How many names a confirmation lists before "and N more".
+pub const LISTED_NAMES: usize = 5;
+
+/// "New folder 2".
+pub fn numbered(name: &str, n: u32) -> String {
+    format!("{name} {n}")
+}
+
+/// "Delete report.pdf?", "Delete 3 items?".
+pub fn delete_question(names: &[&str]) -> String {
+    match names {
+        [one] => format!("Delete {one}?"),
+        many => format!("Delete {} items?", many.len()),
+    }
+}
+
+/// "and 4 more".
+pub fn and_more(n: usize) -> String {
+    format!("and {n} more")
+}
+
+/// "Deleting… 12 items".
+pub fn deleting(done: u64) -> String {
+    match done {
+        0 => "Deleting…".to_owned(),
+        1 => "Deleting… 1 item".to_owned(),
+        n => format!("Deleting… {n} items"),
+    }
+}

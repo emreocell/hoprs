@@ -3,17 +3,20 @@
 //! loading, empty, error or not-connected state.
 
 use hoprs_core::{EntryKind, Error, RemotePath};
+use iced::advanced::widget::Operation;
+use iced::advanced::widget::operation::{Focusable, Outcome};
 use iced::event::Status;
 use iced::keyboard::{self, Key, key::Named};
 use iced::widget::{Id, button, column, container, mouse_area, row, rule, scrollable, space, text};
-use iced::{Alignment, Element, Event, Length, Padding, window};
+use iced::{Alignment, Element, Event, Length, Padding, Rectangle, window};
 
+use crate::app::actions::{EditKind, PaneAction};
 use crate::app::files::{Pane, PaneStatus, Row, SortKey};
 use crate::app::{App, FileKey, Message, Mods, PaneMsg, Tab, TabId, TabState};
 use crate::backend::Side;
 use crate::ui::theme::{self, palette};
 use crate::ui::virtual_list::{self, ROW_HEIGHT};
-use crate::ui::{format, strings};
+use crate::ui::{file_actions, format, strings};
 
 /// The path bar (mockup `.path`: 38 px).
 const PATH_HEIGHT: f32 = 38.0;
@@ -71,8 +74,20 @@ pub fn scroll_id(tab: TabId, side: Side) -> Id {
     Id::from(format!("files-{}-{side}", tab.0))
 }
 
+/// The id of a pane's inline name editor, for [`crate::app::Effect::FocusEdit`].
+pub fn edit_id(tab: TabId, side: Side) -> Id {
+    let side = match side {
+        Side::Local => "local",
+        Side::Remote => "remote",
+    };
+    Id::from(format!("edit-{}-{side}", tab.0))
+}
+
 /// The keyboard for the panes: the modifiers always (clicks read them), the keys only
-/// when no widget took them (a focused text field keeps its arrows).
+/// when no widget took them. Escape comes through even when a text field took it (to let
+/// go of the focus), since it also closes the pane's editor. A text field that has the
+/// focus but ignores a key (arrows, Tab, F2, F7…) is caught later, by
+/// [`crate::app::Effect::KeyUnlessTyping`].
 pub fn key_message(event: Event, status: Status, _: window::Id) -> Option<Message> {
     let Event::Keyboard(event) = event else {
         return None;
@@ -86,24 +101,57 @@ pub fn key_message(event: Event, status: Status, _: window::Id) -> Option<Messag
             key: Key::Named(named),
             modifiers,
             ..
-        } if status == Status::Ignored => {
-            let key = match named {
-                Named::ArrowUp => FileKey::Up,
-                Named::ArrowDown => FileKey::Down,
-                Named::Home => FileKey::Home,
-                Named::End => FileKey::End,
-                Named::Enter => FileKey::Enter,
-                Named::Backspace => FileKey::Back,
-                Named::Tab => FileKey::SwitchPane,
-                _ => return None,
-            };
-            Some(Message::Key {
+        } => {
+            let key = file_key(named)?;
+            if status == Status::Captured && key != FileKey::Escape {
+                return None;
+            }
+            Some(Message::KeyPressed {
                 key,
                 shift: modifiers.shift(),
             })
         }
         _ => None,
     }
+}
+
+/// The pane key a named key stands for.
+fn file_key(named: Named) -> Option<FileKey> {
+    Some(match named {
+        Named::ArrowUp => FileKey::Up,
+        Named::ArrowDown => FileKey::Down,
+        Named::Home => FileKey::Home,
+        Named::End => FileKey::End,
+        Named::Enter => FileKey::Enter,
+        Named::Backspace => FileKey::Back,
+        Named::Tab => FileKey::SwitchPane,
+        Named::F7 => FileKey::NewFolder,
+        Named::F2 => FileKey::Rename,
+        Named::Delete => FileKey::Delete,
+        Named::Escape => FileKey::Escape,
+        _ => return None,
+    })
+}
+
+/// A widget operation that finds out whether any text field has the focus.
+pub fn text_focused() -> impl Operation<bool> {
+    struct TextFocused(bool);
+
+    impl Operation<bool> for TextFocused {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<bool>)) {
+            operate(self);
+        }
+
+        fn focusable(&mut self, _id: Option<&Id>, _bounds: Rectangle, state: &mut dyn Focusable) {
+            self.0 |= state.is_focused();
+        }
+
+        fn finish(&self) -> Outcome<bool> {
+            Outcome::Some(self.0)
+        }
+    }
+
+    TextFocused(false)
 }
 
 /// The tab's two panes.
@@ -138,28 +186,42 @@ fn pane<'a>(
         Side::Local => app.home.as_ref(),
         Side::Remote => None,
     };
+    let focused = tab.focus == side;
     let body: Element<'a, Message> = match tab.pane_status(side) {
         PaneStatus::Loading => skeleton(side),
-        PaneStatus::Full => list(tab.id, side, pane, this_year),
+        PaneStatus::Full => list(tab.id, side, pane, this_year, focused),
         PaneStatus::Empty => column![
             // `..` stays reachable from an empty folder.
             pane.has_up()
-                .then(|| file_row(tab.id, side, pane, 0, this_year)),
+                .then(|| file_row(tab.id, side, pane, 0, this_year, focused)),
             centered(text(strings::EMPTY_FOLDER).color(palette().muted).into()),
         ]
         .into(),
         PaneStatus::Failed(error) => failed(error, msg(PaneMsg::Retry)),
         PaneStatus::NotConnected => not_connected(app, tab),
     };
-    let content = column![
+    let mut content = column![
+        // The focused pane (the one the keyboard drives) has the accent line on top.
+        container(space())
+            .width(Length::Fill)
+            .height(theme::HAIRLINE)
+            .style(theme::pane_focus(focused)),
         path_bar(place, pane, home, msg),
         hrule(),
-        header(side, pane, msg),
+        file_actions::toolbar(tab, side),
         hrule(),
-        body,
-    ]
-    .width(Length::FillPortion(1))
-    .height(Length::Fill);
+    ];
+    for bar in file_actions::bars(tab.id, side, pane) {
+        content = content.push(bar).push(hrule());
+    }
+    content = content.push(header(side, pane, msg)).push(hrule());
+    if let Some(row) = file_actions::new_folder_row(tab.id, side, pane) {
+        content = content.push(row);
+    }
+    let content = content
+        .push(body)
+        .width(Length::FillPortion(1))
+        .height(Length::Fill);
     // A press anywhere focuses the pane for the keyboard, without taking the click.
     mouse_area(content).on_release(msg(PaneMsg::Focus)).into()
 }
@@ -300,7 +362,13 @@ fn header<'a>(side: Side, pane: &Pane, msg: impl Fn(PaneMsg) -> Message) -> Elem
     cells.into()
 }
 
-fn list<'a>(tab: TabId, side: Side, pane: &'a Pane, this_year: i32) -> Element<'a, Message> {
+fn list<'a>(
+    tab: TabId,
+    side: Side,
+    pane: &'a Pane,
+    this_year: i32,
+    focused: bool,
+) -> Element<'a, Message> {
     virtual_list::view(
         scroll_id(tab, side),
         pane.row_count(),
@@ -313,17 +381,19 @@ fn list<'a>(tab: TabId, side: Side, pane: &'a Pane, this_year: i32) -> Element<'
                 viewport_h: viewport.bounds().height,
             },
         },
-        move |i| file_row(tab, side, pane, i, this_year),
+        move |i| file_row(tab, side, pane, i, this_year, focused),
     )
 }
 
-/// One 30 px row: click selects, double click enters, hover highlights.
+/// One 30 px row: click selects, double click enters, hover highlights. The entry being
+/// renamed shows the name editor in its name cell.
 fn file_row<'a>(
     tab: TabId,
     side: Side,
     pane: &'a Pane,
     index: usize,
     this_year: i32,
+    focused: bool,
 ) -> Element<'a, Message> {
     let p = palette();
     let msg = move |msg: PaneMsg| Message::Pane { tab, side, msg };
@@ -371,6 +441,12 @@ fn file_row<'a>(
         }
     };
     let up = matches!(pane.row(index), Some(Row::Up));
+    let renaming = match (&pane.action, pane.row(index)) {
+        (Some(PaneAction::Edit(edit)), Some(Row::Entry(entry))) => {
+            matches!(&edit.kind, EditKind::Rename { from } if *from == entry.name).then_some(edit)
+        }
+        _ => None,
+    };
     // Folders: medium weight in ink, with a muted "/" (mockup `.dir::after`).
     let mut name_cell = row![
         text(name)
@@ -397,8 +473,18 @@ fn file_row<'a>(
             .size(theme::TEXT_SM)
             .wrapping(text::Wrapping::None)
     };
+    let name_cell: Element<'a, Message> = match renaming {
+        // The editor fills the name column; its own padding lines the text up.
+        Some(edit) => container(file_actions::name_editor(tab, side, edit))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(Padding::ZERO.left(theme::SPACE_XS).right(theme::SPACE_XS))
+            .align_y(Alignment::Center)
+            .into(),
+        None => cell(name_cell.into(), Length::Fill, false).into(),
+    };
     let mut cells = row![
-        cell(name_cell.into(), Length::Fill, false),
+        name_cell,
         cell(size_text.into(), Length::Fixed(SIZE_WIDTH), true),
         cell(data(modified).into(), Length::Fixed(MODIFIED_WIDTH), false),
     ];
@@ -414,11 +500,12 @@ fn file_row<'a>(
     }
     let selected = pane.selection.contains(index);
     let hovered = pane.hovered == Some(index);
+    let cursor = focused && pane.selection.cursor == Some(index);
     mouse_area(
         container(cells)
             .width(Length::Fill)
             .height(ROW_HEIGHT)
-            .style(theme::file_row(selected, hovered)),
+            .style(theme::file_row(selected, hovered, cursor)),
     )
     .on_press(msg(PaneMsg::Click(index)))
     .on_double_click(msg(PaneMsg::Open(index)))
@@ -552,6 +639,51 @@ mod tests {
         list.iter()
             .map(|(a, b)| ((*a).to_owned(), (*b).to_owned()))
             .collect()
+    }
+
+    fn press(named: Named) -> Event {
+        Event::Keyboard(keyboard::Event::KeyPressed {
+            key: Key::Named(named),
+            modified_key: Key::Named(named),
+            physical_key: keyboard::key::Physical::Unidentified(
+                keyboard::key::NativeCode::Unidentified,
+            ),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::default(),
+            text: None,
+            repeat: false,
+        })
+    }
+
+    /// Keys reach the panes only when no widget took them, except Escape; F2, F7 and Del
+    /// are the action keys.
+    #[test]
+    fn keys_taken_by_a_text_field_stay_there() {
+        let id = window::Id::unique();
+        let pressed = |named, status| match key_message(press(named), status, id) {
+            Some(Message::KeyPressed { key, .. }) => Some(key),
+            None => None,
+            other => panic!("{other:?}"),
+        };
+        for (named, key) in [
+            (Named::F7, FileKey::NewFolder),
+            (Named::F2, FileKey::Rename),
+            (Named::Delete, FileKey::Delete),
+            (Named::ArrowDown, FileKey::Down),
+            (Named::Escape, FileKey::Escape),
+        ] {
+            assert_eq!(pressed(named, Status::Ignored), Some(key), "{named:?}");
+        }
+        // A text field took them (Delete edits the text, Enter submits, …).
+        for named in [Named::Delete, Named::Enter, Named::Home, Named::Backspace] {
+            assert_eq!(pressed(named, Status::Captured), None, "{named:?}");
+        }
+        // Escape always comes through: it also closes the pane's editor.
+        assert_eq!(
+            pressed(Named::Escape, Status::Captured),
+            Some(FileKey::Escape)
+        );
+        assert_eq!(pressed(Named::F5, Status::Ignored), None);
     }
 
     #[test]

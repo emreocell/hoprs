@@ -10,6 +10,7 @@ use std::collections::{BTreeSet, HashSet};
 
 use hoprs_core::{EntryKind, Error, RemoteEntry, RemotePath, SiteId};
 
+use super::actions::{Busy, PaneAction};
 use super::{App, Effect, TabState};
 use crate::backend::{SessionId, Side};
 use crate::ui::virtual_list::ROW_HEIGHT;
@@ -132,6 +133,14 @@ pub struct Pane {
     pub viewport_h: f32,
     /// The request whose result this pane waits for.
     pub request: Option<RequestId>,
+    /// The inline editor, delete confirmation or permissions dialog open, if any.
+    pub action: Option<PaneAction>,
+    /// The file operation in flight, if any.
+    pub busy: Option<Busy>,
+    /// The last operation's failure, inline above the table until dismissed.
+    pub action_error: Option<Error>,
+    /// The entry to select once the folder is listed again (a new or renamed one).
+    pub select_after: Option<String>,
 }
 
 impl Pane {
@@ -146,6 +155,10 @@ impl Pane {
             offset_y: 0.0,
             viewport_h: 0.0,
             request: None,
+            action: None,
+            busy: None,
+            action_error: None,
+            select_after: None,
         }
     }
 
@@ -213,7 +226,7 @@ impl Pane {
     }
 
     /// The offset that brings `row` into view, if it is not.
-    fn scroll_to_show(&self, row: usize) -> Option<f32> {
+    pub(super) fn scroll_to_show(&self, row: usize) -> Option<f32> {
         if self.viewport_h <= 0.0 {
             return None;
         }
@@ -287,6 +300,23 @@ pub enum PaneMsg {
     Hover(usize),
     Unhover(usize),
     Retry,
+    /// The toolbar.
+    NewFolder,
+    Rename,
+    Delete,
+    Permissions,
+    /// The inline name editor.
+    EditChanged(String),
+    EditCommit,
+    /// Cancel / Keep in the editor, confirmation or dialog.
+    CancelAction,
+    ConfirmDelete,
+    /// A box of the rwx grid (its bit).
+    PermissionToggled(u32),
+    PermissionOctal(String),
+    ApplyPermissions,
+    /// "Dismiss" on the error bar.
+    DismissError,
 }
 
 /// The keys the focused pane handles.
@@ -302,6 +332,14 @@ pub enum FileKey {
     Back,
     /// Tab: focus the other pane.
     SwitchPane,
+    /// F7.
+    NewFolder,
+    /// F2.
+    Rename,
+    /// Del.
+    Delete,
+    /// Closes the inline editor, confirmation or dialog (or the error bar).
+    Escape,
 }
 
 /// One file tab: a site, its connection and its two panes.
@@ -368,7 +406,7 @@ impl App {
         self.tabs.iter().position(|t| t.id == id)
     }
 
-    fn next_id(&mut self) -> u64 {
+    pub(super) fn next_id(&mut self) -> u64 {
         self.next_id += 1;
         self.next_id
     }
@@ -409,49 +447,54 @@ impl App {
     }
 
     /// Lists the pane's folder again, superseding any listing in flight. The remote side
-    /// waits for its session.
+    /// waits for its session. The list starts again from the top: the skeleton replaces
+    /// it meanwhile, so the scrollable that comes back is at 0 too.
     pub(super) fn request_listing(&mut self, index: usize, side: Side) -> Vec<Effect> {
         let request_id = RequestId(self.next_id());
         let tab = &mut self.tabs[index];
         let (tab_id, session) = (tab.id, tab.session());
         let pane = tab.pane_mut(side);
+        pane.offset_y = 0.0;
+        let scroll = Effect::ScrollPane {
+            tab: tab_id,
+            side,
+            offset_y: 0.0,
+        };
         let session = match side {
             Side::Local => None,
             Side::Remote if session.is_none() => {
                 pane.listing = Listing::Idle;
                 pane.request = None;
-                return Vec::new();
+                return vec![scroll];
             }
             Side::Remote => session,
         };
         pane.listing = Listing::Loading;
         pane.request = Some(request_id);
-        vec![Effect::List {
-            tab: tab_id,
-            side,
-            request_id,
-            session,
-            path: pane.path.clone(),
-        }]
+        vec![
+            Effect::List {
+                tab: tab_id,
+                side,
+                request_id,
+                session,
+                path: pane.path.clone(),
+            },
+            scroll,
+        ]
     }
 
-    /// Goes to `path`: the old entries go, the list scrolls to the top.
+    /// Goes to `path`: the old entries go, with any editor or dialog about them, and the
+    /// list scrolls to the top.
     fn navigate(&mut self, index: usize, side: Side, path: RemotePath) -> Vec<Effect> {
-        let tab = &mut self.tabs[index];
-        let tab_id = tab.id;
-        let pane = tab.pane_mut(side);
+        let pane = self.tabs[index].pane_mut(side);
         pane.path = path;
         pane.entries.clear();
         pane.selection = Selection::default();
         pane.hovered = None;
-        pane.offset_y = 0.0;
-        let mut effects = self.request_listing(index, side);
-        effects.push(Effect::ScrollPane {
-            tab: tab_id,
-            side,
-            offset_y: 0.0,
-        });
-        effects
+        pane.action = None;
+        pane.action_error = None;
+        pane.select_after = None;
+        self.request_listing(index, side)
     }
 
     /// Enters the folder of `row` (`..` goes up); files stay where they are.
@@ -515,6 +558,46 @@ impl App {
                 return Vec::new();
             }
             PaneMsg::Retry => return self.request_listing(index, side),
+            PaneMsg::NewFolder => {
+                self.tabs[index].focus = side;
+                return self.start_new_folder(index, side);
+            }
+            PaneMsg::Rename => {
+                self.tabs[index].focus = side;
+                return self.start_rename(index, side);
+            }
+            PaneMsg::Delete => {
+                self.tabs[index].focus = side;
+                return self.start_delete(index, side);
+            }
+            PaneMsg::Permissions => {
+                self.tabs[index].focus = side;
+                return self.start_permissions(index, side);
+            }
+            PaneMsg::EditChanged(value) => {
+                if let Some(PaneAction::Edit(edit)) = &mut pane.action {
+                    edit.value = value;
+                    edit.error = None;
+                }
+                return Vec::new();
+            }
+            PaneMsg::EditCommit => return self.commit_edit(index, side),
+            PaneMsg::CancelAction => self.cancel_action(index, side),
+            PaneMsg::ConfirmDelete => return self.confirm_delete(index, side),
+            PaneMsg::PermissionToggled(bit) => {
+                if let Some(PaneAction::Permissions(dialog)) = &mut pane.action {
+                    dialog.toggle(bit);
+                }
+                return Vec::new();
+            }
+            PaneMsg::PermissionOctal(text) => {
+                if let Some(PaneAction::Permissions(dialog)) = &mut pane.action {
+                    dialog.set_octal(text);
+                }
+                return Vec::new();
+            }
+            PaneMsg::ApplyPermissions => return self.apply_permissions(index, side),
+            PaneMsg::DismissError => pane.action_error = None,
         }
         self.tabs[index].focus = side;
         Vec::new()
@@ -539,6 +622,7 @@ impl App {
         pane.request = None;
         pane.selection = Selection::default();
         pane.hovered = None;
+        let listed = result.is_ok();
         match result {
             Ok(mut entries) => {
                 // FTP listings may carry the folder's own "." and "..".
@@ -552,9 +636,37 @@ impl App {
             Err(error) => {
                 pane.entries.clear();
                 pane.listing = Listing::Failed(error);
+                pane.select_after = None;
             }
         }
-        Vec::new()
+        if listed {
+            self.select_new_entry(index, side)
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// A key from the subscription. Escape goes straight to the pane (a text field that
+    /// had it already let go of the focus); the others first make sure no text field has
+    /// the focus. With the pane's editor or dialog open, only Enter may matter.
+    pub(super) fn key_pressed(&mut self, key: FileKey, shift: bool) -> Vec<Effect> {
+        if self.form.is_some() {
+            return Vec::new();
+        }
+        let Some(tab) = self.active_tab.and_then(|i| self.tabs.get(i)) else {
+            return Vec::new();
+        };
+        if key == FileKey::Escape {
+            return self.file_key(key, shift);
+        }
+        let typing = matches!(
+            tab.pane(tab.focus).action,
+            Some(PaneAction::Edit(_) | PaneAction::Permissions(_))
+        );
+        if typing && key != FileKey::Enter {
+            return Vec::new();
+        }
+        vec![Effect::KeyUnlessTyping { key, shift }]
     }
 
     /// A key for the active tab's focused pane (ignored while a form is open).
@@ -567,6 +679,24 @@ impl App {
         };
         let tab = &mut self.tabs[index];
         let side = tab.focus;
+        // An editor or dialog is open: only Escape (cancel) and Enter (commit a name) act;
+        // every other key belongs to it.
+        match (&tab.pane(side).action, key) {
+            (Some(_), FileKey::Escape) => {
+                self.cancel_action(index, side);
+                return Vec::new();
+            }
+            (Some(PaneAction::Edit(_)), FileKey::Enter) => return self.commit_edit(index, side),
+            (Some(_), _) => return Vec::new(),
+            (None, FileKey::Escape) => {
+                tab.pane_mut(side).action_error = None;
+                return Vec::new();
+            }
+            (None, FileKey::NewFolder) => return self.start_new_folder(index, side),
+            (None, FileKey::Rename) => return self.start_rename(index, side),
+            (None, FileKey::Delete) => return self.start_delete(index, side),
+            (None, _) => {}
+        }
         if key == FileKey::SwitchPane {
             tab.focus = match side {
                 Side::Local => Side::Remote,
@@ -601,7 +731,11 @@ impl App {
                     None => Vec::new(),
                 };
             }
-            FileKey::SwitchPane => unreachable!("handled above"),
+            FileKey::SwitchPane
+            | FileKey::NewFolder
+            | FileKey::Rename
+            | FileKey::Delete
+            | FileKey::Escape => unreachable!("handled above"),
         };
         pane.selection.move_to(target, shift);
         match pane.scroll_to_show(target) {
