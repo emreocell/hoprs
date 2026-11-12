@@ -11,6 +11,7 @@ testing = []
 hoprs-core = { path = "../hoprs-core" }
 tokio = { workspace = true, features = ["io-util", "fs", "rt", "time"] }
 async-trait.workspace = true
+futures-util.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["io-util", "fs", "macros", "rt", "time", "test-util"] }

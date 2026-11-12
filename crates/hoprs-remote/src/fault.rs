@@ -16,6 +16,7 @@ use hoprs_core::{Error, ErrorKind, RemoteEntry, RemotePath, Result};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::time::Sleep;
 
+use crate::io_err::io_kind_for;
 use crate::{BoxAsyncRead, BoxAsyncWrite, RemoteFs};
 
 /// Operations that `FaultFs::fail_next` can target.
@@ -47,19 +48,6 @@ type Shared = Arc<Mutex<State>>;
 
 fn lock(s: &Shared) -> MutexGuard<'_, State> {
     s.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// Maps a core error kind to an `io::ErrorKind` such that
-/// `Error::from(io::Error::new(io_kind_for(kind), ..))` recovers `kind` for
-/// `Network`, `NotFound`, `Permission` and `Io`. Every other kind maps to
-/// `Other`, which converts back to `Io`.
-fn io_kind_for(kind: ErrorKind) -> io::ErrorKind {
-    match kind {
-        ErrorKind::Network => io::ErrorKind::ConnectionReset,
-        ErrorKind::NotFound => io::ErrorKind::NotFound,
-        ErrorKind::Permission => io::ErrorKind::PermissionDenied,
-        _ => io::ErrorKind::Other,
-    }
 }
 
 /// A `RemoteFs` that forwards to `inner` while injecting faults.
