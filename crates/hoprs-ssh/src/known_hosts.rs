@@ -166,6 +166,8 @@ pub struct KnownHostEntry {
     /// The host field is hashed (`|1|salt|hash`): it names exactly one host, which cannot
     /// be read back from the file.
     pub hashed: bool,
+    /// The whole line, trimmed (hosts, key type, key): what [`remove_entries`] checks.
+    pub text: String,
 }
 
 /// The lines [`remove`] would delete for `host:port` (same matching: plain, pattern and
@@ -175,13 +177,48 @@ pub fn entries_for(path: &Path, host: &str, port: u16) -> Result<Vec<KnownHostEn
     let Some(data) = read_optional(path)? else {
         return Ok(Vec::new());
     };
+    Ok(entries_in(&data, &host_name(host, port)))
+}
+
+/// Like [`remove`], but only if the lines for `host:port` are still exactly `expected`
+/// (what [`entries_for`] showed the user: same line numbers, same text). Otherwise nothing
+/// is written and the error is `Conflict`: the file changed since, review it again.
+pub fn remove_entries(
+    path: &Path,
+    host: &str,
+    port: u16,
+    expected: &[KnownHostEntry],
+) -> Result<usize> {
+    let data = read_optional(path)?.unwrap_or_default();
     let name = host_name(host, port);
+    if entries_in(&data, &name) != expected {
+        return Err(hoprs_core::Error::new(
+            hoprs_core::ErrorKind::Conflict,
+            "known_hosts changed; review the entries again",
+        ));
+    }
+    if expected.is_empty() {
+        return Ok(0);
+    }
+    let mut kept = Vec::with_capacity(data.len());
+    for raw in data.split_inclusive(|b| *b == b'\n') {
+        match parse_line(raw) {
+            Some(entry) if !entry.revoked && patterns_match(entry.patterns, &name) => {}
+            _ => kept.extend_from_slice(raw),
+        }
+    }
+    write_atomic(path, &kept)?;
+    Ok(expected.len())
+}
+
+/// The lines of `data` that [`remove`] would delete for the entry name `name`.
+fn entries_in(data: &[u8], name: &str) -> Vec<KnownHostEntry> {
     let mut entries = Vec::new();
     for (idx, raw) in data.split_inclusive(|b| *b == b'\n').enumerate() {
         let Some(entry) = parse_line(raw) else {
             continue;
         };
-        if entry.revoked || !patterns_match(entry.patterns, &name) {
+        if entry.revoked || !patterns_match(entry.patterns, name) {
             continue;
         }
         let hashed = entry.patterns.starts_with("|1|");
@@ -191,15 +228,17 @@ pub fn entries_for(path: &Path, host: &str, port: u16) -> Result<Vec<KnownHostEn
             && entry
                 .patterns
                 .split(',')
-                .any(|pattern| !pattern.eq_ignore_ascii_case(&name));
+                .any(|pattern| !pattern.eq_ignore_ascii_case(name));
         entries.push(KnownHostEntry {
             line: idx + 1,
             key_type: entry.key.algorithm().as_str().to_owned(),
             covers_other_hosts,
             hashed,
+            // `parse_line` accepted it, so it is UTF-8.
+            text: String::from_utf8_lossy(raw).trim().to_owned(),
         });
     }
-    Ok(entries)
+    entries
 }
 
 struct Entry<'a> {
@@ -802,6 +841,12 @@ mod tests {
                 key_type: "ssh-ed25519".into(),
                 covers_other_hosts: false,
                 hashed: true,
+                text: fs::read_to_string(&p)
+                    .unwrap()
+                    .lines()
+                    .nth(1)
+                    .unwrap()
+                    .to_owned(),
             }]
         );
         // `[host]:port` off port 22; the plain name on port 22 is another entry.
@@ -812,5 +857,39 @@ mod tests {
             .collect();
         assert_eq!(lines, [(3, false, false), (4, true, false)]);
         assert!(entries_for(&p, "h", 22).unwrap().is_empty());
+    }
+
+    #[test]
+    fn remove_entries_refuses_a_changed_file() {
+        let dir = TempDir::new().unwrap();
+        let p = kh_path(&dir);
+        let (a, b) = (ed(), ed());
+        fs::write(&p, format!("{}{}", line_for("h", &a), line_for("keep", &a))).unwrap();
+        let shown = entries_for(&p, "h", 22).unwrap();
+        assert_eq!(shown[0].text, line_for("h", &a).trim());
+
+        // The line changed (another key) since it was shown: nothing is removed.
+        let changed = format!("{}{}", line_for("h", &b), line_for("keep", &a));
+        fs::write(&p, &changed).unwrap();
+        let err = remove_entries(&p, "h", 22, &shown).unwrap_err();
+        assert_eq!(err.kind, hoprs_core::ErrorKind::Conflict);
+        assert_eq!(fs::read_to_string(&p).unwrap(), changed);
+        // A line added for the host since: refused too.
+        let shown = entries_for(&p, "h", 22).unwrap();
+        let added = format!("{changed}{}", line_for("h,other", &a));
+        fs::write(&p, &added).unwrap();
+        assert!(remove_entries(&p, "h", 22, &shown).is_err());
+        assert_eq!(fs::read_to_string(&p).unwrap(), added);
+
+        // Unchanged since shown: removed, other hosts kept.
+        let shown = entries_for(&p, "h", 22).unwrap();
+        assert_eq!(remove_entries(&p, "h", 22, &shown).unwrap(), 2);
+        assert_eq!(fs::read_to_string(&p).unwrap(), line_for("keep", &a));
+        // Nothing shown, nothing there: fine, nothing written.
+        assert_eq!(remove_entries(&p, "h", 22, &[]).unwrap(), 0);
+        assert_eq!(
+            remove_entries(&dir.path().join("none"), "h", 22, &[]).unwrap(),
+            0
+        );
     }
 }

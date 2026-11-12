@@ -53,6 +53,11 @@ pub trait FtpPrompter: Send + Sync {
     async fn pin_superseded(&self, host: &str, port: u16, pinned: &str) {
         let _ = (host, port, pinned);
     }
+    /// The server logged in with the password returned by [`password`](Self::password).
+    /// A typed password never reported here was refused (or never tried), so it must not
+    /// be kept. May be reported again for later connections of the same session. Does
+    /// nothing by default.
+    fn password_accepted(&self) {}
 }
 
 /// Number of times each prompt kind was invoked.
@@ -73,6 +78,7 @@ pub struct ScriptedFtpPrompter {
     pins: Mutex<Vec<(String, u16, String)>>,
     superseded: Mutex<Vec<(String, u16, String)>>,
     certificates: Mutex<Vec<CertificatePrompt>>,
+    accepted: AtomicU32,
 }
 
 /// The arguments of one `confirm_certificate` call.
@@ -104,7 +110,13 @@ impl ScriptedFtpPrompter {
             pins: Mutex::new(Vec::new()),
             superseded: Mutex::new(Vec::new()),
             certificates: Mutex::new(Vec::new()),
+            accepted: AtomicU32::new(0),
         }
+    }
+
+    /// How many times `password_accepted` was called.
+    pub fn password_accepted_calls(&self) -> u32 {
+        self.accepted.load(Ordering::SeqCst)
     }
 
     pub fn with_password(mut self, password: Option<&str>) -> Self {
@@ -177,6 +189,10 @@ impl FtpPrompter for ScriptedFtpPrompter {
             .lock()
             .unwrap()
             .push((host.to_owned(), port, pinned.to_owned()));
+    }
+
+    fn password_accepted(&self) {
+        self.accepted.fetch_add(1, Ordering::SeqCst);
     }
 }
 

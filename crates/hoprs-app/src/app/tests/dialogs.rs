@@ -85,7 +85,8 @@ async fn next(
 fn prompts_are_queued_one_at_a_time() {
     let mut app = App::new();
     let effects = show(&mut app, request(1, 1, "h:22", host_key(&[])));
-    assert!(effects.is_empty(), "a decision has no field to focus");
+    // A decision has no field: the keyboard is taken from whatever had it behind.
+    assert!(matches!(effects[..], [Effect::Unfocus]), "{effects:?}");
     // Two more arrive while the first is open: they wait, in order.
     let effects = show(&mut app, request(2, 2, "other:22", password()));
     assert!(effects.is_empty());
@@ -111,7 +112,11 @@ fn prompts_are_queued_one_at_a_time() {
         answer(&effects),
         (PromptId(1), PromptAnswer::Decision(true))
     ));
-    assert!(effects.iter().any(|e| matches!(e, Effect::FocusDialog)));
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::FocusDialogField(0)))
+    );
     assert_eq!(shown(&app), Some(PromptId(2)));
 
     // A queued request that is withdrawn is gone without an answer.
@@ -299,6 +304,7 @@ fn entry(line: usize, covers_other_hosts: bool) -> KnownHostEntry {
         key_type: "ssh-ed25519".into(),
         covers_other_hosts,
         hashed: false,
+        text: format!("h{line} ssh-ed25519 AAAA"),
     }
 }
 
@@ -312,7 +318,19 @@ async fn remove_entry_warns_on_multi_host_line() {
     let mut app = changed_host_key_tab(&fake, &s).await;
     let tab = app.tabs[app.tab_of(&s.id).unwrap()].id;
     let index = app.tab_of(&s.id).unwrap();
+    let TabState::Failed(failure) = &app.tabs[index].state else {
+        panic!("failed tab");
+    };
+    let old_session = failure.session.expect("the failed session is kept");
     fake.set_known_host_entries(vec![entry(3, true), entry(7, false)]);
+    // The site is edited after the failure: the fix still works on the endpoint that
+    // failed.
+    let mut edited = s.clone();
+    edited.host = "elsewhere".into();
+    edited.port = 22;
+    let mut profiles = fake.profiles().await.unwrap();
+    profiles.sites = vec![edited];
+    app.update(Message::ProfilesLoaded(Ok(profiles)));
     let backend: Arc<dyn BackendApi> = fake.clone();
 
     let effects = app.update(Message::KnownHosts {
@@ -360,16 +378,85 @@ async fn remove_entry_warns_on_multi_host_line() {
         tab,
         msg: KnownHostsMsg::Confirm,
     });
-    let Ok([Effect::RemoveKnownHost { host, port, .. }]) = <[Effect; 1]>::try_from(effects) else {
+    let Ok(
+        [
+            Effect::RemoveKnownHost {
+                host,
+                port,
+                expected,
+                ..
+            },
+        ],
+    ) = <[Effect; 1]>::try_from(effects)
+    else {
         panic!("one RemoveKnownHost effect");
     };
+    assert_eq!(
+        expected,
+        [entry(3, true), entry(7, false)],
+        "the lines shown"
+    );
     assert_eq!(app.tabs[index].known_hosts, KnownHostsFix::Removing);
-    let message = effects::remove_known_host(backend, tab, host, port).await;
+    let message = effects::remove_known_host(backend.clone(), tab, host, port, expected).await;
     let effects = app.update(message);
     assert_eq!(fake.known_host_removals(), [("h".to_owned(), 2222)]);
-    assert_eq!(connect_effect(effects), [s.id.clone()]);
+    // The failed session is closed first, then a new one connects (a reused session
+    // would not check known_hosts the same way).
+    let Ok([Effect::RestartSite { close, site }]) = <[Effect; 1]>::try_from(effects) else {
+        panic!("one RestartSite effect");
+    };
+    assert_eq!((close, &site), (Some(old_session), &s.id));
     assert_eq!(app.tabs[index].state, TabState::Connecting);
     assert_eq!(app.tabs[index].known_hosts, KnownHostsFix::Idle);
+    let messages: Vec<Message> = effects::restart_site(backend.clone(), close, site)
+        .collect()
+        .await;
+    for message in messages {
+        app.update(message);
+    }
+    assert_eq!(fake.closed(), [old_session]);
+    let TabState::Connected(connected) = &app.tabs[index].state else {
+        panic!("{:?}", app.tabs[index].state);
+    };
+    assert_ne!(connected.session, old_session, "a new session");
+
+    // The file changed between the preview and the confirmation: refused inline, nothing
+    // removed ("review again").
+    fake.close(connected.session).await;
+    let mut app = changed_host_key_tab(&fake, &s).await;
+    let tab = app.tabs[0].id;
+    fake.set_known_host_entries(vec![entry(3, false)]);
+    app.update(Message::KnownHosts {
+        tab,
+        msg: KnownHostsMsg::Start,
+    });
+    let message = effects::known_host_entries(backend.clone(), tab, "h".into(), 2222).await;
+    app.update(message);
+    fake.set_known_host_entries(vec![entry(3, false), entry(9, true)]);
+    let effects = app.update(Message::KnownHosts {
+        tab,
+        msg: KnownHostsMsg::Confirm,
+    });
+    let Ok(
+        [
+            Effect::RemoveKnownHost {
+                host,
+                port,
+                expected,
+                ..
+            },
+        ],
+    ) = <[Effect; 1]>::try_from(effects)
+    else {
+        panic!("one RemoveKnownHost effect");
+    };
+    let message = effects::remove_known_host(backend, tab, host, port, expected).await;
+    assert!(app.update(message).is_empty());
+    let KnownHostsFix::Failed(error) = &app.tabs[0].known_hosts else {
+        panic!("{:?}", app.tabs[0].known_hosts);
+    };
+    assert_eq!(error.kind, ErrorKind::Conflict);
+    assert_eq!(fake.known_host_removals().len(), 1, "nothing more removed");
 
     // A failed removal shows inline and keeps the action.
     let mut app = changed_host_key_tab(&fake, &s).await;
@@ -513,7 +600,10 @@ fn cert_reason_text() {
 fn password_cleared_after_submit() {
     let mut app = App::new();
     let effects = show(&mut app, request(1, 1, "h:22", password()));
-    assert!(matches!(effects[..], [Effect::FocusDialog]), "{effects:?}");
+    assert!(
+        matches!(effects[..], [Effect::FocusDialogField(0)]),
+        "{effects:?}"
+    );
     show(&mut app, request(2, 2, "h2:22", password()));
     dialog_msg(&mut app, DialogMsg::Input(0, Typed("hunter2".into())));
     dialog_msg(&mut app, DialogMsg::Save(true));
@@ -702,4 +792,194 @@ async fn prompt_feed_delivers_broker_events() {
     );
     let mut again = Box::pin(effects::prompt_feed(&fake));
     assert!(again.next().await.is_none());
+}
+
+/// A security dialog takes the keyboard from the window behind it: a rename editor that
+/// had the focus can't commit while the dialog is open, and Enter means Cancel.
+#[tokio::test]
+async fn dialog_takes_the_keyboard_from_a_rename_editor() {
+    let mut a = site("a", "h", "u", Protocol::Ftp);
+    a.remote_dir = Some("/srv".into());
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    fake.remote_fs(&a.id)
+        .add_file("/srv/report.pdf", b"r", std::time::SystemTime::UNIX_EPOCH);
+    fake.local_fs().add_dir("/home/me");
+    let mut app = connected_tab(&fake, &a).await;
+    let tab = app.tabs[0].id;
+    let key = |key| Message::Key { key, shift: false };
+    app.update(key(FileKey::SwitchPane));
+    app.update(pane_msg(tab, Side::Remote, PaneMsg::Click(1)));
+    app.update(key(FileKey::Rename));
+    app.update(pane_msg(
+        tab,
+        Side::Remote,
+        PaneMsg::EditChanged("final.pdf".into()),
+    ));
+    let editing = app.tabs[0].remote.action.clone();
+    assert!(editing.is_some(), "the rename editor is open");
+
+    // The dialog opens: the editor loses the keyboard.
+    let effects = show(&mut app, request(1, 1, "h:21", host_key(&[])));
+    assert!(matches!(effects[..], [Effect::Unfocus]), "{effects:?}");
+    // Enter is the dialog's: Cancel, and no rename.
+    let effects = app.update(Message::KeyPressed {
+        key: FileKey::Enter,
+        shift: false,
+    });
+    assert!(matches!(
+        answer(&effects),
+        (PromptId(1), PromptAnswer::Cancel)
+    ));
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::FileOp { .. })),
+        "{effects:?}"
+    );
+
+    // While a dialog is open, what a focused field behind it could still send is dropped.
+    show(&mut app, request(2, 1, "h:21", host_key(&[])));
+    for blocked in [
+        pane_msg(tab, Side::Remote, PaneMsg::EditCommit),
+        pane_msg(tab, Side::Remote, PaneMsg::EditChanged("x".into())),
+        key(FileKey::Enter),
+        Message::FilterSites("typed".into()),
+        Message::ConnectSite(a.id.clone()),
+        Message::CloseTab(tab),
+    ] {
+        assert!(app.update(blocked.clone()).is_empty(), "{blocked:?}");
+    }
+    assert_eq!(
+        app.tabs[0].remote.action, editing,
+        "the editor is untouched"
+    );
+    assert_eq!(app.site_filter, "");
+    assert_eq!(app.tabs.len(), 1);
+    assert_eq!(shown(&app), Some(PromptId(2)));
+    // Scroll reports still land (the lists keep their offsets right).
+    app.update(pane_msg(
+        tab,
+        Side::Remote,
+        PaneMsg::Scrolled {
+            offset_y: 30.0,
+            viewport_h: 300.0,
+        },
+    ));
+    assert_eq!(app.tabs[0].remote.offset_y, 30.0);
+
+    // Closed: the editor works again.
+    app.update(Message::KeyPressed {
+        key: FileKey::Escape,
+        shift: false,
+    });
+    let commit = app.update(pane_msg(tab, Side::Remote, PaneMsg::EditCommit));
+    assert!(
+        commit.iter().any(|e| matches!(e, Effect::FileOp { .. })),
+        "{commit:?}"
+    );
+}
+
+/// Tab and Shift+Tab cycle through the dialog's own fields, never into the window behind
+/// it; a decision has no field, so Tab does nothing there.
+#[test]
+fn tab_cycles_within_dialog_fields() {
+    let mut app = App::new();
+    let tab = |shift| Message::KeyPressed {
+        key: FileKey::SwitchPane,
+        shift,
+    };
+    let prompts = (0..3)
+        .map(|n| KbdField {
+            text: format!("Q{n}"),
+            echo: false,
+        })
+        .collect();
+    let kind = PromptKind::KeyboardInteractive {
+        name: String::new(),
+        instructions: String::new(),
+        prompts,
+    };
+    let focus = |effects: Vec<Effect>| match effects[..] {
+        [Effect::FocusDialogField(n)] => n,
+        _ => panic!("{effects:?}"),
+    };
+    assert_eq!(focus(show(&mut app, request(1, 1, "h:22", kind))), 0);
+    assert_eq!(focus(app.update(tab(false))), 1);
+    assert_eq!(focus(app.update(tab(false))), 2);
+    assert_eq!(focus(app.update(tab(false))), 0, "wraps to the first");
+    assert_eq!(focus(app.update(tab(true))), 2, "Shift+Tab goes back");
+    // Typing in a field (after a click into it) moves the cycle there.
+    dialog_msg(&mut app, DialogMsg::Input(1, Typed("x".into())));
+    assert_eq!(focus(app.update(tab(false))), 2);
+
+    dialog_msg(&mut app, DialogMsg::Cancel);
+    show(&mut app, request(2, 1, "h:22", host_key(&[])));
+    assert!(app.update(tab(false)).is_empty(), "no field to move to");
+    assert!(app.update(tab(true)).is_empty());
+}
+
+/// Review Focus 4: the key changed from the one this session verified (not a known_hosts
+/// line): editing known_hosts can't help the session, so the tab offers "Close and
+/// reconnect", which closes it and connects with a new session.
+#[tokio::test]
+async fn pinned_key_change_offers_close_and_reconnect() {
+    let s = site("s", "h", "u", Protocol::Ssh);
+    let fake = Arc::new(FakeBackend::new().with_site(s.clone()));
+    let mut app = loaded(&fake).await;
+    fake.fail_next_connect(&s.id, hoprs_ssh::testing::pinned_key_changed_error("h"));
+    let sites = connect_effect(app.update(Message::ConnectSite(s.id.clone())));
+    drive(&mut app, &fake, sites).await;
+    let tab = app.tabs[0].id;
+    let TabState::Failed(failure) = &app.tabs[0].state else {
+        panic!("{:?}", app.tabs[0].state);
+    };
+    let old = failure.session.unwrap();
+    assert_eq!(
+        app.tabs[0].host_key_change(),
+        Some(hoprs_ssh::HostKeyChange { line: None })
+    );
+    assert_eq!(
+        app.failure_actions(&app.tabs[0]),
+        [FailureAction::CloseAndReconnect, FailureAction::EditSite]
+    );
+    // No known_hosts edit for it.
+    assert!(
+        app.update(Message::KnownHosts {
+            tab,
+            msg: KnownHostsMsg::Start
+        })
+        .is_empty()
+    );
+    assert_eq!(app.tabs[0].known_hosts, KnownHostsFix::Idle);
+
+    // A password typed with "save" for the old session is forgotten with it.
+    show(&mut app, request(9, old.0, "h:22", password()));
+    dialog_msg(&mut app, DialogMsg::Save(true));
+    dialog_msg(&mut app, DialogMsg::Submit);
+    assert!(app.dialogs.is_saving(old));
+
+    let effects = app.update(Message::RestartSession(tab));
+    let Ok([Effect::RestartSite { close, site }]) = <[Effect; 1]>::try_from(effects) else {
+        panic!("one RestartSite effect");
+    };
+    assert_eq!((close, &site), (Some(old), &s.id));
+    assert!(!app.dialogs.is_saving(old));
+    assert_eq!(app.tabs[0].state, TabState::Connecting);
+    let backend: Arc<dyn BackendApi> = fake.clone();
+    let messages: Vec<Message> = effects::restart_site(backend, close, site).collect().await;
+    for message in messages {
+        app.update(message);
+    }
+    assert_eq!(fake.closed(), [old], "closed before the new connect");
+    let TabState::Connected(connected) = &app.tabs[0].state else {
+        panic!("{:?}", app.tabs[0].state);
+    };
+    assert_ne!(connected.session, old, "a new session");
+
+    // Closing a tab forgets its session's pending save too.
+    let session = connected.session;
+    show(&mut app, request(10, session.0, "h:22", password()));
+    dialog_msg(&mut app, DialogMsg::Save(true));
+    dialog_msg(&mut app, DialogMsg::Submit);
+    assert!(app.dialogs.is_saving(session));
+    app.update(Message::CloseTab(tab));
+    assert!(!app.dialogs.is_saving(session));
 }

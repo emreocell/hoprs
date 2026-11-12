@@ -28,7 +28,7 @@ use hoprs_core::Error;
 use hoprs_ssh::HostKeyChange;
 use secrecy::SecretString;
 
-use super::{App, Effect, FileKey, Tab, TabId, TabState};
+use super::{App, Effect, FileKey, Message, Tab, TabId, TabState};
 use crate::backend::broker::{PromptKind, PromptRequest};
 use crate::backend::{BrokerEvent, KnownHostEntry, PromptAnswer, SessionId};
 
@@ -47,6 +47,12 @@ impl Dialogs {
         self.current.is_some()
     }
 
+    /// A secret typed for `session` waits for its connect to be saved.
+    #[cfg(test)]
+    pub fn is_saving(&self, session: SessionId) -> bool {
+        self.saving.contains(&session)
+    }
+
     /// The requests waiting behind the current dialog, in order.
     pub fn queued(&self) -> impl Iterator<Item = &PromptRequest> {
         self.queue.iter()
@@ -62,6 +68,9 @@ pub struct Dialog {
     pub fields: Vec<Typed>,
     /// "Save in the system keyring" (password and passphrase only).
     pub save: bool,
+    /// The field with the keyboard focus (as far as the app knows: the one focused when
+    /// shown, typed in last, or reached with Tab).
+    pub focus: usize,
 }
 
 impl Dialog {
@@ -75,6 +84,7 @@ impl Dialog {
             request,
             fields: vec![Typed::default(); inputs],
             save: false,
+            focus: 0,
         }
     }
 
@@ -153,6 +163,8 @@ pub enum FailureAction {
     EditSite,
     /// The host key changed: remove the old `known_hosts` entry (never accept the key).
     RemoveOldEntry,
+    /// The key changed from the one this session verified: close it and start a new one.
+    CloseAndReconnect,
 }
 
 impl Tab {
@@ -190,12 +202,14 @@ impl App {
     /// Shows `request`, focusing its first field if it has one.
     fn show(&mut self, request: PromptRequest) -> Vec<Effect> {
         let dialog = Dialog::new(request);
-        let focus = !dialog.fields.is_empty();
+        let fields = !dialog.fields.is_empty();
         self.dialogs.current = Some(dialog);
-        if focus {
-            vec![Effect::FocusDialog]
+        // The keyboard leaves whatever had it behind the dialog (a rename editor, a form
+        // field, the sidebar filter): `opaque` only stops the mouse.
+        if fields {
+            vec![Effect::FocusDialogField(0)]
         } else {
-            Vec::new()
+            vec![Effect::Unfocus]
         }
     }
 
@@ -229,6 +243,7 @@ impl App {
             DialogMsg::Input(index, typed) => {
                 if let Some(field) = dialog.fields.get_mut(index) {
                     *field = typed;
+                    dialog.focus = index;
                 }
                 Vec::new()
             }
@@ -253,17 +268,64 @@ impl App {
 
     /// A key while a dialog is open: it belongs to the dialog, never to the panes. Esc
     /// refuses; Enter is the default button (Cancel for a trust decision, since iced
-    /// buttons take no focus; submit for credentials); Tab moves between fields.
-    pub(super) fn dialog_key(&mut self, key: FileKey) -> Vec<Effect> {
-        let Some(dialog) = &self.dialogs.current else {
+    /// buttons take no focus; submit for credentials); Tab and Shift+Tab cycle through the
+    /// dialog's own fields only (a decision has none: nothing to move to).
+    pub(super) fn dialog_key(&mut self, key: FileKey, shift: bool) -> Vec<Effect> {
+        let Some(dialog) = &mut self.dialogs.current else {
             return Vec::new();
         };
         match key {
             FileKey::Escape => self.dialog_msg(DialogMsg::Cancel),
             FileKey::Enter if dialog.is_decision() => self.dialog_msg(DialogMsg::Cancel),
             FileKey::Enter => self.dialog_msg(DialogMsg::Submit),
-            FileKey::SwitchPane => vec![Effect::FocusNext],
+            FileKey::SwitchPane if !dialog.fields.is_empty() => {
+                let n = dialog.fields.len();
+                dialog.focus = if shift {
+                    (dialog.focus + n - 1) % n
+                } else {
+                    (dialog.focus + 1) % n
+                };
+                vec![Effect::FocusDialogField(dialog.focus)]
+            }
             _ => Vec::new(),
+        }
+    }
+
+    /// While a dialog is open, the window behind it takes no input: the messages its
+    /// widgets and keys send are dropped (results of work in flight still land). The
+    /// mouse is stopped by the backdrop; this covers what the keyboard could still reach.
+    pub(super) fn blocked_by_dialog(&self, msg: &Message) -> bool {
+        if !self.dialogs.is_open() {
+            return false;
+        }
+        match msg {
+            // Scroll offsets the lists report (also after a programmatic scroll).
+            Message::Pane {
+                msg: super::PaneMsg::Scrolled { .. },
+                ..
+            }
+            | Message::Queue(super::QueueMsg::Scrolled { .. }) => false,
+            Message::ToggleQueue
+            | Message::FilterSites(_)
+            | Message::ToggleWorkspace(_)
+            | Message::OpenWorkspace(_)
+            | Message::ConnectSite(_)
+            | Message::SelectTab(_)
+            | Message::NewSite
+            | Message::EditSite(_)
+            | Message::NewWorkspace
+            | Message::EditWorkspace(_)
+            | Message::SiteForm(_)
+            | Message::WorkspaceForm(_)
+            | Message::OpenProfileFolder
+            | Message::CloseTab(_)
+            | Message::Pane { .. }
+            | Message::Key { .. }
+            | Message::Queue(_)
+            | Message::FileDropped(_)
+            | Message::KnownHosts { .. }
+            | Message::RestartSession(_) => true,
+            _ => false,
         }
     }
 
@@ -278,25 +340,55 @@ impl App {
     }
 
     /// What the failed tab offers: never a way to accept a changed host key.
+    /// - The key differs from `known_hosts`: "Remove the old entry…".
+    /// - The key differs from the one this session verified when it first connected
+    ///   (`line: None`): editing `known_hosts` cannot help the session, which keeps that
+    ///   key; "Close and reconnect" starts a new session, which checks `known_hosts` again.
     pub fn failure_actions(&self, tab: &Tab) -> Vec<FailureAction> {
         let mut actions = Vec::new();
         if self.site(&tab.site).is_none() {
             return actions;
         }
-        if tab.host_key_change().is_some() {
-            actions.push(FailureAction::RemoveOldEntry);
-        } else {
-            actions.push(FailureAction::Reconnect);
-        }
+        actions.push(match tab.host_key_change() {
+            Some(HostKeyChange { line: Some(_) }) => FailureAction::RemoveOldEntry,
+            Some(HostKeyChange { line: None }) => FailureAction::CloseAndReconnect,
+            None => FailureAction::Reconnect,
+        });
         actions.push(FailureAction::EditSite);
         actions
     }
 
-    /// The `host:port` of the tab whose host key changed, if it did.
+    /// The `host:port` the tab failed with, if its host key changed in `known_hosts`.
     fn changed_endpoint(&self, index: usize) -> Option<(String, u16)> {
         let tab = &self.tabs[index];
-        tab.host_key_change()?;
-        self.site(&tab.site).map(|s| (s.host.clone(), s.port))
+        tab.host_key_change()?.line?;
+        tab.failed_endpoint.clone()
+    }
+
+    /// Closes the tab's failed session and connects the site with a new one (the effect
+    /// closes first, then connects: a reused session would keep its old state).
+    pub(super) fn restart_session(&mut self, tab: TabId) -> Vec<Effect> {
+        let Some(index) = self.tab_index(tab) else {
+            return Vec::new();
+        };
+        let tab = &mut self.tabs[index];
+        let TabState::Failed(failure) = &tab.state else {
+            return Vec::new();
+        };
+        let close = failure.session;
+        let site = tab.site.clone();
+        tab.state = TabState::Connecting;
+        tab.known_hosts = KnownHostsFix::Idle;
+        tab.failed_endpoint = None;
+        if let Some(session) = close {
+            self.forget_session(session);
+        }
+        vec![Effect::RestartSite { close, site }]
+    }
+
+    /// A session is gone: nothing waits to be saved for it.
+    pub(super) fn forget_session(&mut self, session: SessionId) {
+        self.dialogs.saving.remove(&session);
     }
 
     /// "Remove the old entry…" and its confirmation, in the tab.
@@ -313,9 +405,15 @@ impl App {
                 *fix = KnownHostsFix::Checking;
                 vec![Effect::KnownHostEntries { tab, host, port }]
             }
-            (KnownHostsMsg::Confirm, KnownHostsFix::Confirm(_)) => {
+            (KnownHostsMsg::Confirm, KnownHostsFix::Confirm(entries)) => {
+                let expected = entries.clone();
                 *fix = KnownHostsFix::Removing;
-                vec![Effect::RemoveKnownHost { tab, host, port }]
+                vec![Effect::RemoveKnownHost {
+                    tab,
+                    host,
+                    port,
+                    expected,
+                }]
             }
             (KnownHostsMsg::Cancel, KnownHostsFix::Confirm(_)) => {
                 *fix = KnownHostsFix::Idle;
@@ -355,11 +453,8 @@ impl App {
             return Vec::new();
         }
         match result {
-            Ok(_) => {
-                self.tabs[index].known_hosts = KnownHostsFix::Idle;
-                let site = self.tabs[index].site.clone();
-                self.open_tabs(vec![site])
-            }
+            // A new session checks `known_hosts` again (the failed one is closed).
+            Ok(_) => self.restart_session(tab),
             Err(error) => {
                 self.tabs[index].known_hosts = KnownHostsFix::Failed(error);
                 Vec::new()

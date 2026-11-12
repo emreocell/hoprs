@@ -16,9 +16,14 @@
 //!   dialogs are withdrawn ([`BrokerEvent::Withdrawn`]). A dialog withdrawn that way is not
 //!   an answer: the requests waiting on it ask again, in a dialog of their own.
 //! - **Saving a typed secret:** a password or passphrase answered with `save: true` is
-//!   kept by the session's prompter ([`SessionPrompter::take_pending_secrets`]) until the
-//!   session manager sees the session connect with it (then it goes to the keyring) or fail
-//!   or close (then it is dropped). A later answer of the same kind replaces it.
+//!   kept by the session's prompter until the session manager sees the session connect (see
+//!   [`SessionPrompter::take_pending_secrets`]), fail or close. Only a secret that proved
+//!   right is handed out for the keyring: the connection crates report it through
+//!   [`Prompter::secret_accepted`] (the server accepted the password, the passphrase
+//!   decrypted its key) and [`FtpPrompter::password_accepted`] (the FTP login worked). A
+//!   password the server refused before keyboard-interactive or a key succeeded, or a wrong
+//!   passphrase skipped for another method, is never reported, so never saved. A later
+//!   answer of the same kind replaces the pending one.
 //! - **Pins:** `store_pin` writes the accepted certificate to the session's site
 //!   ([`Vault::set_ftps_pin`](hoprs_vault::Vault::set_ftps_pin)); `pin_superseded` (a trusted
 //!   chain beat a stale pin, ruling R5 of Plan 3) clears it.
@@ -32,7 +37,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use async_trait::async_trait;
 use hoprs_core::SiteId;
 use hoprs_remote::{CertProblem, FtpPrompter};
-use hoprs_ssh::{KbdPrompt, Prompter};
+use hoprs_ssh::{AcceptedSecret, KbdPrompt, Prompter};
 use hoprs_vault::SecretKind;
 use secrecy::SecretString;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -385,6 +390,13 @@ impl Drop for Leader<'_> {
     }
 }
 
+/// A typed secret waiting to be saved.
+struct Pending {
+    secret: SecretString,
+    /// The connection crate reported it right.
+    accepted: bool,
+}
+
 /// The [`Prompter`] and [`FtpPrompter`] of one session. Cheap to clone.
 #[derive(Clone)]
 pub struct SessionPrompter {
@@ -394,8 +406,9 @@ pub struct SessionPrompter {
     /// `host:port` of the session's connection.
     key: String,
     cancel: CancellationToken,
-    /// Typed secrets to save once the session connects (see the module docs).
-    pending: Arc<Mutex<HashMap<SecretKind, SecretString>>>,
+    /// Typed secrets to save once the session connects (see the module docs), with
+    /// whether they proved right.
+    pending: Arc<Mutex<HashMap<SecretKind, Pending>>>,
 }
 
 impl SessionPrompter {
@@ -405,14 +418,25 @@ impl SessionPrompter {
         self.cancel.cancel();
     }
 
-    fn pending(&self) -> MutexGuard<'_, HashMap<SecretKind, SecretString>> {
+    fn pending(&self) -> MutexGuard<'_, HashMap<SecretKind, Pending>> {
         self.pending.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The typed secrets the user asked to save, taken out: the session just connected
-    /// with them.
+    /// The session just connected: the typed secrets the user asked to save that proved
+    /// right, taken out. The others (refused, or never tried) are dropped.
     pub fn take_pending_secrets(&self) -> Vec<(SecretKind, SecretString)> {
-        self.pending().drain().collect()
+        self.pending()
+            .drain()
+            .filter(|(_, pending)| pending.accepted)
+            .map(|(kind, pending)| (kind, pending.secret))
+            .collect()
+    }
+
+    /// The pending secret of `kind` proved right.
+    fn accept(&self, kind: SecretKind) {
+        if let Some(pending) = self.pending().get_mut(&kind) {
+            pending.accepted = true;
+        }
     }
 
     /// Forgets the typed secrets waiting to be saved: the connection failed or closed.
@@ -426,7 +450,9 @@ impl SessionPrompter {
             Some(PromptAnswer::Secret { secret, save }) => {
                 let mut pending = self.pending();
                 if save {
-                    pending.insert(slot, secret.clone());
+                    let secret = secret.clone();
+                    let accepted = false;
+                    pending.insert(slot, Pending { secret, accepted });
                 } else {
                     // A new answer without "save": an earlier one was not the right one.
                     pending.remove(&slot);
@@ -508,6 +534,13 @@ impl Prompter for SessionPrompter {
             _ => None,
         }
     }
+
+    fn secret_accepted(&self, secret: AcceptedSecret) {
+        self.accept(match secret {
+            AcceptedSecret::Password => SecretKind::Password,
+            AcceptedSecret::Passphrase => SecretKind::KeyPassphrase,
+        });
+    }
 }
 
 #[async_trait]
@@ -533,6 +566,10 @@ impl FtpPrompter for SessionPrompter {
         self.broker
             .decide(self, endpoint_key(host, port), subject, kind)
             .await
+    }
+
+    fn password_accepted(&self) {
+        self.accept(SecretKind::Password);
     }
 
     async fn store_pin(&self, _host: &str, _port: u16, fingerprint: &str) {
@@ -926,20 +963,38 @@ mod tests {
         f.broker.answer(r.id, secret("phrase", true));
         join(ask).await.unwrap();
 
-        let mut taken: Vec<_> = p
+        // Only what proved right is handed out (the server accepted the password); the
+        // passphrase never decrypted its key, or was never tried, so it is dropped.
+        p.secret_accepted(hoprs_ssh::AcceptedSecret::Password);
+        let taken: Vec<_> = p
             .take_pending_secrets()
             .into_iter()
             .map(|(kind, s)| (kind.account(), s.expose_secret().to_owned()))
             .collect();
-        taken.sort();
-        assert_eq!(
-            taken,
-            [
-                ("key-passphrase", "phrase".to_owned()),
-                ("password", "pw".to_owned())
-            ]
-        );
+        assert_eq!(taken, [("password", "pw".to_owned())]);
+        p.secret_accepted(hoprs_ssh::AcceptedSecret::Passphrase);
         assert!(p.take_pending_secrets().is_empty(), "taken once");
+
+        // A refused secret is never accepted: a new prompt replaces it, and only the
+        // new one, once accepted, is handed out. FTP reports its login the same way.
+        let (ask, value, save) = answer("refused", true);
+        let r = f.next_request().await;
+        f.broker.answer(r.id, secret(value, save));
+        join(ask).await;
+        let (ask, value, save) = answer("right", true);
+        let r = f.next_request().await;
+        f.broker.answer(r.id, secret(value, save));
+        join(ask).await;
+        FtpPrompter::password_accepted(&p);
+        let taken: Vec<_> = p
+            .take_pending_secrets()
+            .into_iter()
+            .map(|(_, s)| s.expose_secret().to_owned())
+            .collect();
+        assert_eq!(taken, ["right"]);
+        // An acceptance with nothing pending does nothing.
+        p.secret_accepted(hoprs_ssh::AcceptedSecret::Password);
+        assert!(p.take_pending_secrets().is_empty());
 
         // Without "save", a new answer of the same kind drops the earlier one.
         let (ask, value, save) = answer("first", true);
@@ -950,6 +1005,7 @@ mod tests {
         let r = f.next_request().await;
         f.broker.answer(r.id, secret(value, save));
         join(ask).await;
+        p.secret_accepted(hoprs_ssh::AcceptedSecret::Password);
         assert!(p.take_pending_secrets().is_empty());
 
         // Discarding forgets them.
@@ -957,6 +1013,7 @@ mod tests {
         let r = f.next_request().await;
         f.broker.answer(r.id, secret(value, save));
         join(ask).await;
+        p.secret_accepted(hoprs_ssh::AcceptedSecret::Password);
         p.discard_pending_secrets();
         assert!(p.take_pending_secrets().is_empty());
         // Debug of an answer shows the flag, never the secret.

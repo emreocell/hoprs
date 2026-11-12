@@ -362,6 +362,9 @@ pub struct Tab {
     pub focus: Side,
     /// "Remove the old entry…" after a changed host key.
     pub known_hosts: super::KnownHostsFix,
+    /// The site's `host:port` when its connect failed (the endpoint "Remove the old
+    /// entry…" works on).
+    pub failed_endpoint: Option<(String, u16)>,
 }
 
 impl Tab {
@@ -444,6 +447,7 @@ impl App {
             remote: Pane::new(remote),
             focus: Side::Local,
             known_hosts: super::KnownHostsFix::Idle,
+            failed_endpoint: None,
         };
         tab.local.listing = Listing::Loading;
         tab.local.request = Some(request_id);
@@ -672,7 +676,7 @@ impl App {
     /// the focus. With the pane's editor or dialog open, only Enter may matter.
     pub(super) fn key_pressed(&mut self, key: FileKey, shift: bool) -> Vec<Effect> {
         if self.dialogs.is_open() {
-            return self.dialog_key(key);
+            return self.dialog_key(key, shift);
         }
         if self.form.is_some() {
             return Vec::new();

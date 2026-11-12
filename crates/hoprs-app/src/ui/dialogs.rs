@@ -9,7 +9,9 @@ use iced::widget::{
 };
 use iced::{Alignment, Element, Length, Padding};
 
-use crate::app::{App, Dialog, DialogMsg, KnownHostsFix, KnownHostsMsg, Message, Tab, Typed};
+use crate::app::{
+    App, Dialog, DialogMsg, FailureAction, KnownHostsFix, KnownHostsMsg, Message, Tab, Typed,
+};
 use crate::backend::KnownHostEntry;
 use crate::backend::broker::PromptKind;
 use crate::ui::strings;
@@ -288,17 +290,21 @@ pub fn host_key_changed<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> 
         msg: m,
     };
     let pad = Padding::from([theme::SPACE_2XS, theme::SPACE_XS]);
+    let line = tab.host_key_change().and_then(|change| change.line);
+    let explanation = if line.is_some() {
+        strings::HOST_KEY_CHANGED_BODY
+    } else {
+        strings::HOST_KEY_CHANGED_SESSION_BODY
+    };
     let mut body = column![
         text(strings::HOST_KEY_CHANGED_TITLE)
             .font(theme::INTER_SEMIBOLD)
             .color(p.error),
-        text(strings::HOST_KEY_CHANGED_BODY)
-            .size(theme::TEXT_SM)
-            .color(p.ink_2),
+        text(explanation).size(theme::TEXT_SM).color(p.ink_2),
     ]
     .spacing(theme::SPACE_XS)
     .max_width(WIDTH);
-    if let Some(line) = tab.host_key_change().and_then(|change| change.line) {
+    if let Some(line) = line {
         body = body.push(
             text(strings::known_hosts_line(line))
                 .font(theme::MONO)
@@ -306,21 +312,38 @@ pub fn host_key_changed<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> 
                 .color(p.muted),
         );
     }
-    let host = app
-        .site(&tab.site)
-        .map(|s| format!("{}:{}", s.host, s.port))
+    let host = tab
+        .failed_endpoint
+        .as_ref()
+        .map(|(host, port)| format!("{host}:{port}"))
         .unwrap_or_default();
-    let actions = row![
-        button(text(strings::REMOVE_OLD_ENTRY))
-            .padding(pad)
-            .style(theme::button_outline)
-            .on_press_maybe(app.site(&tab.site).map(|_| fix(KnownHostsMsg::Start))),
-        button(text(strings::EDIT_SITE))
-            .padding(pad)
-            .style(theme::button_text)
-            .on_press(Message::EditSite(tab.site.clone())),
-    ]
-    .spacing(theme::SPACE_XS);
+    let mut actions = row![].spacing(theme::SPACE_XS);
+    for action in app.failure_actions(tab) {
+        let (label, style, on_press): (_, fn(&iced::Theme, _) -> _, _) = match action {
+            FailureAction::RemoveOldEntry => (
+                strings::REMOVE_OLD_ENTRY,
+                theme::button_outline,
+                fix(KnownHostsMsg::Start),
+            ),
+            FailureAction::CloseAndReconnect => (
+                strings::CLOSE_AND_RECONNECT,
+                theme::button_outline,
+                Message::RestartSession(tab.id),
+            ),
+            FailureAction::EditSite => (
+                strings::EDIT_SITE,
+                theme::button_text,
+                Message::EditSite(tab.site.clone()),
+            ),
+            FailureAction::Reconnect => continue,
+        };
+        actions = actions.push(
+            button(text(label))
+                .padding(pad)
+                .style(style)
+                .on_press(on_press),
+        );
+    }
     let muted = |label: &'a str| text(label).size(theme::TEXT_SM).color(p.muted);
     body = match &tab.known_hosts {
         KnownHostsFix::Idle => body.push(actions),

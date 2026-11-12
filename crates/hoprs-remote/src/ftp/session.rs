@@ -392,6 +392,10 @@ impl Shared {
         let mut cfg = self.cfg();
         let result = open_control(&mut cfg, &AttemptPrompter(self)).await;
         self.remember_pin(&cfg);
+        if result.is_ok() && self.password_prompted.load(Ordering::SeqCst) {
+            // The server logged in with the password typed at the prompt.
+            self.prompter.password_accepted();
+        }
         result
     }
 

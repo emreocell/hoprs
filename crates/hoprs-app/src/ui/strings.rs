@@ -371,7 +371,9 @@ pub fn cert_reason(reason: &hoprs_remote::CertReason) -> String {
 // Changed host key, in the tab.
 pub const HOST_KEY_CHANGED_TITLE: &str = "The host key has changed";
 pub const HOST_KEY_CHANGED_BODY: &str = "The server presented a different key than the one recorded for it. That happens when the server was reinstalled, or when someone intercepts the connection. hoprs won't connect while the old entry is in known_hosts.";
+pub const HOST_KEY_CHANGED_SESSION_BODY: &str = "The server presented a different key than the one this session verified when it connected. That happens when the server was reinstalled, or when someone intercepts the connection. A new session checks the key against known_hosts again.";
 pub const REMOVE_OLD_ENTRY: &str = "Remove the old entry…";
+pub const CLOSE_AND_RECONNECT: &str = "Close and reconnect";
 pub const READING_KNOWN_HOSTS: &str = "Reading known_hosts…";
 pub const REMOVING_KNOWN_HOSTS: &str = "Removing…";
 pub const REMOVE: &str = "Remove";

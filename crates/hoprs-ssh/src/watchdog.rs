@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use secrecy::SecretString;
 use tokio::sync::Notify;
 
-use crate::prompt::{KbdPrompt, Prompter};
+use crate::prompt::{AcceptedSecret, KbdPrompt, Prompter};
 
 /// Told `true` when a prompt starts waiting for the user (none was open), `false` when the
 /// last open prompt closes.
@@ -133,6 +133,10 @@ impl Prompter for WatchedPrompter {
             None,
         )
         .await
+    }
+
+    fn secret_accepted(&self, secret: AcceptedSecret) {
+        self.inner.secret_accepted(secret);
     }
 }
 

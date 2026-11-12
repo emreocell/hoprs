@@ -221,6 +221,8 @@ pub enum Message {
         tab: TabId,
         result: Result<usize, Error>,
     },
+    /// "Close and reconnect": the tab's failed session is closed and a new one started.
+    RestartSession(TabId),
 }
 
 /// The profile change a form asked for, carried back with its result.
@@ -305,10 +307,10 @@ pub enum Effect {
         id: PromptId,
         answer: PromptAnswer,
     },
-    /// Focuses the first field of the dialog just shown.
-    FocusDialog,
-    /// Tab in a dialog: the next field.
-    FocusNext,
+    /// Focuses field `n` of the open dialog (shown, or Tab).
+    FocusDialogField(usize),
+    /// Takes the keyboard focus from every widget (a dialog without fields opened).
+    Unfocus,
     /// Reads the `known_hosts` lines for `host:port`; back as
     /// [`Message::KnownHostEntries`].
     KnownHostEntries {
@@ -316,12 +318,19 @@ pub enum Effect {
         host: String,
         port: u16,
     },
-    /// Removes the `known_hosts` lines for `host:port`; back as
-    /// [`Message::KnownHostRemoved`].
+    /// Removes the `known_hosts` lines for `host:port` if they are still `expected` (what
+    /// the user confirmed); back as [`Message::KnownHostRemoved`].
     RemoveKnownHost {
         tab: TabId,
         host: String,
         port: u16,
+        expected: Vec<KnownHostEntry>,
+    },
+    /// Closes `close` (if any), then connects `site` with a new session; back as
+    /// [`Message::SiteConnected`].
+    RestartSite {
+        close: Option<SessionId>,
+        site: SiteId,
     },
 }
 
@@ -410,6 +419,9 @@ impl App {
     }
 
     fn apply(&mut self, msg: Message) -> Vec<Effect> {
+        if self.blocked_by_dialog(&msg) {
+            return Vec::new();
+        }
         match msg {
             Message::ToggleQueue => self.queue_open = !self.queue_open,
             Message::FilterSites(filter) => self.site_filter = filter,
@@ -513,6 +525,7 @@ impl App {
             Message::KnownHostRemoved { tab, result } => {
                 return self.known_host_removed(tab, result);
             }
+            Message::RestartSession(tab) => return self.restart_session(tab),
         }
         Vec::new()
     }
@@ -581,6 +594,9 @@ impl App {
                 Ok(connected) => Some(connected.session),
                 Err(failure) => failure.session,
             };
+            if let Some(session) = session {
+                self.forget_session(session);
+            }
             return session.map(Effect::CloseSession).into_iter().collect();
         };
         self.tabs[index].known_hosts = KnownHostsFix::Idle;
@@ -598,6 +614,10 @@ impl App {
                     Some(session) => self.settle_saving(session, false),
                     None => Vec::new(),
                 };
+                // Where it failed, as the profile said then: "Remove the old entry…"
+                // works on that endpoint even if the site is edited meanwhile.
+                self.tabs[index].failed_endpoint =
+                    self.site(&site).map(|s| (s.host.clone(), s.port));
                 self.tabs[index].state = TabState::Failed(failure);
                 effects
             }
@@ -687,7 +707,9 @@ impl App {
         let TabState::Failed(failure) = &mut tab.state else {
             return None;
         };
-        failure.session.take().map(Effect::CloseSession)
+        let session = failure.session.take()?;
+        self.forget_session(session);
+        Some(Effect::CloseSession(session))
     }
 
     /// Removes the site's tab and closes its session, if any.
@@ -713,6 +735,9 @@ impl App {
             TabState::Failed(failure) => failure.session,
             TabState::Connecting => None,
         };
+        if let Some(session) = session {
+            self.forget_session(session);
+        }
         session.map(Effect::CloseSession).into_iter().collect()
     }
 }

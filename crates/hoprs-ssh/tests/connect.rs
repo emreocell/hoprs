@@ -670,3 +670,53 @@ async fn keyboard_interactive_wrong_answer_fails() {
     assert!(detail.contains("tried: keyboard-interactive"), "{detail}");
     assert!(!detail.contains("nope"), "{detail}");
 }
+
+/// Only a typed secret that proved right is reported as accepted (the app saves only
+/// those in the keyring).
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn accepted_secret_right_password() {
+    let dir = trusted_dir().await;
+    let cfg = test_config("bob", dir.path());
+    let p = Arc::new(ScriptedPrompter::new().with_password(Some("bob-pass")));
+    connect(cfg, &p).await.unwrap().disconnect().await;
+    assert_eq!(p.accepted(), [hoprs_ssh::AcceptedSecret::Password]);
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn accepted_secret_not_for_rejected_password_then_kbd() {
+    let dir = trusted_dir().await;
+    let mut cfg = test_config("dave", dir.path());
+    cfg.auth.use_agent = false;
+    cfg.auth.allow_keyboard_interactive = true;
+    let p = Arc::new(
+        ScriptedPrompter::new()
+            .with_password(Some("not-daves-pass"))
+            .with_kbd_answers(Some(vec!["dave-pass"])),
+    );
+    connect(cfg, &p).await.unwrap().disconnect().await;
+    assert_eq!(p.calls().password, 1);
+    assert!(p.calls().kbd >= 1);
+    assert!(p.accepted().is_empty(), "{:?}", p.accepted());
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn accepted_secret_not_for_wrong_passphrase_then_password() {
+    let dir = trusted_dir().await;
+    let mut cfg = test_config("alice", dir.path());
+    cfg.auth.use_agent = false;
+    cfg.auth.key = KeySource::File {
+        path: fixture("id_ed25519_pp"),
+        passphrase: None,
+    };
+    let p = Arc::new(
+        ScriptedPrompter::new()
+            .with_passphrase(Some("not-the-pp"))
+            .with_password(Some("alice-pass")),
+    );
+    connect(cfg, &p).await.unwrap().disconnect().await;
+    assert_eq!(p.calls().passphrase, 1);
+    assert_eq!(p.accepted(), [hoprs_ssh::AcceptedSecret::Password]);
+}

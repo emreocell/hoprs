@@ -16,6 +16,16 @@ pub struct KbdPrompt {
     pub echo: bool,
 }
 
+/// A secret the user typed at a prompt that proved right (see
+/// [`Prompter::secret_accepted`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcceptedSecret {
+    /// The server accepted the password from [`Prompter::password`].
+    Password,
+    /// The passphrase from [`Prompter::key_passphrase`] decrypted its key.
+    Passphrase,
+}
+
 /// Asks the user for decisions and secrets. `None` / `false` means cancelled.
 #[async_trait]
 pub trait Prompter: Send + Sync {
@@ -39,6 +49,13 @@ pub trait Prompter: Send + Sync {
         instructions: &str,
         prompts: &[KbdPrompt],
     ) -> Option<Vec<SecretString>>;
+    /// The last secret of this kind returned by a prompt proved right: the server
+    /// accepted the password, or the passphrase decrypted its key. A secret never reported
+    /// here was refused or never tried (another method succeeded first), so it must not be
+    /// kept. Not called for configured or remembered secrets. Does nothing by default.
+    fn secret_accepted(&self, secret: AcceptedSecret) {
+        let _ = secret;
+    }
 }
 
 /// Number of times each prompt kind was invoked.
@@ -74,6 +91,7 @@ pub struct ScriptedPrompter {
     password_calls: AtomicU32,
     passphrase_calls: AtomicU32,
     kbd: AtomicU32,
+    accepted: Mutex<Vec<AcceptedSecret>>,
 }
 
 #[cfg(feature = "testing")]
@@ -97,7 +115,16 @@ impl ScriptedPrompter {
             password_calls: AtomicU32::new(0),
             passphrase_calls: AtomicU32::new(0),
             kbd: AtomicU32::new(0),
+            accepted: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Every `secret_accepted` call, in order.
+    pub fn accepted(&self) -> Vec<AcceptedSecret> {
+        self.accepted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub fn accept_host(mut self, accept: bool) -> Self {
@@ -183,6 +210,13 @@ impl Prompter for ScriptedPrompter {
         self.kbd_answers
             .as_ref()
             .map(|a| a.iter().map(|s| SecretString::from(s.as_str())).collect())
+    }
+
+    fn secret_accepted(&self, secret: AcceptedSecret) {
+        self.accepted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(secret);
     }
 }
 

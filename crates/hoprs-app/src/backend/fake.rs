@@ -23,7 +23,9 @@
 //! Dialogs: [`FakeBackend::push_prompt`] remembers each request, so an answer to a
 //! password or passphrase prompt with `save: true` is held for its session like the real
 //! broker does, and stored (as `set_password` would) only when that session's connect
-//! succeeds; a failed connect or a close drops it. `known_hosts` is a scripted list
+//! succeeds (the fake assumes the typed secret is what logged in: the "accepted only"
+//! rule is tested against the real broker and session manager); a failed connect or a
+//! close drops it. `known_hosts` is a scripted list
 //! ([`FakeBackend::set_known_host_entries`]); removals are recorded.
 //!
 //! `save_site` keeps the backend-owned fields of a stored site (`has_*`, and the FTPS pin
@@ -633,8 +635,20 @@ impl BackendApi for FakeBackend {
         Ok(self.state().known_hosts.clone())
     }
 
-    async fn remove_known_host(&self, host: String, port: u16) -> Result<usize> {
+    /// Like the real one: refused (`Conflict`) unless `expected` is the scripted list.
+    async fn remove_known_host(
+        &self,
+        host: String,
+        port: u16,
+        expected: Vec<KnownHostEntry>,
+    ) -> Result<usize> {
         let mut state = self.state();
+        if state.known_hosts != expected {
+            return Err(Error::new(
+                ErrorKind::Conflict,
+                "known_hosts changed; review the entries again",
+            ));
+        }
         state.known_host_removals.push((host, port));
         Ok(std::mem::take(&mut state.known_hosts).len())
     }

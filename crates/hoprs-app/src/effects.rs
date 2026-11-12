@@ -10,7 +10,7 @@ use hoprs_transfer::{Event, TransferSpec};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::app::{Effect, FileAction, Message, ProfileOp, RequestId, TabId};
-use crate::backend::{BackendApi, PromptAnswer, PromptId, SessionId, Side};
+use crate::backend::{BackendApi, KnownHostEntry, PromptAnswer, PromptId, SessionId, Side};
 use crate::ui::site_form::PasswordChange;
 use crate::ui::{dialogs, files};
 
@@ -119,14 +119,20 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
         Effect::AnswerPrompt { id, answer } => {
             Task::future(answer_prompt(backend, id, answer)).discard()
         }
-        Effect::FocusDialog => iced::widget::operation::focus(dialogs::field_id(0)),
-        Effect::FocusNext => iced::widget::operation::focus_next(),
+        Effect::FocusDialogField(n) => iced::widget::operation::focus(dialogs::field_id(n)),
+        Effect::Unfocus => {
+            iced::advanced::widget::operate(iced::advanced::widget::operation::focusable::unfocus())
+        }
         Effect::KnownHostEntries { tab, host, port } => {
             Task::future(known_host_entries(backend, tab, host, port))
         }
-        Effect::RemoveKnownHost { tab, host, port } => {
-            Task::future(remove_known_host(backend, tab, host, port))
-        }
+        Effect::RemoveKnownHost {
+            tab,
+            host,
+            port,
+            expected,
+        } => Task::future(remove_known_host(backend, tab, host, port, expected)),
+        Effect::RestartSite { close, site } => Task::run(restart_site(backend, close, site), |m| m),
     }
 }
 
@@ -146,15 +152,32 @@ pub async fn known_host_entries(
     Message::KnownHostEntries { tab, result }
 }
 
-/// Removes the `known_hosts` lines of `host:port`.
+/// Removes the `known_hosts` lines of `host:port`, if still the ones confirmed.
 pub async fn remove_known_host(
     backend: Arc<dyn BackendApi>,
     tab: TabId,
     host: String,
     port: u16,
+    expected: Vec<KnownHostEntry>,
 ) -> Message {
-    let result = backend.remove_known_host(host, port).await;
+    let result = backend.remove_known_host(host, port, expected).await;
     Message::KnownHostRemoved { tab, result }
+}
+
+/// Closes `close` first, then connects `site`: the connect never finds (and reuses) the
+/// old session.
+pub fn restart_site(
+    backend: Arc<dyn BackendApi>,
+    close: Option<SessionId>,
+    site: SiteId,
+) -> impl Stream<Item = Message> + Send + 'static {
+    let closer = backend.clone();
+    stream::once(async move {
+        if let Some(session) = close {
+            closer.close(session).await;
+        }
+    })
+    .flat_map(move |()| connect_sites(backend.clone(), vec![site.clone()]))
 }
 
 /// The broker's dialogs for the UI's subscription: each request or withdrawal as

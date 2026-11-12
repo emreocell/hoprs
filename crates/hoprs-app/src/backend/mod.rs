@@ -150,8 +150,14 @@ pub trait BackendApi: Send + Sync {
     /// for `host:port`, to show before it does (a line that also covers other hosts).
     async fn known_host_entries(&self, host: String, port: u16) -> Result<Vec<KnownHostEntry>>;
     /// Deletes every `known_hosts` line for `host:port` (the user's "Remove the old entry"
-    /// after a changed host key); returns how many.
-    async fn remove_known_host(&self, host: String, port: u16) -> Result<usize>;
+    /// after a changed host key), if they are still exactly `expected` (what the user saw
+    /// and confirmed); `Conflict` otherwise, nothing removed. Returns how many.
+    async fn remove_known_host(
+        &self,
+        host: String,
+        port: u16,
+        expected: Vec<KnownHostEntry>,
+    ) -> Result<usize>;
 
     /// Delivers the UI's answer to a dialog (closing it is [`PromptAnswer::Cancel`]).
     async fn answer_prompt(&self, id: PromptId, answer: PromptAnswer);
@@ -407,9 +413,16 @@ impl BackendApi for Backend {
         blocking(move || hoprs_ssh::known_hosts::entries_for(&path, &host, port)).await
     }
 
-    async fn remove_known_host(&self, host: String, port: u16) -> Result<usize> {
+    async fn remove_known_host(
+        &self,
+        host: String,
+        port: u16,
+        expected: Vec<KnownHostEntry>,
+    ) -> Result<usize> {
         let path = self.sessions.known_hosts_path();
-        let removed = blocking(move || hoprs_ssh::known_hosts::remove(&path, &host, port)).await?;
+        let removed =
+            blocking(move || hoprs_ssh::known_hosts::remove_entries(&path, &host, port, &expected))
+                .await?;
         tracing::info!(removed, "removed known_hosts entries at the user's request");
         Ok(removed)
     }
@@ -672,8 +685,22 @@ mod tests {
             .map(|e| (e.line, e.covers_other_hosts))
             .collect();
         assert_eq!(lines, [(1, false), (3, true)]);
+        // Not what is in the file now (a stale preview): refused, nothing removed.
+        let stale = entries[..1].to_vec();
+        let err = backend
+            .remove_known_host("h".into(), 2222, stale)
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, hoprs_core::ErrorKind::Conflict);
         assert_eq!(
-            backend.remove_known_host("h".into(), 2222).await.unwrap(),
+            backend.known_host_entries("h".into(), 2222).await.unwrap(),
+            entries
+        );
+        assert_eq!(
+            backend
+                .remove_known_host("h".into(), 2222, entries)
+                .await
+                .unwrap(),
             2
         );
         assert_eq!(

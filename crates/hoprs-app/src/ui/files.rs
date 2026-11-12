@@ -635,7 +635,7 @@ fn not_connected<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> {
                 Message::EditSite(tab.site.clone()),
             ),
             // Drawn by the changed host key view above.
-            FailureAction::RemoveOldEntry => continue,
+            FailureAction::RemoveOldEntry | FailureAction::CloseAndReconnect => continue,
         };
         actions = actions.push(
             button(text(label))

@@ -20,7 +20,7 @@ use secrecy::{ExposeSecret, SecretString};
 use zeroize::Zeroizing;
 
 use crate::config::{KeySource, SshConfig};
-use crate::prompt::{KbdPrompt, Prompter};
+use crate::prompt::{AcceptedSecret, KbdPrompt, Prompter};
 use crate::session::map_russh_error;
 
 /// Default key files tried when the profile has no key, in this order.
@@ -213,6 +213,7 @@ pub(crate) async fn authenticate<H: client::Handler>(
         if update(result, &mut methods) {
             if source == Source::Prompted {
                 remembered.set_password(Some(password));
+                prompter.secret_accepted(AcceptedSecret::Password);
             }
             return Ok(());
         }
@@ -577,6 +578,7 @@ async fn load_key(
                 Ok(key) => {
                     if source == Source::Prompted {
                         remembered.set_passphrase(path, Some(passphrase));
+                        prompter.secret_accepted(AcceptedSecret::Passphrase);
                     }
                     Ok(key)
                 }
@@ -662,12 +664,21 @@ mod tests {
             Some(SkipReason::WrongPassphrase)
         );
         assert!(remembered.passphrase(&pp).is_none());
+        assert!(
+            wrong.accepted().is_empty(),
+            "a wrong passphrase is never accepted"
+        );
 
         // A right one is, and is used without asking again.
         let right = ScriptedPrompter::new().with_passphrase(Some("fixture-pp"));
         load_key(&pp, None, &right, &remembered).await.unwrap();
         load_key(&pp, None, &right, &remembered).await.unwrap();
         assert_eq!(right.calls().passphrase, 1);
+        assert_eq!(
+            right.accepted(),
+            [AcceptedSecret::Passphrase],
+            "reported once, for the prompted passphrase only"
+        );
 
         // A remembered passphrase that no longer decrypts the key is forgotten.
         remembered.set_passphrase(&pp, Some(SecretString::from("stale")));

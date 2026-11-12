@@ -949,7 +949,8 @@ mod tests {
     }
 
     /// "Save in the system keyring": the typed password reaches the keyring only once the
-    /// session it was typed for connects; a failed connection or a close drops it.
+    /// session it was typed for connects *with it* (auth reported it accepted); a session
+    /// that got in another way, a failed connection or a close drops it.
     #[tokio::test]
     async fn typed_secret_saved_only_after_connect() {
         use hoprs_ssh::Prompter as _;
@@ -968,7 +969,10 @@ mod tests {
 
         // Each case: a session still connecting, whose password prompt is answered with
         // "save"; then the connection succeeds, fails, or the session is closed.
-        for (n, outcome) in ["connects", "fails", "closes"].into_iter().enumerate() {
+        for (n, outcome) in ["connects", "another method", "fails", "closes"]
+            .into_iter()
+            .enumerate()
+        {
             let site = Site::new(outcome, "h", "u", Protocol::Ssh);
             f.vault.upsert_site(site.clone()).await.unwrap();
             let (state, _) = watch::channel(ConnectionState::Connecting);
@@ -1001,11 +1005,28 @@ mod tests {
 
             match outcome {
                 "connects" => {
+                    // Auth reports the typed password right, then the state follows.
+                    prompter.secret_accepted(hoprs_ssh::AcceptedSecret::Password);
                     conn.state.send_replace(ConnectionState::Connected);
                     attach.await.unwrap().unwrap();
                     assert_eq!(stored(&site), Some("pw-connects".into()));
                     assert!(
                         f.vault
+                            .site(site.id.clone())
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .has_password
+                    );
+                }
+                "another method" => {
+                    // The server refused the password; keyboard-interactive (or a key)
+                    // got in: the session connects, the typed password is not saved.
+                    conn.state.send_replace(ConnectionState::Connected);
+                    attach.await.unwrap().unwrap();
+                    assert_eq!(stored(&site), None);
+                    assert!(
+                        !f.vault
                             .site(site.id.clone())
                             .await
                             .unwrap()

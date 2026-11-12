@@ -2641,3 +2641,40 @@ async fn upload_into_read_only_dir_is_permission() {
     let e = c.fs.chmod(&c.at("ro/missing"), 0o600).await.unwrap_err();
     assert_eq!(e.kind, ErrorKind::NotFound, "{e:?}");
 }
+
+/// Only a typed password the server logged in with is reported as accepted (the app
+/// saves only those); a refused one never is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn ftp_password_accepted_only_after_login() {
+    let p = Arc::new(ScriptedFtpPrompter::new().with_password(Some("frank-pass")));
+    let fs = FtpFs::connect(prompted_session_config(), p.clone() as Arc<dyn FtpPrompter>)
+        .await
+        .unwrap();
+    assert!(p.password_accepted_calls() >= 1);
+    fs.disconnect().await;
+
+    let wrong = Arc::new(ScriptedFtpPrompter::new().with_password(Some("not-franks-pass")));
+    let fs = FtpFs::start(
+        prompted_session_config(),
+        wrong.clone() as Arc<dyn FtpPrompter>,
+    );
+    let mut rx = Connection::state(&fs);
+    wait_state(
+        &mut rx,
+        |st| matches!(st, ConnectionState::Disconnected(_)),
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(wrong.calls().password >= 1);
+    assert_eq!(wrong.password_accepted_calls(), 0);
+    fs.disconnect().await;
+
+    // A configured password is not a typed one: never reported.
+    let configured = Arc::new(ScriptedFtpPrompter::new());
+    let fs = FtpFs::connect(session_config(), configured.clone() as Arc<dyn FtpPrompter>)
+        .await
+        .unwrap();
+    assert_eq!(configured.password_accepted_calls(), 0);
+    fs.disconnect().await;
+}

@@ -678,18 +678,22 @@ fn known_hosts_revoked(host: &str, line: usize) -> Error {
 /// connection), whatever its algorithm.
 fn check_pinned(pinned: Option<&PublicKey>, host: &str, key: &PublicKey) -> Result<()> {
     match pinned {
-        Some(pinned) if pinned.key_data() != key.key_data() => {
-            Err(
-                Error::new(ErrorKind::HostKey, changed_message(host)).with_detail(format!(
-                    "the server presented a {} key ({}) instead of the key verified when this \
-             session connected",
-                    key.algorithm().as_str(),
-                    known_hosts::fingerprint(key)
-                )),
-            )
-        }
+        Some(pinned) if pinned.key_data() != key.key_data() => Err(pinned_key_changed(
+            host,
+            key.algorithm().as_str(),
+            &known_hosts::fingerprint(key),
+        )),
         _ => Ok(()),
     }
+}
+
+/// The server presented a `key_type` key (`fingerprint`) instead of the one this session
+/// verified when it first connected.
+pub(crate) fn pinned_key_changed(host: &str, key_type: &str, fingerprint: &str) -> Error {
+    Error::new(ErrorKind::HostKey, changed_message(host)).with_detail(format!(
+        "the server presented a {key_type} key ({fingerprint}) instead of the key verified \
+         when this session connected"
+    ))
 }
 
 /// russh callbacks: host key verification and disconnect notification.
