@@ -114,7 +114,12 @@ pub struct SshConfig {
     pub user: String,
     pub auth: AuthConfig,
     pub known_hosts: PathBuf,
+    /// A keepalive is sent after this much time without data from the server.
     pub keepalive_interval: Duration,
+    /// Unanswered keepalives tolerated. The connection is declared lost once one more goes
+    /// unanswered, so a hung connection is detected within
+    /// `keepalive_interval x (keepalive_max + 1)` of the last data received (120 s with the
+    /// defaults 30 s x 3). Values below 1 count as 1: keepalive never waits forever.
     pub keepalive_max: u32,
     pub reconnect: ReconnectPolicy,
     pub connect_timeout: Duration,

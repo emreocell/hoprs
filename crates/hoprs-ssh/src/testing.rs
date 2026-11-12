@@ -41,6 +41,8 @@ pub fn docker(args: &[&str]) {
 /// Matches every sshd process title except the listener's (`sshd: /usr/sbin/sshd ...`):
 /// `sshd: bob [priv]`, `sshd: bob` (authenticated, no command yet), `sshd: bob@notty`.
 /// `sshd: .*@` alone would miss connections that never ran a command or subsystem.
+/// Assumes OpenSSH < 9.8 (the container runs Debian bookworm's 9.2): from 9.8 on,
+/// per-connection processes are titled `sshd-session: ...` and this pattern must change.
 pub fn kill_ssh_sessions() {
     let args = ["exec", "-T", "sshd", "pkill", "-f", "^sshd: [^/]"];
     let status = compose(&args);

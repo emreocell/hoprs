@@ -128,7 +128,8 @@ fn assert_not_connected(result: Result<russh::Channel<russh::client::Msg>, Error
 #[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
 async fn reconnects_after_kill() {
     let (s, _p, _dir) = connected().await;
-    s.open_channel().await.unwrap();
+    let (_ch, tag) = s.open_channel_tagged().await.unwrap();
+    assert_eq!(tag, 1);
     let rec = record_until(s.state(), |st| *st == SessionState::Connected);
     kill_ssh_sessions();
     let states = recorded(rec).await;
@@ -141,7 +142,8 @@ async fn reconnects_after_kill() {
     );
     assert_eq!(s.generation(), 2);
 
-    let mut ch = s.open_channel().await.unwrap();
+    let (mut ch, tag) = s.open_channel_tagged().await.unwrap();
+    assert_eq!(tag, 2);
     ch.exec(true, "echo alive").await.unwrap();
     let mut out = Vec::new();
     while let Some(msg) = ch.wait().await {
@@ -177,7 +179,17 @@ async fn open_channel_while_reconnecting_is_network() {
         "open_channel waited"
     );
     assert!(matches!(*rx.borrow(), SessionState::Reconnecting { .. }));
+
     s.disconnect().await;
+    let by_user =
+        SessionState::Disconnected(Error::new(ErrorKind::Network, "Disconnected by user"));
+    assert_eq!(*rx.borrow_and_update(), by_user);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !rx.has_changed().unwrap(),
+        "state changed after disconnect: {:?}",
+        *rx.borrow()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -206,7 +218,8 @@ async fn hung_connection_detected_by_keepalive() {
     let _restore = restore(&[&["unpause", "sshd"]]);
     docker(&["pause", "sshd"]);
     // The server is frozen once `pause` returns. russh counts keepalives from the last
-    // reply received, so it gives up within 1 s x 3 + 1 s of the freeze. The 200 ms are
+    // reply received and gives up once more than `keepalive_max` go unanswered, so within
+    // keepalive_interval x (keepalive_max + 1) = 1 s x 4 of the freeze. The 200 ms are
     // timer and scheduling slack only.
     let start = Instant::now();
     let state = wait_state(
@@ -284,4 +297,22 @@ async fn reconnect_now_after_disconnect() {
     assert_eq!(s.generation(), 2);
     s.open_channel().await.unwrap();
     s.disconnect().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn supervisor_ends_when_last_handle_drops() {
+    let (s, _p, _dir) = connected().await;
+    let mut rx = s.state();
+    let clone = s.clone();
+    drop(s);
+    assert!(
+        clone.open_channel().await.is_ok(),
+        "a clone keeps the session"
+    );
+    drop(clone);
+    let closed = tokio::time::timeout(Duration::from_secs(1), rx.changed())
+        .await
+        .expect("supervisor still running 1 s after the last handle dropped");
+    assert!(closed.is_err(), "expected the state channel to close");
 }

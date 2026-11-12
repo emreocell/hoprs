@@ -5,8 +5,10 @@
 //! connection is lost, and ends when the last handle is dropped.
 //!
 //! Disconnect detection (russh 0.65): keepalive is russh's own (`client::Config::
-//! keepalive_interval` / `keepalive_max`); after `keepalive_max` unanswered keepalives the
-//! session loop ends with `KeepaliveTimeout`. Every end of an established session (server
+//! keepalive_interval` / `keepalive_max`): russh gives up when more than `keepalive_max`
+//! keepalives go unanswered, i.e. `keepalive_interval x (keepalive_max + 1)` after the last
+//! data received, ending the session loop with `KeepaliveTimeout`. russh reads
+//! `keepalive_max = 0` as "never give up", so `russh_config` clamps it to at least 1. Every end of an established session (server
 //! `DISCONNECT`, EOF, I/O error, keepalive timeout) calls `Handler::disconnected`, except
 //! when shutting down the write half fails first (e.g. after a reset), which returns early.
 //! So the handler also signals when it is dropped, which happens whenever the session task
@@ -59,8 +61,8 @@ struct Inner {
 
 /// State shared between the handles and the supervisor.
 struct Shared {
-    /// The live connection; `Some` only while `Connected`.
-    handle: RwLock<Option<Arc<client::Handle<ClientHandler>>>>,
+    /// The live connection and its generation; `Some` only while `Connected`.
+    handle: RwLock<Option<(Arc<client::Handle<ClientHandler>>, u64)>>,
     generation: AtomicU64,
     state: watch::Sender<SessionState>,
 }
@@ -79,9 +81,17 @@ impl Shared {
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .take()
+            .map(|(handle, _)| handle)
     }
 
-    fn current_handle(&self) -> Option<Arc<client::Handle<ClientHandler>>> {
+    /// Publishes a new connection under the next generation.
+    fn install(&self, handle: client::Handle<ClientHandler>) {
+        let mut slot = self.handle.write().unwrap_or_else(PoisonError::into_inner);
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        *slot = Some((Arc::new(handle), generation));
+    }
+
+    fn current_handle(&self) -> Option<(Arc<client::Handle<ClientHandler>>, u64)> {
         self.handle
             .read()
             .unwrap_or_else(PoisonError::into_inner)
@@ -114,7 +124,7 @@ impl SshSession {
         let conn = establish(&config, &prompter).await?;
         let (state, _) = watch::channel(SessionState::Connected);
         let shared = Arc::new(Shared {
-            handle: RwLock::new(Some(Arc::new(conn.handle))),
+            handle: RwLock::new(Some((Arc::new(conn.handle), 1))),
             generation: AtomicU64::new(1),
             state,
         });
@@ -154,17 +164,31 @@ impl SshSession {
 
     /// Starts at 1 and goes up by one after every successful reconnection. Channels opened
     /// under an older generation are dead.
+    ///
+    /// Reading this next to [`open_channel`](Self::open_channel) can race with a reconnect;
+    /// callers that track which connection a channel belongs to should use
+    /// [`open_channel_tagged`](Self::open_channel_tagged).
     pub fn generation(&self) -> u64 {
         self.inner.shared.generation.load(Ordering::SeqCst)
+    }
+
+    /// Like [`open_channel`](Self::open_channel), also returning the generation of the
+    /// connection the channel was opened on (read together with the handle).
+    pub async fn open_channel_tagged(&self) -> Result<(russh::Channel<client::Msg>, u64)> {
+        let Some((handle, generation)) = self.inner.shared.current_handle() else {
+            return Err(Error::new(ErrorKind::Network, "Not connected"));
+        };
+        let channel = handle
+            .channel_open_session()
+            .await
+            .map_err(map_russh_error)?;
+        Ok((channel, generation))
     }
 
     /// Opens a `session` channel on the current connection. Never waits for a reconnection:
     /// while `Reconnecting` or `Disconnected` it fails at once with `Network`, "Not connected".
     pub async fn open_channel(&self) -> Result<russh::Channel<client::Msg>> {
-        let Some(handle) = self.inner.shared.current_handle() else {
-            return Err(Error::new(ErrorKind::Network, "Not connected"));
-        };
-        handle.channel_open_session().await.map_err(map_russh_error)
+        self.open_channel_tagged().await.map(|(channel, _)| channel)
     }
 
     /// Starts a new round of reconnection attempts, the first one without delay, when the
@@ -287,11 +311,7 @@ impl Supervisor {
             };
             match result {
                 Ok(conn) => {
-                    *shared
-                        .handle
-                        .write()
-                        .unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(conn.handle));
-                    shared.generation.fetch_add(1, Ordering::SeqCst);
+                    shared.install(conn.handle);
                     shared.set_state(SessionState::Connected);
                     return Phase::Connected(conn.lost);
                 }
@@ -331,8 +351,9 @@ impl Supervisor {
     }
 
     async fn disconnect_by_user(&self) {
+        let handle = self.shared.take_handle();
         self.shared.set_state(user_disconnected());
-        if let Some(handle) = self.shared.take_handle() {
+        if let Some(handle) = handle {
             let _ = handle
                 .disconnect(russh::Disconnect::ByApplication, "", "en")
                 .await;
@@ -391,11 +412,7 @@ async fn attempt(cfg: &SshConfig, prompter: Arc<WatchedPrompter>) -> Result<Conn
     // Nagle only delays interactive traffic; a failure here is harmless.
     let _ = stream.set_nodelay(true);
 
-    let russh_config = Arc::new(client::Config {
-        keepalive_interval: Some(cfg.keepalive_interval),
-        keepalive_max: cfg.keepalive_max as usize,
-        ..Default::default()
-    });
+    let russh_config = Arc::new(russh_config(cfg));
     let (lost_tx, lost) = oneshot::channel();
     let handler = ClientHandler {
         host: cfg.host.clone(),
@@ -409,6 +426,16 @@ async fn attempt(cfg: &SshConfig, prompter: Arc<WatchedPrompter>) -> Result<Conn
         .map_err(|e| e.0)?;
     crate::auth::authenticate(&mut handle, cfg, prompter.as_ref()).await?;
     Ok(Connection { handle, lost })
+}
+
+/// russh client settings for `cfg`. `keepalive_max` is clamped to at least 1: russh treats
+/// 0 as unlimited, which would never detect a hung connection.
+fn russh_config(cfg: &SshConfig) -> client::Config {
+    client::Config {
+        keepalive_interval: Some(cfg.keepalive_interval),
+        keepalive_max: cfg.keepalive_max.max(1) as usize,
+        ..Default::default()
+    }
 }
 
 /// russh callbacks: host key verification and disconnect notification.
@@ -524,5 +551,23 @@ impl client::Handler for ClientHandler {
                 .with_detail(format!("known_hosts line {line}")),
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keepalive_max_is_at_least_one() {
+        let mut cfg = SshConfig::new("h", 22, "u");
+        cfg.keepalive_max = 0;
+        assert_eq!(russh_config(&cfg).keepalive_max, 1);
+        cfg.keepalive_max = 3;
+        assert_eq!(russh_config(&cfg).keepalive_max, 3);
+        assert_eq!(
+            russh_config(&cfg).keepalive_interval,
+            Some(cfg.keepalive_interval)
+        );
     }
 }
