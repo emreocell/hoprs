@@ -1,0 +1,26 @@
+[package]
+name = "hoprs-transfer"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+hoprs-core = { path = "../hoprs-core" }
+hoprs-remote = { path = "../hoprs-remote" }
+rusqlite = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "time", "sync", "rt", "macros"] }
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util"] }
+tempfile = { workspace = true }
+async-trait = { workspace = true }
+hoprs-remote = { path = "../hoprs-remote", features = ["testing"] }
+criterion = { workspace = true }
+
+[[bench]]
+name = "engine"
+harness = false

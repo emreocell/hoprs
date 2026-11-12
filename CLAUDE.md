@@ -9,10 +9,10 @@ Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI), open source (MIT OR Apa
 - Plan roadmap (6 plans, one per subsystem): `docs/superpowers/plans/2026-11-11-00-roadmap.md`
 - Plan 1 (foundation + transfer engine): `docs/superpowers/plans/2026-11-11-01-foundation-transfer-engine.md`
 
-## Current status (2026-11-11)
+## Current status (2026-11-12)
 
-- Brainstorming done, spec approved, Plan 1 written. No code yet.
-- **Next step:** execute Plan 1 in **Native** mode (superpowers:executing-plans), task by task, TDD, one commit per task.
+- Plan 1 implemented on branch `plan-1-foundation` (hoprs-core, hoprs-remote, hoprs-transfer), every task reviewed plus a whole-branch review; follow-ups deferred to later plans are in `docs/superpowers/plans/2026-11-12-01-followups.md`.
+- **Next step:** merge Plan 1, then write Plan 2 (SSH + SFTP) from the real signatures (`RemoteFs` contract in `crates/hoprs-remote/src/lib.rs`, `TransferEngine::register_site`, `pause_site`, `resume_site`).
 - Plans 2–6 are written only after the previous plan is done, using the real signatures it produced.
 
 ## Decisions already made (do not re-litigate)
