@@ -1,0 +1,14 @@
+[package]
+name = "hoprs-vault"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hoprs-core = { path = "../hoprs-core" }
+serde = { workspace = true }
+toml = { workspace = true, features = ["preserve_order"] }
+dirs = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
