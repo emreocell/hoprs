@@ -8,18 +8,19 @@ use hoprs_core::{
     ConnectionState, EntryKind, Error, ErrorKind, ReconnectPolicy, RemoteEntry, RemotePath,
 };
 use hoprs_remote::testing::{
-    FtpSession, OtherCertificate, TestControl, ftp_config, ftps_fixture, kill_ftp_sessions,
-    open_test_control, pooled_quote, server_fingerprint, session_command,
+    FTPS_IMPLICIT_PORT, FtpSession, OtherCertificate, TestControl, ftp_config, ftps_fixture,
+    kill_ftp_sessions, open_test_control, pooled_quote, server_fingerprint, session_command,
     session_disconnect_inside_command, session_fail, session_quote,
 };
 use hoprs_remote::{
     CertProblem, Connection, FtpConfig, FtpFs, FtpPrompter, FtpSecurity, RemoteFs,
-    ScriptedFtpPrompter, cert_fingerprint,
+    ScriptedFtpPrompter, TransferMode, cert_fingerprint,
 };
 use hoprs_ssh::testing::docker;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject;
 use secrecy::SecretString;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
@@ -1028,14 +1029,19 @@ fn path(s: &str) -> RemotePath {
     RemotePath::new(s).unwrap()
 }
 
-/// Removes the work directory when dropped. Never panics.
-struct Cleanup(String);
+/// Removes a path in a compose service's container when dropped. Never panics.
+struct Cleanup {
+    service: &'static str,
+    path: String,
+}
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
-        let dir = self.0.clone();
-        if std::panic::catch_unwind(|| docker(&["exec", "-T", "ftp", "rm", "-rf", &dir])).is_err() {
-            eprintln!("could not remove {dir}");
+        let (service, path) = (self.service, self.path.clone());
+        if std::panic::catch_unwind(|| docker(&["exec", "-T", service, "rm", "-rf", &path]))
+            .is_err()
+        {
+            eprintln!("could not remove {path} in {service}");
         }
     }
 }
@@ -1043,6 +1049,8 @@ impl Drop for Cleanup {
 struct Ctx {
     fs: FtpFs,
     work: RemotePath,
+    /// The compose service the work directory lives in.
+    service: &'static str,
     _cleanup: Cleanup,
 }
 
@@ -1055,7 +1063,7 @@ impl Ctx {
     /// Runs `cmd` as frank inside the work directory.
     fn sh(&self, cmd: &str) {
         let script = format!("cd {} && {cmd}", self.work);
-        docker(&["exec", "-T", "ftp", "su", "frank", "-c", &script]);
+        docker(&["exec", "-T", self.service, "su", "frank", "-c", &script]);
     }
 }
 
@@ -1071,16 +1079,30 @@ fn unique() -> String {
 }
 
 async fn setup() -> Ctx {
+    setup_on(ftp_config(FtpSecurity::Plain)).await
+}
+
+/// Connects with `cfg` and makes a fresh work directory on the service `cfg.port` points to.
+async fn setup_on(cfg: FtpConfig) -> Ctx {
+    let service = if cfg.port == FTPS_IMPLICIT_PORT {
+        "ftps-implicit"
+    } else {
+        "ftp"
+    };
     let p = Arc::new(ScriptedFtpPrompter::new());
-    let fs = FtpFs::connect(ftp_config(FtpSecurity::Plain), p as Arc<dyn FtpPrompter>)
+    let fs = FtpFs::connect(cfg, p as Arc<dyn FtpPrompter>)
         .await
         .unwrap();
     let work = format!("/home/frank/t-{}", unique());
-    let cleanup = Cleanup(work.clone());
+    let cleanup = Cleanup {
+        service,
+        path: work.clone(),
+    };
     fs.mkdir(&path(&work)).await.unwrap();
     Ctx {
         fs,
         work: path(&work),
+        service,
         _cleanup: cleanup,
     }
 }
@@ -1415,4 +1437,374 @@ async fn unreadable_dir_is_permission() {
     c.fs.mkdir(&c.at("same")).await.unwrap();
     c.fs.mkdir(&c.at("same/same")).await.unwrap();
     assert_eq!(names(&c.fs.list(&c.at("same")).await.unwrap()), ["same"]);
+}
+
+// ---------------------------------------------------------------------------------------
+// FtpFs streams: open_read / open_write, passive, active and the PASV NAT workaround.
+// ---------------------------------------------------------------------------------------
+
+const MIB: usize = 1024 * 1024;
+
+/// Deterministic pseudo-random bytes (xorshift64).
+fn data(len: usize, seed: u64) -> Vec<u8> {
+    let mut x = seed | 1;
+    (0..len)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        })
+        .collect()
+}
+
+async fn upload(fs: &FtpFs, path: &RemotePath, offset: u64, bytes: &[u8]) {
+    let mut w = fs.open_write(path, offset).await.unwrap();
+    w.write_all(bytes).await.unwrap();
+    w.shutdown().await.unwrap();
+}
+
+async fn download(fs: &FtpFs, path: &RemotePath, offset: u64) -> Vec<u8> {
+    let mut r = fs.open_read(path, offset).await.unwrap();
+    let mut out = Vec::new();
+    r.read_to_end(&mut out).await.unwrap();
+    out
+}
+
+/// Uploads `len` random bytes to `name` and downloads them again.
+async fn roundtrip(c: &Ctx, name: &str, len: usize, seed: u64) {
+    let src = data(len, seed);
+    let f = c.at(name);
+    upload(&c.fs, &f, 0, &src).await;
+    assert_eq!(c.fs.stat(&f).await.unwrap().size, src.len() as u64);
+    let back = download(&c.fs, &f, 0).await;
+    assert!(back == src, "downloaded bytes of {name} differ");
+}
+
+/// `SIZE` of `path` on a separate control connection to the `ftp` service.
+async fn server_size(path: &RemotePath) -> u64 {
+    let p = ScriptedFtpPrompter::new();
+    let mut c = open_test_control(&mut ftp_config(FtpSecurity::Plain), &p)
+        .await
+        .unwrap();
+    let (code, text) = c.quote(&format!("SIZE {path}")).await.unwrap();
+    assert_eq!(code, 213, "{text}");
+    text.trim().parse().unwrap()
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn roundtrip_8mib_random() {
+    let c = setup().await;
+    roundtrip(&c, "big.bin", 8 * MIB, 0x1234_5678).await;
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn read_from_offset() {
+    let c = setup().await;
+    let src = data(MIB + 123, 2);
+    let f = c.at("f.bin");
+    upload(&c.fs, &f, 0, &src).await;
+    for off in [1usize, 32 * 1024, 300_001, MIB + 122] {
+        let back = download(&c.fs, &f, off as u64).await;
+        assert!(back == src[off..], "offset {off}");
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn read_past_eof_is_empty() {
+    let c = setup().await;
+    let f = c.at("f");
+    upload(&c.fs, &f, 0, &data(1000, 3)).await;
+    assert!(download(&c.fs, &f, 1000).await.is_empty());
+    assert!(download(&c.fs, &f, 5000).await.is_empty());
+    let empty = c.at("empty");
+    upload(&c.fs, &empty, 0, &[]).await;
+    assert_eq!(c.fs.stat(&empty).await.unwrap().size, 0);
+    assert!(download(&c.fs, &empty, 0).await.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn read_dir_is_io() {
+    let c = setup().await;
+    c.fs.mkdir(&c.at("d")).await.unwrap();
+    let e = c.fs.open_read(&c.at("d"), 0).await.err().unwrap();
+    assert_eq!(e.kind, ErrorKind::Io, "{e:?}");
+    assert!(e.message.contains(c.at("d").as_str()), "{e:?}");
+    for off in [0, 1] {
+        let e = c.fs.open_write(&c.at("d"), off).await.err().unwrap();
+        assert_eq!(e.kind, ErrorKind::Io, "{e:?}");
+    }
+    assert_eq!(
+        c.fs.open_read(&c.at("nope"), 0).await.err().unwrap().kind,
+        ErrorKind::NotFound
+    );
+    assert_eq!(c.fs.stat(&c.at("d")).await.unwrap().kind, EntryKind::Dir);
+
+    // Special files and symlinks are never opened (a FIFO would block the server).
+    c.sh("mkfifo fifo && printf abc > target && ln -s target link");
+    for name in ["fifo", "link"] {
+        let p = c.at(name);
+        let r = tokio::time::timeout(Duration::from_secs(10), c.fs.open_read(&p, 0))
+            .await
+            .expect("open_read hung");
+        let e = r.err().unwrap();
+        assert_eq!(e.kind, ErrorKind::Io, "{name}: {e:?}");
+        assert!(e.message.contains(p.as_str()), "{e:?}");
+        for off in [0, 1] {
+            let w = tokio::time::timeout(Duration::from_secs(10), c.fs.open_write(&p, off))
+                .await
+                .expect("open_write hung");
+            assert_eq!(w.err().unwrap().kind, ErrorKind::Io, "{name} at {off}");
+        }
+    }
+    c.sh("test -p fifo && test -L link && test \"$(cat target)\" = abc");
+    assert_eq!(download(&c.fs, &c.at("target"), 0).await, b"abc");
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn write_offset_zero_truncates_before_return() {
+    let c = setup().await;
+    c.sh("head -c 1000 /dev/urandom > f");
+    let f = c.at("f");
+    assert_eq!(server_size(&f).await, 1000);
+    let w = c.fs.open_write(&f, 0).await.unwrap();
+    assert_eq!(server_size(&f).await, 0);
+    drop(w);
+    // A missing file is created at once.
+    let g = c.at("g");
+    let w = c.fs.open_write(&g, 0).await.unwrap();
+    assert_eq!(c.fs.stat(&g).await.unwrap().kind, EntryKind::File);
+    drop(w);
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn write_from_offset_appends() {
+    let c = setup().await;
+    let src = data(1_000_000, 4);
+    let f = c.at("f");
+    upload(&c.fs, &f, 0, &src[..400_000]).await;
+    let mut w = c.fs.open_write(&f, 400_000).await.unwrap();
+    w.write_all(&src[400_000..]).await.unwrap();
+    w.shutdown().await.unwrap();
+    assert_eq!(server_size(&f).await, src.len() as u64);
+    assert!(download(&c.fs, &f, 0).await == src);
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn write_offset_mismatch_is_io() {
+    let c = setup().await;
+    let f = c.at("f");
+    upload(&c.fs, &f, 0, &data(1000, 6)).await;
+    // FTP cannot truncate: a smaller offset is refused like a larger one.
+    for off in [1001, 999] {
+        let e = c.fs.open_write(&f, off).await.err().unwrap();
+        assert_eq!(e.kind, ErrorKind::Io, "{off}: {e:?}");
+        assert!(e.message.contains(f.as_str()), "{e:?}");
+    }
+    assert_eq!(server_size(&f).await, 1000);
+    let e = c.fs.open_write(&c.at("missing"), 10).await.err().unwrap();
+    assert_eq!(e.kind, ErrorKind::Io, "{e:?}");
+    assert_eq!(
+        c.fs.stat(&c.at("missing")).await.unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn shutdown_means_bytes_are_there() {
+    let c = setup().await;
+    let src = data(5 * MIB, 7);
+    let f = c.at("f");
+    let mut w = c.fs.open_write(&f, 0).await.unwrap();
+    w.write_all(&src).await.unwrap();
+    w.shutdown().await.unwrap();
+    assert_eq!(server_size(&f).await, src.len() as u64);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn dropped_reader_does_not_poison_pool() {
+    let mut cfg = ftp_config(FtpSecurity::Plain);
+    cfg.transfer_connections = 1;
+    let c = setup_on(cfg).await;
+    let src = data(4 * MIB, 11);
+    let f = c.at("f");
+    upload(&c.fs, &f, 0, &src).await;
+
+    let mut r = c.fs.open_read(&f, 0).await.unwrap();
+    let mut part = vec![0u8; 100_000];
+    r.read_exact(&mut part).await.unwrap();
+    assert!(part == src[..100_000]);
+    drop(r);
+
+    let back = tokio::time::timeout(Duration::from_secs(15), download(&c.fs, &f, 0))
+        .await
+        .expect("the next open_read hung");
+    assert!(back == src, "downloaded bytes differ");
+    // The same holds for a writer dropped mid-upload.
+    let mut w = c.fs.open_write(&c.at("g"), 0).await.unwrap();
+    w.write_all(&src[..MIB]).await.unwrap();
+    drop(w);
+    tokio::time::timeout(Duration::from_secs(15), roundtrip(&c, "h", MIB, 12))
+        .await
+        .expect("the next transfer hung");
+    assert_eq!(
+        *Connection::state(&c.fs).borrow(),
+        ConnectionState::Connected
+    );
+    assert_eq!(Connection::generation(&c.fs), 1);
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn active_mode_roundtrip() {
+    let mut cfg = ftp_config(FtpSecurity::Plain);
+    cfg.mode = TransferMode::Active;
+    let c = setup_on(cfg).await;
+    roundtrip(&c, "a.bin", 2 * MIB, 13).await;
+    assert_eq!(names(&c.fs.list(&c.work).await.unwrap()), ["a.bin"]);
+    let back = download(&c.fs, &c.at("a.bin"), 1000).await;
+    assert!(back == data(2 * MIB, 13)[1000..]);
+}
+
+/// Ruling R7: the docker vsftpd keeps `require_ssl_reuse=YES` (its default), so every data
+/// connection must resume the control connection's TLS session. One transfer connection
+/// carries many transfers in a row, so session tickets must not run out either.
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn explicit_tls_roundtrip() {
+    let mut cfg = tls_config(FtpSecurity::ExplicitTls, true);
+    cfg.transfer_connections = 1;
+    let c = setup_on(cfg).await;
+    roundtrip(&c, "big.bin", 2 * MIB, 14).await;
+    for i in 0..8 {
+        roundtrip(&c, &format!("s{i}"), 10_000 + i, 100 + i as u64).await;
+    }
+    assert_eq!(names(&c.fs.list(&c.work).await.unwrap()).len(), 9);
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn implicit_tls_roundtrip() {
+    let c = setup_on(tls_config(FtpSecurity::ImplicitTls, true)).await;
+    roundtrip(&c, "big.bin", 2 * MIB, 15).await;
+}
+
+/// Review Focus 1: `ftps-implicit` announces 10.255.255.1 in its `PASV` replies; with the
+/// workaround the data connections go to the control connection's host.
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn pasv_private_ip_with_workaround() {
+    let mut cfg = tls_config(FtpSecurity::ImplicitTls, true);
+    cfg.pasv_nat_workaround = true;
+    let c = setup_on(cfg).await;
+    roundtrip(&c, "f.bin", 300_000, 16).await;
+    assert_eq!(names(&c.fs.list(&c.work).await.unwrap()), ["f.bin"]);
+}
+
+/// Review Focus 1: without the workaround the data connection goes to the unreachable
+/// address; it fails as a `Network` data channel error within `connect_timeout` (plus a
+/// margin), and the session does not reconnect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn pasv_private_ip_without_workaround_fails_fast() {
+    let mut cfg = tls_config(FtpSecurity::ImplicitTls, true);
+    cfg.pasv_nat_workaround = false;
+    cfg.connect_timeout = Duration::from_secs(2);
+    let limit = cfg.connect_timeout + Duration::from_secs(2);
+    let p = Arc::new(ScriptedFtpPrompter::new());
+    let fs = FtpFs::connect(cfg, p as Arc<dyn FtpPrompter>)
+        .await
+        .unwrap();
+    let mut rx = Connection::state(&fs);
+    rx.mark_unchanged();
+    let f = path("/home/frank/never.bin");
+
+    let start = Instant::now();
+    let r = tokio::time::timeout(Duration::from_secs(30), fs.open_read(&f, 0))
+        .await
+        .expect("open_read hung");
+    let e = r.err().unwrap();
+    assert!(start.elapsed() < limit, "took {:?}", start.elapsed());
+    assert_eq!(e.kind, ErrorKind::Network, "{e:?}");
+    assert!(
+        e.detail.as_deref().unwrap_or("").contains("10.255.255.1"),
+        "{e:?}"
+    );
+
+    let start = Instant::now();
+    let w = tokio::time::timeout(Duration::from_secs(30), fs.open_write(&f, 0))
+        .await
+        .expect("open_write hung");
+    assert_eq!(w.err().unwrap().kind, ErrorKind::Network);
+    assert!(start.elapsed() < limit, "took {:?}", start.elapsed());
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !rx.has_changed().unwrap(),
+        "state changed: {:?}",
+        *rx.borrow()
+    );
+    assert_eq!(Connection::generation(&fs), 1);
+    fs.disconnect().await;
+}
+
+/// Review Focus 5: a full disk is the server's problem with this file (`Io`), not a lost
+/// connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn disk_full_is_io_not_network() {
+    let c = setup().await;
+    let f = path(&format!("/home/frank/small/full-{}", unique()));
+    let _cleanup = Cleanup {
+        service: "ftp",
+        path: f.to_string(),
+    };
+    let src = data(2 * MIB, 10);
+    let mut w = c.fs.open_write(&f, 0).await.unwrap();
+    let err = match w.write_all(&src).await {
+        Err(e) => e,
+        Ok(()) => w.shutdown().await.expect_err("2 MiB fit in a 1 MiB tmpfs"),
+    };
+    let e = Error::from(err);
+    assert_eq!(e.kind, ErrorKind::Io, "{e:?}");
+    drop(w);
+    // The session is fine.
+    assert_eq!(c.fs.stat(&f).await.unwrap().kind, EntryKind::File);
+    assert_eq!(
+        *Connection::state(&c.fs).borrow(),
+        ConnectionState::Connected
+    );
+    assert_eq!(Connection::generation(&c.fs), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn concurrent_streams_share_pool() {
+    let mut cfg = ftp_config(FtpSecurity::Plain);
+    cfg.transfer_connections = 2;
+    let c = setup_on(cfg).await;
+    let mut tasks = tokio::task::JoinSet::new();
+    for i in 0..6u64 {
+        let fs = c.fs.clone();
+        let p = c.at(&format!("f{i}"));
+        tasks.spawn(async move {
+            let src = data(MIB, 200 + i);
+            upload(&fs, &p, 0, &src).await;
+            (p, src)
+        });
+    }
+    let done = tasks.join_all().await;
+    assert_eq!(done.len(), 6);
+    for (p, src) in done {
+        assert!(download(&c.fs, &p, 0).await == src, "{p}");
+    }
 }

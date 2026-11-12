@@ -10,15 +10,15 @@ use futures_util::future::BoxFuture;
 use hoprs_core::{ConnectionState, Error, ErrorKind, Result};
 use secrecy::{ExposeSecret, SecretString};
 use suppaftp::FtpError;
-use suppaftp::Status;
 use suppaftp::tokio::{AsyncRustlsConnector, AsyncRustlsFtpStream};
 use suppaftp::types::FileType;
+use suppaftp::{Mode, Status};
 use tokio::sync::{
     Mutex, MutexGuard, Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch,
 };
 use tokio::time::Instant;
 
-use super::config::{FtpConfig, FtpSecurity};
+use super::config::{FtpConfig, FtpSecurity, TransferMode};
 use super::errors::{data_connect_failed, is_control_loss, map_ftp_error, reply_parts};
 use super::prompt::FtpPrompter;
 use super::tls::{RejectedCert, RejectedSlot, connector, fingerprint};
@@ -185,6 +185,27 @@ async fn connect_and_login(
             }
         })
     });
+    match cfg.mode {
+        TransferMode::Passive => {
+            // `PASV`, so that the NAT workaround applies: suppaftp replaces the announced
+            // address with the control connection's peer (a no-op when they are equal).
+            // `PASV` cannot express IPv6, so an IPv6 server gets `EPSV`, which has no address.
+            let ipv6 = stream
+                .get_ref()
+                .await
+                .peer_addr()
+                .is_ok_and(|a| a.is_ipv6());
+            stream.set_mode(if ipv6 {
+                Mode::ExtendedPassive
+            } else {
+                Mode::Passive
+            });
+            stream.set_passive_nat_workaround(cfg.pasv_nat_workaround);
+        }
+        // `PORT` (`EPRT` for IPv6) with the control connection's local address. The server
+        // must connect back within `connect_timeout`, and only the control peer is accepted.
+        TransferMode::Active => stream = stream.active_mode(cfg.connect_timeout),
+    }
 
     let who = format!("{}@{target}", cfg.user);
     // suppaftp logs every command at trace level, `PASS <password>` included: a logger must
@@ -285,8 +306,6 @@ struct Shared {
     /// Idle transfer connections, tagged with their generation.
     idle: StdMutex<Vec<(FtpStream, u64)>>,
     /// One permit per checked-out transfer connection.
-    // Until `FtpFs` streams use the transfer pool (Plan 3, Task 6), only the tests do.
-    #[cfg_attr(not(feature = "testing"), allow(dead_code))]
     permits: Arc<Semaphore>,
     /// Tells the supervisor that the control connection of a generation was lost.
     lost: mpsc::UnboundedSender<(u64, Error)>,
@@ -350,7 +369,6 @@ impl Shared {
     }
 
     /// An idle transfer connection of `generation`; older ones are dropped (closed).
-    #[cfg_attr(not(feature = "testing"), allow(dead_code))]
     fn take_idle(&self, generation: u64) -> Option<FtpStream> {
         let mut idle = self.idle.lock().unwrap_or_else(PoisonError::into_inner);
         idle.retain(|(_, g)| *g == generation);
@@ -534,8 +552,6 @@ impl FtpSession {
     ///
     /// Unless `Connected` (also when the state changes while waiting) it fails at once with
     /// `Network`, "Not connected". Errors opening a new connection are returned as is.
-    // Until `FtpFs` streams use the transfer pool (Plan 3, Task 6), only the tests do.
-    #[cfg_attr(not(feature = "testing"), allow(dead_code))]
     pub async fn checkout(&self) -> Result<PooledConn> {
         let shared = &self.inner.shared;
         let mut state = shared.state.subscribe();
@@ -570,6 +586,17 @@ impl FtpSession {
             return Err(not_connected());
         }
         Ok(pooled(control.stream, generation))
+    }
+
+    /// [`FtpConfig::command_timeout`]: bounds a whole command, a transfer's final reply
+    /// included.
+    pub(crate) fn command_timeout(&self) -> Duration {
+        self.inner.shared.command_timeout
+    }
+
+    /// [`FtpConfig::connect_timeout`]: bounds a reply that should come at once (a `NOOP`).
+    pub(crate) fn reply_timeout(&self) -> Duration {
+        self.inner.shared.reply_timeout
     }
 
     /// Closes every connection and stops reconnecting: the state becomes `Disconnected`
@@ -607,8 +634,6 @@ impl Drop for InFlight<'_> {
 /// Dropped, it goes back to the pool only if [`mark_clean`](Self::mark_clean) was called
 /// and the session has not reconnected since; otherwise it is closed. Its pool slot is
 /// freed either way.
-// Until `FtpFs` streams use the transfer pool (Plan 3, Task 6), only the tests do.
-#[cfg_attr(not(feature = "testing"), allow(dead_code))]
 pub struct PooledConn {
     /// `Some` until dropped.
     stream: Option<FtpStream>,
@@ -618,7 +643,6 @@ pub struct PooledConn {
     _permit: OwnedSemaphorePermit,
 }
 
-#[cfg_attr(not(feature = "testing"), allow(dead_code))]
 impl PooledConn {
     /// The logged-in connection, in binary mode.
     pub fn stream(&mut self) -> &mut FtpStream {

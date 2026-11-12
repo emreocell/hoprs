@@ -24,6 +24,8 @@ pub(crate) fn map_reply(code: u32, text: &str, context: &str) -> Error {
             (ErrorKind::Permission, "Permission denied")
         }
         450 | 550 => (ErrorKind::Io, "File unavailable"),
+        // vsftpd: "Failure writing to local file." (a full disk among others).
+        451 => (ErrorKind::Io, "Server failed to process the file"),
         452 | 552 => (ErrorKind::Io, "Server storage full or quota exceeded"),
         553 => (ErrorKind::Io, "File name not allowed"),
         _ => (ErrorKind::Protocol, "Unexpected FTP reply"),
@@ -38,6 +40,13 @@ pub(crate) fn map_reply(code: u32, text: &str, context: &str) -> Error {
 /// Detail prefix of the `Network` errors for data channel replies (`425`, `426`): they come
 /// over a healthy control connection.
 const DATA_CHANNEL: &str = "data channel: ";
+
+/// A transfer's data connection failed while its control connection still answers: `Network`,
+/// but not a control loss.
+pub(crate) fn data_channel_lost(context: &str, detail: impl fmt::Display) -> Error {
+    Error::new(ErrorKind::Network, format!("Connection lost: {context}"))
+        .with_detail(format!("{DATA_CHANNEL}{detail}"))
+}
 
 /// Whether `e`, returned by a command, means the connection it ran on is lost: a socket or
 /// I/O failure, a timeout, or `421`. Data channel replies (`425`, `426`) are `Network` errors
@@ -230,8 +239,15 @@ mod tests {
     }
 
     #[test]
+    fn local_processing_error_is_io() {
+        let e = map_reply(451, "Failure writing to local file.", "/a");
+        assert_eq!(e.kind, ErrorKind::Io, "{e:?}");
+        assert!(!is_control_loss(&e), "{e:?}");
+    }
+
+    #[test]
     fn other_codes_are_protocol() {
-        for code in [400, 451, 500, 501, 502, 503, 504, 532, 551, 599] {
+        for code in [400, 500, 501, 502, 503, 504, 532, 551, 599] {
             assert_eq!(kind(code, "x"), ErrorKind::Protocol, "{code}");
         }
     }
