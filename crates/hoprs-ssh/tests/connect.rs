@@ -1,8 +1,12 @@
 //! Integration tests against the OpenSSH container in `docker/compose.yml`.
 
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -357,6 +361,7 @@ async fn slow_prompt_does_not_time_out() {
     assert_eq!(known_hosts_lines(dir.path()).len(), 1);
 }
 
+#[cfg(unix)]
 /// A private `ssh-agent` holding one fixture key; killed on drop.
 struct TestAgent {
     child: Child,
@@ -364,6 +369,7 @@ struct TestAgent {
     _dir: TempDir,
 }
 
+#[cfg(unix)]
 impl TestAgent {
     fn start(key: &str) -> Self {
         let dir = TempDir::new().unwrap();
@@ -406,6 +412,7 @@ impl TestAgent {
     }
 }
 
+#[cfg(unix)]
 impl Drop for TestAgent {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -413,6 +420,7 @@ impl Drop for TestAgent {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 #[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
 async fn agent_auth() {
@@ -427,6 +435,7 @@ async fn agent_auth() {
     assert_eq!(p.calls().password, 0);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 #[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
 async fn agent_missing_falls_through() {
@@ -439,6 +448,7 @@ async fn agent_missing_falls_through() {
     connect(cfg, &p).await.unwrap().disconnect().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 #[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
 async fn order_is_agent_key_password() {
