@@ -89,10 +89,20 @@ fn stopped() -> Error {
 
 impl TransferEngine {
     /// Spawns the engine actor. Must be called inside a tokio runtime.
-    pub fn start(store: QueueStore, config: EngineConfig) -> TransferEngine {
+    ///
+    /// Items left unfinished by a previous run are recovered as `Paused`
+    /// (see `QueueStore::recover`); nothing resumes automatically.
+    pub fn start(mut store: QueueStore, config: EngineConfig) -> TransferEngine {
+        let recovered = actor::recover(&mut store);
         let (commands, command_rx) = mpsc::channel(COMMAND_CAPACITY);
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
-        tokio::spawn(actor::run(store, config, command_rx, events.clone()));
+        tokio::spawn(actor::run(
+            store,
+            recovered,
+            config,
+            command_rx,
+            events.clone(),
+        ));
         TransferEngine { commands, events }
     }
 
@@ -102,19 +112,12 @@ impl TransferEngine {
 
     /// Registers (or replaces) the endpoints of a site; its queued items become dispatchable.
     pub async fn register_site(&self, site: SiteId, endpoints: SiteEndpoints) {
-        let (reply, rx) = oneshot::channel();
-        if self
-            .commands
-            .send(Command::RegisterSite {
-                site,
-                endpoints,
-                reply,
-            })
-            .await
-            .is_ok()
-        {
-            let _ = rx.await;
-        }
+        self.request(|reply| Command::RegisterSite {
+            site,
+            endpoints,
+            reply,
+        })
+        .await;
     }
 
     /// Adds a transfer to the queue and returns its id.
@@ -167,13 +170,36 @@ impl TransferEngine {
 
     /// Sets the conflict policy used by items dispatched from now on.
     pub async fn set_policy(&self, policy: ConflictPolicy) {
+        self.request(|reply| Command::SetPolicy { policy, reply })
+            .await;
+    }
+
+    /// Stops dispatching the items of `site`; transfers already running
+    /// continue. Has no effect on an unknown or already paused site.
+    pub async fn pause_site(&self, site: SiteId) {
+        self.request(|reply| Command::PauseSite { site, reply })
+            .await;
+    }
+
+    /// Dispatches the items of a paused `site` again (after a manual pause or
+    /// a network failure). Has no effect on an unknown or unpaused site.
+    pub async fn resume_site(&self, site: SiteId) {
+        self.request(|reply| Command::ResumeSite { site, reply })
+            .await;
+    }
+
+    /// Stops the engine: running transfers are cancelled, their items keep
+    /// their stored state (so the next start recovers them), and this waits
+    /// for the actor to finish. Other handles stop working.
+    pub async fn shutdown(self) {
+        self.request(|reply| Command::Shutdown { reply }).await;
+    }
+
+    /// Sends a command whose only reply is an acknowledgement, and waits for
+    /// it. Does nothing if the engine has stopped.
+    async fn request(&self, command: impl FnOnce(oneshot::Sender<()>) -> Command) {
         let (reply, rx) = oneshot::channel();
-        if self
-            .commands
-            .send(Command::SetPolicy { policy, reply })
-            .await
-            .is_ok()
-        {
+        if self.commands.send(command(reply)).await.is_ok() {
             let _ = rx.await;
         }
     }

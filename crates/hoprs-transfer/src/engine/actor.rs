@@ -13,8 +13,15 @@
 //! cannot change state until its worker reports back: the command records an
 //! `Intent` and cancels the item's token, and the worker's result is mapped
 //! through that intent.
+//!
+//! A network error pauses the item's whole site: the item goes back to
+//! `Queued` (a file continues from its partial destination later) and the
+//! site dispatches nothing until `resume_site`. Other sites keep running.
+//!
+//! At start, items left unfinished by a previous run are loaded as `Paused`
+//! (see `recover`); nothing resumes automatically.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use hoprs_core::{EntryKind, Error, ErrorKind, RemoteEntry, Result, SiteId};
@@ -35,6 +42,8 @@ use crate::store::{NewChild, PausedFrom, QueueStore};
 const MAX_WORKERS: usize = 16;
 const SYMLINK_SKIP: &str = "symlinks are not followed";
 const USER_SKIP: &str = "skipped by user";
+/// How long a stopping engine waits for its cancelled workers to report back.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 fn unknown() -> Error {
     Error::new(ErrorKind::NotFound, "Unknown transfer")
@@ -79,6 +88,16 @@ pub(super) enum Command {
         op: Control,
         reply: oneshot::Sender<Result<()>>,
     },
+    PauseSite {
+        site: SiteId,
+        reply: oneshot::Sender<()>,
+    },
+    ResumeSite {
+        site: SiteId,
+        reply: oneshot::Sender<()>,
+    },
+    /// Stops the actor; `reply` is answered once it has stopped.
+    Shutdown { reply: oneshot::Sender<()> },
 }
 
 /// A control command on one item.
@@ -105,12 +124,18 @@ enum Intent {
 struct Running {
     cancel: CancellationToken,
     intent: Option<Intent>,
+    /// Policy override for the item's next run if this one is interrupted
+    /// by a network error: the override this run consumed, until the copy
+    /// starts; then the policy that continues that copy.
+    retry: Option<ConflictPolicy>,
 }
 
 struct Site {
     endpoints: SiteEndpoints,
     /// Worker slots currently held by items of this site.
     busy: usize,
+    /// Set by `pause_site` or a network error: nothing new is dispatched.
+    paused: bool,
 }
 
 impl Site {
@@ -173,8 +198,58 @@ struct Actor {
     worker_tx: mpsc::UnboundedSender<WorkerMsg>,
 }
 
+/// Recovers the items a previous run left unfinished: `Active` and
+/// `AwaitingDecision` items become `Paused` (`QueueStore::recover`), and so
+/// do `Queued` ones, so that nothing resumes automatically.
+///
+/// Returns every item of each tree that still has an unfinished item,
+/// finished ones included: an expanded directory counts all of its
+/// children when it is resumed, and is never listed again. Trees that are
+/// entirely finished are not loaded. A store error yields an empty queue.
+pub(super) fn recover(store: &mut QueueStore) -> Vec<TransferItem> {
+    let Ok(unfinished) = store.recover() else {
+        return Vec::new();
+    };
+    for item in unfinished
+        .iter()
+        .filter(|i| i.state == TransferState::Queued)
+    {
+        // Best effort: if this fails the item is still loaded as paused,
+        // and simply resumes under the global policy.
+        let _ = store.set_state(item.id, &TransferState::Paused);
+    }
+    let Ok(all) = store.list_all() else {
+        return Vec::new();
+    };
+    // Parents are inserted before their children, so ids are ascending
+    // down every tree.
+    let mut root_of: HashMap<TransferId, TransferId> = HashMap::new();
+    for item in &all {
+        let root = item
+            .parent
+            .and_then(|p| root_of.get(&p).copied())
+            .unwrap_or(item.id);
+        root_of.insert(item.id, root);
+    }
+    let live: HashSet<TransferId> = all
+        .iter()
+        .filter(|i| !i.state.is_terminal())
+        .map(|i| root_of[&i.id])
+        .collect();
+    all.into_iter()
+        .filter(|i| live.contains(&root_of[&i.id]))
+        .map(|mut i| {
+            if i.state == TransferState::Queued {
+                i.state = TransferState::Paused;
+            }
+            i
+        })
+        .collect()
+}
+
 pub(super) async fn run(
     store: QueueStore,
+    recovered: Vec<TransferItem>,
     config: EngineConfig,
     mut commands: mpsc::Receiver<Command>,
     events: broadcast::Sender<Event>,
@@ -185,7 +260,7 @@ pub(super) async fn run(
         buf_size: config.buf_size,
         policy: config.default_policy,
         events,
-        items: BTreeMap::new(),
+        items: recovered.into_iter().map(|i| (i.id, i)).collect(),
         sites: HashMap::new(),
         queued: HashMap::new(),
         dirs: HashMap::new(),
@@ -197,15 +272,23 @@ pub(super) async fn run(
     let mut ticker = tokio::time::interval(config.progress_interval.max(Duration::from_millis(1)));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-    loop {
+    let shutdown = loop {
         tokio::select! {
             cmd = commands.recv() => match cmd {
+                Some(Command::Shutdown { reply }) => break Some(reply),
                 Some(cmd) => actor.handle_command(cmd),
-                None => break,
+                // Every handle was dropped.
+                None => break None,
             },
             Some(msg) = worker_rx.recv() => actor.handle_worker(msg),
             _ = ticker.tick() => actor.tick(),
         }
+    };
+    actor.stop_workers(&mut worker_rx).await;
+    // Closes the store before acknowledging.
+    drop(actor);
+    if let Some(reply) = shutdown {
+        let _ = reply.send(());
     }
 }
 
@@ -225,7 +308,14 @@ impl Actor {
                 match self.sites.get_mut(&site) {
                     Some(existing) => existing.endpoints = endpoints,
                     None => {
-                        self.sites.insert(site, Site { endpoints, busy: 0 });
+                        self.sites.insert(
+                            site,
+                            Site {
+                                endpoints,
+                                busy: 0,
+                                paused: false,
+                            },
+                        );
                     }
                 }
                 let _ = reply.send(());
@@ -266,7 +356,45 @@ impl Actor {
                 let _ = reply.send(result);
                 self.dispatch();
             }
+            Command::PauseSite { site, reply } => {
+                if let Some(site) = self.sites.get_mut(&site) {
+                    site.paused = true;
+                }
+                let _ = reply.send(());
+            }
+            Command::ResumeSite { site, reply } => {
+                if let Some(site) = self.sites.get_mut(&site) {
+                    site.paused = false;
+                }
+                let _ = reply.send(());
+                self.dispatch();
+            }
+            // `run` handles it, since it ends the actor.
+            Command::Shutdown { reply } => {
+                let _ = reply.send(());
+            }
         }
+    }
+
+    /// Cancels every running worker and waits (at most `SHUTDOWN_GRACE`)
+    /// until each has reported back, so that no cancelled copy is still
+    /// writing its partial destination once the engine has stopped. What
+    /// they report is ignored: stored states are left as they are, for the
+    /// next start to recover.
+    async fn stop_workers(&mut self, worker_rx: &mut mpsc::UnboundedReceiver<WorkerMsg>) {
+        for running in self.running.values() {
+            running.cancel.cancel();
+        }
+        let drain = async {
+            while !self.running.is_empty() {
+                let Some(msg) = worker_rx.recv().await else {
+                    break;
+                };
+                let (WorkerMsg::Prepared { id, .. } | WorkerMsg::Copied { id, .. }) = msg;
+                self.running.remove(&id);
+            }
+        };
+        let _ = tokio::time::timeout(SHUTDOWN_GRACE, drain).await;
     }
 
     fn control(&mut self, id: TransferId, state: &TransferState, op: Control) -> Result<()> {
@@ -596,7 +724,7 @@ impl Actor {
         let ready: Vec<SiteId> = self
             .sites
             .iter()
-            .filter(|(_, s)| s.free() > 0)
+            .filter(|(_, s)| !s.paused && s.free() > 0)
             .map(|(id, _)| id.clone())
             .collect();
         for site_id in ready {
@@ -615,14 +743,16 @@ impl Actor {
                 if let Some(site) = self.sites.get_mut(&site_id) {
                     site.busy += 1;
                 }
+                let policy_override = self.overrides.remove(&id);
                 self.running.insert(
                     id,
                     Running {
                         cancel: CancellationToken::new(),
                         intent: None,
+                        retry: policy_override,
                     },
                 );
-                let policy = self.overrides.remove(&id).unwrap_or(self.policy);
+                let policy = policy_override.unwrap_or(self.policy);
                 worker::spawn_prepare(id, route, policy, self.worker_tx.clone());
             }
         }
@@ -644,6 +774,41 @@ impl Actor {
         self.transition(id, state);
         self.free_slot(id);
         self.dispatch();
+    }
+
+    /// Puts an item whose worker hit a network error back in the queue, with
+    /// `retry` as the policy override of its next run, and pauses its site.
+    /// `SitePaused` is emitted only if the site was not paused already.
+    fn network_requeue(&mut self, id: TransferId, error: Error, retry: Option<ConflictPolicy>) {
+        if let Some(policy) = retry {
+            self.overrides.insert(id, policy);
+        }
+        let site_id = self.items.get(&id).map(|i| i.spec.site.clone());
+        self.transition(id, TransferState::Queued);
+        self.free_slot(id);
+        if let Some(site_id) = site_id
+            && let Some(site) = self.sites.get_mut(&site_id)
+            && !site.paused
+        {
+            site.paused = true;
+            self.emit(Event::SitePaused {
+                site: site_id,
+                error,
+            });
+        }
+        self.dispatch();
+    }
+
+    /// The state of a copy stopped by the control `intent`.
+    fn stopped_copy(&mut self, id: TransferId, intent: Option<Intent>) -> TransferState {
+        match intent {
+            Some(Intent::Pause) => TransferState::Paused,
+            Some(Intent::Requeue) => {
+                self.overrides.insert(id, ConflictPolicy::Resume);
+                TransferState::Queued
+            }
+            Some(Intent::Cancel) | None => TransferState::Cancelled,
+        }
     }
 
     /// The pending control intent of the item holding a worker slot, if any.
@@ -679,6 +844,10 @@ impl Actor {
                     (Ok(Prepared::Symlink), None) => {
                         self.release(id, TransferState::Skipped(SYMLINK_SKIP.to_string()))
                     }
+                    (Err(e), None) if e.kind == ErrorKind::Network => {
+                        let retry = self.running.get(&id).and_then(|r| r.retry);
+                        self.network_requeue(id, e, retry);
+                    }
                     (Err(e), None) => self.release(id, TransferState::Failed(e)),
                 }
             }
@@ -690,14 +859,16 @@ impl Actor {
                 }
                 let state = match (result, self.store.set_bytes_done(id, bytes)) {
                     (Ok(CopyOutcome::Completed), Ok(())) => TransferState::Done,
-                    (Ok(CopyOutcome::Cancelled), Ok(())) => match intent {
-                        Some(Intent::Pause) => TransferState::Paused,
-                        Some(Intent::Requeue) => {
-                            self.overrides.insert(id, ConflictPolicy::Resume);
-                            TransferState::Queued
-                        }
-                        Some(Intent::Cancel) | None => TransferState::Cancelled,
-                    },
+                    (Ok(CopyOutcome::Cancelled), Ok(())) => self.stopped_copy(id, intent),
+                    // A pending control command wins over the network error.
+                    (Err(e), Ok(())) if e.kind == ErrorKind::Network && intent.is_some() => {
+                        self.stopped_copy(id, intent)
+                    }
+                    (Err(e), Ok(())) if e.kind == ErrorKind::Network => {
+                        let retry = self.running.get(&id).and_then(|r| r.retry);
+                        self.network_requeue(id, e, retry);
+                        return;
+                    }
                     (Ok(_), Err(store_err)) => TransferState::Failed(store_err),
                     (Err(e), Ok(())) => TransferState::Failed(e),
                     // Keep the copy's own error; the store error goes into its detail.
@@ -805,11 +976,22 @@ impl Actor {
         };
         match decision {
             Decision::Write { offset } => {
-                let cancel = self
-                    .running
-                    .get(&id)
-                    .map(|r| r.cancel.clone())
-                    .unwrap_or_default();
+                // After a network error, the next run continues this copy
+                // from the partial destination; but replacing an existing
+                // file starts over, as the error may have come before the
+                // destination was truncated.
+                let retry = if offset == 0 && dst.is_some() {
+                    ConflictPolicy::Overwrite
+                } else {
+                    ConflictPolicy::Resume
+                };
+                let cancel = match self.running.get_mut(&id) {
+                    Some(running) => {
+                        running.retry = Some(retry);
+                        running.cancel.clone()
+                    }
+                    None => CancellationToken::new(),
+                };
                 let counter = self.tracker.register(id, Some(src.size), offset);
                 worker::spawn_copy(
                     id,
