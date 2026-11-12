@@ -15,6 +15,9 @@ use crate::{Event, TransferEngine};
 /// the network is restored.
 pub const RESTORE_GRACE: Duration = Duration::from_secs(2);
 
+/// Grace restores a watcher issues before it gives up on a site whose connection stays up.
+pub const MAX_GRACE_RESTORES: u32 = 3;
+
 /// Watches `conn` and tells `engine` when the network of `site` is back. The app wires one
 /// watcher per connected site (any protocol):
 ///
@@ -25,6 +28,16 @@ pub const RESTORE_GRACE: Duration = Duration::from_secs(2);
 ///   after [`RESTORE_GRACE`], if the state is still `Connected`, call `network_restored`;
 /// - the event receiver lagged (a `SitePaused` may have been lost): if the state is
 ///   `Connected`, call `network_restored` (it does nothing when the site is not paused).
+///
+/// Grace restores are limited to [`MAX_GRACE_RESTORES`] since the last generation change: a
+/// request that keeps failing with `Network` while the connection stays up (a data channel
+/// the server never opens, say) would otherwise pause and restore the site forever. Past the
+/// limit the site stays network-paused (its items stay queued, none fails) until the user
+/// calls `resume_site` or the connection comes back with a new generation; either starts the
+/// count over. The engine emits `SitePaused` only when the site's network pause turns on, so
+/// a `SitePaused` that arrives after the watcher gave up proves that someone else (the user)
+/// resumed the site; that is how a user resume is seen. While given up, a lagged receiver
+/// does not restore either.
 ///
 /// The task ends when the connection's state channel closes or the engine stops. Abort the returned handle to stop it earlier.
 pub fn spawn_site_watcher(
@@ -39,6 +52,10 @@ pub fn spawn_site_watcher(
     tokio::spawn(async move {
         // Grace timers; dropped (aborted) together with the watcher.
         let mut graces = JoinSet::new();
+        // Grace restores since the last generation change (or user resume).
+        let mut restores = 0u32;
+        // The limit was reached: the site was left network-paused.
+        let mut gave_up = false;
         loop {
             tokio::select! {
                 changed = state.changed() => {
@@ -49,12 +66,20 @@ pub fn spawn_site_watcher(
                     let current = conn.generation();
                     if connected && current > generation {
                         generation = current;
+                        (restores, gave_up) = (0, false);
                         engine.network_restored(site.clone()).await;
                     }
                 }
                 event = events.recv() => match event {
                     Ok(Event::SitePaused { site: paused, .. }) if paused == site => {
-                        if is_connected(&state) {
+                        if gave_up {
+                            // Only a resume from elsewhere (the user) lets the site pause again.
+                            (restores, gave_up) = (0, false);
+                        }
+                        if restores >= MAX_GRACE_RESTORES {
+                            gave_up = true;
+                        } else if is_connected(&state) {
+                            restores += 1;
                             let (engine, site, state) = (engine.clone(), site.clone(), state.clone());
                             graces.spawn(async move {
                                 tokio::time::sleep(RESTORE_GRACE).await;
@@ -65,7 +90,7 @@ pub fn spawn_site_watcher(
                         }
                     }
                     Err(RecvError::Lagged(_)) => {
-                        if is_connected(&state) {
+                        if !gave_up && is_connected(&state) {
                             engine.network_restored(site.clone()).await;
                         }
                     }
@@ -91,7 +116,7 @@ mod tests {
     use std::time::SystemTime;
 
     use hoprs_core::{ConnectionState, ErrorKind, RemotePath};
-    use hoprs_remote::{FaultFs, MemFs};
+    use hoprs_remote::{FaultFs, MemFs, Op};
     use tokio::task::JoinHandle;
 
     use super::*;
@@ -369,6 +394,49 @@ mod tests {
             TransferState::Done,
             "the other site is not restored by this watcher"
         );
+    }
+
+    /// Counts the `SitePaused` of `site()` until `rx` stays quiet for `RESTORE_GRACE * 10`
+    /// (paused time: the wait costs nothing). Gives up at 50.
+    async fn count_pauses(rx: &mut tokio::sync::broadcast::Receiver<Event>) -> u32 {
+        let mut pauses = 0;
+        while pauses < 50 {
+            match tokio::time::timeout(RESTORE_GRACE * 10, rx.recv()).await {
+                Err(_) => return pauses,
+                Ok(Ok(Event::SitePaused { site: s, .. })) if s == site() => pauses += 1,
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return pauses,
+                Ok(_) => {}
+            }
+        }
+        pauses
+    }
+
+    /// A request that fails with `Network` every time while the connection stays up: the
+    /// watcher restores the site `MAX_GRACE_RESTORES` times, then leaves it paused (the item
+    /// stays queued, not failed). A user resume or a new generation allows restores again.
+    #[tokio::test(start_paused = true)]
+    async fn stops_restoring_after_repeated_failures() {
+        let conn = FakeConnection::new();
+        let engine = engine();
+        let mut rx = engine.subscribe();
+        let (_remote, fault) = add_site(&engine, &site(), &[("a".into(), 10)]).await;
+        fault.fail_always(Op::OpenWrite, ErrorKind::Network);
+        let _watcher = spawn_site_watcher(engine.clone(), site(), conn.clone());
+        let id = engine.enqueue(upload_spec(&site(), "a")).await.unwrap();
+
+        // The first failure, then one per restore.
+        assert_eq!(count_pauses(&mut rx).await, 1 + MAX_GRACE_RESTORES);
+        assert_eq!(state_in(&engine, id).await, TransferState::Queued);
+
+        // The user resumes the site: the count starts over.
+        engine.resume_site(site()).await;
+        assert_eq!(count_pauses(&mut rx).await, 1 + MAX_GRACE_RESTORES);
+
+        // A reconnection restores at once, and the count starts over too.
+        conn.set(ConnectionState::Reconnecting { attempt: 1 });
+        conn.reconnected();
+        assert_eq!(count_pauses(&mut rx).await, 1 + MAX_GRACE_RESTORES);
+        assert_eq!(state_in(&engine, id).await, TransferState::Queued);
     }
 
     /// Overflows the watcher's event receiver while it is stuck, so that a `SitePaused` is lost.
