@@ -21,6 +21,8 @@ pub enum HostKeyStatus {
     Unknown,
     /// An entry with the same algorithm but a different key exists (1-based line).
     Changed { line: usize },
+    /// A `@revoked` entry lists this exact key for this host (1-based line). Must refuse.
+    Revoked { line: usize },
 }
 
 /// `SHA256:<base64 without padding>` of the key's wire-format blob, like `ssh-keygen -lf`.
@@ -36,6 +38,7 @@ pub fn check(path: &Path, host: &str, port: u16, key: &PublicKey) -> Result<Host
     };
     let name = host_name(host, port);
     let mut changed = None;
+    let mut known = false;
     for (idx, raw) in data.split_inclusive(|b| *b == b'\n').enumerate() {
         let Some(entry) = parse_line(raw) else {
             continue;
@@ -43,12 +46,20 @@ pub fn check(path: &Path, host: &str, port: u16, key: &PublicKey) -> Result<Host
         if !patterns_match(entry.patterns, &name) {
             continue;
         }
-        if entry.key.key_data() == key.key_data() {
-            return Ok(HostKeyStatus::Known);
+        if entry.revoked {
+            if entry.key.key_data() == key.key_data() {
+                return Ok(HostKeyStatus::Revoked { line: idx + 1 });
+            }
+            continue;
         }
-        if changed.is_none() && entry.key.algorithm() == key.algorithm() {
+        if entry.key.key_data() == key.key_data() {
+            known = true;
+        } else if changed.is_none() && entry.key.algorithm() == key.algorithm() {
             changed = Some(idx + 1);
         }
+    }
+    if known {
+        return Ok(HostKeyStatus::Known);
     }
     Ok(match changed {
         Some(line) => HostKeyStatus::Changed { line },
@@ -58,6 +69,7 @@ pub fn check(path: &Path, host: &str, port: u16, key: &PublicKey) -> Result<Host
 
 /// Appends a plain-text entry for `host:port`, creating the file and parent directory if needed.
 pub fn learn(path: &Path, host: &str, port: u16, key: &PublicKey) -> Result<()> {
+    validate_host(host)?;
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         create_parent_dir(parent)?;
     }
@@ -96,7 +108,7 @@ pub fn remove(path: &Path, host: &str, port: u16) -> Result<usize> {
     let mut removed = 0;
     for raw in data.split_inclusive(|b| *b == b'\n') {
         match parse_line(raw) {
-            Some(entry) if patterns_match(entry.patterns, &name) => removed += 1,
+            Some(entry) if !entry.revoked && patterns_match(entry.patterns, &name) => removed += 1,
             _ => kept.extend_from_slice(raw),
         }
     }
@@ -107,6 +119,7 @@ pub fn remove(path: &Path, host: &str, port: u16) -> Result<usize> {
 }
 
 struct Entry<'a> {
+    revoked: bool,
     patterns: &'a str,
     key: PublicKey,
 }
@@ -116,12 +129,27 @@ fn wire_blob(key: &PublicKey) -> Vec<u8> {
     key.to_bytes().unwrap_or_default()
 }
 
+/// Canonical entry name: ASCII-lowercased (OpenSSH hashes the lowercase name), bracketed off port 22.
 fn host_name(host: &str, port: u16) -> String {
+    let host = host.to_ascii_lowercase();
     if port == 22 {
-        host.to_owned()
+        host
     } else {
         format!("[{host}]:{port}")
     }
+}
+
+fn validate_host(host: &str) -> Result<()> {
+    let bad = host.is_empty()
+        || host.starts_with(['@', '#', '|'])
+        || host.contains(|c: char| c.is_whitespace() || c.is_control() || ",*?!".contains(c));
+    if bad {
+        return Err(hoprs_core::Error::new(
+            hoprs_core::ErrorKind::Io,
+            "Invalid host name for known_hosts",
+        ));
+    }
+    Ok(())
 }
 
 fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
@@ -135,15 +163,27 @@ fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
 /// Parses one line. Comments, blank lines, `@marker` lines and malformed lines yield `None`.
 fn parse_line(raw: &[u8]) -> Option<Entry<'_>> {
     let line = std::str::from_utf8(raw).ok()?.trim();
-    if line.is_empty() || line.starts_with('#') || line.starts_with('@') {
+    if line.is_empty() || line.starts_with('#') {
         return None;
     }
-    let mut fields = line.split_whitespace();
+    let mut fields = line.split_whitespace().peekable();
+    let revoked = match fields.peek() {
+        Some(&"@revoked") => {
+            fields.next();
+            true
+        }
+        Some(f) if f.starts_with('@') => return None,
+        _ => false,
+    };
     let patterns = fields.next()?;
     let algorithm = fields.next()?;
     let blob = STANDARD.decode(fields.next()?).ok()?;
     let key = PublicKey::from_bytes(&blob).ok()?;
-    (key.algorithm().as_str() == algorithm).then_some(Entry { patterns, key })
+    (key.algorithm().as_str() == algorithm).then_some(Entry {
+        revoked,
+        patterns,
+        key,
+    })
 }
 
 fn patterns_match(patterns: &str, name: &str) -> bool {
@@ -439,10 +479,79 @@ mod tests {
         let p = kh_path(&dir);
         let k = ed();
         let mut text = String::from("# comment\n\ngarbage line\nh ssh-ed25519 !!!notbase64\n");
-        text.push_str(&format!("@revoked {}", line_for("h", &k)));
         text.push_str(&format!("@cert-authority {}", line_for("h", &k)));
         fs::write(&p, text).unwrap();
         assert_eq!(check(&p, "h", 22, &k).unwrap(), HostKeyStatus::Unknown);
+    }
+
+    #[test]
+    fn revoked_key_blocks() {
+        let dir = TempDir::new().unwrap();
+        let p = kh_path(&dir);
+        let k = ed();
+        let text = format!(
+            "{}@revoked h {}",
+            line_for("h", &k),
+            &line_for("h", &k)[2..]
+        );
+        fs::write(&p, text).unwrap();
+        assert_eq!(
+            check(&p, "h", 22, &k).unwrap(),
+            HostKeyStatus::Revoked { line: 2 }
+        );
+    }
+
+    #[test]
+    fn revoked_other_key_does_not_affect() {
+        let dir = TempDir::new().unwrap();
+        let p = kh_path(&dir);
+        let (k, other) = (ed(), ed());
+        let text = format!("@revoked {}{}", line_for("h", &other), line_for("h", &k));
+        fs::write(&p, text).unwrap();
+        assert_eq!(check(&p, "h", 22, &k).unwrap(), HostKeyStatus::Known);
+        assert_eq!(
+            check(&p, "h", 22, &ed()).unwrap(),
+            HostKeyStatus::Changed { line: 2 }
+        );
+    }
+
+    #[test]
+    fn mixed_case_host_matches_hashed_entry() {
+        let dir = TempDir::new().unwrap();
+        let p = kh_path(&dir);
+        fs::copy(format!("{FIXTURE_DIR}/known_hosts"), &p).unwrap();
+        assert_eq!(
+            check(&p, "Hashed.Example", 22, &fixture_key()).unwrap(),
+            HostKeyStatus::Known
+        );
+        assert_eq!(
+            check(&p, "HASHED.example", 22, &ed()).unwrap(),
+            HostKeyStatus::Changed { line: 2 }
+        );
+        assert_eq!(remove(&p, "Hashed.EXAMPLE", 22).unwrap(), 1);
+    }
+
+    #[test]
+    fn learn_rejects_corrupting_host_names() {
+        let dir = TempDir::new().unwrap();
+        let p = kh_path(&dir);
+        let k = ed();
+        for bad in [
+            "a b", "a\tb", "a\nb", "a\x07b", "a,b", "a*", "a?", "!a", "@a", "#a", "|a", "",
+        ] {
+            let err = learn(&p, bad, 22, &k).unwrap_err();
+            assert_eq!(err.kind, hoprs_core::ErrorKind::Io, "{bad:?}");
+        }
+        assert!(!p.exists());
+    }
+
+    #[test]
+    fn second_key_for_same_host_is_known() {
+        let dir = TempDir::new().unwrap();
+        let p = kh_path(&dir);
+        let (a, b) = (ed(), ed());
+        fs::write(&p, format!("{}{}", line_for("h", &a), line_for("h", &b))).unwrap();
+        assert_eq!(check(&p, "h", 22, &b).unwrap(), HostKeyStatus::Known);
     }
 
     #[test]
