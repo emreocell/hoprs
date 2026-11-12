@@ -17,6 +17,8 @@ pub use fault::{FaultFs, Op};
 pub use mem::MemFs;
 mod sftp;
 
+pub use sftp::{SftpConfig, SftpFs};
+
 pub use local::LocalFs;
 
 pub type BoxAsyncRead = Box<dyn tokio::io::AsyncRead + Send + Unpin>;
