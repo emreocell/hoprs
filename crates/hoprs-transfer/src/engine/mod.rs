@@ -15,7 +15,7 @@ use crate::model::{ConflictPolicy, TransferId, TransferItem, TransferSpec, Trans
 use crate::progress::ProgressUpdate;
 use crate::store::QueueStore;
 
-use actor::Command;
+use actor::{Command, Control};
 
 const EVENT_CAPACITY: usize = 1024;
 const COMMAND_CAPACITY: usize = 64;
@@ -122,6 +122,44 @@ impl TransferEngine {
         let (reply, rx) = oneshot::channel();
         self.commands
             .send(Command::Enqueue { spec, reply })
+            .await
+            .map_err(|_| stopped())?;
+        rx.await.map_err(|_| stopped())?
+    }
+
+    /// Pauses a transfer (a folder: with its pending descendants). An active
+    /// file stops after its current block and keeps its partial destination.
+    pub async fn pause(&self, id: TransferId) -> Result<()> {
+        self.control(id, Control::Pause).await
+    }
+
+    /// Resumes a paused transfer (a folder: with its paused descendants). A
+    /// file paused while copying continues from its partial destination.
+    pub async fn resume(&self, id: TransferId) -> Result<()> {
+        self.control(id, Control::Resume).await
+    }
+
+    /// Cancels a transfer (a folder: with its pending descendants). Partial
+    /// destination files are kept.
+    pub async fn cancel(&self, id: TransferId) -> Result<()> {
+        self.control(id, Control::Cancel).await
+    }
+
+    /// Requeues a failed or cancelled transfer (a folder: with its failed or
+    /// cancelled descendants).
+    pub async fn retry(&self, id: TransferId) -> Result<()> {
+        self.control(id, Control::Retry).await
+    }
+
+    /// Answers the conflict of an item awaiting a decision.
+    pub async fn resolve(&self, id: TransferId, resolution: Resolution) -> Result<()> {
+        self.control(id, Control::Resolve(resolution)).await
+    }
+
+    async fn control(&self, id: TransferId, op: Control) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.commands
+            .send(Command::Control { id, op, reply })
             .await
             .map_err(|_| stopped())?;
         rx.await.map_err(|_| stopped())?

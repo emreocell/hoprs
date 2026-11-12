@@ -7,6 +7,12 @@
 //! dispatched before directories, so a large tree starts copying before it
 //! has been listed completely. A directory stays `Active` (without holding a
 //! worker slot) until all of its children are terminal.
+//!
+//! Control commands (pause, resume, cancel, retry, resolve) act on an item
+//! and, for a directory, on its descendants. An item holding a worker slot
+//! cannot change state until its worker reports back: the command records an
+//! `Intent` and cancels the item's token, and the worker's result is mapped
+//! through that intent.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::{Duration, Instant};
@@ -17,17 +23,26 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 use super::worker::{self, Prepared, Route, WorkerMsg};
-use super::{EngineConfig, Event, SiteEndpoints};
+use super::{EngineConfig, Event, Resolution, ResolveAction, SiteEndpoints};
 use crate::conflict::Decision;
 use crate::copy::CopyOutcome;
 use crate::model::{
     ConflictInfo, ConflictPolicy, TransferId, TransferItem, TransferSpec, TransferState,
 };
 use crate::progress::ProgressTracker;
-use crate::store::{NewChild, QueueStore};
+use crate::store::{NewChild, PausedFrom, QueueStore};
 
 const MAX_WORKERS: usize = 16;
 const SYMLINK_SKIP: &str = "symlinks are not followed";
+const USER_SKIP: &str = "skipped by user";
+
+fn unknown() -> Error {
+    Error::new(ErrorKind::NotFound, "Unknown transfer")
+}
+
+fn conflict(message: &str) -> Error {
+    Error::new(ErrorKind::Conflict, message)
+}
 
 /// Appends a queue-store error to `e`'s technical detail.
 fn with_store_detail(e: Error, store_err: &Error) -> Error {
@@ -59,6 +74,37 @@ pub(super) enum Command {
     Snapshot {
         reply: oneshot::Sender<Vec<TransferItem>>,
     },
+    Control {
+        id: TransferId,
+        op: Control,
+        reply: oneshot::Sender<Result<()>>,
+    },
+}
+
+/// A control command on one item.
+#[derive(Copy, Clone, Debug)]
+pub(super) enum Control {
+    Pause,
+    Resume,
+    Cancel,
+    Retry,
+    Resolve(Resolution),
+}
+
+/// What to do with an item holding a worker slot once its worker reports
+/// back, set by a control command that arrived meanwhile.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Intent {
+    Pause,
+    Cancel,
+    /// Paused, then resumed before the worker stopped: back to `Queued`.
+    Requeue,
+}
+
+/// An item holding a worker slot (preparing or copying).
+struct Running {
+    cancel: CancellationToken,
+    intent: Option<Intent>,
 }
 
 struct Site {
@@ -101,7 +147,7 @@ impl SiteQueue {
 }
 
 /// Children of an expanded directory that are not terminal yet, and how
-/// many of its finished children did not end `Done` or `Skipped`.
+/// many of its finished children ended `Failed`.
 struct DirProgress {
     pending: usize,
     failed: usize,
@@ -116,8 +162,13 @@ struct Actor {
     sites: HashMap<SiteId, Site>,
     /// Index of `Queued` items per site (registered or not).
     queued: HashMap<SiteId, SiteQueue>,
-    /// Expanded directories that still have non-terminal children.
+    /// `Active` expanded directories that still have non-terminal children.
     dirs: HashMap<TransferId, DirProgress>,
+    /// Items holding a worker slot.
+    running: HashMap<TransferId, Running>,
+    /// One-shot conflict policy for an item's next run (from `resolve` or
+    /// `resume`); consumed at dispatch, never persisted.
+    overrides: HashMap<TransferId, ConflictPolicy>,
     tracker: ProgressTracker,
     worker_tx: mpsc::UnboundedSender<WorkerMsg>,
 }
@@ -138,6 +189,8 @@ pub(super) async fn run(
         sites: HashMap::new(),
         queued: HashMap::new(),
         dirs: HashMap::new(),
+        running: HashMap::new(),
+        overrides: HashMap::new(),
         tracker: ProgressTracker::new(),
         worker_tx,
     };
@@ -205,7 +258,220 @@ impl Actor {
             Command::Snapshot { reply } => {
                 let _ = reply.send(self.items.values().cloned().collect());
             }
+            Command::Control { id, op, reply } => {
+                let result = match self.items.get(&id).map(|i| i.state.clone()) {
+                    None => Err(unknown()),
+                    Some(state) => self.control(id, &state, op),
+                };
+                let _ = reply.send(result);
+                self.dispatch();
+            }
         }
+    }
+
+    fn control(&mut self, id: TransferId, state: &TransferState, op: Control) -> Result<()> {
+        match op {
+            Control::Pause | Control::Cancel if state.is_terminal() => {
+                Err(conflict("Transfer already finished"))
+            }
+            Control::Pause if *state == TransferState::Paused => Ok(()),
+            Control::Pause => {
+                self.stop_subtree(id, Intent::Pause);
+                Ok(())
+            }
+            Control::Cancel => {
+                self.stop_subtree(id, Intent::Cancel);
+                Ok(())
+            }
+            Control::Resume if *state != TransferState::Paused => {
+                Err(conflict("Transfer is not paused"))
+            }
+            Control::Resume => {
+                self.restart_subtree(id, |s| *s == TransferState::Paused, Intent::Pause);
+                Ok(())
+            }
+            Control::Retry if !is_retryable(state) => {
+                Err(conflict("Transfer is not failed or cancelled"))
+            }
+            Control::Retry => {
+                self.restart_subtree(id, is_retryable, Intent::Cancel);
+                Ok(())
+            }
+            Control::Resolve(_) if !matches!(state, TransferState::AwaitingDecision(_)) => {
+                Err(conflict("Transfer is not awaiting a decision"))
+            }
+            Control::Resolve(resolution) => {
+                self.resolve(id, resolution);
+                Ok(())
+            }
+        }
+    }
+
+    /// Child ids of every directory that has been listed into child items.
+    fn children_index(&self) -> HashMap<TransferId, Vec<TransferId>> {
+        let mut children: HashMap<TransferId, Vec<TransferId>> = HashMap::new();
+        for item in self.items.values() {
+            if let Some(parent) = item.parent {
+                children.entry(parent).or_default().push(item.id);
+            }
+        }
+        children
+    }
+
+    /// `id` and its descendants, children before their parent.
+    fn subtree(children: &HashMap<TransferId, Vec<TransferId>>, id: TransferId) -> Vec<TransferId> {
+        fn walk(
+            id: TransferId,
+            children: &HashMap<TransferId, Vec<TransferId>>,
+            out: &mut Vec<TransferId>,
+        ) {
+            for &child in children.get(&id).into_iter().flatten() {
+                walk(child, children, out);
+            }
+            out.push(id);
+        }
+        let mut out = Vec::new();
+        walk(id, children, &mut out);
+        out
+    }
+
+    /// Pauses or cancels `id` and its non-terminal descendants. Directories
+    /// stop counting their children first, so the cascade never finalizes
+    /// them; a cancelled directory becomes `Cancelled` directly.
+    fn stop_subtree(&mut self, id: TransferId, intent: Intent) {
+        let ids = Self::subtree(&self.children_index(), id);
+        for &i in &ids {
+            self.dirs.remove(&i);
+        }
+        for i in ids {
+            self.stop_one(i, intent);
+        }
+    }
+
+    fn stop_one(&mut self, id: TransferId, intent: Intent) {
+        let Some(item) = self.items.get(&id) else {
+            return;
+        };
+        if item.state.is_terminal()
+            || (intent == Intent::Pause && item.state == TransferState::Paused)
+        {
+            return;
+        }
+        if let Some(running) = self.running.get_mut(&id) {
+            // A pending cancel is never downgraded to a pause.
+            if running.intent != Some(Intent::Cancel) {
+                running.intent = Some(intent);
+            }
+            running.cancel.cancel();
+            return;
+        }
+        self.overrides.remove(&id);
+        let state = match intent {
+            Intent::Cancel => TransferState::Cancelled,
+            Intent::Pause | Intent::Requeue => TransferState::Paused,
+        };
+        self.transition(id, state);
+    }
+
+    /// Restarts every item of the subtree of `id` whose state matches
+    /// `restartable`, children before their parent: an expanded directory
+    /// becomes `Active` again (counting its current children, never listing
+    /// it again), anything else becomes `Queued`. An item still stopping with
+    /// the `stopping` intent (its worker has not reported back yet) is
+    /// requeued when it does.
+    fn restart_subtree(
+        &mut self,
+        id: TransferId,
+        restartable: fn(&TransferState) -> bool,
+        stopping: Intent,
+    ) {
+        let children = self.children_index();
+        for i in Self::subtree(&children, id) {
+            if let Some(running) = self.running.get_mut(&i) {
+                if running.intent == Some(stopping) {
+                    running.intent = Some(Intent::Requeue);
+                }
+                continue;
+            }
+            let Some(item) = self.items.get(&i) else {
+                continue;
+            };
+            if !restartable(&item.state) {
+                continue;
+            }
+            // Only the continuation of an interrupted copy forces `Resume`;
+            // anything else runs under the global policy again.
+            let resume_copy = item.state == TransferState::Paused
+                && item.is_dir != Some(true)
+                && matches!(self.store.paused_from(i), Ok(Some(PausedFrom::Active)));
+            if resume_copy {
+                self.overrides.insert(i, ConflictPolicy::Resume);
+            } else {
+                self.overrides.remove(&i);
+            }
+            if let Some(kids) = children.get(&i) {
+                self.reactivate_dir(i, kids);
+            } else {
+                self.transition(i, TransferState::Queued);
+            }
+        }
+    }
+
+    /// Makes the expanded directory `id` `Active` again, counting its
+    /// current children. Finishes it right away if none is pending.
+    fn reactivate_dir(&mut self, id: TransferId, children: &[TransferId]) {
+        let (mut pending, mut failed) = (0, 0);
+        for child in children.iter().filter_map(|c| self.items.get(c)) {
+            match child.state {
+                TransferState::Failed(_) => failed += 1,
+                ref s if !s.is_terminal() => pending += 1,
+                _ => {}
+            }
+        }
+        if pending == 0 {
+            self.finish_dir(id, failed);
+            return;
+        }
+        if self.transition(id, TransferState::Active) {
+            self.dirs.insert(id, DirProgress { pending, failed });
+        }
+    }
+
+    /// Applies `resolution` to `id`, or with `apply_to_all` to every item
+    /// awaiting a decision, which also becomes the global policy.
+    fn resolve(&mut self, id: TransferId, resolution: Resolution) {
+        if !resolution.apply_to_all {
+            self.resolve_one(id, resolution.action);
+            return;
+        }
+        self.policy = match resolution.action {
+            ResolveAction::Overwrite => ConflictPolicy::Overwrite,
+            ResolveAction::Resume => ConflictPolicy::Resume,
+            ResolveAction::Skip => ConflictPolicy::Skip,
+        };
+        let pending: Vec<TransferId> = self
+            .items
+            .values()
+            .filter(|i| matches!(i.state, TransferState::AwaitingDecision(_)))
+            .map(|i| i.id)
+            .collect();
+        for i in pending {
+            self.resolve_one(i, resolution.action);
+        }
+    }
+
+    fn resolve_one(&mut self, id: TransferId, action: ResolveAction) {
+        let policy = match action {
+            ResolveAction::Overwrite => ConflictPolicy::Overwrite,
+            ResolveAction::Resume => ConflictPolicy::Resume,
+            ResolveAction::Skip => {
+                self.overrides.remove(&id);
+                self.transition(id, TransferState::Skipped(USER_SKIP.to_string()));
+                return;
+            }
+        };
+        self.overrides.insert(id, policy);
+        self.transition(id, TransferState::Queued);
     }
 
     /// Tracks a newly persisted item and emits `Added`.
@@ -251,22 +517,23 @@ impl Actor {
             }
             item.state = state.clone();
         }
-        let ok = matches!(state, TransferState::Done | TransferState::Skipped(_));
+        let failed = matches!(state, TransferState::Failed(_));
         self.emit(Event::StateChanged { id, state });
         if let Some(parent) = finished_child_of {
-            self.child_finished(parent, ok);
+            self.child_finished(parent, failed);
         }
         applied
     }
 
     /// Accounts for a child of `dir` that reached a terminal state. When it
     /// was the last one, `dir` finishes too (which recurses to its parent).
-    fn child_finished(&mut self, dir: TransferId, ok: bool) {
+    /// A directory that is not counting (paused or finished) is left alone.
+    fn child_finished(&mut self, dir: TransferId, failed: bool) {
         let Some(progress) = self.dirs.get_mut(&dir) else {
             return;
         };
         progress.pending = progress.pending.saturating_sub(1);
-        if !ok {
+        if failed {
             progress.failed += 1;
         }
         if progress.pending > 0 {
@@ -274,6 +541,12 @@ impl Actor {
         }
         let failed = progress.failed;
         self.dirs.remove(&dir);
+        self.finish_dir(dir, failed);
+    }
+
+    /// Finishes a directory: `Done`, or `Failed` if `failed` children failed.
+    /// Children that were skipped or cancelled do not count as failures.
+    fn finish_dir(&mut self, dir: TransferId, failed: usize) {
         let state = if failed == 0 {
             TransferState::Done
         } else {
@@ -308,13 +581,22 @@ impl Actor {
                 if let Some(site) = self.sites.get_mut(&site_id) {
                     site.busy += 1;
                 }
-                worker::spawn_prepare(id, route, self.policy, self.worker_tx.clone());
+                self.running.insert(
+                    id,
+                    Running {
+                        cancel: CancellationToken::new(),
+                        intent: None,
+                    },
+                );
+                let policy = self.overrides.remove(&id).unwrap_or(self.policy);
+                worker::spawn_prepare(id, route, policy, self.worker_tx.clone());
             }
         }
     }
 
     /// Frees the worker slot held by `id`.
     fn free_slot(&mut self, id: TransferId) {
+        self.running.remove(&id);
         if let Some(item) = self.items.get(&id)
             && let Some(site) = self.sites.get_mut(&item.spec.site)
         {
@@ -330,30 +612,56 @@ impl Actor {
         self.dispatch();
     }
 
+    /// The pending control intent of the item holding a worker slot, if any.
+    fn intent(&self, id: TransferId) -> Option<Intent> {
+        self.running.get(&id).and_then(|r| r.intent)
+    }
+
     fn handle_worker(&mut self, msg: WorkerMsg) {
         match msg {
-            WorkerMsg::Prepared { id, route, result } => match result.map(|p| *p) {
-                Ok(Prepared::File { src, dst, decision }) => {
-                    self.on_file_prepared(id, route, src, dst, decision)
+            WorkerMsg::Prepared { id, route, result } => {
+                let intent = self.intent(id);
+                match (result.map(|p| *p), intent) {
+                    (Ok(Prepared::Dir { entries }), intent) => {
+                        self.free_slot(id);
+                        self.expand(id, entries, intent);
+                        self.dispatch();
+                    }
+                    // Stopped before copying anything: the prepare result is
+                    // dropped and the item runs from scratch when restarted.
+                    (_, Some(Intent::Pause)) => {
+                        // Recorded as paused from `Queued`, so a resume
+                        // applies the global policy (no copy to continue).
+                        let _ = self.store.set_state(id, &TransferState::Queued);
+                        self.release(id, TransferState::Paused);
+                    }
+                    (_, Some(Intent::Cancel)) => self.release(id, TransferState::Cancelled),
+                    (_, Some(Intent::Requeue)) => self.release(id, TransferState::Queued),
+                    (Ok(Prepared::File { src, dst, decision }), None) => {
+                        self.on_file_prepared(id, route, src, dst, decision)
+                    }
+                    (Ok(Prepared::Symlink), None) => {
+                        self.release(id, TransferState::Skipped(SYMLINK_SKIP.to_string()))
+                    }
+                    (Err(e), None) => self.release(id, TransferState::Failed(e)),
                 }
-                Ok(Prepared::Dir { entries }) => {
-                    self.free_slot(id);
-                    self.expand(id, entries);
-                    self.dispatch();
-                }
-                Ok(Prepared::Symlink) => {
-                    self.release(id, TransferState::Skipped(SYMLINK_SKIP.to_string()))
-                }
-                Err(e) => self.release(id, TransferState::Failed(e)),
-            },
+            }
             WorkerMsg::Copied { id, bytes, result } => {
+                let intent = self.intent(id);
                 self.tracker.unregister(id);
                 if let Some(item) = self.items.get_mut(&id) {
                     item.bytes_done = bytes;
                 }
                 let state = match (result, self.store.set_bytes_done(id, bytes)) {
                     (Ok(CopyOutcome::Completed), Ok(())) => TransferState::Done,
-                    (Ok(CopyOutcome::Cancelled), Ok(())) => TransferState::Cancelled,
+                    (Ok(CopyOutcome::Cancelled), Ok(())) => match intent {
+                        Some(Intent::Pause) => TransferState::Paused,
+                        Some(Intent::Requeue) => {
+                            self.overrides.insert(id, ConflictPolicy::Resume);
+                            TransferState::Queued
+                        }
+                        Some(Intent::Cancel) | None => TransferState::Cancelled,
+                    },
                     (Ok(_), Err(store_err)) => TransferState::Failed(store_err),
                     (Err(e), Ok(())) => TransferState::Failed(e),
                     // Keep the copy's own error; the store error goes into its detail.
@@ -368,8 +676,14 @@ impl Actor {
 
     /// Inserts one child per entry of the listed directory `id`. The
     /// directory stays `Active` until its children finish, or becomes `Done`
-    /// right away if none is pending.
-    fn expand(&mut self, id: TransferId, entries: Vec<RemoteEntry>) {
+    /// right away if none is pending. If it was paused or cancelled while
+    /// listing, its children are created (and it ends) paused or cancelled.
+    fn expand(&mut self, id: TransferId, entries: Vec<RemoteEntry>, intent: Option<Intent>) {
+        let initial = match intent {
+            Some(Intent::Pause) => TransferState::Paused,
+            Some(Intent::Cancel) => TransferState::Cancelled,
+            Some(Intent::Requeue) | None => TransferState::Queued,
+        };
         if let Err(e) = self.store.set_meta(id, true, None) {
             self.transition(id, TransferState::Failed(e));
             return;
@@ -394,7 +708,7 @@ impl Actor {
                 state: if e.kind == EntryKind::Symlink {
                     TransferState::Skipped(SYMLINK_SKIP.to_string())
                 } else {
-                    TransferState::Queued
+                    initial.clone()
                 },
             })
             .collect();
@@ -406,7 +720,7 @@ impl Actor {
             }
         };
         let pending = children.iter().filter(|c| !c.state.is_terminal()).count();
-        if pending > 0 {
+        if pending > 0 && initial == TransferState::Queued {
             self.dirs.insert(id, DirProgress { pending, failed: 0 });
         }
         for (child_id, child) in ids.into_iter().zip(children) {
@@ -420,8 +734,12 @@ impl Actor {
                 state: child.state,
             });
         }
-        if pending == 0 {
+        if initial == TransferState::Cancelled {
+            self.transition(id, TransferState::Cancelled);
+        } else if pending == 0 {
             self.transition(id, TransferState::Done);
+        } else if initial == TransferState::Paused {
+            self.transition(id, TransferState::Paused);
         }
     }
 
@@ -443,6 +761,11 @@ impl Actor {
         }
         match decision {
             Decision::Write { offset } => {
+                let cancel = self
+                    .running
+                    .get(&id)
+                    .map(|r| r.cancel.clone())
+                    .unwrap_or_default();
                 let counter = self.tracker.register(id, Some(src.size), offset);
                 worker::spawn_copy(
                     id,
@@ -451,7 +774,7 @@ impl Actor {
                     offset,
                     self.buf_size,
                     counter,
-                    CancellationToken::new(),
+                    cancel,
                     self.worker_tx.clone(),
                 );
             }
@@ -485,6 +808,10 @@ impl Actor {
         let _ = self.store.set_bytes_done_many(&batch);
         self.emit(Event::Progress(updates));
     }
+}
+
+fn is_retryable(state: &TransferState) -> bool {
+    matches!(state, TransferState::Failed(_) | TransferState::Cancelled)
 }
 
 #[cfg(test)]
