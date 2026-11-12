@@ -1,0 +1,23 @@
+# hoprs integration test server. Test-only.
+Port 22
+HostKey /etc/ssh/keys/ssh_host_ed25519_key
+
+PermitRootLogin no
+PubkeyAuthentication yes
+PasswordAuthentication yes
+KbdInteractiveAuthentication yes
+UsePAM yes
+
+MaxSessions 10
+MaxAuthTries 10
+ClientAliveInterval 0
+PrintMotd no
+LogLevel VERBOSE
+
+Subsystem sftp internal-sftp
+
+Match User bob
+    AuthenticationMethods password
+
+Match User carol
+    AuthenticationMethods keyboard-interactive

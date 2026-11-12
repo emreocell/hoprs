@@ -1,0 +1,24 @@
+# Integration test environment (test-only credentials). Usage, from the repo root:
+#   docker compose -f docker/compose.yml up -d --build --wait
+name: hoprs-test
+
+services:
+  sshd:
+    build:
+      context: .
+      dockerfile: sshd/Dockerfile
+    ports:
+      - "127.0.0.1:2222:22"
+    volumes:
+      - sshd-hostkeys:/etc/ssh/keys
+    tmpfs:
+      - /home/alice/small:size=1m
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "22"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+
+volumes:
+  sshd-hostkeys:
