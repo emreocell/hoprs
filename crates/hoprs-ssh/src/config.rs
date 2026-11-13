@@ -92,6 +92,10 @@ pub struct SshConfig {
     pub keepalive_max: u32,
     pub reconnect: ReconnectPolicy,
     pub connect_timeout: Duration,
+    /// Channels this connection may have open at once (SFTP and terminals); see
+    /// [`crate::channels`]. Defaults to OpenSSH's `MaxSessions`, 10. Values below 1 count
+    /// as 1.
+    pub max_channels: usize,
 }
 
 impl SshConfig {
@@ -109,6 +113,7 @@ impl SshConfig {
             keepalive_max: 3,
             reconnect: ReconnectPolicy::default(),
             connect_timeout: Duration::from_secs(15),
+            max_channels: crate::channels::DEFAULT_MAX_CHANNELS,
         }
     }
 }
@@ -125,6 +130,7 @@ impl fmt::Debug for SshConfig {
             .field("keepalive_max", &self.keepalive_max)
             .field("reconnect", &self.reconnect)
             .field("connect_timeout", &self.connect_timeout)
+            .field("max_channels", &self.max_channels)
             .finish()
     }
 }
@@ -150,5 +156,6 @@ mod tests {
         let c = SshConfig::new("h", 22, "u");
         assert_eq!(c.keepalive_interval, Duration::from_secs(30));
         assert!(c.known_hosts.ends_with(".ssh/known_hosts"));
+        assert_eq!(c.max_channels, 10);
     }
 }

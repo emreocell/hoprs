@@ -2,8 +2,11 @@
 //!
 //! Channels: metadata operations share one SFTP channel (russh-sftp multiplexes concurrent
 //! requests on it). File streams use a pool of `stream_channels` SFTP channels, opened on
-//! demand and handed out round-robin; several files may share one. Every channel remembers
-//! the session generation it was opened on. Before each operation a channel from an older
+//! demand and handed out round-robin; several files may share one. Every channel counts
+//! against the SSH connection's channel budget (`hoprs_ssh::channels`): the pool is capped
+//! so that the metadata channel and the streams leave 2 slots for terminals, and when the
+//! budget is full anyway (terminals took the room) a stream reuses an open pool channel.
+//! Every channel remembers the session generation it was opened on. Before each operation a channel from an older
 //! generation (or one that failed with a connection error) is dropped and reopened. Nothing
 //! waits for a reconnection: while the session is not `Connected`, operations fail at once
 //! with `ErrorKind::Network`.
@@ -19,7 +22,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use hoprs_core::{EntryKind, Error, ErrorKind, RemoteEntry, RemotePath, Result};
-use hoprs_ssh::{SessionState, SshSession};
+use hoprs_ssh::{ChannelSlot, SessionState, SshSession, is_channel_limit};
 use russh_sftp::client::RawSftpSession;
 use russh_sftp::client::error::Error as SftpError;
 use russh_sftp::protocol::{FileAttributes, OpenFlags, Packet, Status, StatusCode};
@@ -55,8 +58,9 @@ const S_IFLNK: u32 = 0o120_000;
 /// SFTP options.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SftpConfig {
-    /// SFTP channels for file streams, clamped to `1..=8`. With the metadata channel and a
-    /// terminal this stays within OpenSSH's default `MaxSessions 10`.
+    /// SFTP channels for file streams, clamped to `1..=8`, then capped by the session's
+    /// channel budget ([`SshSession::sftp_stream_channels`]): with the default budget of 10,
+    /// at most 7, so the metadata channel and the streams leave 2 channels for terminals.
     pub stream_channels: usize,
 }
 
@@ -97,6 +101,8 @@ struct SftpChannel {
     /// no runtime to close on. In that last case the server handle stays open until the
     /// channel closes.
     open_handles: AtomicUsize,
+    /// The channel's place in the session's channel budget, freed with the channel.
+    _slot: ChannelSlot,
     /// russh-sftp per-request timeout set on this channel (after `init`). russh-sftp has no
     /// getter, so the tests read the value back from here.
     #[cfg(test)]
@@ -106,7 +112,8 @@ struct SftpChannel {
 impl SftpChannel {
     /// Opens an SFTP channel whose requests (after `init`) time out after `request_timeout`.
     async fn open(session: &SshSession, request_timeout: Duration) -> Result<SftpChannel> {
-        let (mut channel, generation) = session.open_channel_tagged().await?;
+        let (mut channel, slot) = session.open_channel().await?.into_parts();
+        let generation = slot.generation();
         channel
             .request_subsystem(true, "sftp")
             .await
@@ -147,6 +154,7 @@ impl SftpChannel {
             posix_rename,
             dead: AtomicBool::new(false),
             open_handles: AtomicUsize::new(0),
+            _slot: slot,
             #[cfg(test)]
             request_timeout,
         })
@@ -393,7 +401,7 @@ fn make_entry(
 impl SftpFs {
     /// Opens the metadata channel (`sftp` subsystem) on `session`.
     pub async fn new(session: SshSession, config: SftpConfig) -> Result<SftpFs> {
-        let streams = config.stream_channels.clamp(1, 8);
+        let streams = session.sftp_stream_channels(config.stream_channels.clamp(1, 8));
         let meta = SftpChannel::open(&session, META_REQUEST_TIMEOUT).await?;
         Ok(SftpFs {
             inner: Arc::new(Inner {
@@ -430,7 +438,8 @@ impl SftpFs {
     }
 
     /// The next stream channel, round-robin. After a reconnection every pooled channel is
-    /// dropped; slots are (re)opened when picked.
+    /// dropped; slots are (re)opened when picked. When the channel budget is full (the
+    /// terminals took the room), an open pool channel is shared instead.
     async fn stream_channel(&self) -> Result<Arc<SftpChannel>> {
         self.ensure_connected()?;
         let generation = self.inner.session.generation();
@@ -445,7 +454,18 @@ impl SftpFs {
             return Ok(chan.clone());
         }
         pool[index] = None;
-        let chan = Arc::new(SftpChannel::open(&self.inner.session, STREAM_REQUEST_TIMEOUT).await?);
+        let chan = match SftpChannel::open(&self.inner.session, STREAM_REQUEST_TIMEOUT).await {
+            Ok(chan) => Arc::new(chan),
+            Err(e) if is_channel_limit(&e) => {
+                return pool
+                    .iter()
+                    .flatten()
+                    .find(|c| c.usable(generation))
+                    .cloned()
+                    .ok_or(e);
+            }
+            Err(e) => return Err(e),
+        };
         pool[index] = Some(chan.clone());
         Ok(chan)
     }
@@ -796,13 +816,59 @@ mod tests {
     #[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
     async fn stream_channels_clamped() {
         let (session, _dir) = alice().await;
-        for (asked, got) in [(0, 1), (1, 1), (4, 4), (8, 8), (100, 8)] {
+        // At most 7 under the default budget of 10: metadata + 7 leaves 2 for terminals.
+        for (asked, got) in [(0, 1), (1, 1), (4, 4), (7, 7), (8, 7), (100, 7)] {
             let config = SftpConfig {
                 stream_channels: asked,
             };
             let fs = SftpFs::new(session.clone(), config).await.unwrap();
             assert_eq!(fs.inner.streams.lock().await.len(), got, "{asked}");
         }
+        session.disconnect().await;
+    }
+
+    /// The SFTP channels leave room for terminals, and share a stream channel when the
+    /// terminals took the rest of the budget (Review Focus 5).
+    #[tokio::test]
+    #[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+    async fn sftp_channels_leave_room_for_terminals() {
+        use hoprs_ssh::PtyRequest;
+        let (session, _dir) = alice().await;
+        assert_eq!(session.max_channels(), 10);
+        let fs = SftpFs::new(session.clone(), SftpConfig { stream_channels: 8 })
+            .await
+            .unwrap();
+        let mut streams = Vec::new();
+        for _ in 0..7 {
+            streams.push(fs.stream_channel().await.unwrap());
+        }
+        assert_eq!(session.open_channels(), 8, "metadata + 7 streams");
+        let first = session.open_shell(PtyRequest::default()).await.unwrap();
+        let second = session.open_shell(PtyRequest::default()).await.unwrap();
+        let e = session.open_shell(PtyRequest::default()).await.unwrap_err();
+        assert!(hoprs_ssh::is_channel_limit(&e), "{e:?}");
+        drop((first, second, streams));
+        session.disconnect().await;
+
+        // Terminals first: a stream that cannot get its own channel shares one.
+        let (session, _dir) = alice().await;
+        let fs = SftpFs::new(session.clone(), SftpConfig { stream_channels: 2 })
+            .await
+            .unwrap();
+        let a = fs.stream_channel().await.unwrap();
+        let mut shells = Vec::new();
+        while session.open_channels() < session.max_channels() {
+            shells.push(session.open_shell(PtyRequest::default()).await.unwrap());
+        }
+        assert_eq!(shells.len(), 8);
+        let b = fs.stream_channel().await.unwrap();
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "the full budget shares the open stream"
+        );
+        assert!(b.lstat(&RemotePath::root()).await.is_ok());
+        assert!(fs.list(&RemotePath::root()).await.is_ok());
+        drop(shells);
         session.disconnect().await;
     }
 

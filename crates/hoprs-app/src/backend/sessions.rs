@@ -18,6 +18,10 @@
 //! One session per site: `connect` on a site that already has one returns that session
 //! (retrying it if it is `Disconnected`). The engine keys endpoints by site, so two live
 //! sessions of one site would replace each other's endpoints.
+//!
+//! An SSH session also carries the terminal shells opened on it
+//! ([`open_shell`](SessionManager::open_shell), see [`super::shells`]): `close` closes them,
+//! and a reconnect does not reopen them.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -29,13 +33,14 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, StreamExt};
 use hoprs_core::{ConnectionState, Error, ErrorKind, Protocol, Result, Site, SiteId};
 use hoprs_remote::{Connection, FtpFs, LocalFs, RemoteFs, SftpConfig, SftpFs};
-use hoprs_ssh::SshSession;
+use hoprs_ssh::{PtyRequest, SshSession};
 use hoprs_transfer::{SiteEndpoints, TransferEngine, spawn_site_watcher};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use super::broker::{PromptBroker, SessionPrompter};
 use super::mapping::{SiteSecrets, ftp_config, ssh_config};
+use super::shells::{ShellId, Shells};
 use super::vault::VaultHandle;
 
 /// Identifies one open session. Monotonic: never reused within a run.
@@ -82,7 +87,8 @@ pub struct SessionConfig {
     /// Replaces `~/.ssh/known_hosts` (tests).
     pub known_hosts: Option<PathBuf>,
     /// Transfer workers per site; also the SFTP stream channels and FTP transfer
-    /// connections (both clamped to `1..=8`). The starting value: see
+    /// connections (both clamped to `1..=8`; the SFTP streams are also capped by the SSH
+    /// channel budget, which keeps room for terminals). The starting value: see
     /// [`SessionManager::set_workers`].
     pub workers: usize,
 }
@@ -137,6 +143,8 @@ struct Inner {
     site_locks: Mutex<HashMap<SiteId, Arc<tokio::sync::Mutex<()>>>>,
     /// Sites `close` paused in the engine; the next connect resumes them.
     paused_by_close: Mutex<HashSet<SiteId>>,
+    /// The terminal shells of the sessions. Locked after `sessions` when both are.
+    shells: Shells,
     /// Remotes of the test sessions made by `attach`, until they are ready.
     #[cfg(test)]
     test_remotes: Mutex<HashMap<SessionId, Arc<dyn RemoteFs>>>,
@@ -207,6 +215,7 @@ impl SessionManager {
                 sessions: Mutex::new(HashMap::new()),
                 site_locks: Mutex::new(HashMap::new()),
                 paused_by_close: Mutex::new(HashSet::new()),
+                shells: Shells::default(),
                 #[cfg(test)]
                 test_remotes: Mutex::new(HashMap::new()),
             }),
@@ -500,9 +509,9 @@ impl SessionManager {
         self.ready(id).await
     }
 
-    /// Closes a session: refuses its prompts, aborts its site watcher, pauses its site in
-    /// the engine (the next connect of the site resumes it), then disconnects and drops
-    /// the connection. Unknown ids are ignored.
+    /// Closes a session: closes its shells, refuses its prompts, aborts its site watcher,
+    /// pauses its site in the engine (the next connect of the site resumes it), then
+    /// disconnects and drops the connection. Unknown ids are ignored.
     ///
     /// It does not take the site's lock: a connect waiting on this session's prompts or
     /// first connection holds it, and closing is what ends that wait. A `ready` still
@@ -516,6 +525,9 @@ impl SessionManager {
             let replaced = sessions.values().any(|other| other.site == entry.site);
             (entry, replaced)
         };
+        // A shell `open_shell` registers is registered under the sessions lock while the
+        // session still exists, so none can appear after this.
+        self.inner.shells.close_session(id);
         entry.prompter.cancel();
         entry.prompter.discard_pending_secrets();
         if let Some(watcher) = &entry.watcher {
@@ -527,6 +539,44 @@ impl SessionManager {
         }
         entry.link.disconnect().await;
         drop(entry);
+    }
+
+    /// Opens a terminal of `cols` x `rows` on the SSH session `id` (see
+    /// [`BackendApi::open_shell`](super::BackendApi::open_shell)).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub async fn open_shell(&self, id: SessionId, cols: u16, rows: u16) -> Result<ShellId> {
+        let link = {
+            let sessions = lock(&self.inner.sessions);
+            sessions.get(&id).ok_or_else(closed)?.link.clone()
+        };
+        let Link::Ssh(session) = link else {
+            return Err(Error::new(
+                ErrorKind::Protocol,
+                "Terminals need an SSH site",
+            ));
+        };
+        let request = PtyRequest {
+            cols: cols.into(),
+            rows: rows.into(),
+            ..PtyRequest::default()
+        };
+        let (handle, output) = session.open_shell(request).await?.into_output();
+        let sessions = lock(&self.inner.sessions);
+        if !sessions.contains_key(&id) {
+            // Closed while the shell opened.
+            handle.close();
+            return Err(closed());
+        }
+        Ok(self
+            .inner
+            .shells
+            .insert(id, Arc::new(handle), output.boxed()))
+    }
+
+    /// The terminal shells of the sessions.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn shells(&self) -> &Shells {
+        &self.inner.shells
     }
 
     /// Closes every session (the window is closing).
@@ -622,8 +672,10 @@ impl SessionManager {
 mod tests {
     use std::time::Duration;
 
+    use futures_util::stream::BoxStream;
     use hoprs_core::{EntryKind, RemotePath};
     use hoprs_remote::MemFs;
+    use hoprs_ssh::ShellOutput;
     use hoprs_transfer::{EngineConfig, QueueStore};
     use hoprs_vault::{MemoryStore, SecretKind, Vault};
     use secrecy::SecretString;
@@ -727,6 +779,30 @@ mod tests {
         assert!(f.manager.state(id).is_none());
         // Closing twice is harmless.
         f.manager.close(id).await;
+    }
+
+    /// Only SSH sessions have terminals; a closed session has none.
+    #[tokio::test]
+    async fn open_shell_needs_an_ssh_session() {
+        let f = fixture();
+        let (state, _) = watch::channel(ConnectionState::Connected);
+        let id = f
+            .manager
+            .attach(
+                SiteId::new(),
+                Arc::new(FakeConn { state }),
+                Arc::new(MemFs::new()),
+            )
+            .await
+            .unwrap();
+        let e = f.manager.open_shell(id, 80, 24).await.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Protocol);
+        assert_eq!(e.message, "Terminals need an SSH site");
+        f.manager.close(id).await;
+        assert_eq!(
+            f.manager.open_shell(id, 80, 24).await.unwrap_err(),
+            closed()
+        );
     }
 
     /// The window is closing: every session goes, its watch with it.
@@ -1204,6 +1280,84 @@ mod tests {
         let state = f.manager.state(id).unwrap();
         f.manager.close(id).await;
         assert!(matches!(*state.borrow(), ConnectionState::Disconnected(_)));
+        prompts.abort();
+    }
+
+    /// Reads a shell's output until it contains `needle`.
+    async fn read_until(output: &mut BoxStream<'static, ShellOutput>, needle: &str) {
+        let mut text = String::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !text.contains(needle) {
+            let next = tokio::time::timeout_at(deadline, output.next())
+                .await
+                .unwrap_or_else(|_| panic!("timed out; output so far: {text:?}"));
+            match next {
+                Some(ShellOutput::Data(d)) => text.push_str(&String::from_utf8_lossy(&d)),
+                other => panic!("unexpected {other:?}; output so far: {text:?}"),
+            }
+        }
+    }
+
+    /// Skips output until `Closed`, which ends the stream.
+    async fn wait_closed(output: &mut BoxStream<'static, ShellOutput>) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let next = tokio::time::timeout_at(deadline, output.next())
+                .await
+                .expect("timed out waiting for Closed");
+            match next {
+                Some(ShellOutput::Closed) => break,
+                Some(_) => {}
+                None => panic!("output ended without Closed"),
+            }
+        }
+        assert!(output.next().await.is_none());
+    }
+
+    /// Terminals and files on one SSH session (Review Focus 5): closing a shell leaves
+    /// the files and the other shells alone; closing the session closes its shells.
+    #[tokio::test]
+    #[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+    async fn ssh_shells_close_with_their_session() {
+        let f = fixture();
+        let mut site = Site::new("docker ssh", "127.0.0.1", "alice", Protocol::Ssh);
+        site.port = hoprs_ssh::testing::SSH_PORT;
+        site.ssh.use_agent = false;
+        site.ssh.key_file = Some(hoprs_ssh::testing::fixture("id_ed25519"));
+        f.vault.upsert_site(site.clone()).await.unwrap();
+        let (prompts, _) = answer_prompts(&f.broker);
+        let id = f.manager.connect(site.id.clone()).await.unwrap().session;
+        let shells = f.manager.shells();
+
+        let one = f.manager.open_shell(id, 120, 40).await.unwrap();
+        let two = f.manager.open_shell(id, 80, 24).await.unwrap();
+        let mut out_one = shells.output(one).unwrap();
+        let mut out_two = shells.output(two).unwrap();
+        assert!(shells.output(one).is_none(), "handed out once");
+        shells
+            .input(one, b"printf 'size=<%s>\\n' \"$(stty size)\"\n".to_vec())
+            .await
+            .unwrap();
+        read_until(&mut out_one, "size=<40 120>").await;
+        shells.resize(one, 100, 30).await.unwrap();
+
+        // Closing one shell leaves the other and the files working.
+        shells.close(one);
+        wait_closed(&mut out_one).await;
+        assert!(shells.input(one, b"x".to_vec()).await.is_err());
+        shells
+            .input(two, b"echo two-$((1+1))\n".to_vec())
+            .await
+            .unwrap();
+        read_until(&mut out_two, "two-2").await;
+        let remote = f.manager.remote(id).unwrap();
+        assert!(remote.list(&RemotePath::root()).await.is_ok());
+
+        // Closing the session closes its remaining shell.
+        f.manager.close(id).await;
+        wait_closed(&mut out_two).await;
+        let e = shells.input(two, b"x".to_vec()).await.unwrap_err();
+        assert_eq!(e.message, "Shell closed");
         prompts.abort();
     }
 

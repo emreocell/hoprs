@@ -1,5 +1,6 @@
 //! The backend the effects run against: the vault, the transfer engine, the session
-//! manager and the prompt broker, behind [`BackendApi`].
+//! manager (with the sessions' terminal shells) and the prompt broker, behind
+//! [`BackendApi`].
 
 pub mod broker;
 #[cfg(test)]
@@ -7,20 +8,22 @@ pub mod fake;
 pub mod mapping;
 pub mod ops;
 pub mod sessions;
+pub mod shells;
 pub mod vault;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures_util::stream::BoxStream;
 use hoprs_core::{
     ConnectionState, Error, RemoteEntry, RemotePath, Result, SavedTab, Site, SiteId, Workspace,
     WorkspaceId,
 };
 use hoprs_import::{ImportOptions, ImportReport};
 use hoprs_remote::RemoteFs;
-pub use hoprs_ssh::AuthMethod;
 pub use hoprs_ssh::known_hosts::KnownHostEntry;
+pub use hoprs_ssh::{AuthMethod, ShellOutput};
 use hoprs_transfer::{
     ConflictPolicy, EngineConfig, Event, QueueStore, Resolution, TransferEngine, TransferId,
     TransferItem, TransferSpec,
@@ -34,6 +37,7 @@ pub use ops::DeleteTarget;
 pub use sessions::{
     ConnectError, ConnectResult, Connected, SessionConfig, SessionId, SessionManager,
 };
+pub use shells::ShellId;
 pub use vault::{LazyKeyringStore, ProfileSnapshot, VaultHandle};
 
 use crate::settings::{self, Settings, SettingsLoad};
@@ -121,6 +125,29 @@ pub trait BackendApi: Send + Sync {
     /// The window is closing: shuts the transfer engine down (its running items keep their
     /// stored state, so the next start reopens them paused), then closes every session.
     async fn shutdown(&self);
+
+    // Terminal shells: the terminal tab (Plan 6 Task 4) calls these; until then only the
+    // tests do.
+    /// Opens a terminal (PTY + shell, `cols` x `rows`) on an SSH session; see
+    /// [`shells`]. Not connected: `Network`, "Not connected". Past the connection's channel
+    /// budget: `Protocol`, "Too many channels on this connection (limit N)". An FTP session
+    /// has no terminal (`Protocol`).
+    #[cfg_attr(not(test), allow(dead_code))]
+    async fn open_shell(&self, session: SessionId, cols: u16, rows: u16) -> Result<ShellId>;
+    /// Sends keyboard input to the shell. Ended or unknown: `Network`, "Shell closed".
+    #[cfg_attr(not(test), allow(dead_code))]
+    async fn shell_input(&self, shell: ShellId, data: Vec<u8>) -> Result<()>;
+    /// The terminal is now `cols` x `rows`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    async fn shell_resize(&self, shell: ShellId, cols: u16, rows: u16) -> Result<()>;
+    /// Closes the shell without waiting for the server (its output then yields `Closed`)
+    /// and forgets it. Unknown ids are ignored.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn close_shell(&self, shell: ShellId);
+    /// The shell's output (`Data`..., maybe `Exit`, then `Closed`), handed out once, for
+    /// the tab's subscription; `None` afterwards and for unknown shells.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn shell_output(&self, shell: ShellId) -> Option<BoxStream<'static, ShellOutput>>;
 
     /// Lists `path` on the local disk, or on the remote side of `session` (an error
     /// without one).
@@ -439,6 +466,26 @@ impl BackendApi for Backend {
     async fn shutdown(&self) {
         self.engine.clone().shutdown().await;
         self.sessions.close_all().await;
+    }
+
+    async fn open_shell(&self, session: SessionId, cols: u16, rows: u16) -> Result<ShellId> {
+        self.sessions.open_shell(session, cols, rows).await
+    }
+
+    async fn shell_input(&self, shell: ShellId, data: Vec<u8>) -> Result<()> {
+        self.sessions.shells().input(shell, data).await
+    }
+
+    async fn shell_resize(&self, shell: ShellId, cols: u16, rows: u16) -> Result<()> {
+        self.sessions.shells().resize(shell, cols, rows).await
+    }
+
+    fn close_shell(&self, shell: ShellId) {
+        self.sessions.shells().close(shell);
+    }
+
+    fn shell_output(&self, shell: ShellId) -> Option<BoxStream<'static, ShellOutput>> {
+        self.sessions.shells().output(shell)
     }
 
     async fn list(

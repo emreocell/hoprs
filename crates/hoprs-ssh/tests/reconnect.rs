@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use hoprs_core::{Error, ErrorKind};
 use hoprs_ssh::testing::{docker, kill_ssh_sessions, test_config};
-use hoprs_ssh::{Prompter, ReconnectPolicy, ScriptedPrompter, SessionState, SshSession};
+use hoprs_ssh::{
+    CountedChannel, Prompter, ReconnectPolicy, ScriptedPrompter, SessionState, SshSession,
+};
 use secrecy::SecretString;
 use tempfile::TempDir;
 use tokio::sync::watch;
@@ -145,7 +147,7 @@ fn assert_host_key_refused(states: &[SessionState], host_prompts: u32, prompts_b
     );
 }
 
-fn assert_not_connected(result: Result<russh::Channel<russh::client::Msg>, Error>) {
+fn assert_not_connected(result: Result<CountedChannel, Error>) {
     let Err(e) = result else {
         panic!("expected Not connected, got a channel");
     };
@@ -157,8 +159,9 @@ fn assert_not_connected(result: Result<russh::Channel<russh::client::Msg>, Error
 #[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
 async fn reconnects_after_kill() {
     let (s, _p, _dir) = connected().await;
-    let (_ch, tag) = s.open_channel_tagged().await.unwrap();
-    assert_eq!(tag, 1);
+    let old = s.open_channel().await.unwrap();
+    assert_eq!(old.generation(), 1);
+    assert_eq!(s.open_channels(), 1);
     let rec = record_until(s.state(), |st| *st == SessionState::Connected);
     kill_ssh_sessions();
     let states = recorded(rec).await;
@@ -170,9 +173,15 @@ async fn reconnects_after_kill() {
         ]
     );
     assert_eq!(s.generation(), 2);
+    // The dead connection's channel no longer counts against the budget, and dropping it
+    // does not free a slot of the new connection.
+    assert_eq!(s.open_channels(), 0);
 
-    let (mut ch, tag) = s.open_channel_tagged().await.unwrap();
-    assert_eq!(tag, 2);
+    let mut ch = s.open_channel().await.unwrap();
+    assert_eq!(ch.generation(), 2);
+    assert_eq!(s.open_channels(), 1);
+    drop(old);
+    assert_eq!(s.open_channels(), 1);
     ch.exec(true, "echo alive").await.unwrap();
     let mut out = Vec::new();
     while let Some(msg) = ch.wait().await {
