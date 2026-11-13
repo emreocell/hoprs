@@ -47,6 +47,12 @@
 //! Resizes are kept per shell ([`FakeBackend::shell_sizes`]); opens and shell closes are
 //! recorded in [`FakeBackend::calls`].
 //!
+//! Remote edits run on the real [`EditManager`](super::EditManager) over the site's `MemFs`
+//! and the session's state watch, in a temporary directory, without a file watcher and
+//! without an editor: [`FakeBackend::edits_launched`] records what would have opened, and
+//! [`FakeBackend::save_edit`] stands for the editor's save (the debounce then runs as in the
+//! real backend). Starting an edit needs a connected session.
+//!
 //! The FileZilla import, the delete of its file, the backup export and restore and the
 //! settings calls are recorded in order ([`FakeBackend::backup_calls`]) and succeed with
 //! empty reports.
@@ -55,7 +61,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -72,11 +78,12 @@ use secrecy::{ExposeSecret, SecretString};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use super::broker::{PromptKind, PromptRequest};
+use super::edit::{EditManager, Launcher, UploadMode};
 use super::shells::{ShellControl, Shells, shell_closed};
 use super::{
     AuthMethod, BackendApi, BrokerEvent, ConnectError, ConnectResult, Connected, ControlOp,
-    DeleteTarget, KnownHostEntry, ProfileSnapshot, PromptAnswer, PromptId, SessionId, ShellId,
-    ShellOutput, Side, TransferSnapshot, WorkspaceTabs,
+    DeleteTarget, EditChoice, EditEvent, EditId, EditSummary, KnownHostEntry, ProfileSnapshot,
+    PromptAnswer, PromptId, SessionId, ShellId, ShellOutput, Side, TransferSnapshot, WorkspaceTabs,
 };
 use crate::settings::{Settings, SettingsLoad};
 use hoprs_vault::SecretKind;
@@ -185,6 +192,10 @@ pub struct FakeBackend {
     /// Engine events the test sends with [`FakeBackend::send_transfer_event`].
     transfer_events: broadcast::Sender<Event>,
     shells: Shells,
+    /// The edits and their directory, made on first use.
+    edits: OnceLock<(tempfile::TempDir, EditManager)>,
+    /// `(editor command, local path)` of every editor the edits opened.
+    launched: Arc<Mutex<Vec<(String, PathBuf)>>>,
 }
 
 #[derive(Default)]
@@ -262,7 +273,42 @@ impl FakeBackend {
             receiver: Mutex::new(Some(receiver)),
             transfer_events: broadcast::channel(16).0,
             shells: Shells::default(),
+            edits: OnceLock::new(),
+            launched: Arc::default(),
         }
+    }
+
+    /// The edits (see the module docs).
+    fn edits(&self) -> &EditManager {
+        let (_, edits) = self.edits.get_or_init(|| {
+            let dir = tempfile::tempdir().expect("a temporary edit directory");
+            let launched = self.launched.clone();
+            let launcher: Launcher = Arc::new(move |command: &str, path: &std::path::Path| {
+                launched
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push((command.to_owned(), path.to_owned()));
+                Ok(())
+            });
+            let edits = EditManager::with_options(dir.path().join("edit"), false, launcher);
+            (dir, edits)
+        });
+        edits
+    }
+
+    /// `(editor command, local path)` of every editor the edits opened, in order.
+    pub fn edits_launched(&self) -> Vec<(String, PathBuf)> {
+        self.launched
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The editor saves `data` into the edit's local file (and the watcher reports it).
+    pub fn save_edit(&self, session: SessionId, id: EditId, data: &[u8]) {
+        let path = self.edits().local_path(id).expect("a live edit");
+        std::fs::write(&path, data).expect("the local copy is writable");
+        self.edits().file_event(session, path);
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
@@ -1106,6 +1152,46 @@ impl BackendApi for FakeBackend {
     fn set_keepalive(&self, secs: u64) {
         self.record(BackupCall::SetKeepalive(secs));
     }
+
+    async fn start_edit(
+        &self,
+        session: SessionId,
+        remote: RemotePath,
+        editor: String,
+    ) -> Result<EditId> {
+        let (fs, state) = {
+            let state = self.state();
+            if !state.connected.contains(&session) {
+                return Err(Error::new(ErrorKind::Network, "Not connected"));
+            }
+            let site = state
+                .sessions
+                .get(&session)
+                .ok_or_else(|| Self::not_found("Unknown session"))?;
+            let fs: Arc<dyn RemoteFs> = Arc::new(state.remotes[site].clone());
+            let watch = state.watches[&session].subscribe();
+            (fs, watch)
+        };
+        self.edits()
+            .start(session, fs, state, UploadMode::TempRename, remote, &editor)
+            .await
+    }
+
+    async fn resolve_edit(&self, id: EditId, choice: EditChoice) -> Result<()> {
+        self.edits().resolve(id, choice).await
+    }
+
+    async fn edits_pending(&self, session: SessionId) -> Vec<EditSummary> {
+        self.edits().pending(session).await
+    }
+
+    async fn finish_edits(&self, session: SessionId, discard: bool) -> Result<Vec<EditSummary>> {
+        self.edits().finish(session, discard).await
+    }
+
+    fn subscribe_edits(&self) -> broadcast::Receiver<EditEvent> {
+        self.edits().subscribe()
+    }
 }
 
 #[cfg(test)]
@@ -1116,6 +1202,54 @@ mod tests {
     use hoprs_transfer::Direction;
 
     use super::*;
+
+    /// Edits run on the real edit manager: a save while the connection is down is held,
+    /// and goes up once the session reconnects.
+    #[tokio::test(start_paused = true)]
+    async fn fake_backend_edits_wait_for_reconnect() {
+        let site = Site::new("s", "h", "u", Protocol::Ssh);
+        let fake = FakeBackend::new().with_site(site.clone());
+        let session = fake.connect(site.id.clone()).await.unwrap().session;
+        let remote = fake.remote_fs(&site.id);
+        remote.add_file("/f.txt", b"one", SystemTime::UNIX_EPOCH);
+        let mut events = fake.subscribe_edits();
+
+        // Not a connected session: no edit.
+        let err = fake
+            .start_edit(
+                SessionId(99),
+                RemotePath::new("/f.txt").unwrap(),
+                "ed".into(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Network);
+
+        let id = fake
+            .start_edit(session, RemotePath::new("/f.txt").unwrap(), "ed -s".into())
+            .await
+            .unwrap();
+        let launched = fake.edits_launched();
+        assert_eq!(launched.len(), 1);
+        assert_eq!(launched[0].0, "ed -s");
+        assert_eq!(std::fs::read(&launched[0].1).unwrap(), b"one");
+
+        fake.drop_connection(session, Error::new(ErrorKind::Network, "lost"));
+        fake.save_edit(session, id, b"two");
+        tokio::time::advance(super::super::edit::DEBOUNCE).await;
+        assert_eq!(events.recv().await.unwrap(), EditEvent::Pending { id });
+        assert_eq!(fake.edits_pending(session).await.len(), 1);
+        assert_eq!(remote.read_file("/f.txt").unwrap(), b"one");
+
+        fake.reconnect(session).await.unwrap();
+        assert!(matches!(
+            events.recv().await.unwrap(),
+            EditEvent::Uploaded { id: got, .. } if got == id
+        ));
+        assert_eq!(remote.read_file("/f.txt").unwrap(), b"two");
+        assert!(fake.finish_edits(session, false).await.unwrap().is_empty());
+        assert_eq!(events.recv().await.unwrap(), EditEvent::Closed { id });
+    }
 
     #[tokio::test]
     async fn fake_backend_connects_lists_and_records() {

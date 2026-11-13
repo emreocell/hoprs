@@ -766,6 +766,13 @@ impl SessionManager {
             .ok_or_else(|| Error::new(ErrorKind::Network, "Not connected"))
     }
 
+    /// The protocol of a session's site.
+    pub fn protocol(&self, id: SessionId) -> Option<Protocol> {
+        lock(&self.inner.sessions)
+            .get(&id)
+            .map(|entry| entry.label.protocol)
+    }
+
     /// The `known_hosts` file SSH sessions check: the configured one, else
     /// `~/.ssh/known_hosts`.
     pub fn known_hosts_path(&self) -> PathBuf {

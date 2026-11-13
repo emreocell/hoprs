@@ -12,7 +12,7 @@ hoprs-remote = { path = "../hoprs-remote" }
 hoprs-transfer = { path = "../hoprs-transfer" }
 hoprs-import = { path = "../hoprs-import" }
 iced = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time", "io-util"] }
 tokio-util = { workspace = true }
 futures-util = { workspace = true }
 async-trait = { workspace = true }
@@ -29,6 +29,11 @@ toml = { workspace = true }
 # Terminal emulation core (grid, parser, selection, search).
 alacritty_terminal = { version = "0.26", default-features = false }
 rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
+# Remote editing: watches the local copies (inotify on Linux).
+notify = "8.2"
+# Splits the editor command with shell quoting rules, without running a shell. Already in
+# the dependency tree (no new download), dependency-free, MIT OR Apache-2.0.
+shlex = "2.0"
 
 [dev-dependencies]
 tempfile = { workspace = true }
