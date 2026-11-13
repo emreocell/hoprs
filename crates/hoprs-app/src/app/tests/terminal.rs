@@ -1515,3 +1515,35 @@ async fn restart_on_lost_session_reconnects_then_opens() {
     });
     assert_eq!(opens(&effects), 0, "{effects:?}");
 }
+
+/// Final review: only the user's own terminal actions (a key, a paste, "Restart") count
+/// as acting on the site; the terminal's timers and write acknowledgements never do.
+#[test]
+fn terminal_timers_are_not_user_actions() {
+    use crate::app::reconnect::is_user_action;
+    let tab = TabId(1);
+    let msg = |msg| Message::Terminal { tab, msg };
+    for user in [
+        TerminalMsg::Key {
+            key: Key::Char('x'),
+            mods: NONE,
+        },
+        TerminalMsg::Paste,
+        TerminalMsg::Pasted(Some("x".into())),
+        TerminalMsg::Restart,
+    ] {
+        assert!(is_user_action(&msg(user.clone())), "{user:?}");
+    }
+    for not_user in [
+        TerminalMsg::ResizeDue(1),
+        TerminalMsg::SearchDue(1),
+        TerminalMsg::InputSent(ShellId(1)),
+        TerminalMsg::Resized { cols: 80, rows: 24 },
+        TerminalMsg::Focus(true),
+        TerminalMsg::Scroll(1),
+        TerminalMsg::Copy,
+        TerminalMsg::SearchInput("x".into()),
+    ] {
+        assert!(!is_user_action(&msg(not_user.clone())), "{not_user:?}");
+    }
+}

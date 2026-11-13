@@ -28,9 +28,12 @@
 
 use hoprs_core::{ConnectionState, Error, ErrorKind, SiteId};
 
+use super::terminal::TerminalMsg;
 use super::{App, Effect, Message, SiteConn, TabState};
 
-/// Whether `msg` is the user acting on a tab (what may reconnect a lost session).
+/// Whether `msg` is the user acting on a tab (what may reconnect a lost session). In a
+/// terminal: a key, a paste, "Restart" (a new terminal tab is [`Message::NewTab`]); never
+/// its timers, focus, scrolling or write acknowledgements.
 pub(super) fn is_user_action(msg: &Message) -> bool {
     matches!(
         msg,
@@ -38,7 +41,13 @@ pub(super) fn is_user_action(msg: &Message) -> bool {
             | Message::KeyPressed { .. }
             | Message::Key { .. }
             | Message::NewTab { .. }
-            | Message::Terminal { .. }
+            | Message::Terminal {
+                msg: TerminalMsg::Key { .. }
+                    | TerminalMsg::Paste
+                    | TerminalMsg::Pasted(_)
+                    | TerminalMsg::Restart,
+                ..
+            }
             | Message::FileDropped(_)
             | Message::DragEnd
     )
