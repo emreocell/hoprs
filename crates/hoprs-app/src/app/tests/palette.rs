@@ -582,3 +582,100 @@ async fn keys_do_not_leak_to_panes_or_terminal() {
     });
     assert!(app.tabs[1].remote().action.is_some(), "Del asks again");
 }
+
+#[tokio::test]
+async fn empty_query_reaches_sites_workspaces_and_settings() {
+    // A files tab with a selection has many own actions; several sites and a workspace
+    // are saved. Without typing, the palette still lists a few of each kind: at most 5
+    // of the tab's own actions, at most 3 other tabs, then "Open workspace…", Settings
+    // and the sites, then the other global actions.
+    let web = ssh_site("web");
+    let mut others: Vec<Site> = ["db", "nas", "blog", "mail", "wiki"]
+        .iter()
+        .map(|name| site(name, &format!("{name}.example"), "deploy", Protocol::Ftp))
+        .collect();
+    others.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut sites: Vec<&Site> = vec![&web];
+    sites.extend(others.iter());
+    let ws = workspace("Shop", &[&web.id]);
+    let fake = fake_with(&sites, vec![ws]);
+    fake.remote_fs(&web.id)
+        .add_file("/notes.txt", b"n", SystemTime::UNIX_EPOCH);
+    let mut app = ssh_both(&fake, &web).await;
+    let (terminal, files) = (app.tabs[0].id, app.tabs[1].id);
+    // More tabs on the session than the empty list shows.
+    for _ in 0..3 {
+        app.update(Message::NewTab {
+            tab: terminal,
+            kind: TabKind::Terminal,
+        });
+    }
+    let index = app.tab_index(files).expect("the files tab");
+    app.update(Message::SelectTab(index));
+    app.update(Message::Key {
+        key: FileKey::SwitchPane,
+        shift: false,
+    });
+    app.update(pane_msg(files, Side::Remote, PaneMsg::Click(0)));
+    let own = all(&app)
+        .iter()
+        .take_while(|e| e.group == Group::Action)
+        .count();
+    assert!(own > 5, "the test needs more than 5 own actions: {own}");
+
+    app.update(palette(PaletteMsg::Open));
+    let results = app.palette_results();
+    assert!(results.len() <= crate::app::palette::MAX_RESULTS);
+    let groups: Vec<Group> = results.iter().map(|e| e.group).collect();
+    // The tab's own actions first, at most 5.
+    let context = groups.iter().take_while(|g| **g == Group::Action).count();
+    assert_eq!(context, 5, "{:?}", labels(&results));
+    assert_eq!(results[0].label, strings::NEW_FOLDER);
+    // Then the other tabs (not the active one), at most 3.
+    let tabs: Vec<&Entry> = results.iter().filter(|e| e.group == Group::Tab).collect();
+    assert_eq!(tabs.len(), 3, "{:?}", labels(&results));
+    assert!(tabs.iter().all(|e| e.item != PaletteItem::Tab(files)));
+    // Go to: the workspaces, Settings and some sites are reachable without typing.
+    for label in [strings::PALETTE_OPEN_WORKSPACE, strings::SETTINGS] {
+        assert!(
+            entry(&results, label).is_some(),
+            "{label}: {:?}",
+            labels(&results)
+        );
+    }
+    assert!(
+        results.iter().any(|e| e.group == Group::Site),
+        "{:?}",
+        labels(&results)
+    );
+    // Typing still searches every row.
+    app.update(palette(PaletteMsg::Query("wiki".into())));
+    assert_eq!(
+        app.palette_results().first().map(|e| e.label.as_str()),
+        Some("wiki")
+    );
+    app.update(palette(PaletteMsg::Query("close tab".into())));
+    assert_eq!(
+        app.palette_results().first().map(|e| e.label.as_str()),
+        Some(strings::PALETTE_CLOSE_TAB)
+    );
+}
+
+#[tokio::test]
+async fn results_computed_only_when_needed() {
+    use crate::app::palette::results_computed;
+    let mut app = App::new();
+    app.update(palette(PaletteMsg::Open));
+    let before = results_computed();
+    // Typing, closing the queue behind it (dropped), unrelated messages: no ranking.
+    app.update(palette(PaletteMsg::Query("set".into())));
+    app.update(Message::ToggleQueue);
+    app.update(palette(PaletteMsg::Query("se".into())));
+    assert_eq!(results_computed(), before, "nothing needed the results");
+    // ↓ needs the count, Enter the row.
+    app.update(pressed(FileKey::Down));
+    assert_eq!(results_computed(), before + 1);
+    app.update(pressed(FileKey::Enter));
+    assert_eq!(results_computed(), before + 2);
+    assert!(app.palette.is_none());
+}

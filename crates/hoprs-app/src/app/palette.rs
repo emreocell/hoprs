@@ -15,7 +15,10 @@
 //!
 //! **Matching.** [`fuzzy_score`]: the query's letters in order, case-insensitive, spaces
 //! ignored; word starts and contiguous runs score more. Results go best first, equal scores
-//! alphabetically. An empty query keeps the order above.
+//! alphabetically. An empty query lists a few of each kind so "go to" needs no typing:
+//! up to 5 of the tab's own actions, up to 3 other tabs, "Open workspace…", Settings, up to
+//! 4 sites, then the other global actions ([`empty_query_order`]). Rows are ranked only
+//! when something needs them (the view, ↑/↓, a run), not on every message.
 //!
 //! **Input.** While it is open, the palette has the keyboard: ↑/↓ move, Enter runs, Esc
 //! closes, every other key is dropped, and what the window behind could still send (a
@@ -32,6 +35,18 @@ use crate::ui::strings;
 
 /// The most results the palette lists.
 pub const MAX_RESULTS: usize = 12;
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread ranked the palette's rows ([`App::palette_results`]).
+    static RESULTS_COMPUTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times this thread ranked the palette's rows.
+#[cfg(test)]
+pub fn results_computed() -> usize {
+    RESULTS_COMPUTED.with(std::cell::Cell::get)
+}
 
 /// Every matched letter.
 const BASE: u32 = 1;
@@ -114,6 +129,54 @@ fn ranked<T>(
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     scored.into_iter().map(|(_, _, item)| item).collect()
+}
+
+/// The most of the active tab's own actions an empty query lists.
+const EMPTY_CONTEXT: usize = 5;
+/// The most other tabs an empty query lists.
+const EMPTY_TABS: usize = 3;
+/// The most sites an empty query lists before the other global actions.
+const EMPTY_SITES: usize = 4;
+
+/// The rows without a query, so that every kind is reachable without typing: up to
+/// [`EMPTY_CONTEXT`] of the active tab's own actions, up to [`EMPTY_TABS`] other tabs
+/// (not `active`), "Open workspace…" and Settings, up to [`EMPTY_SITES`] sites, then the
+/// other global actions and everything left, in [`App::palette_entries`]' order.
+fn empty_query_order(entries: Vec<Entry>, active: Option<TabId>) -> Vec<Entry> {
+    let mut context = Vec::new();
+    let mut tabs = Vec::new();
+    let mut go_to = Vec::new();
+    let mut sites = Vec::new();
+    let mut rest = Vec::new();
+    for entry in entries {
+        match &entry.item {
+            PaletteItem::Tab(id) if Some(*id) == active => {}
+            PaletteItem::Tab(_) if tabs.len() < EMPTY_TABS => tabs.push(entry),
+            PaletteItem::OpenWorkspace | PaletteItem::Settings => go_to.push(entry),
+            PaletteItem::Site(_) if sites.len() < EMPTY_SITES => sites.push(entry),
+            PaletteItem::FileKey(..)
+            | PaletteItem::Copy(_)
+            | PaletteItem::Paste(_)
+            | PaletteItem::Find(_)
+            | PaletteItem::Reconnect(_)
+            | PaletteItem::NewTerminalTab(_)
+            | PaletteItem::NewFilesTab(_)
+            | PaletteItem::CloseTab(_)
+                if context.len() < EMPTY_CONTEXT =>
+            {
+                context.push(entry);
+            }
+            _ => rest.push(entry),
+        }
+    }
+    // "Open workspace…" before Settings.
+    go_to.sort_by_key(|e| e.item != PaletteItem::OpenWorkspace);
+    let mut out = context;
+    out.extend(tabs);
+    out.extend(go_to);
+    out.extend(sites);
+    out.extend(rest);
+    out
 }
 
 /// The candidates matching `query` in the palette's order, as indices.
@@ -318,11 +381,18 @@ impl App {
     }
 
     /// The rows shown: those matching the query, best first, at most [`MAX_RESULTS`].
+    /// Without a query, a few of each kind ([`empty_query_order`]).
     pub fn palette_results(&self) -> Vec<Entry> {
+        #[cfg(test)]
+        RESULTS_COMPUTED.with(|n| n.set(n.get() + 1));
         let entries = self.palette_entries();
         let query = self.palette.as_ref().map_or("", |p| p.query.as_str());
         let mut results = if query.trim().is_empty() {
-            entries
+            let active = self
+                .active_tab
+                .and_then(|i| self.tabs.get(i))
+                .map(|tab| tab.id);
+            empty_query_order(entries, active)
         } else {
             ranked(entries, |e| e.score(query), |e| e.label.to_lowercase())
         };
@@ -504,17 +574,20 @@ impl App {
         let Some(palette) = &self.palette else {
             return msg;
         };
-        let results = self.palette_results();
+        // Only a run request ranks the rows (not every message while it is open).
         let row = match &msg {
-            // The highlighted row (the list may have shrunk under it).
             Message::Palette(PaletteMsg::Run)
             | Message::KeyPressed {
                 key: FileKey::Enter,
                 ..
-            } => palette.selected.min(results.len().saturating_sub(1)),
-            Message::Palette(PaletteMsg::Pick(row)) => *row,
+            } => None,
+            Message::Palette(PaletteMsg::Pick(row)) => Some(*row),
             _ => return msg,
         };
+        let selected = palette.selected;
+        let results = self.palette_results();
+        // The highlighted row (the list may have shrunk under it).
+        let row = row.unwrap_or_else(|| selected.min(results.len().saturating_sub(1)));
         let Some(command) = results
             .get(row)
             .and_then(|entry| self.item_message(&entry.item))
@@ -560,15 +633,20 @@ impl App {
     /// A key while the palette is open: ↑/↓ move through the results (wrapping), Esc
     /// closes; every other key is dropped (Enter with a row to run never gets here).
     pub(super) fn palette_key(&mut self, key: FileKey) -> Vec<Effect> {
-        let count = self.palette_results().len();
-        let Some(palette) = &mut self.palette else {
+        if self.palette.is_none() {
             return Vec::new();
-        };
+        }
         match key {
             FileKey::Escape => self.palette = None,
-            FileKey::Down if count > 0 => palette.selected = (palette.selected + 1) % count,
-            FileKey::Up if count > 0 => {
-                palette.selected = (palette.selected + count - 1) % count;
+            FileKey::Down | FileKey::Up => {
+                let count = self.palette_results().len();
+                if let Some(palette) = self.palette.as_mut().filter(|_| count > 0) {
+                    palette.selected = if key == FileKey::Down {
+                        (palette.selected + 1) % count
+                    } else {
+                        (palette.selected + count - 1) % count
+                    };
+                }
             }
             _ => {}
         }
