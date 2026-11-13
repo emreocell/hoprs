@@ -103,7 +103,9 @@ target that passes again is printed as such and should leave the list.
 Local run of `scripts/perf.sh`, 2026-11-13, branch `plan-6-terminal-polish` at `10e0947`
 (Ubuntu 26.04, 12 CPUs; Docker 29; `lftp` 4.9.2 and Xvfb from an Ubuntu 24.04 container,
 `scp` OpenSSH 10.2 on the host, sshd OpenSSH 9.2 in the container). The CI runs of
-`perf.yml` put theirs in the job summary.
+`perf.yml` put theirs in the job summary. Its first run is the one its `push: main`
+trigger starts when Plan 6 is merged: `workflow_dispatch` cannot run a workflow that is
+not on the default branch yet, so it never ran on the Plan 6 branch.
 
 | Target (spec §9) | Measured | Criterion | Result |
 |---|---|---|---|

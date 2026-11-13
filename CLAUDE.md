@@ -22,7 +22,7 @@ Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI), open source (MIT OR Apa
 - Plans 1–5 merged to `main`: core + transfer engine, SSH/SFTP, FTP/FTPS, vault + FileZilla import, the iced app.
 - Plan 6 (terminal tabs over the site's SSH connection, remote editing with re-upload on save, Ctrl+K palette, technical log panel, idle-drop fixes, perf job) implemented on branch `plan-6-terminal-polish`; QA checklist run (`docs/qa/plan-6-checklist.md`, NEEDS HUMAN rows wait for the author).
 - Deferred follow-ups: `docs/superpowers/plans/2026-11-12-01-followups.md` (a "Plan 6" section lists what was left out, grouped).
-- **Next step:** merge Plan 6 (after `perf.yml` ran once on the branch), then prepare the v1 release: packaging, icon, `.desktop` file, version.
+- **Next step:** merge Plan 6, then check the first `perf.yml` run on `main` (its `push: main` trigger starts it after the merge; `workflow_dispatch` cannot run a workflow that is not on the default branch yet, so it never ran on the branch), then prepare the v1 release: packaging, icon, `.desktop` file, version.
 - Docker integration tests: `docker compose -f docker/compose.yml up -d --build --wait`, then `cargo test --workspace --all-features -- --ignored --test-threads=1`.
 
 ## Decisions already made (do not re-litigate)
