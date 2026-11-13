@@ -205,6 +205,15 @@ pub(super) struct Actor {
     /// answer is only stored once the item is dispatched.
     pub(super) overrides: HashMap<TransferId, ConflictPolicy>,
     pub(super) tracker: ProgressTracker,
+    /// The shortest time between two `Progress` events (spec §9: 10 Hz at most).
+    pub(super) progress_interval: Duration,
+    /// When the last `Progress` went out.
+    pub(super) last_progress: Option<Instant>,
+    /// Final counts of copy runs that ended since the last `Progress`; they go out
+    /// with the next one.
+    pub(super) final_progress: Vec<ProgressUpdate>,
+    /// A `Progress` went out off the ticker: the next tick is one interval after it.
+    pub(super) progress_off_tick: bool,
     pub(super) worker_tx: mpsc::UnboundedSender<WorkerMsg>,
 }
 
@@ -229,9 +238,13 @@ pub(super) async fn run(
         running: HashMap::new(),
         overrides: HashMap::new(),
         tracker: ProgressTracker::new(),
+        progress_interval: config.progress_interval.max(Duration::from_millis(1)),
+        last_progress: None,
+        final_progress: Vec::new(),
+        progress_off_tick: false,
         worker_tx,
     };
-    let mut ticker = tokio::time::interval(config.progress_interval.max(Duration::from_millis(1)));
+    let mut ticker = tokio::time::interval(actor.progress_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     let shutdown = loop {
@@ -244,6 +257,9 @@ pub(super) async fn run(
             },
             Some(msg) = worker_rx.recv() => actor.handle_worker(msg),
             _ = ticker.tick() => actor.tick(),
+        }
+        if std::mem::take(&mut actor.progress_off_tick) {
+            ticker.reset();
         }
     };
     actor.stop_workers(&mut worker_rx).await;
@@ -651,8 +667,13 @@ impl Actor {
     }
 
     /// Ends the progress tracking of a copy run: records its final byte
-    /// count and emits it in a last `Progress` (rate 0, as the copy has
-    /// stopped), before the state change that ends the run.
+    /// count and sends it in a `Progress` (rate 0, as the copy has stopped).
+    ///
+    /// `Progress` goes out at most once per interval, all workers together
+    /// (spec §9): when the last one is at least an interval old, the final
+    /// count goes out now, before the state change that ends the run, and the
+    /// ticker restarts from it; otherwise it rides with the next tick, after
+    /// the state change.
     fn finish_progress(&mut self, id: TransferId, bytes: u64) {
         self.tracker.unregister(id);
         let Some(item) = self.items.get_mut(&id) else {
@@ -665,7 +686,16 @@ impl Actor {
             total: item.size,
             bytes_per_sec: 0,
         };
-        self.emit(EventKind::Progress(vec![update]));
+        self.final_progress.retain(|u| u.id != id);
+        self.final_progress.push(update);
+        let now = Instant::now();
+        let due = self
+            .last_progress
+            .is_none_or(|at| now.saturating_duration_since(at) >= self.progress_interval);
+        if due {
+            self.emit_progress(now);
+            self.progress_off_tick = true;
+        }
     }
 
     /// Removes finished top-level items and their descendants from the
@@ -781,22 +811,34 @@ impl Actor {
         }
     }
 
-    /// Emits the periodic `EventKind::Progress` (a copy's final count is
-    /// emitted by `finish_progress`). Byte counts are persisted best-effort
-    /// here; the final count is persisted (strictly) at completion.
+    /// Emits the periodic `EventKind::Progress`.
     fn tick(&mut self) {
-        let updates = self.tracker.sample(Instant::now());
+        self.emit_progress(Instant::now());
+    }
+
+    /// Emits one `EventKind::Progress`: the final counts of the copy runs
+    /// that ended since the last one (see `finish_progress`), then a sample
+    /// of the running ones; nothing when both are empty. Running counts are
+    /// persisted best-effort here; a final count is persisted (strictly) at
+    /// completion.
+    fn emit_progress(&mut self, now: Instant) {
+        let sampled = self.tracker.sample(now);
+        if !sampled.is_empty() {
+            let mut batch = Vec::with_capacity(sampled.len());
+            for u in &sampled {
+                if let Some(item) = self.items.get_mut(&u.id) {
+                    item.bytes_done = u.bytes_done;
+                }
+                batch.push((u.id, u.bytes_done));
+            }
+            let _ = self.store.set_bytes_done_many(&batch);
+        }
+        let mut updates = std::mem::take(&mut self.final_progress);
+        updates.extend(sampled);
         if updates.is_empty() {
             return;
         }
-        let mut batch = Vec::with_capacity(updates.len());
-        for u in &updates {
-            if let Some(item) = self.items.get_mut(&u.id) {
-                item.bytes_done = u.bytes_done;
-            }
-            batch.push((u.id, u.bytes_done));
-        }
-        let _ = self.store.set_bytes_done_many(&batch);
+        self.last_progress = Some(now);
         self.emit(EventKind::Progress(updates));
     }
 }
