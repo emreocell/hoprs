@@ -393,6 +393,9 @@ pub fn workspace_status(connected: usize, total: usize, name: &str) -> String {
 pub const NEW_FOLDER: &str = "New folder";
 pub const RENAME: &str = "Rename";
 pub const PERMISSIONS: &str = "Permissions…";
+/// Short toolbar labels for the narrowest panes (`ui::fit::Toolbar::Narrow`).
+pub const NEW_FOLDER_SHORT: &str = "Folder";
+pub const PERMISSIONS_SHORT: &str = "Perms…";
 pub const KEY_NEW_FOLDER: &str = "F7";
 pub const KEY_RENAME: &str = "F2";
 pub const KEY_DELETE: &str = "Del";

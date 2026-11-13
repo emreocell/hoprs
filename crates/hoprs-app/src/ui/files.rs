@@ -329,7 +329,7 @@ fn pane<'a>(
             .style(theme::pane_focus(focused)),
         path_bar(place, pane, home, msg),
         hrule(),
-        file_actions::toolbar(tab, conn, side, fit::compact_toolbar(width, side)),
+        file_actions::toolbar(tab, conn, side, fit::toolbar(width, side)),
         hrule(),
     ];
     for bar in file_actions::bars(tab.id, side, pane) {

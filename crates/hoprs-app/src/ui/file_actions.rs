@@ -12,21 +12,28 @@ use crate::app::files::Pane;
 use crate::app::{Message, PaneMsg, SiteConn, Tab, TabId};
 use crate::backend::Side;
 use crate::ui::files::edit_id;
+use crate::ui::fit::Toolbar;
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
 use crate::ui::virtual_list::ROW_HEIGHT;
 
 /// The toolbar under the path bar: the actions, each with its key, and on the right the
 /// operation in flight.
-/// `compact` (a narrow pane, [`crate::ui::fit::compact_toolbar`]): no key hints, and while
-/// an operation runs only its progress (the actions are all dim then).
+/// `form` ([`crate::ui::fit::toolbar`]): below Full no key hints, and while an operation
+/// runs only its progress (the actions are all dim then); Narrow also uses short labels.
 pub fn toolbar<'a>(
     tab: &'a Tab,
     conn: &SiteConn,
     side: Side,
-    compact: bool,
+    form: Toolbar,
 ) -> Element<'a, Message> {
     let p = palette();
+    let compact = !form.hints();
+    let (new_folder, permissions) = if form.short_labels() {
+        (strings::NEW_FOLDER_SHORT, strings::PERMISSIONS_SHORT)
+    } else {
+        (strings::NEW_FOLDER, strings::PERMISSIONS)
+    };
     let Some(pane) = tab.pane(side) else {
         return space().into();
     };
@@ -78,7 +85,7 @@ pub fn toolbar<'a>(
         }
         bar = bar
             .push(action(
-                strings::NEW_FOLDER,
+                new_folder,
                 Some(strings::KEY_NEW_FOLDER),
                 can,
                 PaneMsg::NewFolder,
@@ -96,12 +103,7 @@ pub fn toolbar<'a>(
                 PaneMsg::Delete,
             ));
         if side == Side::Remote {
-            bar = bar.push(action(
-                strings::PERMISSIONS,
-                None,
-                chmod,
-                PaneMsg::Permissions,
-            ));
+            bar = bar.push(action(permissions, None, chmod, PaneMsg::Permissions));
         }
     }
     bar = bar.push(space().width(Length::Fill));
