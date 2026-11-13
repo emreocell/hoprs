@@ -1,43 +1,37 @@
 //! Remote editing in the UI (Plan 6, Task 8; Review Focus 4). The backend does the work
 //! ([`crate::backend::edit`]); this is what the user sees and decides:
 //!
-//! - **Edit (F4)** on the remote pane opens the entry under the cursor (else the first
-//!   selected one) in the editor of the settings ([`crate::settings::Settings::editor_command`]).
-//!   Folders, links and files over [`EDIT_MAX_BYTES`] are refused, with the reason inline
-//!   ([`edit_refusal`]).
-//! - **Notices, never modals.** A thin strip in the site's files tabs has one line per
-//!   active edit ([`EditStatus`]); a change on the server since the file was opened shows
-//!   the inline choice "Overwrite / Keep remote / Save a copy" there. Each upload shows a
-//!   [`Toast`] for [`TOAST_TIME`] at the bottom right.
-//! - **Closing the last tab of a session** that has edits asks inline in that tab, listing
-//!   the files: "Upload pending changes and close", "Close and keep local copies" or
-//!   "Cancel" ([`CloseAsk`]).
-//! - **Closing the window** with unsent edits asks the same in the center, *before* the
-//!   Plan 5 close flow (save → engine → sessions): "Upload and quit" waits up to
-//!   [`FLUSH_LIMIT`] for the uploads, "Quit and keep local copies" says where the copies go
-//!   and deletes nothing ([`QuitAsk`]).
+//! - **Edit (F4)** on the remote pane opens the selected file in the editor of the
+//!   settings ([`crate::settings::Settings::editor_command`]). Folders, links, files over
+//!   [`EDIT_MAX_BYTES`] and a selection of several entries are refused, with the reason
+//!   inline ([`edit_refusal`]).
+//! - **Notices, never modals.** A thin strip in the session's files and terminal tabs has
+//!   one line per active edit ([`EditStatus`], the file name in mono); a change on the
+//!   server since the file was opened shows the inline choice "Overwrite / Keep remote /
+//!   Save a copy" there. Each upload shows a [`Toast`] for [`TOAST_TIME`] at the bottom
+//!   right. Copies a close kept are said by a [`KeptNotice`] above the center, until
+//!   dismissed.
+//! - **Questions before closing** (the last tab of a session, "Close workspace", the
+//!   window), in [`close`]: asked only when something is unsent, before anything closes.
 //!
-//! Both questions first ask the backend what is unsent ([`Effect::CheckEdits`]): a save
-//! the debounce has not seen yet counts. Their answers run as one [`Effect::SettleEdits`];
-//! only its result closes the tab (and so its session) or starts the window's close flow.
-//! An upload that could not finish keeps the question open with the files left, so
-//! nothing is closed over unsent work. "Keep" saves each unsent edit as a recovered copy
-//! (durable, see the backend) and leaves the local edit files where they are. A session
-//! closed any other way (its site deleted, moved, restarted) ends its edits the same way
-//! after the close ([`Effect::CloseSession`]).
+//! A session closed any other way (its site deleted or moved, "Close and reconnect")
+//! keeps its unsent edits as recovered copies after the close ([`Effect::CloseSession`]),
+//! deleting nothing; the window's shutdown (and a forced exit) keeps them first.
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-use hoprs_core::{EntryKind, Error, RemoteEntry, RemotePath, SiteId};
+use hoprs_core::{EntryKind, Error, RemoteEntry, RemotePath, SiteId, WorkspaceId};
 
 use super::files::Row;
 use super::tabs::{SiteConn, Tab, TabId};
-use super::{App, Effect, Form, Message};
+use super::{App, Effect, Message};
 use crate::backend::{
     EditChoice, EditEvent, EditId, EditState, EditSummary, KeptEdit, SessionId, Side,
 };
 use crate::ui::strings;
+
+mod close;
 
 /// Largest file the Edit action opens (50 MB, base 1024 as the size column shows it).
 pub const EDIT_MAX_BYTES: u64 = 50 * 1024 * 1024;
@@ -103,21 +97,34 @@ pub struct Opening {
     pub remote: RemotePath,
 }
 
-/// The small notice at the bottom right.
+/// The small notice at the bottom right: `text` then the file `name` (in mono).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Toast {
     /// Which expiry ends it (a newer toast is not ended by an older one's).
     pub id: u64,
-    pub text: String,
+    pub text: &'static str,
+    pub name: String,
+}
+
+/// Unsent edits a close kept as recovered copies, said until dismissed (above the
+/// center, whatever it shows).
+#[derive(Clone, Debug, PartialEq)]
+pub struct KeptNotice {
+    /// How many copies, since the notice was last dismissed.
+    pub count: usize,
+    /// The recovered copies' root.
+    pub dir: PathBuf,
 }
 
 /// What a close question is for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EditsFor {
     /// The last tab of a session.
     Tab(TabId),
     /// The window.
     Quit(iced::window::Id),
+    /// "Close workspace".
+    Workspace(WorkspaceId),
 }
 
 /// An answer to a close question.
@@ -147,6 +154,8 @@ pub struct Settled {
     pub unsent: Vec<EditSummary>,
     /// Saved as recovered copies.
     pub kept: Vec<KeptEdit>,
+    /// The recovered copies' root.
+    pub kept_in: PathBuf,
 }
 
 /// A close question's state, in the tab or in the center.
@@ -189,10 +198,12 @@ impl Question {
 /// The question of a tab whose close waits for its edits.
 pub type CloseAsk = Question;
 
-/// The window's question (shown in the center as [`Form::QuitEdits`]).
+/// The question shown in the center ([`Form::QuitEdits`]): the window's, or "Close
+/// workspace"'s.
 #[derive(Clone, Debug, PartialEq)]
-pub struct QuitAsk {
-    pub window: iced::window::Id,
+pub struct CenterAsk {
+    /// [`EditsFor::Quit`] or [`EditsFor::Workspace`].
+    pub purpose: EditsFor,
     pub question: Question,
 }
 
@@ -205,8 +216,10 @@ pub enum EditMsg {
     Retry(EditId),
     /// An answer in a tab's close question.
     CloseTab { tab: TabId, answer: CloseAnswer },
-    /// An answer in the window's close question.
-    Quit(CloseAnswer),
+    /// An answer in the question in the center (window or workspace).
+    Center(CloseAnswer),
+    /// "Dismiss" on the notice of kept copies.
+    DismissKept,
     /// The toast whose id this is may go.
     ToastExpired(u64),
     /// [`Effect::StartEdit`] finished.
@@ -235,8 +248,12 @@ pub enum EditMsg {
         how: Settle,
         result: Result<Settled, Error>,
     },
-    /// A session closed some other way kept these unsent edits as recovered copies.
-    Kept(Vec<KeptEdit>),
+    /// A session closed some other way kept these unsent edits as recovered copies,
+    /// under `kept_in`.
+    Kept {
+        kept: Vec<KeptEdit>,
+        kept_in: PathBuf,
+    },
 }
 
 impl EditMsg {
@@ -244,7 +261,11 @@ impl EditMsg {
     pub fn is_user(&self) -> bool {
         matches!(
             self,
-            Self::Resolve { .. } | Self::Retry(_) | Self::CloseTab { .. } | Self::Quit(_)
+            Self::Resolve { .. }
+                | Self::Retry(_)
+                | Self::CloseTab { .. }
+                | Self::Center(_)
+                | Self::DismissKept
         )
     }
 }
@@ -294,6 +315,10 @@ impl Tab {
                 Some(Row::Entry(entry)) => Some(entry),
                 _ => None,
             });
+        // Several selected: one file at a time (the cursor's would be a guess).
+        if pane.selected_entries().len() > 1 {
+            return Some(Err(strings::EDIT_ONE_FILE));
+        }
         let entry = cursor.or_else(|| pane.selected_entries().first().copied())?;
         Some(match edit_refusal(entry) {
             Some(reason) => Err(reason),
@@ -328,6 +353,7 @@ impl App {
                     strings::EDIT_NO_FOLDERS,
                     strings::EDIT_NO_LINKS,
                     strings::EDIT_TOO_LARGE,
+                    strings::EDIT_ONE_FILE,
                 ]
                 .contains(&note)
             })
@@ -375,7 +401,11 @@ impl App {
                 _ => Vec::new(),
             },
             EditMsg::CloseTab { tab, answer } => self.close_tab_answer(tab, answer),
-            EditMsg::Quit(answer) => self.quit_answer(answer),
+            EditMsg::Center(answer) => self.center_answer(answer),
+            EditMsg::DismissKept => {
+                self.kept_notice = None;
+                Vec::new()
+            }
             EditMsg::ToastExpired(id) => {
                 if self.toast.as_ref().is_some_and(|t| t.id == id) {
                     self.toast = None;
@@ -403,7 +433,10 @@ impl App {
                 how,
                 result,
             } => self.edits_settled(purpose, how, result),
-            EditMsg::Kept(kept) => self.kept_toast(&kept),
+            EditMsg::Kept { kept, kept_in } => {
+                self.note_kept(&kept, kept_in);
+                Vec::new()
+            }
         }
     }
 
@@ -482,8 +515,8 @@ impl App {
                     return Vec::new();
                 };
                 edit.status = EditStatus::Editing { saved: Some(at) };
-                let text = strings::uploaded(edit.name());
-                return self.show_toast(text);
+                let name = edit.name().to_owned();
+                return self.show_toast(strings::UPLOADED, name);
             }
             EditEvent::RemoteChanged { id } => {
                 if let Some(edit) = find(&mut self.edits, id) {
@@ -536,276 +569,30 @@ impl App {
         Vec::new()
     }
 
-    /// Shows `text` as the toast, ending it after [`TOAST_TIME`].
-    fn show_toast(&mut self, text: String) -> Vec<Effect> {
+    /// Shows `text` + `name` as the toast, ending it after [`TOAST_TIME`].
+    fn show_toast(&mut self, text: &'static str, name: String) -> Vec<Effect> {
         let id = self.next_id();
-        self.toast = Some(Toast { id, text });
+        self.toast = Some(Toast { id, text, name });
         vec![Effect::Later {
             after: TOAST_TIME,
             message: Box::new(Message::Edit(EditMsg::ToastExpired(id))),
         }]
     }
 
-    /// Recovered copies were made: the toast says where.
-    fn kept_toast(&mut self, kept: &[KeptEdit]) -> Vec<Effect> {
-        let Some(first) = kept.first() else {
-            return Vec::new();
-        };
-        let dir = first
-            .recovered
-            .parent()
-            .map_or_else(|| first.recovered.clone(), PathBuf::from);
-        self.show_toast(strings::kept_copies(kept.len(), &dir.display().to_string()))
+    /// Recovered copies were made by a close: the notice above the center says how many
+    /// and where, until dismissed (an upload's toast never replaces it); logged too.
+    pub(super) fn note_kept(&mut self, kept: &[KeptEdit], dir: PathBuf) {
+        if kept.is_empty() {
+            return;
+        }
+        tracing::info!(count = kept.len(), dir = %dir.display(), "unsent remote edits kept as recovered copies");
+        let count = self.kept_notice.as_ref().map_or(0, |n| n.count) + kept.len();
+        self.kept_notice = Some(KeptNotice { count, dir });
     }
 
-    /// The × of the last tab of a session with edits: the question, once the backend
-    /// said what is unsent. `None`: the tab closes as usual.
-    pub(super) fn ask_before_closing_tab(&mut self, index: usize) -> Option<Vec<Effect>> {
-        let tab = &self.tabs[index];
-        let id = tab.id;
-        if self.close_asks.contains_key(&id) {
-            // Asked already: the question is on screen.
-            self.active_tab = Some(index);
-            return Some(Vec::new());
-        }
-        if self.tabs_of(&tab.site).len() > 1 {
-            return None;
-        }
-        let session = self.conn(&tab.site).session()?;
-        if self.session_edits(session).is_empty() {
-            return None;
-        }
-        self.close_asks
-            .insert(id, Question::checking(vec![session]));
-        self.active_tab = Some(index);
-        self.form = None;
-        Some(vec![Effect::CheckEdits {
-            purpose: EditsFor::Tab(id),
-            sessions: vec![session],
-        }])
-    }
-
-    /// The window asks to close: with active edits, the backend first says what is unsent
-    /// (the question, or the usual close flow if nothing is). `None`: no edits.
-    pub(super) fn ask_before_quitting(&mut self, window: iced::window::Id) -> Option<Vec<Effect>> {
-        if let Some(quit) = &self.quit {
-            if quit.question.files.is_some() && quit.question.busy.is_none() {
-                // Asked already: show it again.
-                self.form = Some(Form::QuitEdits);
-                return Some(Vec::new());
-            }
-            // Asked again while the backend checks or settles: the user insists. The
-            // usual close flow runs; the shutdown keeps what is unsent as recovered
-            // copies (it never deletes them).
-            tracing::warn!("close requested again while the remote edits were settled; closing");
-            return None;
-        }
-        let mut sessions: Vec<SessionId> = self.edits.iter().map(|edit| edit.session).collect();
-        sessions.sort();
-        sessions.dedup();
-        if sessions.is_empty() {
-            return None;
-        }
-        self.quit = Some(QuitAsk {
-            window,
-            question: Question::checking(sessions.clone()),
-        });
-        Some(vec![Effect::CheckEdits {
-            purpose: EditsFor::Quit(window),
-            sessions,
-        }])
-    }
-
-    fn edits_checked(
-        &mut self,
-        purpose: EditsFor,
-        unsent: Vec<EditSummary>,
-        kept_in: PathBuf,
-    ) -> Vec<Effect> {
-        match purpose {
-            EditsFor::Tab(tab) => {
-                let Some(index) = self.tab_index(tab) else {
-                    self.close_asks.remove(&tab);
-                    return Vec::new();
-                };
-                let Some(question) = self.close_asks.get(&tab) else {
-                    return Vec::new();
-                };
-                let files = self.question_files(&question.sessions, &unsent);
-                if files.is_empty() {
-                    // The edits ended meanwhile: nothing to ask.
-                    self.close_asks.remove(&tab);
-                    return self.close_tab(index);
-                }
-                if let Some(question) = self.close_asks.get_mut(&tab) {
-                    question.files = Some(files);
-                    question.kept_in = Some(kept_in);
-                }
-                Vec::new()
-            }
-            EditsFor::Quit(window) => {
-                let Some(quit) = self.quit.as_ref().filter(|q| q.window == window) else {
-                    return Vec::new();
-                };
-                if unsent.is_empty() {
-                    // Everything is on the server: the usual close flow (which ends the
-                    // edits and removes their files).
-                    self.quit = None;
-                    return self.begin_close(window);
-                }
-                let files = self.question_files(&quit.question.sessions, &unsent);
-                if let Some(quit) = &mut self.quit {
-                    quit.question.files = Some(files);
-                    quit.question.kept_in = Some(kept_in);
-                }
-                self.form = Some(Form::QuitEdits);
-                Vec::new()
-            }
-        }
-    }
-
-    /// The files a question lists: the active edits of `sessions` (the window lists only
-    /// the unsent ones), each marked unsent or not.
-    fn question_files(&self, sessions: &[SessionId], unsent: &[EditSummary]) -> Vec<QuestionFile> {
-        let mut files: Vec<QuestionFile> = self
-            .edits
-            .iter()
-            .filter(|edit| sessions.contains(&edit.session))
-            .map(|edit| {
-                let summary = unsent.iter().find(|s| s.id == edit.id);
-                QuestionFile {
-                    remote: edit.remote.clone(),
-                    unsent: summary.is_some(),
-                    conflict: summary.is_some_and(|s| s.state == EditState::Conflict),
-                }
-            })
-            .collect();
-        // Unsent edits the UI does not list (started by a click whose result is late).
-        for summary in unsent {
-            if !self.edits.iter().any(|edit| edit.id == summary.id) {
-                files.push(QuestionFile {
-                    remote: summary.remote.clone(),
-                    unsent: true,
-                    conflict: summary.state == EditState::Conflict,
-                });
-            }
-        }
-        files
-    }
-
-    fn close_tab_answer(&mut self, tab: TabId, answer: CloseAnswer) -> Vec<Effect> {
-        let Some(question) = self.close_asks.get_mut(&tab) else {
-            return Vec::new();
-        };
-        if question.busy.is_some() || question.files.is_none() {
-            return Vec::new();
-        }
-        let how = match answer {
-            CloseAnswer::Cancel => {
-                self.close_asks.remove(&tab);
-                return Vec::new();
-            }
-            CloseAnswer::Upload => Settle::Upload,
-            CloseAnswer::Keep => Settle::Keep,
-        };
-        question.busy = Some(answer);
-        question.error = None;
-        vec![Effect::SettleEdits {
-            purpose: EditsFor::Tab(tab),
-            sessions: question.sessions.clone(),
-            how,
-        }]
-    }
-
-    fn quit_answer(&mut self, answer: CloseAnswer) -> Vec<Effect> {
-        let Some(quit) = &mut self.quit else {
-            return Vec::new();
-        };
-        if quit.question.busy.is_some() || quit.question.files.is_none() {
-            return Vec::new();
-        }
-        let how = match answer {
-            CloseAnswer::Cancel => {
-                self.quit = None;
-                if matches!(self.form, Some(Form::QuitEdits)) {
-                    self.form = None;
-                }
-                return Vec::new();
-            }
-            CloseAnswer::Upload => Settle::Upload,
-            CloseAnswer::Keep => Settle::Keep,
-        };
-        quit.question.busy = Some(answer);
-        quit.question.error = None;
-        vec![Effect::SettleEdits {
-            purpose: EditsFor::Quit(quit.window),
-            sessions: quit.question.sessions.clone(),
-            how,
-        }]
-    }
-
-    /// An answer ran. Everything sent, or kept: the tab closes (its session with it), or
-    /// the window's close flow starts. Unsent files left (or a copy that failed): the
-    /// question stays, saying so.
-    fn edits_settled(
-        &mut self,
-        purpose: EditsFor,
-        how: Settle,
-        result: Result<Settled, Error>,
-    ) -> Vec<Effect> {
-        let mut effects = match &result {
-            Ok(settled) => self.kept_toast(&settled.kept),
-            Err(_) => Vec::new(),
-        };
-        let unsent = match result {
-            Ok(settled) => Ok(settled.unsent),
-            Err(error) => Err(error),
-        };
-        let question = match purpose {
-            EditsFor::Tab(tab) => self.close_asks.get_mut(&tab),
-            EditsFor::Quit(window) => self
-                .quit
-                .as_mut()
-                .filter(|q| q.window == window)
-                .map(|q| &mut q.question),
-        };
-        let Some(question) = question else {
-            // Cancelled meanwhile (the window's question left the center).
-            return effects;
-        };
-        question.busy = None;
-        match unsent {
-            Ok(unsent) if unsent.is_empty() || how == Settle::Keep => {}
-            Ok(unsent) => {
-                question.not_uploaded = unsent.len();
-                let sessions = question.sessions.clone();
-                let files = self.question_files(&sessions, &unsent);
-                let question = match purpose {
-                    EditsFor::Tab(tab) => self.close_asks.get_mut(&tab),
-                    EditsFor::Quit(_) => self.quit.as_mut().map(|q| &mut q.question),
-                };
-                if let Some(question) = question {
-                    question.files = Some(files.into_iter().filter(|f| f.unsent).collect());
-                }
-                return effects;
-            }
-            Err(error) => {
-                question.error = Some(error);
-                return effects;
-            }
-        }
-        match purpose {
-            EditsFor::Tab(tab) => {
-                self.close_asks.remove(&tab);
-                if let Some(index) = self.tab_index(tab) {
-                    effects.extend(self.close_tab(index));
-                }
-            }
-            EditsFor::Quit(window) => {
-                self.quit = None;
-                effects.extend(self.begin_close(window));
-            }
-        }
-        effects
+    /// The delete confirmation's note when the site has files open for editing.
+    pub fn site_delete_note(&self, site: &SiteId) -> Option<String> {
+        let n = self.edits.iter().filter(|edit| &edit.site == site).count();
+        (n > 0).then(|| strings::delete_site_edits(n))
     }
 }

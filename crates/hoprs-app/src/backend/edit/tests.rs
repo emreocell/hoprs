@@ -27,6 +27,9 @@ struct CountingFs {
     /// While set, `stat` waits for a permit (after telling `stat_entered`).
     stat_gate: Mutex<Option<Arc<Semaphore>>>,
     stat_entered: Notify,
+    /// While set, `open_write` truncates the file, then waits for a permit (a slow upload
+    /// already under way).
+    write_gate: Mutex<Option<Arc<Semaphore>>>,
 }
 
 impl CountingFs {
@@ -80,7 +83,12 @@ impl RemoteFs for CountingFs {
             drop(self.inner.open_write(path, offset).await?);
             return Err(Error::new(kind, "Write cut"));
         }
-        self.inner.open_write(path, offset).await
+        let gate = self.write_gate.lock().unwrap().clone();
+        let writer = self.inner.open_write(path, offset).await?;
+        if let Some(gate) = gate {
+            let _permit = gate.acquire().await.unwrap();
+        }
+        Ok(writer)
     }
     async fn mkdir(&self, path: &RemotePath) -> Result<()> {
         self.check()?;
@@ -1182,4 +1190,69 @@ async fn retry_uploads_a_failed_edit() {
     assert!(matches!(h.next_event().await, EditEvent::Uploaded { .. }));
     assert_eq!(h.mem.read_file(FILE).unwrap(), b"mine\n");
     assert!(h.edits.retry(EditId(999)).await.is_err());
+}
+
+/// Fix round 1, Important 1: a flush whose deadline passes while an in-place upload is
+/// under way lets it finish: the server's copy is never left truncated unflagged.
+#[tokio::test(start_paused = true)]
+async fn slow_upload_crossing_the_flush_deadline_is_never_left_half_done() {
+    let h = harness(false);
+    let id = h.start_with(FILE, UploadMode::InPlace).await.unwrap();
+    let local = h.edits.local_path(id).unwrap();
+    std::fs::write(&local, b"slow but whole\n").unwrap();
+    let gate = Arc::new(Semaphore::new(0));
+    *h.fs.write_gate.lock().unwrap() = Some(gate.clone());
+
+    let edits = h.edits.clone();
+    let flush = tokio::spawn(async move { edits.flush(SESSION, Duration::from_secs(1)).await });
+    // The write has started (the file is truncated) and outlives the deadline.
+    for _ in 0..200 {
+        if h.mem.read_file(FILE).unwrap().is_empty() {
+            break;
+        }
+        settle().await;
+    }
+    assert_eq!(
+        h.mem.read_file(FILE).unwrap(),
+        b"",
+        "the upload is under way"
+    );
+    tokio::time::advance(Duration::from_secs(5)).await;
+    settle().await;
+    gate.add_permits(1);
+    let unsent = flush.await.unwrap();
+    assert!(unsent.is_empty(), "{unsent:?}");
+    assert_eq!(h.mem.read_file(FILE).unwrap(), b"slow but whole\n");
+}
+
+/// Fix round 1, Important 2: the local-only pass before a shutdown saves each unsent
+/// edit as a recovered copy at once (no network, no waiting for uploads), and a later
+/// `keep` / `end_all` of the same bytes does not write a second copy.
+#[tokio::test(start_paused = true)]
+async fn preserve_saves_unsent_edits_locally_once() {
+    let mut h = harness(false);
+    let id = h.start(FILE).await.unwrap();
+    h.state
+        .send_replace(ConnectionState::Reconnecting { attempt: 1 });
+    h.save(id, b"unsent\n");
+    tokio::time::advance(DEBOUNCE).await;
+    assert_eq!(h.next_event().await, held(id));
+    // An upload in flight holds the turn: the pass does not wait for it.
+    let turn = h.edits.inner.edit(id).unwrap().turn.clone();
+    let _held = turn.lock().await;
+
+    let kept = h.edits.preserve_unsent().await;
+    assert_eq!(kept.len(), 1);
+    assert_eq!(std::fs::read(&kept[0].recovered).unwrap(), b"unsent\n");
+    assert_eq!(h.recovered_copies(), vec![kept[0].recovered.clone()]);
+    drop(_held);
+
+    // The window closes for good: nothing deleted, still one copy.
+    let ended = h.edits.end_all().await;
+    assert_eq!(ended.len(), 1);
+    assert_eq!(ended[0].recovered, kept[0].recovered);
+    assert_eq!(h.recovered_copies().len(), 1);
+    assert!(h.edits.local_path(id).is_none());
+    let local = h.root.join(SESSION.0.to_string());
+    assert!(local.exists(), "the edit directory is kept");
 }

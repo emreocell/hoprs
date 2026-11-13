@@ -67,3 +67,15 @@ three times in a row: `sh -c 'sleep 1; for i in 1 2 3; do printf "save %s\n" "$i
 | Real GUI editor | `gedit` and VS Code are not installed here; `xdg-open` maps text files to GNOME Text Editor | NEEDS HUMAN: with the Docker site open, set Editor to `gnome-text-editor` (or `gedit`, `code --wait`), F4 on a text file, save three times quickly (Ctrl+S ×3): the log panel shows one "remote edit uploaded" per 500 ms of quiet and one toast; then edit on the server (`docker exec hoprs-test-sshd-1 sh -c 'echo x >> /home/alice/<file>'`), save again, check the inline choice and each button |
 | Keep remote / Save a copy | Covered by `remote_changed_choice_inline` and the backend tests | NEEDS HUMAN visually: click "Keep remote", check the line says to reload the editor and shows "Your version was saved to …"; reload the editor |
 | Upload and quit | Covered by `window_close_with_pending_edits_asks_before_saving` (edits settled before the save) | NEEDS HUMAN: with a saved, unsent change and the network cut (`docker compose -f docker/compose.yml stop sshd`), close the window, click "Upload and quit": after ≤10 s the question stays with "1 file could not be uploaded"; start sshd, click again: the app closes and the server has the change |
+
+### Task 8 fix round 1 (2026-11-13)
+
+Not re-captured (the driver was not rebuilt); covered by tests, visual check pending.
+
+| Check | Result |
+| --- | --- |
+| Strip and toast | File names now a separate JetBrains Mono span ("Editing `notes.txt` — saved 13:42", "Uploaded `notes.txt`"); the strip also shows in terminal tabs of the session | NEEDS HUMAN: open a file for editing, look at the strip in the files tab and in a terminal tab of the same site, and at the toast |
+| Kept notice | After a close that kept unsent edits (delete the site, or "Close and keep local copies"): a `paper_2` bar above the center "Kept 1 unsent edit as a recovered copy in" + the recovered root in mono + Dismiss; visible from any tab and form; upload toasts don't replace it | NEEDS HUMAN visually |
+| Close workspace | With an unsent edit on one of its sites: the center question "Some remote edits of this workspace are not uploaded", Upload pending changes and close / Close and keep local copies / Cancel; an open site form comes back after Cancel | NEEDS HUMAN visually |
+| Delete site | The delete confirmation adds "1 file of this site is open for editing: its unsent changes will be kept as a recovered copy, never deleted." | NEEDS HUMAN visually |
+| Stop and keep | While "Upload…" runs, only "Stop and keep local copies" and "Uploading (up to 10 s)…" | NEEDS HUMAN: stop sshd, save, close the window, click Upload and quit, then Stop and keep local copies |

@@ -902,6 +902,10 @@ impl BackendApi for FakeBackend {
             state.calls.push(Call::Shutdown);
             (state.hang_shutdown, state.panic_shutdown)
         };
+        // As the real backend: the unsent edits are kept first, locally.
+        if let Some((_, edits)) = self.edits.get() {
+            edits.preserve_unsent().await;
+        }
         assert!(!panic, "the fake's shutdown panics, as asked");
         if hang {
             std::future::pending::<()>().await;
@@ -1233,6 +1237,10 @@ impl BackendApi for FakeBackend {
 
     fn recovered_dir(&self) -> PathBuf {
         self.edits().recovered_dir().to_owned()
+    }
+
+    async fn preserve_edits(&self) -> Vec<KeptEdit> {
+        self.edits().preserve_unsent().await
     }
 }
 

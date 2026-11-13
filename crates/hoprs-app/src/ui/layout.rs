@@ -25,7 +25,13 @@ pub const LOG_BODY_HEIGHT: f32 = 180.0;
 pub const UNDERLINE: f32 = 2.0;
 
 pub fn view(app: &App) -> Element<'_, Message> {
-    let right = column![edits::with_toast(app, center(app)), queue::view(app)]
+    let mut right = column![];
+    if let Some(notice) = edits::kept_notice(app) {
+        right = right.push(notice).push(hrule());
+    }
+    let right = right
+        .push(edits::with_toast(app, center(app)))
+        .push(queue::view(app))
         .push(log::view(app))
         .push(status::view(app))
         .width(Length::Fill);
@@ -101,7 +107,9 @@ fn top_bar(app: &App) -> Element<'_, Message> {
 /// The center: the open form, else the active tab, else the empty state.
 fn center(app: &App) -> Element<'_, Message> {
     match &app.form {
-        Some(Form::Site(form)) => return site_form::view(form),
+        Some(Form::Site(form)) => {
+            return site_form::view(form, app.site_delete_note(form.site_id()));
+        }
         Some(Form::Workspace(form)) => return workspace_form::view(form, &app.sites),
         Some(Form::Import) => return import::view(app),
         Some(Form::Settings) => return settings::view(app),

@@ -235,12 +235,12 @@ async fn uploaded_shows_toast_and_status() {
         edit_line(the_edit(&app)),
         format!("Editing a.txt — saved {}", clock(at))
     );
-    assert_eq!(
-        strings::editing_saved("config.php", "14:02"),
-        "Editing config.php — saved 14:02"
-    );
+    // The file name is its own (mono) span.
+    let (before, name, after) = crate::ui::edits::edit_line_parts(the_edit(&app));
+    assert_eq!((before.as_str(), name.as_str()), ("Editing ", "a.txt"));
+    assert_eq!(after, format!(" — saved {}", clock(at)));
     let toast = app.toast.clone().expect("a toast");
-    assert_eq!(toast.text, "Uploaded a.txt");
+    assert_eq!((toast.text, toast.name.as_str()), ("Uploaded", "a.txt"));
     assert_eq!(TOAST_TIME, Duration::from_secs(3));
     let [Effect::Later { after, message }] = &effects[..] else {
         panic!("{effects:?}");
@@ -416,7 +416,7 @@ async fn closing_last_tab_with_edits_asks() {
         panic!("{effects:?}");
     };
     assert_eq!(
-        (*purpose, sessions.clone()),
+        (purpose.clone(), sessions.clone()),
         (EditsFor::Tab(first), vec![session])
     );
     assert_eq!(app.tabs.len(), 1);
@@ -424,7 +424,7 @@ async fn closing_last_tab_with_edits_asks() {
         app.update(Message::CloseTab(first)).is_empty(),
         "asked once"
     );
-    let checked = effects::check_edits(backend.clone(), *purpose, sessions.clone()).await;
+    let checked = effects::check_edits(backend.clone(), purpose.clone(), sessions.clone()).await;
     assert!(app.update(checked).is_empty());
     let question = &app.close_asks[&first];
     assert_eq!(
@@ -454,7 +454,7 @@ async fn closing_last_tab_with_edits_asks() {
     let [Effect::CheckEdits { purpose, sessions }] = &effects[..] else {
         panic!("{effects:?}");
     };
-    app.update(effects::check_edits(backend.clone(), *purpose, sessions.clone()).await);
+    app.update(effects::check_edits(backend.clone(), purpose.clone(), sessions.clone()).await);
     fake.drop_connection(session, Error::new(ErrorKind::Network, "Connection lost"));
     let effects = app.update(edit(EditMsg::CloseTab {
         tab: first,
@@ -473,7 +473,7 @@ async fn closing_last_tab_with_edits_asks() {
     assert_eq!(app.close_asks[&first].busy, Some(CloseAnswer::Upload));
     let settled = effects::settle_edits(
         backend.clone(),
-        *purpose,
+        purpose.clone(),
         sessions.clone(),
         Settle::Upload,
         Duration::from_millis(200),
@@ -505,7 +505,7 @@ async fn closing_last_tab_with_edits_asks() {
     };
     let settled = effects::settle_edits(
         backend.clone(),
-        *purpose,
+        purpose.clone(),
         sessions.clone(),
         *how,
         FLUSH_LIMIT,
@@ -553,12 +553,12 @@ async fn window_close_with_pending_edits_asks_before_saving() {
     let [Effect::CheckEdits { purpose, sessions }] = &effects[..] else {
         panic!("no save, no shutdown before the question: {effects:?}");
     };
-    assert_eq!(*purpose, EditsFor::Quit(window));
+    assert_eq!(purpose.clone(), EditsFor::Quit(window));
     assert!(!app.closing, "the window stays open");
-    let checked = effects::check_edits(backend.clone(), *purpose, sessions.clone()).await;
+    let checked = effects::check_edits(backend.clone(), purpose.clone(), sessions.clone()).await;
     assert!(app.update(checked).is_empty());
     assert!(matches!(app.form, Some(Form::QuitEdits)), "in the center");
-    let quit = app.quit.as_ref().unwrap();
+    let quit = app.center_ask.as_ref().unwrap();
     assert_eq!(
         quit.question.files.as_deref(),
         Some(
@@ -574,8 +574,8 @@ async fn window_close_with_pending_edits_asks_before_saving() {
     assert!(!app.closing);
 
     // "Cancel": the window stays, nothing was saved or closed.
-    app.update(edit(EditMsg::Quit(CloseAnswer::Cancel)));
-    assert!(app.quit.is_none());
+    app.update(edit(EditMsg::Center(CloseAnswer::Cancel)));
+    assert!(app.center_ask.is_none());
     assert!(app.form.is_none());
     assert!(!app.closing);
     assert!(fake.calls().is_empty());
@@ -585,8 +585,8 @@ async fn window_close_with_pending_edits_asks_before_saving() {
     let [Effect::CheckEdits { purpose, sessions }] = &effects[..] else {
         panic!("{effects:?}");
     };
-    app.update(effects::check_edits(backend.clone(), *purpose, sessions.clone()).await);
-    let effects = app.update(edit(EditMsg::Quit(CloseAnswer::Upload)));
+    app.update(effects::check_edits(backend.clone(), purpose.clone(), sessions.clone()).await);
+    let effects = app.update(edit(EditMsg::Center(CloseAnswer::Upload)));
     let [
         Effect::SettleEdits {
             purpose,
@@ -601,7 +601,7 @@ async fn window_close_with_pending_edits_asks_before_saving() {
     assert!(!app.closing);
     let settled = effects::settle_edits(
         backend.clone(),
-        *purpose,
+        purpose.clone(),
         sessions.clone(),
         *how,
         FLUSH_LIMIT,
@@ -645,7 +645,8 @@ async fn window_close_with_pending_edits_asks_before_saving() {
     let [Effect::CheckEdits { purpose, sessions }] = &effects[..] else {
         panic!("{effects:?}");
     };
-    let effects = app.update(effects::check_edits(backend, *purpose, sessions.clone()).await);
+    let effects =
+        app.update(effects::check_edits(backend, purpose.clone(), sessions.clone()).await);
     assert!(
         matches!(effects[..], [Effect::Shutdown { .. }]),
         "{effects:?}"
@@ -669,15 +670,15 @@ async fn keep_local_copies_never_deletes() {
     let [Effect::CheckEdits { purpose, sessions }] = &effects[..] else {
         panic!("{effects:?}");
     };
-    app.update(effects::check_edits(backend.clone(), *purpose, sessions.clone()).await);
+    app.update(effects::check_edits(backend.clone(), purpose.clone(), sessions.clone()).await);
     let kept_in = fake.recovered_dir();
     assert_eq!(
-        app.quit.as_ref().unwrap().question.kept_in.as_ref(),
+        app.center_ask.as_ref().unwrap().question.kept_in.as_ref(),
         Some(&kept_in),
         "the question says where the copies go"
     );
 
-    let effects = app.update(edit(EditMsg::Quit(CloseAnswer::Keep)));
+    let effects = app.update(edit(EditMsg::Center(CloseAnswer::Keep)));
     let [
         Effect::SettleEdits {
             purpose,
@@ -691,7 +692,7 @@ async fn keep_local_copies_never_deletes() {
     assert_eq!(*how, Settle::Keep);
     let settled = effects::settle_edits(
         backend.clone(),
-        *purpose,
+        purpose.clone(),
         sessions.clone(),
         *how,
         FLUSH_LIMIT,
@@ -715,13 +716,8 @@ async fn keep_local_copies_never_deletes() {
         })
         .expect("the close flow goes on");
     assert!(app.closing);
-    assert!(
-        app.toast
-            .as_ref()
-            .is_some_and(|t| t.text.starts_with("Local copy kept in")),
-        "{:?}",
-        app.toast
-    );
+    let notice = app.kept_notice.clone().expect("the kept copies are said");
+    assert_eq!((notice.count, notice.dir), (1, kept_in.clone()));
     assert_eq!(fake.calls(), vec![Call::KeepEdits(session)]);
     assert_eq!(std::fs::read(&local).unwrap(), b"unsent", "nothing deleted");
     assert_eq!(std::fs::read(&copy).unwrap(), b"unsent");
@@ -787,5 +783,335 @@ async fn editor_setting_roundtrip() {
     assert_eq!(
         file::parse("workers_per_site = 2").unwrap().editor_command,
         "xdg-open"
+    );
+}
+
+/// Every file under `dir`, recursively (the recovered copies).
+fn files_under(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return found;
+    };
+    for entry in entries {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            found.extend(files_under(&path));
+        } else {
+            found.push(path);
+        }
+    }
+    found
+}
+
+/// Fix round 1 (Important 4, 5): a session closed without the question (here as the
+/// site's deletion or a reload would) keeps its unsent edit as a recovered copy and
+/// deletes nothing; the notice says how many and the recovered root, stays until
+/// dismissed, and an upload's toast does not replace it.
+#[tokio::test]
+async fn close_session_keeps_unsent_edits_and_says_where() {
+    let a = srv_site(Protocol::Ssh);
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    let backend: Arc<dyn BackendApi> = fake.clone();
+    let (mut app, session, id) = editing(&fake, &a).await;
+    let local = save_unseen(&fake, id, b"unsent");
+
+    let (kept, kept_in) = effects::close_session(backend.clone(), session)
+        .await
+        .expect("the unsent edit is kept");
+    assert_eq!(kept_in, fake.recovered_dir());
+    assert_eq!(kept.len(), 1);
+    assert_eq!(std::fs::read(&kept[0].recovered).unwrap(), b"unsent");
+    assert_eq!(std::fs::read(&local).unwrap(), b"unsent", "nothing deleted");
+    assert_eq!(files_under(&kept_in), vec![kept[0].recovered.clone()]);
+
+    app.update(edit(EditMsg::Kept {
+        kept: kept.clone(),
+        kept_in: kept_in.clone(),
+    }));
+    let notice = app.kept_notice.clone().unwrap();
+    assert_eq!(
+        (notice.count, &notice.dir),
+        (1, &kept_in),
+        "the root, not a file's folder"
+    );
+    // An upload's toast leaves it alone; a second close adds to it.
+    app.update(edit(EditMsg::Event(EditEvent::Uploaded {
+        id,
+        at: SystemTime::now(),
+    })));
+    app.update(edit(EditMsg::Kept {
+        kept,
+        kept_in: kept_in.clone(),
+    }));
+    assert_eq!(app.kept_notice.as_ref().map(|n| n.count), Some(2));
+    assert!(app.toast.is_some());
+    app.update(edit(EditMsg::DismissKept));
+    assert_eq!(app.kept_notice, None);
+}
+
+/// Fix round 1 (Important 3, 5): "Close workspace" with an unsent edit asks in the
+/// center first (an open site form steps aside and comes back); "Close and keep local
+/// copies" keeps it and only then closes the tabs and sessions; nothing is deleted.
+#[tokio::test]
+async fn close_workspace_with_edits_asks() {
+    let a = srv_site(Protocol::Ssh);
+    let ws = workspace("Shop", &[&a.id]);
+    let fake = Arc::new(
+        FakeBackend::new()
+            .with_site(a.clone())
+            .with_workspace(ws.clone()),
+    );
+    let backend: Arc<dyn BackendApi> = fake.clone();
+    let (mut app, session, id) = editing(&fake, &a).await;
+    app.open_workspace = Some(ws.id.clone());
+    let local = save_unseen(&fake, id, b"unsent");
+    app.update(Message::EditSite(a.id.clone()));
+    assert!(matches!(app.form, Some(Form::Site(_))));
+
+    let effects = app.update(Message::CloseWorkspace(ws.id.clone()));
+    let [Effect::CheckEdits { purpose, sessions }] = &effects[..] else {
+        panic!("{effects:?}");
+    };
+    assert_eq!(*purpose, EditsFor::Workspace(ws.id.clone()));
+    assert_eq!(app.tabs.len(), 1, "nothing closes yet");
+    app.update(effects::check_edits(backend.clone(), purpose.clone(), sessions.clone()).await);
+    assert!(matches!(app.form, Some(Form::QuitEdits)));
+    assert_eq!(
+        app.center_ask.as_ref().unwrap().question.files,
+        Some(vec![QuestionFile {
+            remote: rpath("/srv/a.txt"),
+            unsent: true,
+            conflict: false,
+        }])
+    );
+    // Cancel: the site form is back, the workspace stays open.
+    app.update(edit(EditMsg::Center(CloseAnswer::Cancel)));
+    assert!(matches!(app.form, Some(Form::Site(_))), "{:?}", app.form);
+    assert_eq!(app.open_workspace, Some(ws.id.clone()));
+
+    let effects = app.update(Message::CloseWorkspace(ws.id.clone()));
+    let [Effect::CheckEdits { purpose, sessions }] = &effects[..] else {
+        panic!("{effects:?}");
+    };
+    app.update(effects::check_edits(backend.clone(), purpose.clone(), sessions.clone()).await);
+    let effects = app.update(edit(EditMsg::Center(CloseAnswer::Keep)));
+    let [
+        Effect::SettleEdits {
+            purpose,
+            sessions,
+            how,
+        },
+    ] = &effects[..]
+    else {
+        panic!("{effects:?}");
+    };
+    assert_eq!(*how, Settle::Keep);
+    let settled = effects::settle_edits(
+        backend.clone(),
+        purpose.clone(),
+        sessions.clone(),
+        *how,
+        FLUSH_LIMIT,
+    )
+    .await;
+    let effects = app.update(settled);
+    assert!(effects.iter().any(|e| matches!(e, Effect::SaveTabs { .. })));
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::CloseSession(s) if *s == session))
+    );
+    assert!(app.tabs.is_empty());
+    assert_eq!(app.open_workspace, None);
+    assert!(
+        matches!(app.form, Some(Form::Site(_))),
+        "the form comes back"
+    );
+    let copies = files_under(&fake.recovered_dir());
+    assert_eq!(copies.len(), 1);
+    assert_eq!(std::fs::read(&copies[0]).unwrap(), b"unsent");
+    assert_eq!(std::fs::read(&local).unwrap(), b"unsent", "nothing deleted");
+    assert_eq!(app.kept_notice.as_ref().map(|n| n.count), Some(1));
+}
+
+/// Fix round 1 (Important 3, 5): deleting a site whose files are open for editing says
+/// so in the confirmation; the deletion's session close keeps the unsent edit as a
+/// recovered copy and deletes nothing.
+#[tokio::test]
+async fn deleting_a_site_with_edits_keeps_them() {
+    let a = srv_site(Protocol::Ssh);
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    let backend: Arc<dyn BackendApi> = fake.clone();
+    let (mut app, session, id) = editing(&fake, &a).await;
+    let local = save_unseen(&fake, id, b"unsent");
+    assert_eq!(
+        app.site_delete_note(&a.id),
+        Some(strings::delete_site_edits(1))
+    );
+    assert_eq!(app.site_delete_note(&SiteId::new()), None);
+
+    let effects = app.update(Message::FormDone {
+        op: ProfileOp::DeleteSite(a.id.clone()),
+        result: Ok(()),
+    });
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::CloseSession(s) if *s == session)),
+        "{effects:?}"
+    );
+    let (kept, _) = effects::close_session(backend, session).await.unwrap();
+    assert_eq!(std::fs::read(&kept[0].recovered).unwrap(), b"unsent");
+    assert_eq!(std::fs::read(&local).unwrap(), b"unsent", "nothing deleted");
+}
+
+/// Fix round 1 (Important 2, 5): the question bypassed (a second close request while
+/// it is checked), the shutdown keeps the unsent edit; a forced exit keeps it too, before
+/// any shutdown. Nothing is deleted either way.
+#[tokio::test]
+async fn bypassed_question_or_forced_exit_still_keeps_unsent_edits() {
+    let a = srv_site(Protocol::Ssh);
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    let backend: Arc<dyn BackendApi> = fake.clone();
+    let (mut app, _, id) = editing(&fake, &a).await;
+    let local = save_unseen(&fake, id, b"unsent");
+    let window = iced::window::Id::unique();
+    let effects = app.update(Message::CloseRequested(window));
+    assert!(matches!(effects[..], [Effect::CheckEdits { .. }]));
+    let effects = without_panes(app.update(Message::CloseRequested(window)));
+    let [Effect::Shutdown { save, .. }] = &effects[..] else {
+        panic!("the user insists: {effects:?}");
+    };
+    effects::shutdown(backend, save.clone(), effects::SHUTDOWN_LIMIT).await;
+    let copies = files_under(&fake.recovered_dir());
+    assert_eq!(copies.len(), 1, "{copies:?}");
+    assert_eq!(std::fs::read(&copies[0]).unwrap(), b"unsent");
+    assert_eq!(std::fs::read(&local).unwrap(), b"unsent");
+
+    // Forced exit: closing already, the window is asked to close again.
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    let backend: Arc<dyn BackendApi> = fake.clone();
+    let (mut app, _, id) = editing(&fake, &a).await;
+    let local = save_unseen(&fake, id, b"unsent too");
+    app.closing = true;
+    let effects = app.update(Message::CloseRequested(window));
+    assert!(matches!(effects[..], [Effect::ExitWindow(w)] if w == window));
+    // What `ExitWindow` runs before closing the window.
+    let kept = effects::preserve_before_exit(backend, effects::PRESERVE_LIMIT).await;
+    assert_eq!(kept.len(), 1);
+    assert_eq!(std::fs::read(&kept[0].recovered).unwrap(), b"unsent too");
+    assert_eq!(std::fs::read(&local).unwrap(), b"unsent too");
+}
+
+/// Fix round 1 (minors): nothing unsent, closing the last tab asks nothing; while
+/// "Upload" runs, "Stop and keep local copies" switches to keeping and the upload's late
+/// result is ignored.
+#[tokio::test]
+async fn tab_question_skips_when_sent_and_stop_keeps() {
+    let a = srv_site(Protocol::Ssh);
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    let backend: Arc<dyn BackendApi> = fake.clone();
+    let (mut app, session, id) = editing(&fake, &a).await;
+    let tab = app.tabs[0].id;
+
+    let effects = app.update(Message::CloseTab(tab));
+    let [Effect::CheckEdits { purpose, sessions }] = &effects[..] else {
+        panic!("{effects:?}");
+    };
+    // An unsent save after all: the question.
+    let local = save_unseen(&fake, id, b"unsent");
+    app.update(effects::check_edits(backend.clone(), purpose.clone(), sessions.clone()).await);
+    assert!(app.close_asks[&tab].files.is_some());
+
+    let effects = app.update(edit(EditMsg::CloseTab {
+        tab,
+        answer: CloseAnswer::Upload,
+    }));
+    assert!(matches!(
+        effects[..],
+        [Effect::SettleEdits {
+            how: Settle::Upload,
+            ..
+        }]
+    ));
+    let effects = app.update(edit(EditMsg::CloseTab {
+        tab,
+        answer: CloseAnswer::Keep,
+    }));
+    assert!(
+        matches!(
+            effects[..],
+            [Effect::SettleEdits {
+                how: Settle::Keep,
+                ..
+            }]
+        ),
+        "stop and keep: {effects:?}"
+    );
+    assert_eq!(app.close_asks[&tab].busy, Some(CloseAnswer::Keep));
+    // The upload's late result changes nothing.
+    let stale = app.update(edit(EditMsg::Settled {
+        purpose: EditsFor::Tab(tab),
+        how: Settle::Upload,
+        result: Ok(crate::app::edit::Settled {
+            unsent: fake.edits_pending(session).await,
+            ..Default::default()
+        }),
+    }));
+    assert!(stale.is_empty());
+    assert_eq!(app.tabs.len(), 1);
+    let settled = effects::settle_edits(
+        backend.clone(),
+        EditsFor::Tab(tab),
+        vec![session],
+        Settle::Keep,
+        FLUSH_LIMIT,
+    )
+    .await;
+    let effects = app.update(settled);
+    assert!(effects.iter().any(|e| matches!(e, Effect::CloseSession(_))));
+    assert!(app.tabs.is_empty());
+    assert!(local.exists());
+
+    // Nothing unsent: no question, the tab closes once the backend says so.
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    let backend: Arc<dyn BackendApi> = fake.clone();
+    let (mut app, _, _) = editing(&fake, &a).await;
+    let tab = app.tabs[0].id;
+    let effects = app.update(Message::CloseTab(tab));
+    let [Effect::CheckEdits { purpose, sessions }] = &effects[..] else {
+        panic!("{effects:?}");
+    };
+    let effects =
+        app.update(effects::check_edits(backend, purpose.clone(), sessions.clone()).await);
+    assert!(effects.iter().any(|e| matches!(e, Effect::CloseSession(_))));
+    assert!(app.tabs.is_empty());
+    assert!(app.close_asks.is_empty());
+}
+
+/// Fix round 1 (minor): with several entries selected, Edit refuses with the reason
+/// (one file at a time).
+#[tokio::test]
+async fn edit_needs_one_selected_file() {
+    let a = srv_site(Protocol::Ftp);
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    let remote = fake.remote_fs(&a.id);
+    remote.add_file("/srv/a.txt", b"a", SystemTime::UNIX_EPOCH);
+    remote.add_file("/srv/b.txt", b"b", SystemTime::UNIX_EPOCH);
+    let mut app = remote_focused(&fake, &a).await;
+    click(&mut app, "a.txt");
+    app.update(Message::Modifiers(Mods {
+        ctrl: true,
+        shift: false,
+    }));
+    click(&mut app, "b.txt");
+    assert_eq!(
+        app.edit_target(0, Side::Remote),
+        Some(Err(strings::EDIT_ONE_FILE))
+    );
+    assert!(start_effects(&app.update(key(FileKey::Edit))).is_empty());
+    assert_eq!(
+        app.tabs[0].remote().note.as_deref(),
+        Some(strings::EDIT_ONE_FILE)
     );
 }

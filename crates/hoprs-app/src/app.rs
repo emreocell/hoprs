@@ -41,7 +41,8 @@ pub enum Form {
     Import,
     /// The settings page ([`App::settings`], [`App::backup`]).
     Settings,
-    /// The window's question about unsent remote edits ([`App::quit`]).
+    /// The question about unsent remote edits before the window or a workspace closes
+    /// ([`App::center_ask`]).
     QuitEdits,
 }
 
@@ -162,8 +163,12 @@ pub struct App {
     pub toast: Option<edit::Toast>,
     /// Last tabs of a session whose close waits for the answer about its edits.
     pub close_asks: HashMap<TabId, edit::CloseAsk>,
-    /// The window's close waits for the answer about unsent edits.
-    pub quit: Option<edit::QuitAsk>,
+    /// The window's (or a workspace's) close waits for the answer about unsent edits.
+    pub center_ask: Option<edit::CenterAsk>,
+    /// A site or workspace form a close question stepped in front of (back after it).
+    pub parked_form: Option<Form>,
+    /// Unsent edits kept as recovered copies by a close, until dismissed.
+    pub kept_notice: Option<edit::KeptNotice>,
     /// The editor command as typed on the settings page, while it is not valid.
     pub editor_input: Option<String>,
     /// Actions waiting for their site's lost session to reconnect ([`reconnect`]).
@@ -686,7 +691,9 @@ impl App {
             edit_opening: Vec::new(),
             toast: None,
             close_asks: HashMap::new(),
-            quit: None,
+            center_ask: None,
+            parked_form: None,
+            kept_notice: None,
             editor_input: None,
             held: HashMap::new(),
             replayed: HashSet::new(),
@@ -1026,6 +1033,12 @@ impl App {
     /// The form itself is closed (success) or shows the error (failure) only if it is the
     /// one that asked: same target, still waiting for this result.
     fn form_done(&mut self, op: ProfileOp, result: Result<(), Error>) -> Vec<Effect> {
+        // A form parked behind a close question still gets its result.
+        let parked =
+            self.parked_form.is_some() && matches!(self.form, None | Some(Form::QuitEdits));
+        if parked {
+            std::mem::swap(&mut self.form, &mut self.parked_form);
+        }
         let waiting = match (&mut self.form, &op) {
             (Some(Form::Site(form)), ProfileOp::SaveSite(id) | ProfileOp::DeleteSite(id)) => {
                 form.busy && form.site_id() == id
@@ -1044,6 +1057,9 @@ impl App {
                 (Some(error), Some(Form::Workspace(form))) => form.finished(Some(error.clone())),
                 (Some(_), None | Some(Form::Import | Form::Settings | Form::QuitEdits)) => {}
             }
+        }
+        if parked {
+            std::mem::swap(&mut self.form, &mut self.parked_form);
         }
         if error.is_some() {
             return Vec::new();

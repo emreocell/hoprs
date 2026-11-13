@@ -318,6 +318,18 @@ impl App {
         if self.open_workspace.as_ref() != Some(id) {
             return Vec::new();
         }
+        // Unsent remote edits on its sites: the question first (see `edit`).
+        if let Some(effects) = self.ask_before_closing_workspace(id) {
+            return effects;
+        }
+        self.close_workspace_now(id)
+    }
+
+    /// "Close workspace" once its edits are settled.
+    pub(super) fn close_workspace_now(&mut self, id: &WorkspaceId) -> Vec<Effect> {
+        if self.open_workspace.as_ref() != Some(id) {
+            return Vec::new();
+        }
         let mut effects: Vec<Effect> = self.save_tabs_effect(id).into_iter().collect();
         self.open_workspace = None;
         let sites: Vec<_> = self
@@ -361,7 +373,7 @@ impl App {
     /// The close flow proper (see the module docs): from here on the window closes.
     pub(super) fn begin_close(&mut self, window: iced::window::Id) -> Vec<Effect> {
         self.closing = true;
-        self.quit = None;
+        self.center_ask = None;
         if matches!(self.form, Some(super::Form::QuitEdits)) {
             self.form = None;
         }

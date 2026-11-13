@@ -65,7 +65,7 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
         }
         Effect::ConnectSites(sites) => Task::run(connect_sites(backend, sites), |m| m),
         Effect::CloseSession(session) => Task::future(close_session(backend, session))
-            .and_then(|kept| Task::done(Message::Edit(EditMsg::Kept(kept)))),
+            .and_then(|(kept, kept_in)| Task::done(Message::Edit(EditMsg::Kept { kept, kept_in }))),
         Effect::OpenProfileFolder => Task::perform(
             open_folder(backend.profile_dir()),
             Message::ProfileFolderOpened,
@@ -160,10 +160,13 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
                 Message::ShutdownDone(window)
             })
         }
-        Effect::ExitWindow(window) => {
-            exit_watchdog();
-            iced::window::close(window)
-        }
+        // A forced exit (or the end of the shutdown) keeps every unsent edit first,
+        // locally, within a short bound.
+        Effect::ExitWindow(window) => Task::future(preserve_before_exit(backend, PRESERVE_LIMIT))
+            .then(move |_| {
+                exit_watchdog();
+                iced::window::close(window)
+            }),
         Effect::LoadSettings => Task::done(Message::SettingsLoaded(backend.settings())),
         Effect::LoadQueueStatus => Task::done(Message::QueueStatus(backend.queue_error())),
         Effect::SaveSettings(settings) => Task::future(save_settings(backend, settings)),
@@ -661,16 +664,16 @@ pub fn session_feed(
 
 /// Closes a session, then ends its remote edits: all sent, their files go; unsent ones
 /// (a close that did not ask, e.g. the site was deleted) are kept as recovered copies,
-/// nothing deleted. Returns the copies kept (none: no message).
+/// nothing deleted. Returns the copies kept and their root (none: no message).
 pub async fn close_session(
     backend: Arc<dyn BackendApi>,
     session: SessionId,
-) -> Option<Vec<KeptEdit>> {
+) -> Option<(Vec<KeptEdit>, PathBuf)> {
     backend.close(session).await;
     match backend.finish_edits(session, false).await {
         Ok(unsent) if unsent.is_empty() => None,
         Ok(_) => match backend.keep_edits(session).await {
-            Ok(kept) => Some(kept),
+            Ok(kept) => Some((kept, backend.recovered_dir())),
             Err(error) => {
                 tracing::warn!(session = session.0, %error, "cannot keep the unsent remote edits; their files stay");
                 None
@@ -679,6 +682,29 @@ pub async fn close_session(
         Err(error) => {
             tracing::warn!(session = session.0, %error, "cannot end the remote edits; their files stay");
             None
+        }
+    }
+}
+
+/// How long a forced exit waits for the unsent edits to be kept.
+pub const PRESERVE_LIMIT: Duration = Duration::from_secs(2);
+
+/// Before the window closes for good: every unsent edit is saved as a recovered copy,
+/// locally (at most `limit`; the edits a finished shutdown ended are already safe).
+pub async fn preserve_before_exit(backend: Arc<dyn BackendApi>, limit: Duration) -> Vec<KeptEdit> {
+    match tokio::time::timeout(limit, backend.preserve_edits()).await {
+        Ok(kept) => {
+            if !kept.is_empty() {
+                tracing::info!(count = kept.len(), dir = %backend.recovered_dir().display(), "unsent remote edits kept before exit");
+            }
+            kept
+        }
+        Err(_) => {
+            tracing::warn!(
+                ?limit,
+                "keeping the unsent remote edits took too long; exiting"
+            );
+            Vec::new()
         }
     }
 }
@@ -735,6 +761,7 @@ pub async fn settle_edits(
                 }
             }
         }
+        settled.kept_in = backend.recovered_dir();
         Ok(settled)
     }
     .await;

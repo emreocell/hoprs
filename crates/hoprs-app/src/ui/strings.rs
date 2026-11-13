@@ -694,9 +694,15 @@ pub const CLOSE_KEEP_COPIES: &str = "Close and keep local copies";
 pub const UPLOAD_AND_QUIT: &str = "Upload and quit";
 pub const QUIT_KEEP_COPIES: &str = "Quit and keep local copies";
 pub const CHECKING_EDITS: &str = "Checking the remote edits…";
-pub const UPLOADING_EDITS: &str = "Uploading (up to 10 s)…";
+pub const STOP_KEEP_COPIES: &str = "Stop and keep local copies";
+pub const EDIT_ONE_FILE: &str = "Select one file to edit";
+pub const UPLOADED: &str = "Uploaded";
+pub const EDITING: &str = "Editing";
+pub const OPENING: &str = "Opening";
+pub const CLOSE_WORKSPACE_EDITS_TITLE: &str =
+    "Some remote edits of this workspace are not uploaded";
 pub const KEEPING_COPIES: &str = "Saving the local copies…";
-pub const CLOSE_EDITS_TITLE: &str = "Files are open for editing";
+pub const CLOSE_EDITS_TITLE: &str = "Some remote edits are not uploaded";
 pub const QUIT_EDITS_TITLE: &str = "Some remote edits are not uploaded";
 pub const QUIT_EDITS_HINT: &str = "The window stays open until you choose. Nothing is deleted.";
 pub const EDIT_UNSENT: &str = "not uploaded";
@@ -706,43 +712,14 @@ pub const EDITOR_COMMAND_HINT: &str = "The command remote files open with; the f
 pub const EDITOR_COMMAND_EMPTY: &str = "Type a command";
 pub const SETTINGS_EDITING: &str = "Remote editing";
 
-/// A line of the edits strip: "Editing config.php".
-pub fn editing(name: &str) -> String {
-    format!("Editing {name}")
-}
-
-/// "Editing config.php — saved 14:02".
-pub fn editing_saved(name: &str, at: &str) -> String {
-    format!("Editing {name} — saved {at}")
-}
-
-/// "Opening config.php…".
-pub fn opening_edit(name: &str) -> String {
-    format!("Opening {name}…")
-}
-
 /// "Upload failed: Permission denied".
 pub fn upload_failed(reason: &str) -> String {
     format!("Upload failed: {reason}")
 }
 
-/// The toast of an upload: "Uploaded config.php".
-pub fn uploaded(name: &str) -> String {
-    format!("Uploaded {name}")
-}
-
 /// "Your version was saved to <path>".
 pub fn your_version_at(path: &str) -> String {
     format!("Your version was saved to {path}")
-}
-
-/// After keeping: "2 local copies kept in <dir>".
-pub fn kept_copies(n: usize, dir: &str) -> String {
-    if n == 1 {
-        format!("Local copy kept in {dir}")
-    } else {
-        format!("{n} local copies kept in {dir}")
-    }
 }
 
 /// Where "keep" puts the copies: "Unsent changes are copied to <dir>".
@@ -756,5 +733,31 @@ pub fn not_uploaded(n: usize) -> String {
         "1 file could not be uploaded".to_owned()
     } else {
         format!("{n} files could not be uploaded")
+    }
+}
+
+/// While "Upload" runs: "Uploading (up to 10 s)…".
+pub fn uploading_edits(secs: u64) -> String {
+    format!("Uploading (up to {secs} s)…")
+}
+
+/// The persistent notice after a close kept unsent edits: "Kept 2 unsent edits as
+/// recovered copies in" (the folder follows, in mono).
+pub fn kept_notice(n: usize) -> String {
+    if n == 1 {
+        "Kept 1 unsent edit as a recovered copy in".to_owned()
+    } else {
+        format!("Kept {n} unsent edits as recovered copies in")
+    }
+}
+
+/// The delete confirmation of a site with files open for editing.
+pub fn delete_site_edits(n: usize) -> String {
+    if n == 1 {
+        "1 file of this site is open for editing: its unsent changes will be kept as a recovered copy, never deleted.".to_owned()
+    } else {
+        format!(
+            "{n} files of this site are open for editing: their unsent changes will be kept as recovered copies, never deleted."
+        )
     }
 }

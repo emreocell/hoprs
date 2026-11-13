@@ -215,6 +215,11 @@ pub fn view<'a>(app: &'a App, tab: &'a Tab, terminal: &'a TerminalTab) -> Elemen
             col.height(Length::Fill).into()
         }
     };
+    // The session's remote edits show here too (a terminal-only session can have them).
+    let body = match crate::ui::edits::strip(app, tab) {
+        Some(strip) => column![strip, hrule(), body].into(),
+        None => body,
+    };
     let body = match crate::ui::files::lost_banner(app, tab) {
         Some(banner) => column![banner, hrule(), body].into(),
         None => body,

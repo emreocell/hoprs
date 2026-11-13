@@ -300,6 +300,9 @@ struct SyncState {
     skip_check: bool,
     /// Temporary upload files a cut may have left on the server.
     orphans: Vec<RemotePath>,
+    /// The last unsent version saved as a recovered copy (its hash, the copy), so the
+    /// same bytes are not copied twice.
+    preserved: Option<(u64, PathBuf)>,
     /// An in-place write of ours was cut: the server's copy may be incomplete until an
     /// upload succeeds (every `Pending`/`Failed` event says so meanwhile).
     truncated: bool,
@@ -313,6 +316,7 @@ impl SyncState {
             state: EditState::Synced,
             skip_check: false,
             orphans,
+            preserved: None,
             truncated: false,
         }
     }
@@ -692,12 +696,15 @@ impl EditManager {
             let edits = self.inner.session_edits(session);
             if edits.iter().any(|edit| edit.connected()) {
                 for edit in &edits {
+                    // The deadline is checked before each sync, never during one: an
+                    // upload under way finishes (or fails) under the protocol's own
+                    // timeouts, so a cut in-place write is always recorded as such.
+                    if Instant::now() >= deadline {
+                        break;
+                    }
                     let unsent = unsent(edit).await;
                     if unsent.is_some_and(|s| s.state != EditState::Conflict) {
-                        let sync = self.inner.sync(edit, false);
-                        if tokio::time::timeout_at(deadline, sync).await.is_err() {
-                            break;
-                        }
+                        self.inner.sync(edit, false).await;
                     }
                 }
             }
@@ -738,7 +745,7 @@ impl EditManager {
             let Some(data) = blocking(move || read_local(&local)).await? else {
                 continue;
             };
-            let recovered = self.inner.recover(edit, data).await?;
+            let recovered = self.inner.preserve(edit, data).await?;
             kept.push(KeptEdit {
                 id: edit.id,
                 remote: edit.remote.clone(),
@@ -788,6 +795,42 @@ impl EditManager {
                 Ok(copies) => kept.extend(copies),
                 Err(error) => {
                     tracing::warn!(session = session.0, %error, "cannot end the remote edits; their files stay");
+                }
+            }
+        }
+        kept
+    }
+
+    /// The window closes (or is forced to): saves each unsent edit of every session as a
+    /// recovered copy **now**, locally only. It neither waits for an upload in flight
+    /// nor touches the network, so it runs first, before the shutdown's slower steps.
+    /// Each version is saved once: a later [`keep`](Self::keep) of the same bytes reuses
+    /// the copy. Failures are logged.
+    pub async fn preserve_unsent(&self) -> Vec<KeptEdit> {
+        let mut edits: Vec<Arc<Edit>> = lock(&self.inner.edits).values().cloned().collect();
+        edits.sort_by_key(|edit| edit.id);
+        let mut kept = Vec::new();
+        for edit in edits {
+            if unsent(&edit).await.is_none() {
+                continue;
+            }
+            let local = edit.local.clone();
+            let data = match blocking(move || read_local(&local)).await {
+                Ok(Some(data)) => data,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::warn!(edit = edit.id.0, %error, "cannot read an unsent edit to keep it");
+                    continue;
+                }
+            };
+            match self.inner.preserve(&edit, data).await {
+                Ok(recovered) => kept.push(KeptEdit {
+                    id: edit.id,
+                    remote: edit.remote.clone(),
+                    recovered,
+                }),
+                Err(error) => {
+                    tracing::warn!(edit = edit.id.0, %error, "cannot keep an unsent edit; its local file stays");
                 }
             }
         }
@@ -1069,6 +1112,23 @@ impl Inner {
         })
         .await?;
         tracing::info!(edit = edit.id.0, remote = %edit.remote, recovered = %path.display(), "saved the local version as a recovered copy");
+        Ok(path)
+    }
+
+    /// [`recover`](Self::recover), unless these exact bytes were saved already: then
+    /// that copy.
+    async fn preserve(&self, edit: &Edit, data: Vec<u8>) -> Result<PathBuf> {
+        let hash = digest(&data);
+        let done = edit
+            .sync_state()
+            .preserved
+            .clone()
+            .filter(|(h, path)| *h == hash && path.exists());
+        if let Some((_, path)) = done {
+            return Ok(path);
+        }
+        let path = self.recover(edit, data).await?;
+        edit.sync_state().preserved = Some((hash, path.clone()));
         Ok(path)
     }
 

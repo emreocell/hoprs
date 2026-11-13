@@ -182,6 +182,9 @@ pub trait BackendApi: Send + Sync {
     fn subscribe_edits(&self) -> broadcast::Receiver<EditEvent>;
     /// Where "keep" saves the recovered copies (the close questions say so).
     fn recovered_dir(&self) -> PathBuf;
+    /// Saves every unsent edit as a recovered copy now, locally only (a forced exit, the
+    /// start of a shutdown); see [`EditManager::preserve_unsent`].
+    async fn preserve_edits(&self) -> Vec<KeptEdit>;
 
     /// Lists `path` on the local disk, or on the remote side of `session` (an error
     /// without one).
@@ -510,6 +513,8 @@ impl BackendApi for Backend {
     /// engine keeps each running item's stored state, which the next start recovers as
     /// paused.
     async fn shutdown(&self) {
+        // Local and fast first: whatever is unsent is safe before any slow step.
+        self.edits.preserve_unsent().await;
         self.engine.clone().shutdown().await;
         self.sessions.close_all().await;
         // The close flow settled the edits it knew of; anything unsent since is kept as a
@@ -598,6 +603,10 @@ impl BackendApi for Backend {
 
     fn recovered_dir(&self) -> PathBuf {
         self.edits.recovered_dir().to_owned()
+    }
+
+    async fn preserve_edits(&self) -> Vec<KeptEdit> {
+        self.edits.preserve_unsent().await
     }
 
     async fn list(

@@ -7,7 +7,9 @@ use std::time::SystemTime;
 use iced::widget::{button, column, container, row, scrollable, space, text};
 use iced::{Alignment, Element, Length, Padding};
 
-use crate::app::edit::{CloseAnswer, EditMsg, EditStatus, Question, QuestionFile, RemoteEdit};
+use crate::app::edit::{
+    CloseAnswer, EditMsg, EditStatus, EditsFor, FLUSH_LIMIT, Question, QuestionFile, RemoteEdit,
+};
 use crate::app::{App, Message, Tab};
 use crate::backend::EditChoice;
 use crate::ui::strings;
@@ -20,37 +22,60 @@ pub fn clock(at: SystemTime) -> String {
         .to_string()
 }
 
-/// What an edit's line says (its buttons aside).
-pub fn edit_line(edit: &RemoteEdit) -> String {
-    let name = edit.name();
-    match &edit.status {
-        EditStatus::Editing { saved: None } => strings::editing(name),
-        EditStatus::Editing { saved: Some(at) } => strings::editing_saved(name, &clock(*at)),
+/// What an edit's line says (its buttons aside), as the text before the file name, the
+/// name (drawn in mono) and the text after it.
+pub fn edit_line_parts(edit: &RemoteEdit) -> (String, String, String) {
+    let name = edit.name().to_owned();
+    let editing = |after: String| (format!("{} ", strings::EDITING), after);
+    let (before, after) = match &edit.status {
+        EditStatus::Editing { saved: None } => editing(String::new()),
+        EditStatus::Editing { saved: Some(at) } => editing(format!(" — saved {}", clock(*at))),
         EditStatus::Waiting { truncated } => {
-            let mut line = format!(
-                "{} — {}",
-                strings::editing(name),
-                strings::WAITING_FOR_CONNECTION
-            );
+            let mut after = format!(" — {}", strings::WAITING_FOR_CONNECTION);
             if *truncated {
-                line.push(' ');
-                line.push_str(strings::REMOTE_MAY_BE_TRUNCATED);
+                after.push(' ');
+                after.push_str(strings::REMOTE_MAY_BE_TRUNCATED);
             }
-            line
+            editing(after)
         }
         EditStatus::Failed { error, truncated } => {
-            let mut line = format!("{name}: {}", strings::upload_failed(&error.message));
+            let mut after = format!(": {}", strings::upload_failed(&error.message));
             if *truncated {
-                line.push(' ');
-                line.push_str(strings::REMOTE_MAY_BE_TRUNCATED);
+                after.push(' ');
+                after.push_str(strings::REMOTE_MAY_BE_TRUNCATED);
             }
-            line
+            (String::new(), after)
         }
-        EditStatus::Conflict { .. } => format!("{name}: {}", strings::CHANGED_ON_SERVER),
-        EditStatus::Replaced { .. } => {
-            format!("{} — {}", strings::editing(name), strings::RELOAD_IN_EDITOR)
-        }
-    }
+        EditStatus::Conflict { .. } => (String::new(), format!(": {}", strings::CHANGED_ON_SERVER)),
+        EditStatus::Replaced { .. } => editing(format!(" — {}", strings::RELOAD_IN_EDITOR)),
+    };
+    (before, name, after)
+}
+
+/// The whole line as one string (what [`edit_line_parts`] draws).
+#[cfg(test)]
+pub fn edit_line(edit: &RemoteEdit) -> String {
+    let (before, name, after) = edit_line_parts(edit);
+    format!("{before}{name}{after}")
+}
+
+/// Text, a file name in mono, text: one line of a notice.
+fn with_name<'a>(
+    before: String,
+    name: String,
+    after: String,
+    color: iced::Color,
+) -> Element<'a, Message> {
+    row![
+        text(before).size(theme::TEXT_XS).color(color),
+        text(name)
+            .font(theme::MONO)
+            .size(theme::TEXT_MONO)
+            .color(color),
+        text(after).size(theme::TEXT_XS).color(color),
+    ]
+    .align_y(Alignment::Center)
+    .into()
 }
 
 fn small_button<'a>(
@@ -90,14 +115,10 @@ fn line(edit: &RemoteEdit) -> Element<'_, Message> {
         EditStatus::Failed { .. } | EditStatus::Conflict { .. } => p.ink,
         _ => p.ink_2,
     };
-    let mut head = row![
-        text(edit_line(edit))
-            .size(theme::TEXT_XS)
-            .color(color)
-            .width(Length::Fill)
-    ]
-    .spacing(theme::SPACE_XS)
-    .align_y(Alignment::Center);
+    let (before, name, after) = edit_line_parts(edit);
+    let mut head = row![container(with_name(before, name, after, color)).width(Length::Fill)]
+        .spacing(theme::SPACE_XS)
+        .align_y(Alignment::Center);
     let mut details = column![];
     let id = edit.id;
     match &edit.status {
@@ -174,11 +195,12 @@ pub fn strip<'a>(app: &'a App, tab: &'a Tab) -> Option<Element<'a, Message>> {
     }
     for o in opening {
         let name = o.remote.file_name().unwrap_or(o.remote.as_str());
-        lines = lines.push(
-            text(strings::opening_edit(name))
-                .size(theme::TEXT_XS)
-                .color(palette().muted),
-        );
+        lines = lines.push(with_name(
+            format!("{} ", strings::OPENING),
+            name.to_owned(),
+            "…".to_owned(),
+            palette().muted,
+        ));
     }
     Some(
         container(lines)
@@ -252,17 +274,26 @@ fn question_body<'a>(
     }
     let idle = question.busy.is_none();
     let on = |a: CloseAnswer| idle.then(|| answer(a));
-    let mut actions = row![
-        small_button(labels[0], on(CloseAnswer::Upload), true),
-        small_button(labels[1], on(CloseAnswer::Keep), false),
-        small_button(strings::CANCEL, on(CloseAnswer::Cancel), false),
-    ]
+    let mut actions = if question.busy == Some(CloseAnswer::Upload) {
+        // The upload may take its full limit: keeping instead stays one click away.
+        row![small_button(
+            strings::STOP_KEEP_COPIES,
+            Some(answer(CloseAnswer::Keep)),
+            false
+        )]
+    } else {
+        row![
+            small_button(labels[0], on(CloseAnswer::Upload), true),
+            small_button(labels[1], on(CloseAnswer::Keep), false),
+            small_button(strings::CANCEL, on(CloseAnswer::Cancel), false),
+        ]
+    }
     .spacing(theme::SPACE_XS)
     .align_y(Alignment::Center);
     match question.busy {
         Some(CloseAnswer::Upload) => {
             actions = actions.push(
-                text(strings::UPLOADING_EDITS)
+                text(strings::uploading_edits(FLUSH_LIMIT.as_secs()))
                     .size(theme::TEXT_XS)
                     .color(p.muted),
             );
@@ -297,18 +328,26 @@ pub fn close_ask<'a>(app: &'a App, tab: &'a Tab) -> Option<Element<'a, Message>>
     )
 }
 
-/// The window's close question, in the center (like the settings page).
+/// The question of the window or of "Close workspace", in the center (like the
+/// settings page).
 pub fn quit_view(app: &App) -> Element<'_, Message> {
-    let Some(quit) = &app.quit else {
+    let Some(ask) = &app.center_ask else {
         return space().into();
     };
-    let content = column![
-        question_body(
-            &quit.question,
+    let (title, labels) = match ask.purpose {
+        EditsFor::Workspace(_) => (
+            strings::CLOSE_WORKSPACE_EDITS_TITLE,
+            [strings::UPLOAD_AND_CLOSE, strings::CLOSE_KEEP_COPIES],
+        ),
+        _ => (
             strings::QUIT_EDITS_TITLE,
             [strings::UPLOAD_AND_QUIT, strings::QUIT_KEEP_COPIES],
-            |answer| edit_msg(EditMsg::Quit(answer)),
         ),
+    };
+    let content = column![
+        question_body(&ask.question, title, labels, |answer| {
+            edit_msg(EditMsg::Center(answer))
+        }),
         text(strings::QUIT_EDITS_HINT)
             .size(theme::TEXT_XS)
             .color(palette().muted),
@@ -329,9 +368,14 @@ pub fn with_toast<'a>(app: &'a App, base: Element<'a, Message>) -> Element<'a, M
     let Some(toast) = &app.toast else {
         return base;
     };
-    let notice = container(text(toast.text.as_str()).size(theme::TEXT_XS))
-        .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_SM]))
-        .style(theme::dialog_box);
+    let notice = container(with_name(
+        format!("{} ", toast.text),
+        toast.name.clone(),
+        String::new(),
+        palette().ink,
+    ))
+    .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_SM]))
+    .style(theme::dialog_box);
     let layer = container(notice)
         .width(Length::Fill)
         .height(Length::Fill)
@@ -339,4 +383,29 @@ pub fn with_toast<'a>(app: &'a App, base: Element<'a, Message>) -> Element<'a, M
         .align_x(Alignment::End)
         .align_y(Alignment::End);
     iced::widget::stack![base, layer].into()
+}
+
+/// The notice of unsent edits a close kept as recovered copies: above the center, from
+/// any tab, until dismissed.
+pub fn kept_notice(app: &App) -> Option<Element<'_, Message>> {
+    let notice = app.kept_notice.as_ref()?;
+    Some(
+        container(
+            row![
+                text(strings::kept_notice(notice.count)).size(theme::TEXT_XS),
+                container(path_text(notice.dir.display().to_string())).width(Length::Fill),
+                small_button(
+                    strings::DISMISS,
+                    Some(edit_msg(EditMsg::DismissKept)),
+                    false
+                ),
+            ]
+            .spacing(theme::SPACE_XS)
+            .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_MD]))
+        .style(theme::pane_bar)
+        .into(),
+    )
 }
