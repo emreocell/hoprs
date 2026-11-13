@@ -33,6 +33,10 @@ const DEFAULT_LOG_FILTER: &str = "info,suppaftp=warn";
 const SUPPAFTP_DEFAULT: &str = "suppaftp=warn";
 /// The most suppaftp may ever log at: at trace it logs `PASS <password>`.
 const SUPPAFTP_CAP: &str = "debug";
+/// Crates that log terminal bytes (unhandled OSC/DCS/CSI payloads) at debug
+/// and trace: never above warn, whatever `RUST_LOG` says.
+const TERMINAL_LOG_CRATES: [&str; 2] = ["vte", "alacritty_terminal"];
+const TERMINAL_LOG_CAP: &str = "warn";
 
 fn main() -> iced::Result {
     let filter = log_filter(std::env::var("RUST_LOG").ok().as_deref());
@@ -241,7 +245,10 @@ struct LogFilter {
     capped: bool,
 }
 
-/// Builds the filter from `RUST_LOG`; suppaftp never goes above debug.
+/// Builds the filter from `RUST_LOG`; suppaftp never goes above debug, and
+/// the terminal crates ([`TERMINAL_LOG_CRATES`]) never above warn. The
+/// unset default stays `info,suppaftp=warn`: [`terminal_log_cap`] caps the
+/// terminal crates at run time in every case, span directives included.
 fn log_filter(rust_log: Option<&str>) -> LogFilter {
     let Some(rust_log) = rust_log.map(str::trim).filter(|s| !s.is_empty()) else {
         return LogFilter {
@@ -253,6 +260,7 @@ fn log_filter(rust_log: Option<&str>) -> LogFilter {
     let mut directives = Vec::new();
     let mut capped = false;
     let mut sets_suppaftp = false;
+    let mut sets_terminal = [false; TERMINAL_LOG_CRATES.len()];
     for directive in rust_log.split(',').map(str::trim).filter(|d| !d.is_empty()) {
         // `selector=level`; the level never contains `]` or `}`, which
         // tells it apart from a `=` inside a span field filter.
@@ -276,6 +284,19 @@ fn log_filter(rust_log: Option<&str>) -> LogFilter {
         // the global level. An unparsable level is dropped by `EnvFilter`.
         sets_suppaftp |= selector == "suppaftp" && level.is_some();
 
+        // A directive for a terminal crate (or a module of it) above warn
+        // is lowered to warn; at or below warn it is honoured.
+        let terminal = TERMINAL_LOG_CRATES
+            .iter()
+            .position(|name| target == *name || target.starts_with(&format!("{name}::")));
+        if let Some(index) = terminal {
+            sets_terminal[index] |= selector == TERMINAL_LOG_CRATES[index] && level.is_some();
+            if level.is_some_and(|rank| rank > WARN) {
+                directives.push(format!("{selector}={TERMINAL_LOG_CAP}"));
+                continue;
+            }
+        }
+
         if reaches_suppaftp && level == Some(TRACE) {
             directives.push(format!("{selector}={SUPPAFTP_CAP}"));
             capped = true;
@@ -288,6 +309,11 @@ fn log_filter(rust_log: Option<&str>) -> LogFilter {
     if !sets_suppaftp {
         directives.push(SUPPAFTP_DEFAULT.to_owned());
     }
+    for (name, set) in TERMINAL_LOG_CRATES.iter().zip(sets_terminal) {
+        if !set {
+            directives.push(format!("{name}={TERMINAL_LOG_CAP}"));
+        }
+    }
 
     LogFilter {
         directives: directives.join(","),
@@ -295,6 +321,7 @@ fn log_filter(rust_log: Option<&str>) -> LogFilter {
     }
 }
 
+const WARN: u8 = 2;
 const TRACE: u8 = 5;
 
 /// A `tracing` level filter as a number, 0 (off) to 5 (trace), the way
@@ -310,9 +337,35 @@ fn level_rank(level: &str) -> Option<u8> {
         .and_then(|rank| u8::try_from(rank).ok())
 }
 
+/// A hard per-target cap on top of the `EnvFilter`: the terminal crates
+/// stay at warn even inside a span a `[span]=debug` directive enables.
+fn terminal_log_cap() -> tracing_subscriber::filter::Targets {
+    TERMINAL_LOG_CRATES.iter().fold(
+        tracing_subscriber::filter::Targets::new()
+            .with_default(tracing_subscriber::filter::LevelFilter::TRACE),
+        |targets, name| targets.with_target(*name, tracing::Level::WARN),
+    )
+}
+
+/// The subscriber's filter: `RUST_LOG` (as rewritten by [`log_filter`])
+/// and the terminal cap.
+fn subscriber_filter<S>(filter: &LogFilter) -> impl tracing_subscriber::layer::Filter<S> + use<S>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    use tracing_subscriber::filter::FilterExt;
+    tracing_subscriber::EnvFilter::new(&filter.directives).and(terminal_log_cap())
+}
+
 fn init_logging(filter: &LogFilter) {
-    let env_filter = tracing_subscriber::EnvFilter::new(&filter.directives);
-    tracing_subscriber::fmt().with_env_filter(env_filter).init();
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    // `init` also installs the `log` bridge, through which vte and
+    // alacritty_terminal log.
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_filter(subscriber_filter(filter)))
+        .init();
     if filter.capped {
         tracing::warn!(
             "RUST_LOG would log suppaftp at trace, where it logs passwords; lowered to debug"
@@ -343,6 +396,15 @@ mod tests {
         );
     }
 
+    /// Serializes the tests that install `tracing` subscribers. Callsite
+    /// interest is cached across all live dispatchers: a concurrent test's
+    /// `trace` subscriber would mark a callsite `always` and skip ours.
+    fn subscriber_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Whether the real `EnvFilter` built from `directives` lets a trace
     /// event through for `target`.
     fn trace_enabled(directives: &str, target: &str) -> bool {
@@ -363,6 +425,7 @@ mod tests {
 
     #[test]
     fn real_env_filter_never_traces_suppaftp() {
+        let _lock = subscriber_test_lock();
         let inputs = [
             None,
             Some("suppaftp=trace"),
@@ -426,55 +489,85 @@ mod tests {
 
         // Explicit trace for suppaftp is lowered to debug, with a warning.
         let filter = log_filter(Some("info,suppaftp=trace"));
-        assert_eq!(filter.directives, "info,suppaftp=debug");
+        assert_eq!(
+            filter.directives,
+            "info,suppaftp=debug,vte=warn,alacritty_terminal=warn"
+        );
         assert!(filter.capped);
 
         // A bare target means trace for it.
         let filter = log_filter(Some("suppaftp"));
-        assert_eq!(filter.directives, "suppaftp=debug");
+        assert_eq!(
+            filter.directives,
+            "suppaftp=debug,vte=warn,alacritty_terminal=warn"
+        );
         assert!(filter.capped);
 
         // Submodules, numeric levels and span filters are capped too.
         let filter = log_filter(Some("suppaftp::async_ftp=TRACE,suppaftp[cmd]=5"));
         assert_eq!(
             filter.directives,
-            "suppaftp::async_ftp=debug,suppaftp[cmd]=debug,suppaftp=warn"
+            "suppaftp::async_ftp=debug,suppaftp[cmd]=debug,suppaftp=warn,vte=warn,alacritty_terminal=warn"
         );
         assert!(filter.capped);
 
         // A global trace would reach suppaftp: it keeps its default.
         let filter = log_filter(Some("trace"));
-        assert_eq!(filter.directives, "trace,suppaftp=warn");
+        assert_eq!(
+            filter.directives,
+            "trace,suppaftp=warn,vte=warn,alacritty_terminal=warn"
+        );
         assert!(!filter.capped);
 
         // A span-only directive applies to every target, suppaftp included.
         let filter = log_filter(Some("info,[connect]=trace"));
-        assert_eq!(filter.directives, "info,[connect]=debug,suppaftp=warn");
+        assert_eq!(
+            filter.directives,
+            "info,[connect]=debug,suppaftp=warn,vte=warn,alacritty_terminal=warn"
+        );
         assert!(filter.capped);
 
         // Levels at or below debug are honoured; other targets untouched.
         let filter = log_filter(Some("hoprs_ssh=trace,suppaftp=debug"));
-        assert_eq!(filter.directives, "hoprs_ssh=trace,suppaftp=debug");
+        assert_eq!(
+            filter.directives,
+            "hoprs_ssh=trace,suppaftp=debug,vte=warn,alacritty_terminal=warn"
+        );
         assert!(!filter.capped);
         let filter = log_filter(Some("warn,suppaftp=off"));
-        assert_eq!(filter.directives, "warn,suppaftp=off");
+        assert_eq!(
+            filter.directives,
+            "warn,suppaftp=off,vte=warn,alacritty_terminal=warn"
+        );
         assert!(!filter.capped);
 
         // A target that only starts with the same letters is not suppaftp.
         let filter = log_filter(Some("suppaftp_ext=trace"));
-        assert_eq!(filter.directives, "suppaftp_ext=trace,suppaftp=warn");
+        assert_eq!(
+            filter.directives,
+            "suppaftp_ext=trace,suppaftp=warn,vte=warn,alacritty_terminal=warn"
+        );
         assert!(!filter.capped);
 
         // Scoped suppaftp directives don't set the `suppaftp` target
         // itself: the cap still applies to it and its other modules.
         let filter = log_filter(Some("trace,suppaftp[cmd]=warn"));
-        assert_eq!(filter.directives, "trace,suppaftp[cmd]=warn,suppaftp=warn");
+        assert_eq!(
+            filter.directives,
+            "trace,suppaftp[cmd]=warn,suppaftp=warn,vte=warn,alacritty_terminal=warn"
+        );
         let filter = log_filter(Some("trace,suppaftp::foo=warn"));
-        assert_eq!(filter.directives, "trace,suppaftp::foo=warn,suppaftp=warn");
+        assert_eq!(
+            filter.directives,
+            "trace,suppaftp::foo=warn,suppaftp=warn,vte=warn,alacritty_terminal=warn"
+        );
 
         // An unparsable level sets nothing, so the default still applies.
         let filter = log_filter(Some("trace,suppaftp=loud"));
-        assert_eq!(filter.directives, "trace,suppaftp=loud,suppaftp=warn");
+        assert_eq!(
+            filter.directives,
+            "trace,suppaftp=loud,suppaftp=warn,vte=warn,alacritty_terminal=warn"
+        );
 
         // Everything produced is valid `EnvFilter` syntax.
         for input in ["suppaftp", "[connect]=trace", "suppaftp[cmd{id=1}]=trace"] {
@@ -488,7 +581,105 @@ mod tests {
         }
         assert_eq!(
             log_filter(Some("suppaftp[cmd{id=1}]=trace")).directives,
-            "suppaftp[cmd{id=1}]=debug,suppaftp=warn"
+            "suppaftp[cmd{id=1}]=debug,suppaftp=warn,vte=warn,alacritty_terminal=warn"
         );
+    }
+
+    #[test]
+    fn terminal_crates_are_capped_at_warn() {
+        // Appended whenever RUST_LOG is set.
+        let filter = log_filter(Some("debug"));
+        assert_eq!(
+            filter.directives,
+            "debug,suppaftp=warn,vte=warn,alacritty_terminal=warn"
+        );
+        // Explicit requests above warn are lowered, modules included.
+        let filter = log_filter(Some("vte=trace,alacritty_terminal::term=debug,vte"));
+        assert_eq!(
+            filter.directives,
+            "vte=warn,alacritty_terminal::term=warn,vte=warn,suppaftp=warn,alacritty_terminal=warn"
+        );
+        // At or below warn is honoured, and not overridden afterwards.
+        let filter = log_filter(Some("info,vte=error,alacritty_terminal=off"));
+        assert_eq!(
+            filter.directives,
+            "info,vte=error,alacritty_terminal=off,suppaftp=warn"
+        );
+        // A crate that only shares the prefix is untouched.
+        let filter = log_filter(Some("vtest=trace"));
+        assert_eq!(
+            filter.directives,
+            "vtest=trace,suppaftp=warn,vte=warn,alacritty_terminal=warn"
+        );
+        assert!(!filter.capped);
+    }
+
+    /// Whether the full subscriber filter (`EnvFilter` + terminal cap)
+    /// enables a debug event from `target`, optionally inside a span `span`.
+    fn debug_enabled(rust_log: Option<&str>, target: &str, in_span: bool) -> bool {
+        use tracing_subscriber::Layer;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let filter = log_filter(rust_log);
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(io::sink)
+                .with_filter(subscriber_filter(&filter)),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            let span = in_span.then(|| tracing::info_span!("connect").entered());
+            let enabled = match target {
+                "vte" => tracing::enabled!(target: "vte", tracing::Level::DEBUG),
+                "vte::ansi" => tracing::enabled!(target: "vte::ansi", tracing::Level::DEBUG),
+                "alacritty_terminal::term" => {
+                    tracing::enabled!(target: "alacritty_terminal::term", tracing::Level::DEBUG)
+                }
+                "vte::warn" => tracing::enabled!(target: "vte", tracing::Level::WARN),
+                "hoprs_app" => tracing::enabled!(target: "hoprs_app", tracing::Level::DEBUG),
+                other => panic!("no callsite for {other}"),
+            };
+            drop(span);
+            enabled
+        })
+    }
+
+    #[test]
+    fn real_filter_never_logs_terminal_bytes() {
+        let _lock = subscriber_test_lock();
+        for rust_log in [
+            None,
+            Some("debug"),
+            Some("trace"),
+            Some("vte=trace"),
+            Some("vte::ansi=debug,alacritty_terminal=trace"),
+            Some("info,[connect]=trace"),
+        ] {
+            for target in ["vte", "vte::ansi", "alacritty_terminal::term"] {
+                for in_span in [false, true] {
+                    assert!(
+                        !debug_enabled(rust_log, target, in_span),
+                        "{rust_log:?} enables debug for {target} (span: {in_span})"
+                    );
+                }
+            }
+        }
+        // Not vacuous: warnings still pass, and other targets debug.
+        assert!(debug_enabled(Some("debug"), "vte::warn", false));
+        assert!(debug_enabled(Some("debug"), "hoprs_app", false));
+        assert!(debug_enabled(
+            Some("info,[connect]=trace"),
+            "hoprs_app",
+            true
+        ));
+        // The span case needs the per-target cap: `EnvFilter` alone lets
+        // a span directive through for every target.
+        use tracing_subscriber::layer::SubscriberExt;
+        let directives = log_filter(Some("info,[connect]=trace")).directives;
+        let env_only =
+            tracing_subscriber::registry().with(tracing_subscriber::EnvFilter::new(directives));
+        tracing::subscriber::with_default(env_only, || {
+            let _span = tracing::info_span!("connect").entered();
+            assert!(tracing::enabled!(target: "vte", tracing::Level::DEBUG));
+        });
     }
 }

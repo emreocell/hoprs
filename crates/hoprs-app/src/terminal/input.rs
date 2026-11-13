@@ -1,5 +1,11 @@
 //! Keyboard and paste encoding, following xterm's conventions (what
 //! `TERM=xterm-256color` promises the remote side).
+//!
+//! Known limitations: the application keypad (DECKPAM, `ESC =`) is not
+//! supported; keypad keys arrive as their plain characters or as the
+//! navigation keys they map to, as in numeric keypad mode. The kitty
+//! keyboard protocol is off (alacritty's `kitty_keyboard: false`), so
+//! programs fall back to these legacy encodings.
 
 use alacritty_terminal::term::TermMode;
 
@@ -144,19 +150,25 @@ fn tilde_key(n: u8, mods: Modifiers) -> Vec<u8> {
 const PASTE_START: &str = "\x1b[200~";
 const PASTE_END: &str = "\x1b[201~";
 
+/// Characters a bracketed paste never carries: ESC and the 8-bit CSI
+/// (any escape sequence, the end marker `ESC[201~` included), and ^C, on
+/// which some shells end the paste.
+const PASTE_FORBIDDEN: [char; 3] = ['\x1b', '\x03', '\u{9b}'];
+
 /// The bytes a paste sends. With bracketed paste on, the text is wrapped in
-/// `ESC[200~ … ESC[201~`, and every end marker inside it is removed (until
-/// none is left, so removing one cannot form another): pasted text cannot
-/// end the paste early and run as typed commands. Without it, line breaks
-/// are sent as Enter (`\r`), as typing them would.
+/// `ESC[200~ … ESC[201~` after removing every [`PASTE_FORBIDDEN`]
+/// character, in one linear pass: pasted text cannot end the paste early
+/// and run as typed commands. An empty result sends nothing. Without
+/// bracketed paste, line breaks are sent as Enter (`\r`), as typing them
+/// would.
 // used by the terminal tab (Plan 6 Task 4)
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn encode_paste(text: &str, mode: TermMode) -> Vec<u8> {
     if mode.contains(TermMode::BRACKETED_PASTE) {
-        let mut body = text.to_owned();
-        while body.contains(PASTE_END) {
-            body = body.replace(PASTE_END, "");
-        }
+        let body: String = text
+            .chars()
+            .filter(|c| !PASTE_FORBIDDEN.contains(c))
+            .collect();
         if body.is_empty() {
             return Vec::new();
         }
@@ -294,14 +306,33 @@ mod tests {
             encode_paste("ls -la\n", bracketed),
             b"\x1b[200~ls -la\n\x1b[201~".to_vec()
         );
-        // An embedded end marker cannot break out of the paste...
+        // An embedded end marker cannot break out of the paste: every ESC
+        // is dropped, so no escape sequence survives inside it.
         assert_eq!(
             encode_paste("a\x1b[201~rm -rf ~\n", bracketed),
-            b"\x1b[200~arm -rf ~\n\x1b[201~".to_vec()
+            b"\x1b[200~a[201~rm -rf ~\n\x1b[201~".to_vec()
         );
-        // ...not even one that removing another would form.
-        let pasted = encode_paste("x\x1b[20\x1b[201~1~y", bracketed);
-        assert_eq!(pasted, b"\x1b[200~xy\x1b[201~".to_vec());
+        // Nested markers, whatever the removal order would form.
+        for nested in [
+            "x\x1b[20\x1b[201~1~y",
+            "x\x1b\x1b[201~[201~y",
+            "x\x1b[201\x1b[201~~y",
+        ] {
+            let pasted = encode_paste(nested, bracketed);
+            let body = &pasted[6..pasted.len() - 6];
+            assert!(pasted.starts_with(b"\x1b[200~") && pasted.ends_with(b"\x1b[201~"));
+            assert!(!body.contains(&0x1b), "{nested:?} -> {pasted:?}");
+        }
+        // ^C (some shells end the paste on it) and the 8-bit CSI are dropped
+        // too; everything else, newlines and UTF-8 included, is kept.
+        assert_eq!(
+            encode_paste("a\x03b\u{9b}201~c\x1bd\té\n", bracketed),
+            "\x1b[200~ab201~cd\té\n\x1b[201~".as_bytes().to_vec()
+        );
+        // A huge adversarial paste stays linear and clean.
+        let hostile = "\x1b[20\x1b[201~1~".repeat(100_000);
+        let pasted = encode_paste(&hostile, bracketed);
+        assert_eq!(pasted.iter().filter(|&&b| b == 0x1b).count(), 2);
         // Without bracketed paste: raw text, newlines sent as Enter.
         assert_eq!(
             encode_paste("one\r\ntwo\nthree", TermMode::default()),
@@ -309,6 +340,6 @@ mod tests {
         );
         // Nothing to paste, nothing sent.
         assert_eq!(encode_paste("", bracketed), Vec::<u8>::new());
-        assert_eq!(encode_paste("\x1b[201~", bracketed), Vec::<u8>::new());
+        assert_eq!(encode_paste("\x1b\x03\u{9b}", bracketed), Vec::<u8>::new());
     }
 }

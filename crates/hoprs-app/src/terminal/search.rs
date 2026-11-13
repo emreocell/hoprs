@@ -114,4 +114,27 @@ mod tests {
         assert_eq!(find(&model, "absent", top, false), None);
         assert_eq!(find(&model, "", top, false), None);
     }
+
+    #[test]
+    fn search_spans_wide_chars_and_wrapped_rows() {
+        let mut model = TerminalModel::new(10, 4, 100);
+        // `中文` takes columns 2-5; the match ends on the wide cell.
+        model.feed("ab中文cd\r\n".as_bytes());
+        let (top, _) = model.grid_bounds();
+        assert_eq!(
+            find(&model, "b中文c", top, false),
+            Some(at(0, 1)..=at(0, 6))
+        );
+        assert_eq!(find(&model, "中", top, false), Some(at(0, 2)..=at(0, 3)));
+        // `wrapped` starts at column 7 and continues on the next row.
+        model.feed(b"xxxxxxxwrapped\r\n");
+        assert_eq!(
+            find(&model, "WRAPPED", top, false),
+            Some(at(1, 7)..=at(2, 3))
+        );
+        assert_eq!(
+            find(&model, "wrapped", at(3, 0), true),
+            Some(at(1, 7)..=at(2, 3))
+        );
+    }
 }

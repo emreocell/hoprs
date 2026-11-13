@@ -116,6 +116,8 @@ impl Default for TermTheme {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TermEvent {
     /// The remote set the window title (OSC 0/2). Empty: back to the default.
+    /// C0, DEL and C1 control characters are already removed, so it is safe
+    /// to show as-is.
     Title(String),
     /// BEL.
     Bell,
@@ -124,6 +126,12 @@ pub enum TermEvent {
     ClipboardStore(String),
     /// Bytes to write back to the PTY: replies to DA, DSR, colour queries.
     PtyWrite(Vec<u8>),
+}
+
+/// The title without control characters (C0, DEL, C1): a remote program
+/// must not smuggle escape sequences or line breaks into the UI.
+fn sanitize_title(title: &str) -> String {
+    title.chars().filter(|c| !c.is_control()).collect()
 }
 
 /// One drawable cell of the viewport. Spacer cells after a wide character
@@ -296,7 +304,7 @@ impl TerminalModel {
 
     fn translate(&self, event: Event) -> Option<TermEvent> {
         match event {
-            Event::Title(title) => Some(TermEvent::Title(title)),
+            Event::Title(title) => Some(TermEvent::Title(sanitize_title(&title))),
             Event::ResetTitle => Some(TermEvent::Title(String::new())),
             Event::Bell => Some(TermEvent::Bell),
             Event::PtyWrite(text) => Some(TermEvent::PtyWrite(text.into_bytes())),
@@ -603,6 +611,7 @@ pub(crate) mod tests {
             b"\x1b[38;2;1",
             b"\x1b[38;5;",
             b"\x1b]0;half a title",
+            b"\x1b]2;t\xc2\x9b\x7fx\x07",
             b"\x1b]52;c;aGVsbG8",
             b"\x1bP1$r",
             b"\x1b[99999999999;99999999999H",
@@ -623,26 +632,33 @@ pub(crate) mod tests {
         let mut model = TerminalModel::new(COLS, ROWS, SCROLLBACK);
         model.set_allow_clipboard_store(true);
         let mut fed = 0usize;
+        let mut titles = 0usize;
         while fed < 1 << 20 {
             let len = 1 + usize::from(rng.next_u8()) * 16;
             let mut chunk: Vec<u8> = (0..len).map(|_| rng.next_u8()).collect();
             let pick = usize::from(rng.next_u8()) % TRUNCATED.len();
             chunk.extend_from_slice(TRUNCATED[pick]);
             fed += chunk.len();
-            let _ = model.feed(&chunk);
-            let cursor = model.cursor();
+            for event in model.feed(&chunk) {
+                match event {
+                    TermEvent::Title(title) => {
+                        assert!(!title.chars().any(char::is_control), "{title:?}");
+                        titles += 1;
+                    }
+                    TermEvent::PtyWrite(reply) => assert!(!reply.is_empty()),
+                    TermEvent::Bell | TermEvent::ClipboardStore(_) => {}
+                }
+            }
+            // alacritty's own cursor (not the clamped view) stays in the grid.
+            let raw = model.term.grid().cursor.point;
             assert!(
-                cursor.line < usize::from(ROWS),
-                "cursor line {}",
-                cursor.line
-            );
-            assert!(
-                cursor.column < usize::from(COLS),
-                "cursor col {}",
-                cursor.column
+                (0..i32::from(ROWS)).contains(&raw.line.0) && raw.column.0 < usize::from(COLS),
+                "raw cursor {raw:?}"
             );
             assert!(model.history_len() <= SCROLLBACK);
         }
+        // The garbage did reach the title path, so the check above ran.
+        assert!(titles > 0);
         // The grid still has its shape.
         assert_eq!((model.columns(), model.screen_lines()), (80, 24));
         let mut wide = 0;
@@ -685,6 +701,9 @@ pub(crate) mod tests {
             bg.r, bg.g, bg.b
         );
         assert_eq!(events, vec![TermEvent::PtyWrite(want.into_bytes())]);
+        // Control characters (C0, DEL, C1) never reach the host's title.
+        let events = model.feed("\x1b]2;a\u{9b}b\x7fc\u{85}d\x1b\\".as_bytes());
+        assert_eq!(events, vec![TermEvent::Title("abcd".into())]);
         // Title and bell come through too.
         let events = model.feed(b"\x1b]2;remote\x07\x07");
         assert_eq!(
@@ -804,6 +823,26 @@ pub(crate) mod tests {
         model.resize(40, 10);
         assert_eq!((model.columns(), model.screen_lines()), (40, 10));
         assert_eq!(line_text(&model, 0), "abc");
+        // Shrinking reflows wrapped text and keeps the cursor in the grid.
+        let mut model = TerminalModel::new(20, 5, 100);
+        model.feed(b"0123456789abcdefghij\r\nsecond line here");
+        model.resize(8, 3);
+        assert_eq!((model.columns(), model.screen_lines()), (8, 3));
+        let cursor = model.cursor();
+        assert!(cursor.visible && cursor.line < 3 && cursor.column < 8);
+        let raw = model.term.grid().cursor.point;
+        assert!((0..3).contains(&raw.line.0) && raw.column.0 < 8);
+        // The long first line now spans 3 rows of 8: all of it is kept.
+        let mut all = String::new();
+        let (top, bottom) = model.grid_bounds();
+        for line in top.line.0..=bottom.line.0 {
+            all.push_str(&line_text(&model, line));
+            all.push('|');
+        }
+        assert_eq!(all, "01234567|89abcdef|ghij|second l|ine here||");
+        // Growing back reflows the rows together again.
+        model.resize(20, 5);
+        assert_eq!(line_text(&model, 0), "0123456789abcdefghij");
         // Zero is clamped instead of panicking.
         model.resize(0, 0);
         assert!(model.columns() >= 1 && model.screen_lines() >= 1);
