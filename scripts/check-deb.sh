@@ -5,7 +5,8 @@
 # Needs docker, and the network inside the container (apt). Builds the image in
 # docker/deb-check, then runs docker/deb-check/inside.sh there with the package mounted
 # read-only: install with Depends only, `hoprs --version`, desktop-file-validate,
-# appstreamcli, every icon size, the start-up probe under xvfb-run (and that every library
+# appstreamcli, the exact file list and modes, no builder paths in the binary, every
+# icon size, the start-up probe under xvfb-run (and that every library
 # it loaded, dlopen'ed ones included, came from Depends), then remove and purge, checking
 # the installed files are gone and the user's ~/.config/hoprs and ~/.local/share/hoprs are
 # not. Prints OK/FAIL per stage and exits non-zero if any failed.
@@ -33,4 +34,7 @@ else
     exit 1
 fi
 
-docker run --rm -v "$deb_dir:/pkg:ro" "$image" "/pkg/$deb_name"
+# The builder's home, for the "no builder paths in the binary" stage. Run the check on
+# the machine that built the package (or pass HOPRS_BUILDER_HOME) for it to mean much.
+docker run --rm -v "$deb_dir:/pkg:ro" -e HOPRS_BUILDER_HOME="${HOPRS_BUILDER_HOME:-$HOME}" \
+    "$image" "/pkg/$deb_name"

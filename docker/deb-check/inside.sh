@@ -54,7 +54,16 @@ installed_files=(
 for n in "${SIZES[@]}"; do
     installed_files+=("/usr/share/icons/hicolor/${n}x${n}/apps/$APP_ID.png")
 done
-doc_files=(/usr/share/doc/hoprs/LICENSE-MIT /usr/share/doc/hoprs/LICENSE-APACHE)
+doc_files=(/usr/share/doc/hoprs/LICENSE-MIT /usr/share/doc/hoprs/LICENSE-APACHE
+    /usr/share/doc/hoprs/copyright)
+
+# The package's exact contents, files only, as "mode path": the binary 755, the rest 644.
+expected_contents() {
+    local f
+    for f in "${installed_files[@]}" "${doc_files[@]}"; do
+        if [ "$f" = /usr/bin/hoprs ]; then echo "-rwxr-xr-x .$f"; else echo "-rw-r--r-- .$f"; fi
+    done | sort
+}
 
 # User data hoprs must never touch on remove or purge (Review Focus 3).
 user_files=("$HOME/.config/hoprs/sites.toml" "$HOME/.local/share/hoprs/x")
@@ -101,8 +110,39 @@ check_version() {
     echo "$out"
     [ "$out" = "hoprs $upstream" ]
 }
+check_contents() {
+    local actual
+    actual=$(dpkg-deb -c "$deb" | awk '$1 !~ /^d/ {print $1, $NF}' | sort)
+    if diff <(expected_contents) <(echo "$actual"); then
+        echo "$(wc -l <<< "$actual") files, modes as expected"
+    else
+        return 1
+    fi
+    # Directories: 755, all of them.
+    ! dpkg-deb -c "$deb" | awk '$1 ~ /^d/ && $1 != "drwxr-xr-x" {print "bad mode:", $1, $NF; bad=1}
+        END {exit !bad}'
+}
+stage "package contents: exact file list and modes" check_contents
+
+# The binary must not carry the builder's paths (panic locations, debug info): no /home/
+# at all, and not the builder's own $HOME (HOPRS_BUILDER_HOME, from check-deb.sh).
+no_builder_paths() {
+    local hits=0 pattern
+    for pattern in /home/ ${HOPRS_BUILDER_HOME:+"$HOPRS_BUILDER_HOME"}; do
+        if grep -qaF -- "$pattern" /usr/bin/hoprs; then
+            echo "found '$pattern':"
+            tr -c '[:print:]' '\n' < /usr/bin/hoprs | grep -F -- "$pattern" | head -n 5
+            hits=1
+        else
+            echo "absent: $pattern"
+        fi
+    done
+    return "$hits"
+}
+
 stage "hoprs --version prints 'hoprs $upstream'" check_version
 stage "installed files present" all_exist "${installed_files[@]}" "${doc_files[@]}"
+stage "no builder paths in the binary" no_builder_paths
 
 stage "install check tools (xvfb, desktop-file-utils, appstream)" \
     apt-get install -y -q --no-install-recommends xvfb xauth desktop-file-utils appstream
@@ -128,11 +168,15 @@ probe() {
     grep -q '^startup_ms=' <<< "$out"
 }
 stage "probe under xvfb-run (tiny-skia)" probe tiny-skia ICED_BACKEND=tiny-skia
-# The default renderer path a user gets: wgpu, falling back to tiny-skia without a GPU.
+# The renderer a user gets by default: iced tries wgpu first and takes tiny-skia only if
+# wgpu finds no adapter at all. Mesa's software adapter (llvmpipe) always counts, so here,
+# without a GPU, wgpu runs on the CPU. This proves that path starts, not that it is cheap.
 stage "probe under xvfb-run (default renderer)" probe default
 
 # Every library the probes loaded must come from a package hoprs' Depends brought in, not
-# from one the check tools installed afterwards.
+# from one the check tools installed afterwards. This proves everything loaded comes from
+# Depends; it cannot prove everything needed is in Depends (a path these probes never
+# take, Wayland for one, may load more).
 # The package that owns a file, trying the merged-/usr spellings of its path.
 owner() {
     local path
@@ -174,13 +218,15 @@ make_user_data() {
 stage "create user data" make_user_data
 
 stage "apt-get remove" apt-get remove -y -q hoprs
-stage "installed files gone after remove" none_exist "${installed_files[@]}"
+stage "installed files and docs gone after remove" none_exist "${installed_files[@]}" \
+    "${doc_files[@]}" /usr/share/doc/hoprs
 stage "user data intact after remove" user_data_intact
 # dpkg, not apt: after a remove that left no conffiles, apt no longer knows the package.
 stage "purge" dpkg --purge hoprs
 not_installed() { ! dpkg -s hoprs 2>/dev/null | grep -q '^Status: install'; }
 stage "hoprs no longer installed" not_installed
-stage "docs gone after purge" none_exist "${doc_files[@]}" /usr/share/doc/hoprs
+stage "nothing left after purge" none_exist "${installed_files[@]}" "${doc_files[@]}" \
+    /usr/share/doc/hoprs
 stage "user data intact after purge" user_data_intact
 
 finish
