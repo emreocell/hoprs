@@ -812,6 +812,7 @@ impl App {
         let mut connect = Vec::new();
         let mut listings = Vec::new();
         for (site, restored) in sites {
+            self.readopt_site(&site);
             let index = match self.tab_of(&site) {
                 Some(index) => {
                     let tab = &mut self.tabs[index];
@@ -845,6 +846,7 @@ impl App {
     /// One site's result lands in its own tab, whatever the other sites do.
     fn site_connected(&mut self, site: SiteId, result: ConnectResult) -> Vec<Effect> {
         let Some(index) = self.tab_of(&site) else {
+            self.readopt_site(&site);
             // Its tab is gone: don't leave the session open behind the user's back.
             let session = match result {
                 Ok(connected) => Some(connected.session),
@@ -1055,7 +1057,8 @@ impl App {
     }
 
     /// Removes the tab at `index` and closes its session, if any. A listing still in
-    /// flight for it finds no tab and is dropped.
+    /// flight for it finds no tab and is dropped. A tab still connecting takes its site's
+    /// dialogs with it ([`abandon_site_prompts`](Self::abandon_site_prompts)).
     fn close_tab(&mut self, index: usize) -> Vec<Effect> {
         let tab = self.tabs.remove(index);
         self.active_tab = match self.active_tab {
@@ -1067,7 +1070,8 @@ impl App {
         let session = match tab.state {
             TabState::Connected(connected) => Some(connected.session),
             TabState::Failed(failure) => failure.session,
-            TabState::Connecting => None,
+            // The connect's session isn't known yet: its dialogs say which it is.
+            TabState::Connecting => return self.abandon_site_prompts(&tab.site),
         };
         if let Some(session) = session {
             self.forget_session(session);

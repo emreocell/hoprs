@@ -409,11 +409,18 @@ impl SessionManager {
             prompter.discard_pending_secrets();
             return Err(error);
         }
-        if !lock(&self.inner.sessions).contains_key(&id) {
-            // Closed while connecting: `close` dropped the secrets already.
-            return Err(closed());
-        }
-        self.save_typed_secrets(&site, &prompter).await;
+        let typed = {
+            let sessions = lock(&self.inner.sessions);
+            if !sessions.contains_key(&id) {
+                // Closed while connecting: `close` dropped the secrets already.
+                return Err(closed());
+            }
+            // Taken under the lock `close` removes the session with: a close that comes
+            // first leaves nothing to save; one that comes after finds them gone. Either
+            // way a closed session never stores what it took.
+            prompter.take_pending_secrets()
+        };
+        self.save_typed_secrets(&site, typed).await;
         if built {
             return Ok(());
         }
@@ -462,8 +469,12 @@ impl SessionManager {
     /// Writes the secrets the user typed with "Save in the system keyring" now that the
     /// session connected with them. A failure is logged: the session works anyway, and
     /// the next connect asks again.
-    async fn save_typed_secrets(&self, site: &SiteId, prompter: &SessionPrompter) {
-        for (kind, secret) in prompter.take_pending_secrets() {
+    async fn save_typed_secrets(
+        &self,
+        site: &SiteId,
+        typed: Vec<(hoprs_vault::SecretKind, secrecy::SecretString)>,
+    ) {
+        for (kind, secret) in typed {
             let saved = self
                 .inner
                 .vault

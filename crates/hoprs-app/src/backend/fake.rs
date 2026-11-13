@@ -1038,6 +1038,7 @@ mod tests {
             fake.push_prompt(BrokerEvent::Request(PromptRequest {
                 id: PromptId(id),
                 session: SessionId(1),
+                site: site.id.clone(),
                 key: "h:22".into(),
                 kind,
             }));

@@ -1,7 +1,7 @@
 //! The prompt broker: turns the connection crates' [`Prompter`] / [`FtpPrompter`] calls into
 //! dialogs for the UI and the UI's answers back into return values.
 //!
-//! - Every call becomes a [`PromptRequest`] `{ id, session, key: "host:port", kind }`, sent
+//! - Every call becomes a [`PromptRequest`] `{ id, session, site, key: "host:port", kind }`, sent
 //!   as a [`BrokerEvent::Request`] on the channel the UI subscribes to
 //!   ([`PromptBroker::take_events`]). The answer comes back through
 //!   [`PromptBroker::answer`].
@@ -55,6 +55,8 @@ pub struct PromptId(pub u64);
 pub struct PromptRequest {
     pub id: PromptId,
     pub session: SessionId,
+    /// The site whose connection asks.
+    pub site: SiteId,
     /// `host:port` of the connection asking.
     pub key: String,
     pub kind: PromptKind,
@@ -242,6 +244,7 @@ impl PromptBroker {
         let request = PromptRequest {
             id,
             session: from.session,
+            site: from.site.clone(),
             key,
             kind,
         };

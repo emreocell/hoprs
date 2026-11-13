@@ -658,6 +658,7 @@ async fn close_request_cancels_dialogs_and_ignores_input() {
     let request = |id: u64| PromptRequest {
         id: PromptId(id),
         session,
+        site: a.id.clone(),
         key: "a.example:22".into(),
         kind: PromptKind::Password {
             user: "u".into(),

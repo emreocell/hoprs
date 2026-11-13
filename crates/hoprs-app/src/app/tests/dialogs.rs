@@ -15,6 +15,7 @@ fn request(id: u64, session: u64, key: &str, kind: PromptKind) -> PromptRequest 
     PromptRequest {
         id: PromptId(id),
         session: SessionId(session),
+        site: SiteId::new(),
         key: key.into(),
         kind,
     }
@@ -1035,4 +1036,103 @@ async fn plain_loss_keeps_reconnect() {
         app.update(Message::ReconnectSession(tab))[..],
         [Effect::Reconnect { .. }]
     ));
+}
+
+/// A tab closed while it connects takes its site's dialogs with it: the one shown and
+/// those waiting are dropped (their sessions are closed, which withdraws them in the
+/// broker and forgets a secret typed with "save"), and a dialog the connect still raises
+/// afterwards is never shown. Another site's dialog stays. A dialog blocks the × of a
+/// tab, but "Close tabs" of the open workspace (or a profile reload) still closes tabs.
+#[tokio::test]
+async fn closing_a_connecting_tab_drops_its_prompts() {
+    let s = site("s", "h", "u", Protocol::Ssh);
+    let t = site("t", "k", "u", Protocol::Ssh);
+    let w = workspace("w", &[&s.id]);
+    let fake = Arc::new(
+        FakeBackend::new()
+            .with_site(s.clone())
+            .with_site(t.clone())
+            .with_workspace(w.clone()),
+    );
+    let mut app = loaded(&fake).await;
+    connect_effect(app.update(Message::OpenWorkspace(w.id.clone())));
+    assert_eq!(app.tabs[0].state, TabState::Connecting);
+    let of = |site: &Site, id: u64, session: u64, kind: PromptKind| PromptRequest {
+        site: site.id.clone(),
+        ..request(id, session, "h:22", kind)
+    };
+    let closed = |effects: &[Effect]| -> Vec<SessionId> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::CloseSession(session) => Some(*session),
+                _ => None,
+            })
+            .collect()
+    };
+
+    // A password for s, typed with "save"; then a host key for s and a password for t.
+    show(&mut app, of(&s, 1, 5, password()));
+    dialog_msg(&mut app, DialogMsg::Input(0, Typed("pw".into())));
+    dialog_msg(&mut app, DialogMsg::Save(true));
+    show(&mut app, of(&s, 2, 5, host_key(&[])));
+    show(&mut app, of(&t, 3, 6, password()));
+    dialog_msg(&mut app, DialogMsg::Submit);
+    assert!(app.dialogs.is_saving(SessionId(5)));
+    assert_eq!(shown(&app), Some(PromptId(2)));
+
+    let effects = app.update(Message::CloseWorkspace(w.id.clone()));
+    assert!(app.tabs.is_empty());
+    assert_eq!(closed(&effects), [SessionId(5)], "{effects:?}");
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::AnswerPrompt { .. })),
+        "dropped, not answered (a refusal would be shared with other sessions): {effects:?}"
+    );
+    assert!(
+        !app.dialogs.is_saving(SessionId(5)),
+        "the save is forgotten"
+    );
+    assert_eq!(shown(&app), Some(PromptId(3)), "t's dialog stays");
+    assert_eq!(app.dialogs.queued().count(), 0);
+
+    // The connect asks again (another session of s): never shown, its session closed.
+    let effects = show(&mut app, of(&s, 4, 7, password()));
+    assert_eq!(closed(&effects), [SessionId(7)], "{effects:?}");
+    assert_eq!(shown(&app), Some(PromptId(3)));
+    assert_eq!(app.dialogs.queued().count(), 0);
+    // The broker withdraws what the closed sessions held: nothing changes.
+    app.update(Message::Prompt(BrokerEvent::Withdrawn(PromptId(2))));
+    assert_eq!(shown(&app), Some(PromptId(3)));
+
+    // The connect's result lands with no tab: its session is closed, and s is a site like
+    // any other again.
+    let effects = app.update(Message::SiteConnected {
+        site: s.id.clone(),
+        result: Err(ConnectError {
+            session: Some(SessionId(7)),
+            error: Error::new(ErrorKind::NotFound, "Session closed"),
+            keyring_unavailable: false,
+        }),
+    });
+    assert_eq!(closed(&effects), [SessionId(7)]);
+    show(&mut app, of(&s, 5, 8, password()));
+    assert_eq!(app.dialogs.queued().count(), 1, "shown in turn again");
+    dialog_msg(&mut app, DialogMsg::Cancel);
+    dialog_msg(&mut app, DialogMsg::Cancel);
+    assert!(!app.dialogs.is_open());
+
+    // The × of a tab still connecting, after a password typed with "save" for it: its
+    // session is closed before the connect can store the password.
+    connect_effect(app.update(Message::ConnectSite(s.id.clone())));
+    let tab = app.tabs[0].id;
+    show(&mut app, of(&s, 6, 9, password()));
+    dialog_msg(&mut app, DialogMsg::Input(0, Typed("pw".into())));
+    dialog_msg(&mut app, DialogMsg::Save(true));
+    dialog_msg(&mut app, DialogMsg::Submit);
+    assert!(app.dialogs.is_saving(SessionId(9)));
+    let effects = app.update(Message::CloseTab(tab));
+    assert_eq!(closed(&effects), [SessionId(9)], "{effects:?}");
+    assert!(!app.dialogs.is_saving(SessionId(9)));
 }

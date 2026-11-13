@@ -21,10 +21,10 @@
 //! blocking explanation with no way to accept the new key, only "Remove the old entry…"
 //! (see [`KnownHostsFix`]).
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 
-use hoprs_core::Error;
+use hoprs_core::{Error, SiteId};
 use hoprs_ssh::HostKeyChange;
 use secrecy::SecretString;
 
@@ -37,9 +37,12 @@ use crate::backend::{BrokerEvent, KnownHostEntry, PromptAnswer, SessionId};
 pub struct Dialogs {
     pub current: Option<Dialog>,
     queue: VecDeque<PromptRequest>,
-    /// Sessions whose typed secret was answered with "save": their next successful
-    /// connect stored it, so the profiles are reloaded then.
-    saving: HashSet<SessionId>,
+    /// Sessions whose typed secret was answered with "save" (and their site): their next
+    /// successful connect stored it, so the profiles are reloaded then.
+    saving: HashMap<SessionId, SiteId>,
+    /// Sites whose tab was closed while connecting, until that connect's result lands:
+    /// a dialog their connect still raises is dropped (and its session closed) unseen.
+    abandoned: HashSet<SiteId>,
 }
 
 impl Dialogs {
@@ -50,7 +53,7 @@ impl Dialogs {
     /// A secret typed for `session` waits for its connect to be saved.
     #[cfg(test)]
     pub fn is_saving(&self, session: SessionId) -> bool {
-        self.saving.contains(&session)
+        self.saving.contains_key(&session)
     }
 
     /// The requests waiting behind the current dialog, in order.
@@ -189,6 +192,11 @@ impl App {
     pub(super) fn prompt_event(&mut self, event: BrokerEvent) -> Vec<Effect> {
         match event {
             BrokerEvent::Request(request) => {
+                if self.dialogs.abandoned.contains(&request.site) {
+                    // Its tab is gone: closing the session withdraws the dialog.
+                    self.forget_session(request.session);
+                    return vec![Effect::CloseSession(request.session)];
+                }
                 if self.dialogs.current.is_some() {
                     self.dialogs.queue.push_back(request);
                     return Vec::new();
@@ -274,7 +282,10 @@ impl App {
             }
             DialogMsg::Submit if !dialog.is_decision() => {
                 if dialog.save && dialog.can_save() {
-                    self.dialogs.saving.insert(dialog.request.session);
+                    let request = &dialog.request;
+                    self.dialogs
+                        .saving
+                        .insert(request.session, request.site.clone());
                 }
                 self.close_dialog(answer_of)
             }
@@ -357,7 +368,7 @@ impl App {
     /// A session's connect finished: a secret answered with "save" was stored if it
     /// connected, so the profiles are reloaded.
     pub(super) fn settle_saving(&mut self, session: SessionId, connected: bool) -> Vec<Effect> {
-        if self.dialogs.saving.remove(&session) && connected {
+        if self.dialogs.saving.remove(&session).is_some() && connected {
             vec![Effect::LoadProfiles]
         } else {
             Vec::new()
@@ -429,6 +440,49 @@ impl App {
     /// A session is gone: nothing waits to be saved for it.
     pub(super) fn forget_session(&mut self, session: SessionId) {
         self.dialogs.saving.remove(&session);
+    }
+
+    /// The tab of `site` closed while it connected (the app doesn't know that connect's
+    /// session yet). Its dialogs, shown or waiting, are dropped unanswered, and the
+    /// sessions they and the secrets typed with "save" came from are closed: the broker
+    /// withdraws their dialogs and the session manager forgets the secrets before the
+    /// connect can store them. Not answered Cancel: a host key refusal would be shared
+    /// with other sessions waiting on the same `host:port`, while a withdrawal makes them
+    /// ask again. Until the connect's result lands, a new dialog of the site is dropped
+    /// the same way.
+    pub(super) fn abandon_site_prompts(&mut self, site: &SiteId) -> Vec<Effect> {
+        self.dialogs.abandoned.insert(site.clone());
+        let mut sessions = BTreeSet::new();
+        self.dialogs.queue.retain(|r| {
+            let mine = &r.site == site;
+            if mine {
+                sessions.insert(r.session);
+            }
+            !mine
+        });
+        self.dialogs.saving.retain(|session, of| {
+            let mine = of == site;
+            if mine {
+                sessions.insert(*session);
+            }
+            !mine
+        });
+        let mut effects = Vec::new();
+        if let Some(dialog) = self.dialogs.current.take_if(|d| &d.request.site == site) {
+            sessions.insert(dialog.request.session);
+            effects.extend(self.show_next());
+        }
+        sessions
+            .into_iter()
+            .map(Effect::CloseSession)
+            .chain(effects)
+            .collect()
+    }
+
+    /// The site connects again (a new tab), or the abandoned connect's result landed:
+    /// its dialogs are shown again.
+    pub(super) fn readopt_site(&mut self, site: &SiteId) {
+        self.dialogs.abandoned.remove(site);
     }
 
     /// "Remove the old entry…" and its confirmation, in the tab.
