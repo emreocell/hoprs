@@ -265,7 +265,17 @@ impl FtpFs {
     /// (a listing of the parent): `NotFound`, `Io` "Is a directory" / "Not a regular file",
     /// or `Permission`. A server without `SIZE` is asked with `stat` alone.
     async fn file_size(&self, path: &RemotePath) -> Result<u64> {
-        let (code, text) = self.reply(format!("SIZE {}", arg(path)?), path).await?;
+        let command = format!("SIZE {}", arg(path)?);
+        let context = path.to_string();
+        // Beside the control connection when a transfer connection is free (the engine's
+        // size check after each upload).
+        let (code, text) = self
+            .session
+            .with_any(move |c| {
+                let (command, context) = (command.clone(), context.clone());
+                Box::pin(async move { session::quote(&mut c.stream, &command, &context).await })
+            })
+            .await?;
         if code == 213 {
             return parse_size(code, &text, path.as_str());
         }
@@ -388,6 +398,8 @@ impl FtpFs {
         let probe = self
             .session
             .with_any(move |c| {
+                let (size, stat, mdtm) = (size.clone(), stat.clone(), mdtm.clone());
+                let (context, name) = (context.clone(), name.clone());
                 Box::pin(async move {
                     let (code, text) = session::quote(&mut c.stream, &size, &context).await?;
                     if matches!(code, 500 | 502) {
@@ -581,9 +593,44 @@ fn regular_file(st: &RemoteEntry, path: &RemotePath) -> Result<()> {
 /// that sent `REST` passes `reusable = false`: after a refused `RETR` the server may keep the
 /// restart offset for the next transfer. After a socket error or a timeout `conn` is closed,
 /// and a lost connection is reported to the session.
+type Opened = std::result::Result<suppaftp::FtpResult<Transfer>, tokio::time::error::Elapsed>;
+
+/// `REST` (when continuing) and `RETR` on `conn`, within `timeout`.
+async fn start_retr(
+    conn: &mut PooledConn,
+    name: &str,
+    rest: usize,
+    timeout: std::time::Duration,
+) -> Opened {
+    let ftp = conn.stream();
+    tokio::time::timeout(timeout, async {
+        ftp.resume_transfer(rest).await?;
+        ftp.retr_as_stream(name).await
+    })
+    .await
+}
+
+/// `STOR` (or `APPE` past `offset` 0) on `conn`, within `timeout`.
+async fn start_stor(
+    conn: &mut PooledConn,
+    name: &str,
+    offset: u64,
+    timeout: std::time::Duration,
+) -> Opened {
+    let ftp = conn.stream();
+    tokio::time::timeout(timeout, async {
+        if offset > 0 {
+            ftp.append_with_stream(name).await
+        } else {
+            ftp.put_with_stream(name).await
+        }
+    })
+    .await
+}
+
 fn transfer_opened(
     conn: &mut PooledConn,
-    opened: std::result::Result<suppaftp::FtpResult<Transfer>, tokio::time::error::Elapsed>,
+    opened: Opened,
     path: &RemotePath,
     reusable: bool,
 ) -> Result<Transfer> {
@@ -722,14 +769,19 @@ impl RemoteFs for FtpFs {
                 format!("Offset {offset} out of range: {path}"),
             )
         })?;
+        let timeout = self.session.command_timeout();
         let mut conn = self.session.checkout().await?;
-        let opened = tokio::time::timeout(self.session.command_timeout(), async {
-            let ftp = conn.stream();
-            ftp.resume_transfer(rest).await?;
-            ftp.retr_as_stream(&name).await
-        })
-        .await;
-        let transfer = transfer_opened(&mut conn, opened, path, rest == 0)?;
+        let opened = start_retr(&mut conn, &name, rest, timeout).await;
+        let transfer = match transfer_opened(&mut conn, opened, path, rest == 0) {
+            // Reused without a check and dead: once more, on a new connection.
+            Err(e) if conn.unchecked() && is_control_loss(&e) => {
+                drop(conn);
+                conn = self.session.checkout_new().await?;
+                let opened = start_retr(&mut conn, &name, rest, timeout).await;
+                transfer_opened(&mut conn, opened, path, rest == 0)?
+            }
+            other => other?,
+        };
         Ok(Box::new(FtpReader::new(
             conn,
             transfer,
@@ -761,18 +813,23 @@ impl RemoteFs for FtpFs {
                 Err(e) => return Err(e),
             }
         }
-        let mut conn = self.session.checkout().await?;
         // The server creates or truncates the file before its `150`: done once this returns.
-        let opened = tokio::time::timeout(self.session.command_timeout(), async {
-            let ftp = conn.stream();
-            if offset > 0 {
-                ftp.append_with_stream(&name).await
-            } else {
-                ftp.put_with_stream(&name).await
-            }
-        })
-        .await;
-        let transfer = match transfer_opened(&mut conn, opened, path, true) {
+        let timeout = self.session.command_timeout();
+        let mut conn = self.session.checkout().await?;
+        let opened = start_stor(&mut conn, &name, offset, timeout).await;
+        let mut result = transfer_opened(&mut conn, opened, path, true);
+        // Reused without a check and dead (the command never reached the server): once
+        // more, on a new connection.
+        if let Err(e) = &result
+            && conn.unchecked()
+            && is_control_loss(e)
+        {
+            drop(conn);
+            conn = self.session.checkout_new().await?;
+            let opened = start_stor(&mut conn, &name, offset, timeout).await;
+            result = transfer_opened(&mut conn, opened, path, true);
+        }
+        let transfer = match result {
             Ok(transfer) => transfer,
             Err(e) => {
                 drop(conn);
@@ -886,6 +943,12 @@ impl RemoteFs for FtpFs {
             .await
     }
 
+    /// `SIZE` alone (`stat` costs `SIZE`, `STAT` and `MDTM`); follows a symlink, which the
+    /// engine's size check after a copy does not mind.
+    async fn size(&self, path: &RemotePath) -> Result<u64> {
+        self.file_size(path).await
+    }
+
     async fn set_modified(&self, path: &RemotePath, mtime: SystemTime) -> Result<()> {
         let command = format_timeval(mtime).map(|stamp| format!("MFMT {stamp} {path}"));
         arg(path)?;
@@ -895,6 +958,7 @@ impl RemoteFs for FtpFs {
         let reply = self
             .session
             .with_any(move |c| {
+                let (command, context) = (command.clone(), context.clone());
                 Box::pin(async move {
                     if !c.has_mfmt {
                         return Ok(None);

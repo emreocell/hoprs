@@ -264,3 +264,109 @@ pub async fn data_tcp_keepalive(addr: std::net::SocketAddr) -> KeepaliveSettings
 }
 
 pub use hoprs_ssh::net::KeepaliveSettings;
+
+/// What [`fake_transfer_server`] holds: its port and the files uploaded to it.
+pub struct FakeTransferServer {
+    pub port: u16,
+    pub files: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+    /// Connections it closed right after a command (transfer connections dying idle).
+    pub closed: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// A minimal FTP server on 127.0.0.1 that stores uploads in memory (`PASV`, `STOR`, `SIZE`,
+/// `STAT` of a missing path, no `FEAT` extras). Every connection but the first (the
+/// session's control connection) is closed right after it answers a `STOR` or a `STAT`: a
+/// pooled transfer connection dies while idle, as when a server's idle timeout or a NAT
+/// drops it just after use. With the engine, a file's `stat` (`SIZE`, `STAT`), its upload
+/// and its size check (`SIZE`) then each meet a dead connection in the pool.
+pub async fn fake_transfer_server() -> FakeTransferServer {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let files: Arc<Mutex<std::collections::HashMap<String, Vec<u8>>>> = Arc::default();
+    let closed = Arc::new(AtomicUsize::new(0));
+    let server = FakeTransferServer {
+        port,
+        files: files.clone(),
+        closed: closed.clone(),
+    };
+    tokio::spawn(async move {
+        let mut accepted = 0usize;
+        while let Ok((sock, _)) = listener.accept().await {
+            accepted += 1;
+            let control = accepted == 1;
+            let files = files.clone();
+            let closed = closed.clone();
+            tokio::spawn(async move {
+                let (read, mut write) = sock.into_split();
+                if write.write_all(b"220 fake\r\n").await.is_err() {
+                    return;
+                }
+                let mut lines = BufReader::new(read).lines();
+                let mut data: Option<TcpListener> = None;
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let (verb, arg) = line.split_once(' ').unwrap_or((line.as_str(), ""));
+                    let verb = verb.to_ascii_uppercase();
+                    let mut close = false;
+                    let reply = match verb.as_str() {
+                        "USER" => "331 Password please.\r\n".to_owned(),
+                        "PASS" => "230 Logged in.\r\n".to_owned(),
+                        "TYPE" => "200 Binary.\r\n".to_owned(),
+                        "NOOP" => "200 NOOP ok.\r\n".to_owned(),
+                        "PWD" => "257 \"/\"\r\n".to_owned(),
+                        "PASV" => {
+                            let l = TcpListener::bind("127.0.0.1:0").await.expect("bind data");
+                            let p = l.local_addr().expect("addr").port();
+                            data = Some(l);
+                            format!(
+                                "227 Entering Passive Mode (127,0,0,1,{},{}).\r\n",
+                                p / 256,
+                                p % 256
+                            )
+                        }
+                        "STOR" => {
+                            let Some(l) = data.take() else {
+                                let _ = write.write_all(b"425 Use PASV first.\r\n").await;
+                                continue;
+                            };
+                            if write.write_all(b"150 Ok to send data.\r\n").await.is_err() {
+                                break;
+                            }
+                            let Ok((mut sock, _)) = l.accept().await else {
+                                break;
+                            };
+                            let mut bytes = Vec::new();
+                            if sock.read_to_end(&mut bytes).await.is_err() {
+                                break;
+                            }
+                            files.lock().unwrap().insert(arg.to_owned(), bytes);
+                            close = !control;
+                            "226 Transfer complete.\r\n".to_owned()
+                        }
+                        "SIZE" => match files.lock().unwrap().get(arg) {
+                            Some(bytes) => format!("213 {}\r\n", bytes.len()),
+                            None => "550 Could not get file size.\r\n".to_owned(),
+                        },
+                        "STAT" if !files.lock().unwrap().contains_key(arg) => {
+                            close = !control;
+                            "213-Status follows:\r\n213 End of status\r\n".to_owned()
+                        }
+                        _ => "502 Not implemented.\r\n".to_owned(),
+                    };
+                    if write.write_all(reply.as_bytes()).await.is_err() {
+                        break;
+                    }
+                    if close {
+                        closed.fetch_add(1, Ordering::SeqCst);
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    server
+}
