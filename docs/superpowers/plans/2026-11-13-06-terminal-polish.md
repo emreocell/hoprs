@@ -309,6 +309,13 @@ docs/qa/plan-6-checklist.md                             # NOVO
 - **(b) NAT, firewall ou roteador:** derrubam a conexão TCP ociosa sem avisar, e o sinal só aparece no próximo uso;
 - **(c) desistência do app:** as 5 tentativas de reconexão se esgotam enquanto o usuário não está olhando, e a aba fica `Disconnected` esperando um clique.
 
+**O autor confirmou que as quedas aconteceram num site FTP.** Por isso o diagnóstico e a correção do FTP vêm primeiro, e o SSH entra para cobrir o mesmo cenário. Hipóteses do lado FTP, nesta ordem:
+- o `NOOP` sendo descartado pelo `try_lock` enquanto a conexão de controle está ocupada;
+- o servidor não contando `NOOP` como atividade (vsftpd, Pure-FTPd e ProFTPD com `TimeoutIdle` têm comportamentos diferentes);
+- um NAT ou firewall cortando a conexão ociosa.
+
+Teste também o caso em que a conexão de controle continua viva, mas as conexões de dados do pool expiram. Nesse caso, a primeira listagem ou transferência depois da pausa tem de funcionar sem erro visível.
+
 **Interfaces:**
 - **Diagnóstico primeiro:**
   - reproduzir com serviços Docker de timeout curto: vsftpd com `idle_session_timeout=20` e sshd com `ClientAliveInterval 5` / `ClientAliveCountMax 1`;
