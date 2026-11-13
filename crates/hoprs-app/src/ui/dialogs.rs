@@ -298,7 +298,8 @@ pub fn host_key_changed_body<'a>(app: &'a App, tab: &'a Tab) -> iced::widget::Co
         msg: m,
     };
     let pad = Padding::from([theme::SPACE_2XS, theme::SPACE_XS]);
-    let line = tab.host_key_change().and_then(|change| change.line);
+    let conn = app.conn(&tab.site);
+    let line = conn.host_key_change().and_then(|change| change.line);
     let explanation = if line.is_some() {
         strings::HOST_KEY_CHANGED_BODY
     } else {
@@ -320,7 +321,7 @@ pub fn host_key_changed_body<'a>(app: &'a App, tab: &'a Tab) -> iced::widget::Co
                 .color(p.muted),
         );
     }
-    let host = tab
+    let host = conn
         .failed_endpoint
         .as_ref()
         .map(|(host, port)| format!("{host}:{port}"))
@@ -353,7 +354,7 @@ pub fn host_key_changed_body<'a>(app: &'a App, tab: &'a Tab) -> iced::widget::Co
         );
     }
     let muted = |label: &'a str| text(label).size(theme::TEXT_SM).color(p.muted);
-    body = match &tab.known_hosts {
+    body = match &conn.known_hosts {
         KnownHostsFix::Idle => body.push(actions),
         KnownHostsFix::Checking => body.push(muted(strings::READING_KNOWN_HOSTS)),
         KnownHostsFix::Removing => body.push(muted(strings::REMOVING_KNOWN_HOSTS)),

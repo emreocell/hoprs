@@ -270,9 +270,9 @@ async fn changed_host_key_has_no_accept() {
     let mut app = changed_host_key_tab(&fake, &s).await;
 
     let tab = &app.tabs[app.tab_of(&s.id).unwrap()];
-    assert!(matches!(tab.state, TabState::Failed(_)));
+    assert!(matches!(app.conn(&s.id).state, TabState::Failed(_)));
     assert_eq!(
-        tab.host_key_change(),
+        app.conn(&s.id).host_key_change(),
         Some(hoprs_ssh::HostKeyChange { line: Some(3) })
     );
     assert_eq!(
@@ -292,7 +292,7 @@ async fn changed_host_key_has_no_accept() {
     let sites = connect_effect(app.update(Message::ConnectSite(other.id.clone())));
     drive(&mut app, &fake, sites).await;
     let tab = &app.tabs[app.tab_of(&other.id).unwrap()];
-    assert_eq!(tab.host_key_change(), None);
+    assert_eq!(app.conn(&other.id).host_key_change(), None);
     assert_eq!(
         app.failure_actions(tab),
         [FailureAction::Reconnect, FailureAction::EditSite]
@@ -319,7 +319,7 @@ async fn remove_entry_warns_on_multi_host_line() {
     let mut app = changed_host_key_tab(&fake, &s).await;
     let tab = app.tabs[app.tab_of(&s.id).unwrap()].id;
     let index = app.tab_of(&s.id).unwrap();
-    let TabState::Failed(failure) = &app.tabs[index].state else {
+    let TabState::Failed(failure) = &app.tab_conn(index).state else {
         panic!("failed tab");
     };
     let old_session = failure.session.expect("the failed session is kept");
@@ -347,11 +347,11 @@ async fn remove_entry_warns_on_multi_host_line() {
         panic!("one KnownHostEntries effect");
     };
     assert_eq!((host.as_str(), port), ("h", 2222));
-    assert_eq!(app.tabs[index].known_hosts, KnownHostsFix::Checking);
-    let message = effects::known_host_entries(backend.clone(), tab, host, port).await;
+    assert_eq!(app.tab_conn(index).known_hosts, KnownHostsFix::Checking);
+    let message = effects::known_host_entries(backend.clone(), s.id.clone(), host, port).await;
     assert!(app.update(message).is_empty());
-    let KnownHostsFix::Confirm(entries) = &app.tabs[index].known_hosts else {
-        panic!("{:?}", app.tabs[index].known_hosts);
+    let KnownHostsFix::Confirm(entries) = &app.tab_conn(index).known_hosts else {
+        panic!("{:?}", app.tab_conn(index).known_hosts);
     };
     let warning = dialogs::known_hosts_warning(entries).expect("a warning");
     assert!(
@@ -367,7 +367,7 @@ async fn remove_entry_warns_on_multi_host_line() {
         tab,
         msg: KnownHostsMsg::Cancel,
     });
-    assert_eq!(app.tabs[index].known_hosts, KnownHostsFix::Idle);
+    assert_eq!(app.tab_conn(index).known_hosts, KnownHostsFix::Idle);
 
     // Again, and confirm: removed, then the tab connects again (the next connect asks
     // about the new key in a dialog).
@@ -378,7 +378,7 @@ async fn remove_entry_warns_on_multi_host_line() {
     let Ok([Effect::KnownHostEntries { host, port, .. }]) = <[Effect; 1]>::try_from(effects) else {
         panic!("one KnownHostEntries effect");
     };
-    let message = effects::known_host_entries(backend.clone(), tab, host, port).await;
+    let message = effects::known_host_entries(backend.clone(), s.id.clone(), host, port).await;
     app.update(message);
     let effects = app.update(Message::KnownHosts {
         tab,
@@ -402,8 +402,9 @@ async fn remove_entry_warns_on_multi_host_line() {
         [entry(3, true), entry(7, false)],
         "the lines shown"
     );
-    assert_eq!(app.tabs[index].known_hosts, KnownHostsFix::Removing);
-    let message = effects::remove_known_host(backend.clone(), tab, host, port, expected).await;
+    assert_eq!(app.tab_conn(index).known_hosts, KnownHostsFix::Removing);
+    let message =
+        effects::remove_known_host(backend.clone(), s.id.clone(), host, port, expected).await;
     let effects = app.update(message);
     assert_eq!(fake.known_host_removals(), [("h".to_owned(), 2222)]);
     // A new session connects (a reused session would not check known_hosts the same
@@ -412,8 +413,8 @@ async fn remove_entry_warns_on_multi_host_line() {
         panic!("one RestartSite effect");
     };
     assert_eq!((close, &site), (None, &s.id));
-    assert_eq!(app.tabs[index].state, TabState::Connecting);
-    assert_eq!(app.tabs[index].known_hosts, KnownHostsFix::Idle);
+    assert_eq!(app.tab_conn(index).state, TabState::Connecting);
+    assert_eq!(app.tab_conn(index).known_hosts, KnownHostsFix::Idle);
     let messages: Vec<Message> = effects::restart_site(backend.clone(), close, site)
         .collect()
         .await;
@@ -421,8 +422,8 @@ async fn remove_entry_warns_on_multi_host_line() {
         app.update(message);
     }
     assert_eq!(fake.closed(), [old_session]);
-    let TabState::Connected(connected) = &app.tabs[index].state else {
-        panic!("{:?}", app.tabs[index].state);
+    let TabState::Connected(connected) = &app.tab_conn(index).state else {
+        panic!("{:?}", app.tab_conn(index).state);
     };
     assert_ne!(connected.session, old_session, "a new session");
 
@@ -436,7 +437,8 @@ async fn remove_entry_warns_on_multi_host_line() {
         tab,
         msg: KnownHostsMsg::Start,
     });
-    let message = effects::known_host_entries(backend.clone(), tab, "h".into(), 2222).await;
+    let message =
+        effects::known_host_entries(backend.clone(), s.id.clone(), "h".into(), 2222).await;
     app.update(message);
     fake.set_known_host_entries(vec![entry(3, false), entry(9, true)]);
     let effects = app.update(Message::KnownHosts {
@@ -456,10 +458,10 @@ async fn remove_entry_warns_on_multi_host_line() {
     else {
         panic!("one RemoveKnownHost effect");
     };
-    let message = effects::remove_known_host(backend, tab, host, port, expected).await;
+    let message = effects::remove_known_host(backend, s.id.clone(), host, port, expected).await;
     assert!(app.update(message).is_empty());
-    let KnownHostsFix::Failed(error) = &app.tabs[0].known_hosts else {
-        panic!("{:?}", app.tabs[0].known_hosts);
+    let KnownHostsFix::Failed(error) = &app.tab_conn(0).known_hosts else {
+        panic!("{:?}", app.tab_conn(0).known_hosts);
     };
     assert_eq!(error.kind, ErrorKind::Conflict);
     assert_eq!(fake.known_host_removals().len(), 1, "nothing more removed");
@@ -472,7 +474,7 @@ async fn remove_entry_warns_on_multi_host_line() {
         msg: KnownHostsMsg::Start,
     });
     app.update(Message::KnownHostEntries {
-        tab,
+        site: s.id.clone(),
         result: Ok(vec![entry(3, false)]),
     });
     app.update(Message::KnownHosts {
@@ -482,13 +484,13 @@ async fn remove_entry_warns_on_multi_host_line() {
     let error = Error::new(ErrorKind::Permission, "Permission denied");
     assert!(
         app.update(Message::KnownHostRemoved {
-            tab,
+            site: s.id.clone(),
             result: Err(error.clone()),
         })
         .is_empty()
     );
-    assert_eq!(app.tabs[0].known_hosts, KnownHostsFix::Failed(error));
-    assert!(matches!(app.tabs[0].state, TabState::Failed(_)));
+    assert_eq!(app.tab_conn(0).known_hosts, KnownHostsFix::Failed(error));
+    assert!(matches!(app.tab_conn(0).state, TabState::Failed(_)));
 }
 
 /// Review Focus 4: a changed certificate shows the fingerprint trusted before and the one
@@ -935,7 +937,7 @@ async fn pinned_key_change_offers_close_and_reconnect() {
     let sites = connect_effect(app.update(Message::ConnectSite(s.id.clone())));
     drive(&mut app, &fake, sites).await;
     let tab = app.tabs[0].id;
-    let old = app.tabs[0].session().expect("connected");
+    let old = app.tab_conn(0).session().expect("connected");
 
     // The session reconnects on its own and finds another key than the one it pinned.
     app.update(Message::SessionState {
@@ -945,13 +947,13 @@ async fn pinned_key_change_offers_close_and_reconnect() {
         ),
         auth: None,
     });
-    assert!(matches!(app.tabs[0].state, TabState::Connected(_)));
+    assert!(matches!(app.tab_conn(0).state, TabState::Connected(_)));
     assert_eq!(
-        app.tabs[0].host_key_change(),
+        app.tab_conn(0).host_key_change(),
         Some(hoprs_ssh::HostKeyChange { line: None })
     );
     assert_eq!(
-        crate::ui::files::banner(&app.tabs[0]),
+        crate::ui::files::banner(app.tab_conn(0)),
         Some(crate::ui::files::Banner::HostKeyChanged),
         "the banner explains the changed key"
     );
@@ -972,7 +974,7 @@ async fn pinned_key_change_offers_close_and_reconnect() {
         })
         .is_empty()
     );
-    assert_eq!(app.tabs[0].known_hosts, KnownHostsFix::Idle);
+    assert_eq!(app.tab_conn(0).known_hosts, KnownHostsFix::Idle);
 
     // A password typed with "save" for the old session is forgotten with it.
     show(&mut app, request(9, old.0, "h:22", password()));
@@ -986,20 +988,20 @@ async fn pinned_key_change_offers_close_and_reconnect() {
     };
     assert_eq!((close, &site), (Some(old), &s.id));
     assert!(!app.dialogs.is_saving(old));
-    assert_eq!(app.tabs[0].state, TabState::Connecting);
-    assert_eq!(app.tabs[0].conn, None);
-    assert_eq!(crate::ui::files::banner(&app.tabs[0]), None);
+    assert_eq!(app.tab_conn(0).state, TabState::Connecting);
+    assert_eq!(app.tab_conn(0).conn, None);
+    assert_eq!(crate::ui::files::banner(app.tab_conn(0)), None);
     let backend: Arc<dyn BackendApi> = fake.clone();
     let messages: Vec<Message> = effects::restart_site(backend, close, site).collect().await;
     for message in messages {
         app.update(message);
     }
     assert_eq!(fake.closed(), [old], "closed before the new connect");
-    let TabState::Connected(connected) = &app.tabs[0].state else {
-        panic!("{:?}", app.tabs[0].state);
+    let TabState::Connected(connected) = &app.tab_conn(0).state else {
+        panic!("{:?}", app.tab_conn(0).state);
     };
     assert_ne!(connected.session, old, "a new session");
-    assert_eq!(app.tabs[0].host_key_change(), None);
+    assert_eq!(app.tab_conn(0).host_key_change(), None);
 
     // Closing a tab forgets its session's pending save too.
     let session = connected.session;
@@ -1020,16 +1022,16 @@ async fn plain_loss_keeps_reconnect() {
     let sites = connect_effect(app.update(Message::ConnectSite(s.id.clone())));
     drive(&mut app, &fake, sites).await;
     let tab = app.tabs[0].id;
-    let session = app.tabs[0].session().unwrap();
+    let session = app.tab_conn(0).session().unwrap();
     let lost = Error::new(ErrorKind::Network, "Connection lost");
     app.update(Message::SessionState {
         session,
         state: hoprs_core::ConnectionState::Disconnected(lost.clone()),
         auth: None,
     });
-    assert_eq!(app.tabs[0].host_key_change(), None);
+    assert_eq!(app.tab_conn(0).host_key_change(), None);
     assert_eq!(
-        crate::ui::files::banner(&app.tabs[0]),
+        crate::ui::files::banner(app.tab_conn(0)),
         Some(crate::ui::files::Banner::Lost(&lost))
     );
     assert!(matches!(
@@ -1056,7 +1058,7 @@ async fn closing_a_connecting_tab_drops_its_prompts() {
     );
     let mut app = loaded(&fake).await;
     connect_effect(app.update(Message::OpenWorkspace(w.id.clone())));
-    assert_eq!(app.tabs[0].state, TabState::Connecting);
+    assert_eq!(app.tab_conn(0).state, TabState::Connecting);
     let of = |site: &Site, id: u64, session: u64, kind: PromptKind| PromptRequest {
         site: site.id.clone(),
         ..request(id, session, "h:22", kind)

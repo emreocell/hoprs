@@ -852,7 +852,7 @@ async fn reloaded_profiles_reconcile_tabs() {
     drive(&mut app, &fake, sites).await;
     let sites = connect_effect(app.update(Message::ConnectSite(c.id.clone())));
     drive(&mut app, &fake, sites).await;
-    let session = |app: &App, id: &SiteId| app.tabs[app.tab_of(id).unwrap()].session().unwrap();
+    let session = |app: &App, id: &SiteId| app.tab_conn(app.tab_of(id).unwrap()).session().unwrap();
     let (sa, sb, sc) = (
         session(&app, &a.id),
         session(&app, &b.id),
@@ -896,7 +896,7 @@ async fn reloaded_profiles_reconcile_tabs() {
         }
         other => panic!("{other:?}"),
     }
-    assert_eq!(app.tabs[app.tab_of(&b.id).unwrap()].session(), None);
+    assert_eq!(app.tab_conn(app.tab_of(&b.id).unwrap()).session(), None);
     assert_eq!(session(&app, &c.id), sc, "unchanged endpoint: kept");
     assert!(app.active_tab.is_some_and(|i| i < app.tabs.len()));
 

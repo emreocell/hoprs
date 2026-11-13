@@ -28,7 +28,7 @@ impl App {
     /// walks them). Empty unless both panes can act (the tab is connected and listed).
     pub(super) fn transfer_specs(&self, index: usize, from: Side) -> Vec<TransferSpec> {
         let tab = &self.tabs[index];
-        if !tab.can_transfer(from) {
+        if !tab.can_transfer(self.tab_conn(index), from) {
             return Vec::new();
         }
         let source = tab.pane(from);
@@ -108,12 +108,12 @@ impl App {
         let connected = self
             .shown_tab()
             .and_then(|id| self.tab_index(id))
-            .filter(|&i| self.tabs[i].is_files() && self.tabs[i].session().is_some());
+            .filter(|&i| self.tabs[i].is_files() && self.tab_session(i).is_some());
         let Some(index) = connected else {
             self.queue_error(Error::new(ErrorKind::NotFound, strings::DROP_NEEDS_SITE));
             return Vec::new();
         };
-        if !self.tabs[index].can_act(Side::Remote) {
+        if !self.can_act(index, Side::Remote) {
             self.queue_error(Error::new(ErrorKind::Conflict, strings::DROP_PANE_BUSY));
             return Vec::new();
         }

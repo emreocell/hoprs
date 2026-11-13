@@ -166,7 +166,7 @@ async fn transfer_tab() -> (Arc<FakeBackend>, App, Site, TabId) {
     local.add_file("/home/me/b.txt", b"b", SystemTime::UNIX_EPOCH);
     local.add_dir("/home/me/dir");
     let app = connected_tab(fake, &a).await;
-    assert!(app.tabs[0].can_act(Side::Remote) && app.tabs[0].can_act(Side::Local));
+    assert!(app.can_act(0, Side::Remote) && app.can_act(0, Side::Local));
     let tab = app.tabs[0].id;
     (fake.clone(), app, a, tab)
 }
@@ -195,7 +195,7 @@ async fn enqueue_selection_to_other_pane() {
     let (fake, mut app, a, tab) = transfer_tab().await;
 
     // Nothing selected: the button does nothing.
-    assert!(!app.tabs[0].can_transfer(Side::Local));
+    assert!(!app.tabs[0].can_transfer(app.tab_conn(0), Side::Local));
     assert!(
         app.update(pane_msg(tab, Side::Local, PaneMsg::Transfer))
             .is_empty()
@@ -211,7 +211,7 @@ async fn enqueue_selection_to_other_pane() {
     }));
     app.update(pane_msg(tab, Side::Local, PaneMsg::Click(dir_row)));
     app.update(Message::Modifiers(Mods::default()));
-    assert!(app.tabs[0].can_transfer(Side::Local));
+    assert!(app.tabs[0].can_transfer(app.tab_conn(0), Side::Local));
     let effects = app.update(pane_msg(tab, Side::Local, PaneMsg::Transfer));
     let specs = enqueued(&effects);
     assert_eq!(
@@ -256,9 +256,9 @@ async fn enqueue_selection_to_other_pane() {
     );
 
     // A tab whose remote side is not connected sends nothing.
-    app.tabs[0].state = TabState::Connecting;
+    app.conns.get_mut(&app.tabs[0].site).unwrap().state = TabState::Connecting;
     app.update(pane_msg(tab, Side::Local, PaneMsg::Click(a_row)));
-    assert!(!app.tabs[0].can_transfer(Side::Local));
+    assert!(!app.tabs[0].can_transfer(app.tab_conn(0), Side::Local));
     assert!(
         app.update(pane_msg(tab, Side::Local, PaneMsg::Transfer))
             .is_empty()

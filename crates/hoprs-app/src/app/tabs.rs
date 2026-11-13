@@ -6,13 +6,14 @@
 //! workspace's saved tabs) opens several tabs with one connect, and "New terminal tab" /
 //! "New files tab" add one to the session already connected, without a connect.
 //!
-//! The connection fields of a tab (`state`, `conn`, `auth`, `reconnecting`,
-//! `failed_endpoint`) are the same in every tab of its site: everything that changes them
-//! (a connect's result, the session's feed, a reconnect, a restart, a moved or edited
-//! site) changes them in all those tabs at once. The session goes away only with the last
-//! tab of its site: closing one tab keeps it for the others, and so does the abandon of
-//! a connect's dialogs ([`App::abandon_site_prompts`]), which only the last tab of a
-//! connecting site does.
+//! The connection is not the tabs': it lives once per site, in a [`SiteConn`] that
+//! [`App`] holds while the site has tabs. Every writer (a connect's result, the session's
+//! feed, a reconnect, a restart, a moved or edited site, the `known_hosts` fix) changes
+//! that one record, and every tab of the site, old or opened later, reads it. A tab holds
+//! only what is its own: kind, panes, focus (and, later, its terminal). The session goes
+//! away only with the last tab of its site: closing one tab keeps it for the others, and
+//! so does the abandon of a connect's dialogs ([`App::abandon_site_prompts`]), which only
+//! the last tab of a connecting site does.
 
 use hoprs_core::{
     ConnectionState, Error, OpenAs, Protocol, RemotePath, SavedTab, Site, SiteId, TabKind,
@@ -35,29 +36,65 @@ pub enum TabState {
     Failed(ConnectError),
 }
 
-/// One tab: a site, its connection and, for a files tab, its two panes. A terminal tab
-/// has panes too but never lists them.
+/// A site's connection, shared by all its tabs (one record per site with tabs).
 #[derive(Debug, Clone, PartialEq)]
-pub struct Tab {
-    pub id: TabId,
-    pub site: SiteId,
-    pub kind: TabKind,
+pub struct SiteConn {
     pub state: TabState,
-    pub local: Pane,
-    pub remote: Pane,
-    /// The pane the keyboard drives.
-    pub focus: Side,
-    /// "Remove the old entry…" after a changed host key.
-    pub known_hosts: KnownHostsFix,
-    /// The site's `host:port` when its connect failed (the endpoint "Remove the old
-    /// entry…" works on).
-    pub failed_endpoint: Option<(String, u16)>,
     /// The connected session's state, as its feed last reported it (`None` until then).
     pub conn: Option<ConnectionState>,
     /// How the session logged in (SSH), as its feed last reported it.
     pub auth: Option<AuthMethod>,
     /// The banner's "Reconnect" is in flight.
     pub reconnecting: bool,
+    /// The site's `host:port` when its connect failed (the endpoint "Remove the old
+    /// entry…" works on).
+    pub failed_endpoint: Option<(String, u16)>,
+    /// "Remove the old entry…" after a changed host key.
+    pub known_hosts: KnownHostsFix,
+}
+
+/// What a site's tabs read before it has a record (never, while it has tabs).
+static CONNECTING: SiteConn = SiteConn::connecting();
+
+impl SiteConn {
+    pub const fn connecting() -> Self {
+        Self {
+            state: TabState::Connecting,
+            conn: None,
+            auth: None,
+            reconnecting: false,
+            failed_endpoint: None,
+            known_hosts: KnownHostsFix::Idle,
+        }
+    }
+
+    /// The connected session, if any.
+    pub fn session(&self) -> Option<SessionId> {
+        match &self.state {
+            TabState::Connected(connected) => Some(connected.session),
+            TabState::Connecting | TabState::Failed(_) => None,
+        }
+    }
+
+    /// Forgets what the session's feed said (a new session, or none).
+    fn forget_feed(&mut self) {
+        self.conn = None;
+        self.auth = None;
+        self.reconnecting = false;
+    }
+}
+
+/// One tab: a site and, for a files tab, its two panes. A terminal tab has panes too but
+/// never lists them. Its connection is its site's [`SiteConn`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tab {
+    pub id: TabId,
+    pub site: SiteId,
+    pub kind: TabKind,
+    pub local: Pane,
+    pub remote: Pane,
+    /// The pane the keyboard drives.
+    pub focus: Side,
 }
 
 impl Tab {
@@ -79,17 +116,10 @@ impl Tab {
         }
     }
 
-    /// The connected session, if any.
-    pub fn session(&self) -> Option<SessionId> {
-        match &self.state {
-            TabState::Connected(connected) => Some(connected.session),
-            TabState::Connecting | TabState::Failed(_) => None,
-        }
-    }
-
-    pub fn pane_status(&self, side: Side) -> PaneStatus<'_> {
+    /// What a pane shows, given its site's connection `conn`.
+    pub fn pane_status<'a>(&'a self, conn: &SiteConn, side: Side) -> PaneStatus<'a> {
         if side == Side::Remote {
-            match self.state {
+            match conn.state {
                 TabState::Connecting => return PaneStatus::Loading,
                 TabState::Failed(_) => return PaneStatus::NotConnected,
                 TabState::Connected(_) => {}
@@ -102,22 +132,6 @@ impl Tab {
             Listing::Loaded if pane.entries.is_empty() => PaneStatus::Empty,
             Listing::Loaded => PaneStatus::Full,
         }
-    }
-
-    /// Takes the connection fields of `other`, a tab of the same site.
-    fn share_connection(&mut self, other: &Tab) {
-        self.state = other.state.clone();
-        self.conn = other.conn.clone();
-        self.auth = other.auth.clone();
-        self.reconnecting = other.reconnecting;
-        self.failed_endpoint = other.failed_endpoint.clone();
-    }
-
-    /// Forgets what the session's feed said (a new session, or none).
-    pub(super) fn forget_feed(&mut self) {
-        self.conn = None;
-        self.auth = None;
-        self.reconnecting = false;
     }
 }
 
@@ -155,6 +169,41 @@ pub fn tab_plan(site: Option<&Site>, saved: &[SavedTab]) -> Vec<(TabKind, Option
 }
 
 impl App {
+    /// The connection of `site`, shared by its tabs.
+    pub fn conn(&self, site: &SiteId) -> &SiteConn {
+        self.conns.get(site).unwrap_or(&CONNECTING)
+    }
+
+    /// The connection of the tab at `index`.
+    pub fn tab_conn(&self, index: usize) -> &SiteConn {
+        self.conn(&self.tabs[index].site)
+    }
+
+    /// The one record to change the connection of `site` (created if missing).
+    pub(super) fn conn_mut(&mut self, site: &SiteId) -> &mut SiteConn {
+        self.conns
+            .entry(site.clone())
+            .or_insert_with(SiteConn::connecting)
+    }
+
+    /// The session of the tab at `index`, if connected.
+    pub fn tab_session(&self, index: usize) -> Option<SessionId> {
+        self.tab_conn(index).session()
+    }
+
+    /// The site whose connected session is `session`.
+    pub(super) fn site_of_session(&self, session: SessionId) -> Option<SiteId> {
+        self.conns
+            .iter()
+            .find(|(_, conn)| conn.session() == Some(session))
+            .map(|(site, _)| site.clone())
+    }
+
+    /// What pane `side` of the tab at `index` shows.
+    pub fn pane_status(&self, index: usize, side: Side) -> PaneStatus<'_> {
+        self.tabs[index].pane_status(self.tab_conn(index), side)
+    }
+
     pub fn tab_index(&self, id: TabId) -> Option<usize> {
         self.tabs.iter().position(|t| t.id == id)
     }
@@ -171,30 +220,16 @@ impl App {
             .collect()
     }
 
-    /// The indices of the tabs on `session`, in strip order.
-    pub(super) fn session_tabs(&self, session: SessionId) -> Vec<usize> {
-        (0..self.tabs.len())
-            .filter(|&i| self.tabs[i].session() == Some(session))
-            .collect()
-    }
-
-    /// Applies `f` to every tab of `site`.
-    pub(super) fn each_site_tab(&mut self, site: &SiteId, mut f: impl FnMut(&mut Tab)) {
-        self.tabs
-            .iter_mut()
-            .filter(|t| &t.site == site)
-            .for_each(&mut f);
-    }
-
     /// Whether "New terminal tab" / "New files tab" can add a tab next to tab `index`:
     /// its site is SSH and its session is connected (not lost).
     pub fn can_open_session_tab(&self, index: usize) -> bool {
         let Some(tab) = self.tabs.get(index) else {
             return false;
         };
+        let conn = self.conn(&tab.site);
         has_terminal(self.site(&tab.site))
-            && matches!(tab.state, TabState::Connected(_))
-            && tab.lost_connection().is_none()
+            && matches!(conn.state, TabState::Connected(_))
+            && conn.lost_connection().is_none()
     }
 
     /// A new tab for `site`, and the listing it runs (a files tab lists its local side;
@@ -229,36 +264,44 @@ impl App {
                     .and_then(remote_path)
             })
             .unwrap_or_else(RemotePath::root);
+        let (mut tab, effects) = self.new_tab_at(site, kind, local, remote);
+        if kind == TabKind::Files {
+            // A folder from the saved tab may be gone since: its first listing falls back.
+            let from_saved = |dir: Option<bool>| dir.unwrap_or(false).then_some(Restore::Saved);
+            tab.local.restore = from_saved(
+                restored
+                    .and_then(|t| t.local_dir.as_deref())
+                    .map(|d| local_path(d).as_ref() == Some(&tab.local.path)),
+            );
+            tab.remote.restore = from_saved(
+                restored
+                    .and_then(|t| t.remote_dir.as_deref())
+                    .map(|d| RemotePath::new(d).ok().as_ref() == Some(&tab.remote.path)),
+            );
+        }
+        (tab, effects)
+    }
+
+    /// A new tab for `site` at these folders, and the local listing a files tab runs.
+    fn new_tab_at(
+        &mut self,
+        site: SiteId,
+        kind: TabKind,
+        local: RemotePath,
+        remote: RemotePath,
+    ) -> (Tab, Vec<Effect>) {
         let id = TabId(self.next_id());
         let mut tab = Tab {
             id,
             site,
             kind,
-            state: TabState::Connecting,
             local: Pane::new(local.clone()),
             remote: Pane::new(remote),
             focus: Side::Local,
-            known_hosts: KnownHostsFix::Idle,
-            failed_endpoint: None,
-            conn: None,
-            auth: None,
-            reconnecting: false,
         };
         if kind == TabKind::Terminal {
             return (tab, Vec::new());
         }
-        // A folder from the saved tab may be gone since: its first listing falls back.
-        let from_saved = |dir: Option<bool>| dir.unwrap_or(false).then_some(Restore::Saved);
-        tab.local.restore = from_saved(
-            restored
-                .and_then(|t| t.local_dir.as_deref())
-                .map(|d| local_path(d).as_ref() == Some(&tab.local.path)),
-        );
-        tab.remote.restore = from_saved(
-            restored
-                .and_then(|t| t.remote_dir.as_deref())
-                .map(|d| RemotePath::new(d).ok().as_ref() == Some(&tab.remote.path)),
-        );
         let request_id = RequestId(self.next_id());
         tab.local.listing = Listing::Loading;
         tab.local.request = Some(request_id);
@@ -312,13 +355,16 @@ impl App {
             self.readopt_site(&site);
             let index = match self.tab_of(&site) {
                 Some(index) => {
-                    if matches!(self.tabs[index].state, TabState::Failed(_)) {
-                        self.each_site_tab(&site, |tab| tab.state = TabState::Connecting);
+                    let conn = self.conn_mut(&site);
+                    if matches!(conn.state, TabState::Failed(_)) {
+                        conn.state = TabState::Connecting;
                         connect.push(site);
                     }
                     index
                 }
                 None => {
+                    // A new connection: whatever the site had is gone with its tabs.
+                    self.conns.insert(site.clone(), SiteConn::connecting());
                     let start = self.tabs.len();
                     for (kind, restored) in tab_plan(self.site(&site), &saved) {
                         let (tab, effects) = self.new_tab(site.clone(), kind, restored.as_ref());
@@ -344,7 +390,7 @@ impl App {
 
     /// One site's result lands in all its tabs, whatever the other sites do.
     pub(super) fn site_connected(&mut self, site: SiteId, result: ConnectResult) -> Vec<Effect> {
-        let Some(first) = self.tab_of(&site) else {
+        if self.tab_of(&site).is_none() {
             self.readopt_site(&site);
             // Its tabs are gone: don't leave the session open behind the user's back.
             let session = match result {
@@ -355,23 +401,20 @@ impl App {
                 self.forget_session(session);
             }
             return session.map(Effect::CloseSession).into_iter().collect();
-        };
+        }
         // A new session's feed tells its state and login from now on. The session already
         // watched keeps what its feed said: the feed only reports changes from here.
-        let same = matches!(&result, Ok(c) if self.tabs[first].session() == Some(c.session));
-        self.each_site_tab(&site, |tab| {
-            tab.known_hosts = KnownHostsFix::Idle;
-            if !same {
-                tab.forget_feed();
-            }
-        });
+        let conn = self.conn_mut(&site);
+        let same = matches!(&result, Ok(c) if conn.session() == Some(c.session));
+        conn.known_hosts = KnownHostsFix::Idle;
+        if !same {
+            conn.forget_feed();
+        }
         match result {
             Ok(connected) => {
                 self.queue.site_restored(&site);
                 let mut effects = self.settle_saving(connected.session, true);
-                self.each_site_tab(&site, |tab| {
-                    tab.state = TabState::Connected(connected);
-                });
+                self.conn_mut(&site).state = TabState::Connected(connected);
                 // The remote panes list their folders now that they can.
                 for index in self.tabs_of(&site) {
                     effects.extend(self.request_listing(index, Side::Remote));
@@ -386,7 +429,7 @@ impl App {
                 // Where it failed, as the profile said then: "Remove the old entry…"
                 // works on that endpoint even if the site is edited meanwhile.
                 self.note_failed_endpoint(&site);
-                self.each_site_tab(&site, |tab| tab.state = TabState::Failed(failure.clone()));
+                self.conn_mut(&site).state = TabState::Failed(failure);
                 effects
             }
         }
@@ -394,6 +437,7 @@ impl App {
 
     /// "New terminal tab" / "New files tab" on tab `tab`: a `kind` tab of the same site,
     /// right after it, on the session already connected (no connect). A new files tab
+    /// starts at the folders of the files tab it was opened from (else the site's) and
     /// lists both its sides at once.
     pub(super) fn new_session_tab(&mut self, tab: TabId, kind: TabKind) -> Vec<Effect> {
         let Some(index) = self.tab_index(tab) else {
@@ -402,9 +446,14 @@ impl App {
         if !self.can_open_session_tab(index) {
             return Vec::new();
         }
-        let site = self.tabs[index].site.clone();
-        let (mut new, mut effects) = self.new_tab(site, kind, None);
-        new.share_connection(&self.tabs[index]);
+        let source = &self.tabs[index];
+        let site = source.site.clone();
+        let (new, mut effects) = if kind == TabKind::Files && source.is_files() {
+            let (local, remote) = (source.local.path.clone(), source.remote.path.clone());
+            self.new_tab_at(site, kind, local, remote)
+        } else {
+            self.new_tab(site, kind, None)
+        };
         let at = index + 1;
         self.tabs.insert(at, new);
         self.active_tab = Some(at);
@@ -438,7 +487,12 @@ impl App {
         if self.tab_of(&tab.site).is_some() {
             return Vec::new();
         }
-        let session = match tab.state {
+        // The last tab: the site's connection goes with it.
+        let conn = self
+            .conns
+            .remove(&tab.site)
+            .unwrap_or(SiteConn::connecting());
+        let session = match conn.state {
             TabState::Connected(connected) => Some(connected.session),
             TabState::Failed(failure) => failure.session,
             // The connect's session isn't known yet: its dialogs say which it is.
@@ -453,8 +507,8 @@ impl App {
     /// The site's host or port changed: its session no longer matches the profile. A
     /// connected one is closed (once) and every tab of the site shows why.
     pub(super) fn drop_moved_session(&mut self, site: &SiteId) -> Option<Effect> {
-        let index = self.tab_of(site)?;
-        match &self.tabs[index].state {
+        self.tab_of(site)?;
+        match &self.conn(site).state {
             TabState::Connected(connected) => {
                 let session = connected.session;
                 let failure = ConnectError {
@@ -465,10 +519,9 @@ impl App {
                     ),
                     keyring_unavailable: false,
                 };
-                self.each_site_tab(site, |tab| {
-                    tab.state = TabState::Failed(failure.clone());
-                    tab.forget_feed();
-                });
+                let conn = self.conn_mut(site);
+                conn.state = TabState::Failed(failure);
+                conn.forget_feed();
                 self.forget_session(session);
                 Some(Effect::CloseSession(session))
             }
@@ -477,20 +530,15 @@ impl App {
         }
     }
 
-    /// The site's settings changed: its failed tabs forget their session (closed here,
-    /// once), so the next connect builds a new one from the saved site. A connected
-    /// session keeps running; the new settings apply to its next connection.
+    /// The site's settings changed: if failed, it forgets its session (closed here), so
+    /// the next connect builds a new one from the saved site. A connected session keeps
+    /// running; the new settings apply to its next connection.
     pub(super) fn drop_stale_session(&mut self, site: &SiteId) -> Option<Effect> {
-        let index = self.tab_of(site)?;
-        let TabState::Failed(failure) = &self.tabs[index].state else {
+        self.tab_of(site)?;
+        let TabState::Failed(failure) = &mut self.conns.get_mut(site)?.state else {
             return None;
         };
-        let session = failure.session?;
-        self.each_site_tab(site, |tab| {
-            if let TabState::Failed(failure) = &mut tab.state {
-                failure.session = None;
-            }
-        });
+        let session = failure.session.take()?;
         self.forget_session(session);
         Some(Effect::CloseSession(session))
     }

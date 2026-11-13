@@ -1,9 +1,10 @@
 //! The session tabs in the top bar: a site's terminal and files tabs, each with the site's
 //! name, its protocol tag in mono (`ssh` for an SSH terminal, `sftp` for its files) and a
 //! × that closes it (the last tab of a site also closes its session). On a connected SSH
-//! tab, "New terminal tab" and "New files tab" add one on the same session. The active tab sits on `paper_3` over the
-//! 2 px white underline. Tabs past the window's width scroll sideways (Shift+wheel or a
-//! touchpad), as the mockup's `overflow-x: auto` strip does.
+//! tab, "New terminal tab" and "New files tab" add one on the same session. The active
+//! tab sits on `paper_3` over the 2 px white underline. Tabs past the window's width
+//! scroll sideways (Shift+wheel or a touchpad), as the mockup's `overflow-x: auto` strip
+//! does.
 
 use hoprs_core::{Protocol, Site, TabKind};
 use iced::widget::scrollable::{Direction, Scrollbar};

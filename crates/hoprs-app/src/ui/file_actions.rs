@@ -9,7 +9,7 @@ use iced::{Alignment, Element, Length, Padding};
 
 use crate::app::actions::{BusyKind, Edit, EditKind, PERMISSION_BITS, PaneAction, Permissions};
 use crate::app::files::Pane;
-use crate::app::{Message, PaneMsg, Tab, TabId};
+use crate::app::{Message, PaneMsg, SiteConn, Tab, TabId};
 use crate::backend::Side;
 use crate::ui::files::edit_id;
 use crate::ui::strings;
@@ -20,7 +20,12 @@ use crate::ui::virtual_list::ROW_HEIGHT;
 /// operation in flight.
 /// `compact` (a narrow pane, [`crate::ui::fit::compact_toolbar`]): no key hints, tighter
 /// padding, and while an operation runs only its progress (the actions are all dim then).
-pub fn toolbar<'a>(tab: &'a Tab, side: Side, compact: bool) -> Element<'a, Message> {
+pub fn toolbar<'a>(
+    tab: &'a Tab,
+    conn: &SiteConn,
+    side: Side,
+    compact: bool,
+) -> Element<'a, Message> {
     let p = palette();
     let pane = tab.pane(side);
     let msg = move |msg: PaneMsg| Message::Pane {
@@ -28,7 +33,7 @@ pub fn toolbar<'a>(tab: &'a Tab, side: Side, compact: bool) -> Element<'a, Messa
         side,
         msg,
     };
-    let can = tab.can_act(side);
+    let can = tab.can_act(conn, side);
     let some = can && !pane.selected_entries().is_empty();
     let chmod = can && !pane.permission_targets().is_empty();
     let action = |label: &'a str, key: Option<&'a str>, enabled: bool, pane_msg: PaneMsg| {
@@ -67,7 +72,7 @@ pub fn toolbar<'a>(tab: &'a Tab, side: Side, compact: bool) -> Element<'a, Messa
             .push(action(
                 transfer,
                 Some(strings::KEY_TRANSFER),
-                tab.can_transfer(side),
+                tab.can_transfer(conn, side),
                 PaneMsg::Transfer,
             ))
             .push(action(

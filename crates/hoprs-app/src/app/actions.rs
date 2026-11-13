@@ -10,7 +10,7 @@
 use hoprs_core::{EntryKind, Error, RemoteEntry, RemotePath};
 
 use super::files::{Pane, PaneStatus, RequestId, Row, Selection};
-use super::tabs::{Tab, TabId};
+use super::tabs::{SiteConn, Tab, TabId};
 use super::{App, Effect};
 use crate::backend::{DeleteTarget, Side};
 use crate::ui::strings;
@@ -242,26 +242,28 @@ impl Pane {
 }
 
 impl Tab {
-    /// Whether a pane can start an action now: its folder is listed (and, remote, it has
-    /// a session) and no other operation runs in it.
-    pub fn can_act(&self, side: Side) -> bool {
-        matches!(self.pane_status(side), PaneStatus::Full | PaneStatus::Empty)
-            && self.pane(side).busy.is_none()
-            && (side == Side::Local || self.session().is_some())
+    /// Whether a pane can start an action now, given its site's connection `conn`: its
+    /// folder is listed (and, remote, it has a session) and no other operation runs in it.
+    pub fn can_act(&self, conn: &SiteConn, side: Side) -> bool {
+        matches!(
+            self.pane_status(conn, side),
+            PaneStatus::Full | PaneStatus::Empty
+        ) && self.pane(side).busy.is_none()
+            && (side == Side::Local || conn.session().is_some())
     }
 
     /// Whether Upload (local) / Download (remote) can send the selection of `side` to
     /// the other pane: both panes listed, connected, and something selected.
-    pub fn can_transfer(&self, side: Side) -> bool {
-        self.can_act(Side::Local)
-            && self.can_act(Side::Remote)
+    pub fn can_transfer(&self, conn: &SiteConn, side: Side) -> bool {
+        self.can_act(conn, Side::Local)
+            && self.can_act(conn, Side::Remote)
             && !self.pane(side).selected_entries().is_empty()
     }
 }
 
 impl App {
-    fn can_act(&self, index: usize, side: Side) -> bool {
-        self.tabs[index].can_act(side)
+    pub(super) fn can_act(&self, index: usize, side: Side) -> bool {
+        self.tabs[index].can_act(self.tab_conn(index), side)
     }
 
     fn selected_entries(&self, index: usize, side: Side) -> Vec<&RemoteEntry> {
@@ -451,8 +453,9 @@ impl App {
     /// Starts `action` in the pane: marks it busy and hands the operation to the effects.
     fn start_op(&mut self, index: usize, side: Side, action: FileAction) -> Vec<Effect> {
         let op = RequestId(self.next_id());
+        let session = self.tab_session(index);
         let tab = &mut self.tabs[index];
-        let (tab_id, session) = (tab.id, tab.session());
+        let tab_id = tab.id;
         let pane = tab.pane_mut(side);
         pane.action_error = None;
         pane.busy = Some(Busy {

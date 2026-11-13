@@ -39,7 +39,7 @@ pub fn line(app: &App) -> StatusLine {
     });
     let tab = app.active_tab.and_then(|i| app.tabs.get(i));
     let site = tab.and_then(|t| app.site(&t.site));
-    let (state, tone) = match tab.map(|t| t.conn_status()) {
+    let (state, tone) = match tab.map(|t| app.conn(&t.site).conn_status()) {
         _ if app.closing => (strings::CLOSING.to_owned(), Tone::Muted),
         None => (strings::NOT_CONNECTED.to_owned(), Tone::Muted),
         Some(ConnStatus::Connecting) => (strings::CONNECTING.to_owned(), Tone::Muted),
@@ -55,7 +55,7 @@ pub fn line(app: &App) -> StatusLine {
     let auth = match (tab, site) {
         (Some(tab), Some(site)) => match strings::ftp_auth(site.protocol) {
             Some(label) => Some(label.to_owned()),
-            None => tab.auth.as_ref().map(strings::ssh_auth),
+            None => app.conn(&tab.site).auth.as_ref().map(strings::ssh_auth),
         },
         _ => None,
     };

@@ -1,7 +1,7 @@
 //! The application state and its pure update: no I/O here, only state
 //! changes and the [`Effect`]s for `effects::run` to perform.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use hoprs_core::{
@@ -69,7 +69,7 @@ pub use dialogs::{Dialog, DialogMsg, Dialogs, FailureAction, KnownHostsFix, Know
 pub use files::{FileKey, Mods, PaneMsg, RequestId};
 pub use lifecycle::ConnStatus;
 pub use queue::{Queue, QueueMsg, QueueTab, RowAction};
-pub use tabs::{Tab, TabId, TabState};
+pub use tabs::{SiteConn, Tab, TabId, TabState};
 
 /// A workspace's entry as the sidebar lists it.
 #[derive(Debug, PartialEq)]
@@ -99,6 +99,8 @@ pub struct App {
     /// The session tabs, in strip order: a site's tabs (terminal or files) share its
     /// session ([`tabs`]).
     pub tabs: Vec<Tab>,
+    /// The connection of each site with tabs, shared by those tabs ([`tabs`]).
+    pub conns: HashMap<SiteId, SiteConn>,
     pub active_tab: Option<usize>,
     /// A sidebar action failed (opening the profile folder).
     pub sidebar_error: Option<Error>,
@@ -269,14 +271,14 @@ pub enum Message {
         tab: TabId,
         msg: KnownHostsMsg,
     },
-    /// The `known_hosts` lines that removing would delete.
+    /// The `known_hosts` lines that removing would delete (the site's fix).
     KnownHostEntries {
-        tab: TabId,
+        site: SiteId,
         result: Result<Vec<KnownHostEntry>, Error>,
     },
-    /// The old `known_hosts` entries were removed (how many).
+    /// The old `known_hosts` entries were removed (how many; the site's fix).
     KnownHostRemoved {
-        tab: TabId,
+        site: SiteId,
         result: Result<usize, Error>,
     },
     /// "Close and reconnect": the tab's failed session is closed and a new one started.
@@ -428,14 +430,14 @@ pub enum Effect {
     /// Reads the `known_hosts` lines for `host:port`; back as
     /// [`Message::KnownHostEntries`].
     KnownHostEntries {
-        tab: TabId,
+        site: SiteId,
         host: String,
         port: u16,
     },
     /// Removes the `known_hosts` lines for `host:port` if they are still `expected` (what
     /// the user confirmed); back as [`Message::KnownHostRemoved`].
     RemoveKnownHost {
-        tab: TabId,
+        site: SiteId,
         host: String,
         port: u16,
         expected: Vec<KnownHostEntry>,
@@ -530,6 +532,7 @@ impl App {
             expanded: HashSet::new(),
             form: None,
             tabs: Vec::new(),
+            conns: HashMap::new(),
             active_tab: None,
             sidebar_error: None,
             home: dirs::home_dir().as_deref().and_then(files::local_path),
@@ -769,11 +772,11 @@ impl App {
             Message::Prompt(event) => return self.prompt_event(event),
             Message::Dialog(msg) => return self.dialog_msg(msg),
             Message::KnownHosts { tab, msg } => return self.known_hosts_msg(tab, msg),
-            Message::KnownHostEntries { tab, result } => {
-                return self.known_host_entries(tab, result);
+            Message::KnownHostEntries { site, result } => {
+                return self.known_host_entries(site, result);
             }
-            Message::KnownHostRemoved { tab, result } => {
-                return self.known_host_removed(tab, result);
+            Message::KnownHostRemoved { site, result } => {
+                return self.known_host_removed(site, result);
             }
             Message::RestartSession(tab) => return self.restart_session(tab),
             Message::SessionState {
@@ -889,6 +892,7 @@ impl App {
     /// New profiles (after a form, an import or a restore). The tabs follow them:
     /// - a site that is gone (deleted, or dropped by a "Replace" restore) loses all its tabs
     ///   and its session;
+    /// - a site that is no longer SSH loses its terminal tabs;
     /// - a site whose host or port changed loses its session: a connected one is closed and
     ///   its tabs show why, with Reconnect starting a new session on the saved endpoint; a
     ///   failed one forgets it ([`drop_stale_session`](Self::drop_stale_session)). A
@@ -914,6 +918,24 @@ impl App {
         }
         for site in gone {
             effects.extend(self.close_site_tabs(&site));
+        }
+        // A site that is no longer SSH has no terminal: its terminal tabs close (the last
+        // tab of the site closes its session).
+        let no_terminal: Vec<TabId> = self
+            .tabs
+            .iter()
+            .filter(|tab| {
+                tab.kind == TabKind::Terminal
+                    && self
+                        .site(&tab.site)
+                        .is_some_and(|site| site.protocol != hoprs_core::Protocol::Ssh)
+            })
+            .map(|tab| tab.id)
+            .collect();
+        for id in no_terminal {
+            if let Some(index) = self.tab_index(id) {
+                effects.extend(self.close_tab(index));
+            }
         }
         let moved: Vec<SiteId> = self
             .sites

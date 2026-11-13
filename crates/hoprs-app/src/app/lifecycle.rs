@@ -37,7 +37,7 @@ pub enum ConnStatus<'a> {
     Disconnected(&'a Error),
 }
 
-impl super::Tab {
+impl super::SiteConn {
     /// The connection as the status bar shows it: the connect's outcome, then what the
     /// session's feed reports.
     pub fn conn_status(&self) -> ConnStatus<'_> {
@@ -67,7 +67,9 @@ impl super::Tab {
             _ => None,
         }
     }
+}
 
+impl super::Tab {
     /// The tab as a workspace saves it: a terminal tab as such (a restored one opens a new
     /// shell), a files tab at its two folders. A side whose listing failed keeps what
     /// `previous` saved for it: a folder that could not be read is not worth restoring.
@@ -102,8 +104,10 @@ impl App {
     /// closes or fails drops out, which ends its feed.
     pub fn watched_sessions(&self) -> Vec<SessionId> {
         let mut sessions: Vec<SessionId> = Vec::new();
-        for session in self.tabs.iter().filter_map(|tab| tab.session()) {
-            if !sessions.contains(&session) {
+        for tab in &self.tabs {
+            if let Some(session) = self.conn(&tab.site).session()
+                && !sessions.contains(&session)
+            {
                 sessions.push(session);
             }
         }
@@ -118,52 +122,46 @@ impl App {
             .iter()
             .filter(|entry| {
                 self.tab_of(&entry.site)
-                    .is_some_and(|i| self.tabs[i].conn_status() == ConnStatus::Connected)
+                    .is_some_and(|_| self.conn(&entry.site).conn_status() == ConnStatus::Connected)
             })
             .count();
         Some((connected, workspace.sites.len()))
     }
 
-    /// A session's feed: its state and, once logged in, how, for every tab of the
-    /// session. Only connected tabs take it (a failed one follows its connect's outcome).
-    /// Back to `Connected` after a loss, the site's transfers run again and a listing that
-    /// failed meanwhile is retried.
+    /// A session's feed: its state and, once logged in, how, for its site's connection
+    /// (all its tabs). Only a connected site takes it (a failed one follows its connect's
+    /// outcome). Back to `Connected` after a loss, the site's transfers run again and a
+    /// listing that failed meanwhile is retried.
     pub(super) fn session_state(
         &mut self,
         session: SessionId,
         state: ConnectionState,
         auth: Option<AuthMethod>,
     ) -> Vec<Effect> {
-        let tabs = self.session_tabs(session);
-        let Some(&first) = tabs.first() else {
+        let Some(site) = self.site_of_session(session) else {
             return Vec::new();
         };
-        let site = self.tabs[first].site.clone();
+        let conn = self.conn_mut(&site);
         let back = state == ConnectionState::Connected
-            && self.tabs[first]
+            && conn
                 .conn
                 .as_ref()
                 .is_some_and(|c| *c != ConnectionState::Connected);
         let lost = matches!(state, ConnectionState::Disconnected(_));
-        for &index in &tabs {
-            let tab = &mut self.tabs[index];
-            if auth.is_some() {
-                tab.auth = auth.clone();
-            }
-            tab.conn = Some(state.clone());
-            if back {
-                tab.reconnecting = false;
-            }
+        if auth.is_some() {
+            conn.auth = auth;
         }
+        conn.conn = Some(state);
         if lost {
             self.note_failed_endpoint(&site);
         }
         if !back {
             return Vec::new();
         }
+        self.conn_mut(&site).reconnecting = false;
         self.queue.site_restored(&site);
         let mut effects = Vec::new();
-        for index in tabs {
+        for index in self.tabs_of(&site) {
             if matches!(self.tabs[index].remote.listing, Listing::Failed(_)) {
                 effects.extend(self.request_listing(index, Side::Remote));
             }
@@ -178,51 +176,44 @@ impl App {
         let Some(index) = self.tab_index(tab) else {
             return Vec::new();
         };
-        let tab_ref = &self.tabs[index];
-        let Some(session) = tab_ref.session() else {
+        let site = self.tabs[index].site.clone();
+        let conn = self.conn_mut(&site);
+        let Some(session) = conn.session() else {
             return Vec::new();
         };
         // A changed host key fails every reconnect of this session: the banner offers
         // "Close and reconnect" instead.
-        if tab_ref.reconnecting
-            || tab_ref.lost_connection().is_none()
-            || tab_ref.host_key_change().is_some()
+        if conn.reconnecting || conn.lost_connection().is_none() || conn.host_key_change().is_some()
         {
             return Vec::new();
         }
-        for index in self.session_tabs(session) {
-            self.tabs[index].reconnecting = true;
-        }
+        conn.reconnecting = true;
         vec![Effect::Reconnect { session }]
     }
 
-    /// The reconnect finished, for every tab still on `session` (the tab that asked may
-    /// be gone): connected, the remote folders are listed again; refused, the banners
-    /// show the new reason. A result for a session no tab has any more is dropped.
+    /// The reconnect finished, for the site still on `session` (the tab that asked may be
+    /// gone, its siblings not): connected, the remote folders are listed again; refused,
+    /// the banners show the new reason. A result for a session no tab has any more is
+    /// dropped.
     pub(super) fn reconnected(
         &mut self,
         session: SessionId,
         result: Result<(), Error>,
     ) -> Vec<Effect> {
-        let tabs = self.session_tabs(session);
-        let Some(&first) = tabs.first() else {
+        let Some(site) = self.site_of_session(session) else {
             return Vec::new();
         };
-        let site = self.tabs[first].site.clone();
         let mut effects = self.settle_saving(session, result.is_ok());
-        let conn = match &result {
+        let conn = self.conn_mut(&site);
+        conn.reconnecting = false;
+        conn.conn = Some(match &result {
             Ok(()) => ConnectionState::Connected,
             Err(error) => ConnectionState::Disconnected(error.clone()),
-        };
-        for &index in &tabs {
-            let tab = &mut self.tabs[index];
-            tab.reconnecting = false;
-            tab.conn = Some(conn.clone());
-        }
+        });
         match result {
             Ok(()) => {
                 self.queue.site_restored(&site);
-                for index in tabs {
+                for index in self.tabs_of(&site) {
                     effects.extend(self.request_listing(index, Side::Remote));
                 }
             }

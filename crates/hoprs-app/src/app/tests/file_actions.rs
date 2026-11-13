@@ -495,7 +495,7 @@ async fn action_error_is_inline_not_modal() {
     assert_eq!(app.tabs[0].remote.busy, None);
     // The folder is listed again: the table stays, under the error.
     settle(&mut app, &fake, run_listings(&fake, &refresh).await).await;
-    assert_eq!(app.tabs[0].pane_status(Side::Remote), PaneStatus::Full);
+    assert_eq!(app.pane_status(0, Side::Remote), PaneStatus::Full);
     assert_eq!(entry_names(&app, 0, Side::Remote), ["a.txt"]);
     assert!(
         app.tabs[0].remote.action_error.is_some(),

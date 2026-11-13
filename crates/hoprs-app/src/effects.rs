@@ -139,15 +139,15 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
         Effect::Unfocus => {
             iced::advanced::widget::operate(iced::advanced::widget::operation::focusable::unfocus())
         }
-        Effect::KnownHostEntries { tab, host, port } => {
-            Task::future(known_host_entries(backend, tab, host, port))
+        Effect::KnownHostEntries { site, host, port } => {
+            Task::future(known_host_entries(backend, site, host, port))
         }
         Effect::RemoveKnownHost {
-            tab,
+            site,
             host,
             port,
             expected,
-        } => Task::future(remove_known_host(backend, tab, host, port, expected)),
+        } => Task::future(remove_known_host(backend, site, host, port, expected)),
         Effect::RestartSite { close, site } => Task::run(restart_site(backend, close, site), |m| m),
         Effect::Reconnect { session } => Task::future(reconnect(backend, session)),
         Effect::SaveTabs { workspace, tabs } => Task::future(save_tabs(backend, workspace, tabs)),
@@ -409,24 +409,24 @@ pub async fn answer_prompt(backend: Arc<dyn BackendApi>, id: PromptId, answer: P
 /// Reads the `known_hosts` lines "Remove the old entry" would delete.
 pub async fn known_host_entries(
     backend: Arc<dyn BackendApi>,
-    tab: TabId,
+    site: SiteId,
     host: String,
     port: u16,
 ) -> Message {
     let result = backend.known_host_entries(host, port).await;
-    Message::KnownHostEntries { tab, result }
+    Message::KnownHostEntries { site, result }
 }
 
 /// Removes the `known_hosts` lines of `host:port`, if still the ones confirmed.
 pub async fn remove_known_host(
     backend: Arc<dyn BackendApi>,
-    tab: TabId,
+    site: SiteId,
     host: String,
     port: u16,
     expected: Vec<KnownHostEntry>,
 ) -> Message {
     let result = backend.remove_known_host(host, port, expected).await;
-    Message::KnownHostRemoved { tab, result }
+    Message::KnownHostRemoved { site, result }
 }
 
 /// Closes `close` first, then connects `site`: the connect never finds (and reuses) the

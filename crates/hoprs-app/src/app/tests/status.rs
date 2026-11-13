@@ -24,7 +24,7 @@ fn files_tab(local: Option<&str>, remote: Option<&str>) -> SavedTab {
 
 /// The session of the site's tab, once connected.
 fn session_of(app: &App, site: &SiteId) -> SessionId {
-    app.tabs[app.tab_of(site).unwrap()]
+    app.tab_conn(app.tab_of(site).unwrap())
         .session()
         .expect("the tab is connected")
 }
@@ -205,7 +205,7 @@ async fn reconnect_banner_on_disconnected() {
     ));
     app.update(first);
     assert_eq!(
-        app.tabs[0].lost_connection(),
+        app.tab_conn(0).lost_connection(),
         None,
         "no banner while connected"
     );
@@ -216,7 +216,7 @@ async fn reconnect_banner_on_disconnected() {
     fake.drop_connection(session, lost.clone());
     let dropped = next(&mut feed).await.unwrap();
     app.update(dropped);
-    assert_eq!(app.tabs[0].lost_connection(), Some(&lost));
+    assert_eq!(app.tab_conn(0).lost_connection(), Some(&lost));
 
     // Reconnect goes through the backend's reconnect (one at a time).
     let effects = app.update(Message::ReconnectSession(tab));
@@ -224,13 +224,13 @@ async fn reconnect_banner_on_disconnected() {
         panic!("{effects:?}");
     };
     assert_eq!(*s, session);
-    assert!(app.tabs[0].reconnecting);
+    assert!(app.tab_conn(0).reconnecting);
     assert!(app.update(Message::ReconnectSession(tab)).is_empty());
     let done = effects::reconnect(backend.clone(), session).await;
     assert!(fake.calls().contains(&Call::Reconnect(session)));
     let effects = app.update(done);
-    assert!(!app.tabs[0].reconnecting);
-    assert_eq!(app.tabs[0].lost_connection(), None);
+    assert!(!app.tab_conn(0).reconnecting);
+    assert_eq!(app.tab_conn(0).lost_connection(), None);
     // The remote folder is listed again.
     assert_eq!(
         listed_path(&effects, tab, Side::Remote),
@@ -253,8 +253,8 @@ async fn reconnect_banner_on_disconnected() {
     app.update(Message::ReconnectSession(tab));
     let failed = effects::reconnect(backend.clone(), session).await;
     app.update(failed);
-    assert_eq!(app.tabs[0].lost_connection(), Some(&refused));
-    assert!(!app.tabs[0].reconnecting);
+    assert_eq!(app.tab_conn(0).lost_connection(), Some(&refused));
+    assert!(!app.tab_conn(0).reconnecting);
 
     // Closing the tab ends the watch: the app stops asking for it, and the backend's
     // stream ends with the session.
@@ -332,7 +332,7 @@ async fn closing_workspace_saves_tabs() {
     // The workspace's tabs are gone; the other site's tab stays.
     assert_eq!(app.open_workspace, None);
     assert_eq!(app.tabs.len(), 1);
-    assert_eq!(app.tabs[0].session(), Some(other_session));
+    assert_eq!(app.tab_conn(0).session(), Some(other_session));
     assert_eq!(status::line(&app).workspace, None);
 
     // The save goes to the vault; the profiles are read again after it.
@@ -733,7 +733,7 @@ async fn close_request_cancels_dialogs_and_ignores_input() {
         ConnectionState::Reconnecting { attempt: 1 },
     );
     assert!(matches!(
-        app.tabs[0].conn,
+        app.tab_conn(0).conn,
         Some(ConnectionState::Reconnecting { attempt: 1 })
     ));
     assert!(matches!(
@@ -848,8 +848,8 @@ async fn same_session_connect_keeps_the_feed_state() {
             keyring_unavailable: false,
         }),
     });
-    assert_eq!(app.tabs[0].auth, Some(AuthMethod::Password));
-    assert_eq!(app.tabs[0].conn, Some(ConnectionState::Connected));
+    assert_eq!(app.tab_conn(0).auth, Some(AuthMethod::Password));
+    assert_eq!(app.tab_conn(0).conn, Some(ConnectionState::Connected));
     // A new session starts over.
     app.update(Message::SiteConnected {
         site: a.id.clone(),
@@ -858,6 +858,6 @@ async fn same_session_connect_keeps_the_feed_state() {
             keyring_unavailable: false,
         }),
     });
-    assert_eq!(app.tabs[0].auth, None);
-    assert_eq!(app.tabs[0].conn, None);
+    assert_eq!(app.tab_conn(0).auth, None);
+    assert_eq!(app.tab_conn(0).conn, None);
 }

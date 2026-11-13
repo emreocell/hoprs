@@ -101,7 +101,8 @@ async fn drive(app: &mut App, fake: &Arc<FakeBackend>, sites: Vec<SiteId>) -> Ve
 }
 
 fn tab_state<'a>(app: &'a App, site: &SiteId) -> &'a TabState {
-    &app.tabs[app.tab_of(site).expect("the site has a tab")].state
+    &app.tab_conn(app.tab_of(site).expect("the site has a tab"))
+        .state
 }
 
 fn site_form(app: &mut App) -> &mut SiteForm {
@@ -365,7 +366,11 @@ async fn open_workspace_connects_all_in_parallel() {
     assert_eq!(sites, [a.id.clone(), b.id.clone(), c.id.clone()]);
     let tab_sites: Vec<_> = app.tabs.iter().map(|t| t.site.clone()).collect();
     assert_eq!(tab_sites, sites);
-    assert!(app.tabs.iter().all(|t| t.state == TabState::Connecting));
+    assert!(
+        app.tabs
+            .iter()
+            .all(|t| app.conn(&t.site).state == TabState::Connecting)
+    );
     assert_eq!(app.active_tab, Some(0));
 
     // `a` is slow: `b` and `c` arrive while it still connects.
@@ -1009,7 +1014,7 @@ async fn stale_listing_is_ignored() {
     // loads), then into "new" from the breadcrumb: three listings in flight.
     let to_old = app.update(pane_msg(tab, Side::Remote, PaneMsg::Open(2)));
     assert_eq!(app.tabs[0].remote.path, rpath("/srv/old"));
-    assert_eq!(app.tabs[0].pane_status(Side::Remote), PaneStatus::Loading);
+    assert_eq!(app.pane_status(0, Side::Remote), PaneStatus::Loading);
     let to_up = app.update(pane_msg(tab, Side::Remote, PaneMsg::Open(0)));
     assert_eq!(app.tabs[0].remote.path, rpath("/srv"));
     let to_new = app.update(pane_msg(
@@ -1041,7 +1046,7 @@ async fn stale_listing_is_ignored() {
 
     // ...and the late ones, arriving before or after the latest, change nothing.
     assert!(app.update(old.into_iter().next().unwrap()).is_empty());
-    assert_eq!(app.tabs[0].pane_status(Side::Remote), PaneStatus::Loading);
+    assert_eq!(app.pane_status(0, Side::Remote), PaneStatus::Loading);
     assert!(app.tabs[0].remote.entries.is_empty());
     assert!(app.update(new.into_iter().next().unwrap()).is_empty());
     assert_eq!(entry_names(&app, 0, Side::Remote), ["fresh.txt"]);
@@ -1082,11 +1087,11 @@ async fn panel_states() {
     let effects = app.update(Message::ConnectSite(a.id.clone()));
     let tab = app.tabs[0].id;
     // Connecting: both panes load (the remote one waits for its session).
-    assert_eq!(app.tabs[0].pane_status(Side::Local), PaneStatus::Loading);
-    assert_eq!(app.tabs[0].pane_status(Side::Remote), PaneStatus::Loading);
+    assert_eq!(app.pane_status(0, Side::Local), PaneStatus::Loading);
+    assert_eq!(app.pane_status(0, Side::Remote), PaneStatus::Loading);
     assert_eq!(app.tabs[0].remote.listing, Listing::Idle);
     settle(&mut app, &fake, run_listings(&fake, &effects).await).await;
-    assert_eq!(app.tabs[0].pane_status(Side::Local), PaneStatus::Full);
+    assert_eq!(app.pane_status(0, Side::Local), PaneStatus::Full);
 
     // Connected, but "/srv" does not exist yet: loading, then the error.
     let backend: Arc<dyn BackendApi> = fake.clone();
@@ -1097,9 +1102,9 @@ async fn panel_states() {
     {
         listing.extend(app.update(message));
     }
-    assert_eq!(app.tabs[0].pane_status(Side::Remote), PaneStatus::Loading);
+    assert_eq!(app.pane_status(0, Side::Remote), PaneStatus::Loading);
     settle(&mut app, &fake, run_listings(&fake, &listing).await).await;
-    let PaneStatus::Failed(error) = app.tabs[0].pane_status(Side::Remote) else {
+    let PaneStatus::Failed(error) = app.pane_status(0, Side::Remote) else {
         panic!("{:?}", app.tabs[0].remote.listing);
     };
     assert_eq!(error.kind, ErrorKind::NotFound);
@@ -1111,16 +1116,16 @@ async fn panel_states() {
     let retry = app.update(pane_msg(tab, Side::Remote, PaneMsg::Retry));
     assert_eq!(listings(&retry).len(), 1);
     assert_eq!(listings(&retry)[0].3, "/srv");
-    assert_eq!(app.tabs[0].pane_status(Side::Remote), PaneStatus::Loading);
+    assert_eq!(app.pane_status(0, Side::Remote), PaneStatus::Loading);
     settle(&mut app, &fake, run_listings(&fake, &retry).await).await;
-    assert_eq!(app.tabs[0].pane_status(Side::Remote), PaneStatus::Full);
+    assert_eq!(app.pane_status(0, Side::Remote), PaneStatus::Full);
     assert_eq!(entry_names(&app, 0, Side::Remote), ["a.txt"]);
 
     // An empty folder is its own state, with ".." still there.
     let empty = app.update(pane_msg(tab, Side::Local, PaneMsg::Open(1)));
     assert_eq!(app.tabs[0].local.path, rpath("/home/me/empty"));
     settle(&mut app, &fake, run_listings(&fake, &empty).await).await;
-    assert_eq!(app.tabs[0].pane_status(Side::Local), PaneStatus::Empty);
+    assert_eq!(app.pane_status(0, Side::Local), PaneStatus::Empty);
     assert_eq!(app.tabs[0].local.row_count(), 1, "just ..");
 
     // A failed connection: the remote side is "Not connected"; the local side works.
@@ -1133,19 +1138,16 @@ async fn panel_states() {
     let effects = app.update(Message::ConnectSite(b.id.clone()));
     settle(&mut app, &fake, run_listings(&fake, &effects).await).await;
     drive(&mut app, &fake, vec![b.id.clone()]).await;
-    assert_eq!(
-        app.tabs[0].pane_status(Side::Remote),
-        PaneStatus::NotConnected
-    );
-    assert_eq!(app.tabs[0].pane_status(Side::Local), PaneStatus::Full);
+    assert_eq!(app.pane_status(0, Side::Remote), PaneStatus::NotConnected);
+    assert_eq!(app.pane_status(0, Side::Local), PaneStatus::Full);
     // Reconnect goes through the sidebar's connect path: the remote side loads, then
     // lists once connected.
     let sites = connect_effect(app.update(Message::ConnectSite(b.id.clone())));
-    assert_eq!(app.tabs[0].pane_status(Side::Remote), PaneStatus::Loading);
+    assert_eq!(app.pane_status(0, Side::Remote), PaneStatus::Loading);
     let backend: Arc<dyn BackendApi> = fake.clone();
     let messages: Vec<Message> = effects::connect_sites(backend, sites).collect().await;
     settle(&mut app, &fake, messages).await;
-    assert_eq!(app.tabs[0].pane_status(Side::Remote), PaneStatus::Empty);
+    assert_eq!(app.pane_status(0, Side::Remote), PaneStatus::Empty);
 }
 
 /// Arrows move the cursor (Shift extends), Enter enters the folder, Backspace goes up,

@@ -389,8 +389,9 @@ impl App {
             return Vec::new();
         }
         let request_id = RequestId(self.next_id());
+        let session = self.tab_session(index);
         let tab = &mut self.tabs[index];
-        let (tab_id, session) = (tab.id, tab.session());
+        let tab_id = tab.id;
         let pane = tab.pane_mut(side);
         pane.offset_y = 0.0;
         let scroll = Effect::ScrollPane {
@@ -703,9 +704,13 @@ impl App {
             };
             return Vec::new();
         }
-        if !matches!(tab.pane_status(side), PaneStatus::Full | PaneStatus::Empty) {
+        if !matches!(
+            self.pane_status(index, side),
+            PaneStatus::Full | PaneStatus::Empty
+        ) {
             return Vec::new();
         }
+        let tab = &mut self.tabs[index];
         let tab_id = tab.id;
         let pane = tab.pane_mut(side);
         let count = pane.row_count();

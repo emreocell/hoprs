@@ -57,7 +57,7 @@ async fn connected(site: &Site) -> (App, Arc<FakeBackend>, SessionId) {
     let mut app = loaded(&fake).await;
     let sites = connect_effect(app.update(Message::ConnectSite(site.id.clone())));
     assert!(drive(&mut app, &fake, sites).await.is_empty());
-    let session = app.tabs[0].session().expect("connected");
+    let session = app.tab_conn(0).session().expect("connected");
     (app, fake, session)
 }
 
@@ -85,7 +85,7 @@ async fn open_as_both_opens_terminal_then_files_on_one_session() {
     let messages: Vec<Message> = effects::connect_sites(backend, sites).collect().await;
     assert_eq!(messages.len(), 1, "one connect result");
     let effects: Vec<Effect> = messages.into_iter().flat_map(|m| app.update(m)).collect();
-    let (t0, t1) = (app.tabs[0].session(), app.tabs[1].session());
+    let (t0, t1) = (app.tab_conn(0).session(), app.tab_conn(1).session());
     assert!(t0.is_some());
     assert_eq!(t0, t1, "both tabs share the session");
     assert_eq!(
@@ -122,7 +122,7 @@ async fn closing_one_tab_keeps_the_session_for_the_other() {
     assert!(closes(&effects).is_empty(), "{effects:?}");
     assert_eq!(app.tabs.len(), 1);
     assert_eq!(app.tabs[0].id, files);
-    assert_eq!(app.tabs[0].session(), Some(session));
+    assert_eq!(app.tab_conn(0).session(), Some(session));
     assert_eq!(app.watched_sessions(), vec![session]);
     assert!(!fake.calls().contains(&Call::Close(session)));
 
@@ -131,7 +131,7 @@ async fn closing_one_tab_keeps_the_session_for_the_other() {
     let files = app.tabs[1].id;
     assert!(closes(&app.update(Message::CloseTab(files))).is_empty());
     assert_eq!(kinds(&app), [TabKind::Terminal]);
-    assert_eq!(app.tabs[0].session(), Some(session));
+    assert_eq!(app.tab_conn(0).session(), Some(session));
 
     // While connecting: closing one tab abandons nothing; the dialog stays and the
     // result lands in the tab left.
@@ -169,7 +169,7 @@ async fn closing_one_tab_keeps_the_session_for_the_other() {
     app.update(Message::Dialog(DialogMsg::Cancel));
     drive(&mut app, &fake, sites).await;
     assert_eq!(kinds(&app), [TabKind::Files]);
-    assert!(matches!(app.tabs[0].state, TabState::Connected(_)));
+    assert!(matches!(app.tab_conn(0).state, TabState::Connected(_)));
 }
 
 #[tokio::test]
@@ -233,13 +233,13 @@ async fn session_state_reaches_every_tab_of_the_session() {
     for tab in &app.tabs {
         assert!(
             matches!(
-                tab.conn_status(),
+                app.conn(&tab.site).conn_status(),
                 ConnStatus::Reconnecting { attempt: 2, .. }
             ),
             "{:?}",
             tab.kind
         );
-        assert_eq!(tab.auth, Some(AuthMethod::Password));
+        assert_eq!(app.conn(&tab.site).auth, Some(AuthMethod::Password));
     }
 
     let lost = Error::new(ErrorKind::Network, "Connection reset");
@@ -249,8 +249,11 @@ async fn session_state_reaches_every_tab_of_the_session() {
         auth: None,
     });
     for tab in &app.tabs {
-        assert_eq!(tab.lost_connection(), Some(&lost));
-        assert_eq!(tab.failed_endpoint, Some(("both.example".into(), 22)));
+        assert_eq!(app.conn(&tab.site).lost_connection(), Some(&lost));
+        assert_eq!(
+            app.conn(&tab.site).failed_endpoint,
+            Some(("both.example".into(), 22))
+        );
     }
 
     // "Reconnect" from the terminal tab: one reconnect, shown in both tabs.
@@ -260,7 +263,7 @@ async fn session_state_reaches_every_tab_of_the_session() {
         effects[..],
         [Effect::Reconnect { session: s, .. }] if s == session
     ));
-    assert!(app.tabs.iter().all(|t| t.reconnecting));
+    assert!(app.tabs.iter().all(|t| app.conn(&t.site).reconnecting));
     // The files tab asks too: already in flight.
     assert!(app.update(Message::ReconnectSession(files)).is_empty());
 
@@ -272,8 +275,8 @@ async fn session_state_reaches_every_tab_of_the_session() {
     });
     let tab = &app.tabs[0];
     assert_eq!(tab.id, files);
-    assert!(!tab.reconnecting);
-    assert_eq!(tab.conn_status(), ConnStatus::Connected);
+    assert!(!app.conn(&tab.site).reconnecting);
+    assert_eq!(app.conn(&tab.site).conn_status(), ConnStatus::Connected);
     assert_eq!(listings(&effects), [(files, Side::Remote)]);
 
     // A failed connect lands in both tabs, and "Close and reconnect" (or Reconnect) from
@@ -286,9 +289,13 @@ async fn session_state_reaches_every_tab_of_the_session() {
     assert!(
         app.tabs
             .iter()
-            .all(|t| matches!(t.state, TabState::Failed(_)))
+            .all(|t| matches!(app.conn(&t.site).state, TabState::Failed(_)))
     );
-    assert!(app.tabs.iter().all(|t| t.failed_endpoint.is_some()));
+    assert!(
+        app.tabs
+            .iter()
+            .all(|t| app.conn(&t.site).failed_endpoint.is_some())
+    );
     let effects = app.update(Message::RestartSession(app.tabs[1].id));
     let [Effect::RestartSite { site, .. }] = &effects[..] else {
         panic!("{effects:?}");
@@ -297,7 +304,8 @@ async fn session_state_reaches_every_tab_of_the_session() {
     assert!(
         app.tabs
             .iter()
-            .all(|t| t.state == TabState::Connecting && t.failed_endpoint.is_none())
+            .all(|t| app.conn(&t.site).state == TabState::Connecting
+                && app.conn(&t.site).failed_endpoint.is_none())
     );
     // The sidebar's retry on a failed site also retries it once for all its tabs.
     let fake = Arc::new(FakeBackend::new().with_site(s.clone()));
@@ -307,9 +315,17 @@ async fn session_state_reaches_every_tab_of_the_session() {
     drive(&mut app, &fake, sites).await;
     let sites = connect_effect(app.update(Message::ConnectSite(s.id.clone())));
     assert_eq!(sites, std::slice::from_ref(&s.id));
-    assert!(app.tabs.iter().all(|t| t.state == TabState::Connecting));
+    assert!(
+        app.tabs
+            .iter()
+            .all(|t| app.conn(&t.site).state == TabState::Connecting)
+    );
     drive(&mut app, &fake, sites).await;
-    let sessions: Vec<_> = app.tabs.iter().map(|t| t.session()).collect();
+    let sessions: Vec<_> = app
+        .tabs
+        .iter()
+        .map(|t| app.conn(&t.site).session())
+        .collect();
     assert!(sessions[0].is_some());
     assert_eq!(sessions[0], sessions[1]);
 }
@@ -356,8 +372,12 @@ async fn workspace_restores_terminal_tabs() {
     assert_eq!(app.tabs[1].remote.path.as_str(), "/var/www");
     assert_eq!(app.tabs[1].local.path.as_str(), "/home/me/shop");
     drive(&mut app, &fake, sites).await;
-    let session = app.tabs[0].session().expect("connected");
-    assert!(app.tabs.iter().all(|t| t.session() == Some(session)));
+    let session = app.tab_conn(0).session().expect("connected");
+    assert!(
+        app.tabs
+            .iter()
+            .all(|t| app.conn(&t.site).session() == Some(session))
+    );
 
     // Closing it saves every tab, terminals included, in strip order.
     let effects = without_panes(app.update(Message::CloseWorkspace(ws.id.clone())));
@@ -429,7 +449,7 @@ async fn delete_site_closes_all_its_tabs() {
     drive(&mut app, &fake, sites).await;
     let sites = connect_effect(app.update(Message::ConnectSite(other.id.clone())));
     drive(&mut app, &fake, sites).await;
-    let session = app.tabs[0].session().unwrap();
+    let session = app.tab_conn(0).session().unwrap();
     assert_eq!(app.tabs.len(), 3);
 
     let effects = app.update(Message::FormDone {
@@ -457,7 +477,7 @@ async fn profile_reload_closes_all_tabs_of_a_vanished_site() {
     drive(&mut app, &fake, sites).await;
     let sites = connect_effect(app.update(Message::ConnectSite(s.id.clone())));
     drive(&mut app, &fake, sites).await;
-    let session = app.tabs[1].session().unwrap();
+    let session = app.tab_conn(1).session().unwrap();
 
     // The host changes: every tab of the site loses the session, closed once.
     let mut moved = s.clone();
@@ -466,15 +486,15 @@ async fn profile_reload_closes_all_tabs_of_a_vanished_site() {
     let effects = app.update(profiles_loaded(&app, fake.profiles().await));
     assert_eq!(closes(&effects), [session]);
     for i in tabs_of(&app, &s.id) {
-        assert!(matches!(app.tabs[i].state, TabState::Failed(_)));
-        assert_eq!(app.tabs[i].conn, None);
+        assert!(matches!(app.tab_conn(i).state, TabState::Failed(_)));
+        assert_eq!(app.tab_conn(i).conn, None);
     }
     assert_eq!(tabs_of(&app, &s.id).len(), 2);
 
     // Reconnected, then gone from the profiles (a "Replace" restore): all its tabs go.
     let sites = connect_effect(app.update(Message::ConnectSite(s.id.clone())));
     drive(&mut app, &fake, sites).await;
-    let session = app.tabs[1].session().unwrap();
+    let session = app.tab_conn(1).session().unwrap();
     fake.delete_site(s.id.clone()).await.unwrap();
     let reload = app.load_profiles();
     assert!(matches!(reload, Effect::LoadProfiles(_)));
@@ -501,10 +521,19 @@ async fn new_terminal_and_files_tabs_join_the_session() {
     );
     assert_eq!(kinds(&app), [TabKind::Files, TabKind::Terminal]);
     assert_eq!(app.active_tab, Some(1));
-    assert_eq!(app.tabs[1].session(), Some(session));
-    assert_eq!(app.tabs[1].conn_status(), ConnStatus::Connected);
+    assert_eq!(app.tab_conn(1).session(), Some(session));
+    assert_eq!(app.tab_conn(1).conn_status(), ConnStatus::Connected);
 
-    // Another files tab on the same session lists both sides at once.
+    // Another files tab on the same session starts at the folders of the tab it was
+    // opened from, and lists both sides at once.
+    let here = |p: &str| RemotePath::new(p).unwrap();
+    for (side, path) in [(Side::Local, "/home/me/work"), (Side::Remote, "/var/www")] {
+        app.update(Message::Pane {
+            tab: first,
+            side,
+            msg: PaneMsg::Navigate(here(path)),
+        });
+    }
     let effects = app.update(Message::NewTab {
         tab: first,
         kind: TabKind::Files,
@@ -515,10 +544,20 @@ async fn new_terminal_and_files_tabs_join_the_session() {
     );
     let new = app.tabs[1].id;
     assert_eq!(app.active_tab, Some(1));
-    assert_eq!(app.tabs[1].session(), Some(session));
+    assert_eq!(app.tab_conn(1).session(), Some(session));
     let mut listed = listings(&effects);
     listed.sort_by_key(|(_, side)| *side == Side::Remote);
     assert_eq!(listed, [(new, Side::Local), (new, Side::Remote)]);
+    assert_eq!(app.tabs[1].local.path, here("/home/me/work"));
+    assert_eq!(app.tabs[1].remote.path, here("/var/www"));
+    let paths: Vec<_> = effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::List { path, .. } => Some(path.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(paths.contains(&"/home/me/work") && paths.contains(&"/var/www"));
     assert_eq!(app.watched_sessions(), vec![session]);
 
     // Not on a tab whose site isn't connected.
@@ -537,4 +576,181 @@ async fn new_terminal_and_files_tabs_join_the_session() {
         .is_empty()
     );
     assert_eq!(app.tabs.len(), 1);
+}
+
+/// The connection is one record per site: a change reaches every tab of the session,
+/// also a tab opened after it, and the record goes with the site's last tab.
+#[tokio::test]
+async fn state_change_reaches_tabs_opened_after_it() {
+    let s = ssh_site("files", OpenAs::Files);
+    let (mut app, _fake, session) = connected(&s).await;
+    app.update(Message::SessionState {
+        session,
+        state: ConnectionState::Reconnecting { attempt: 1 },
+        auth: Some(AuthMethod::Password),
+    });
+    let first = app.tabs[0].id;
+    app.update(Message::NewTab {
+        tab: first,
+        kind: TabKind::Terminal,
+    });
+    assert_eq!(app.tabs.len(), 2);
+    for index in 0..2 {
+        let conn = app.tab_conn(index);
+        assert!(
+            matches!(
+                conn.conn_status(),
+                ConnStatus::Reconnecting { attempt: 1, .. }
+            ),
+            "tab {index}"
+        );
+        assert_eq!(conn.auth, Some(AuthMethod::Password));
+    }
+    app.update(Message::SessionState {
+        session,
+        state: ConnectionState::Connected,
+        auth: None,
+    });
+    assert!((0..2).all(|i| app.tab_conn(i).conn_status() == ConnStatus::Connected));
+    assert_eq!(app.conns.len(), 1, "one record for the site");
+
+    let terminal = app.tabs[1].id;
+    app.update(Message::CloseTab(terminal));
+    assert_eq!(app.conns.len(), 1, "the files tab still uses it");
+    app.update(Message::CloseTab(first));
+    assert!(app.conns.is_empty(), "gone with the last tab");
+}
+
+/// "Remove the old entry…" is the site's: started in one tab, its results land even if
+/// that tab closed meanwhile, and the restart moves the remaining tab on.
+#[tokio::test]
+async fn known_hosts_fix_survives_closing_its_tab() {
+    let s = ssh_site("both", OpenAs::Both);
+    let fake = Arc::new(FakeBackend::new().with_site(s.clone()));
+    fake.fail_next_connect(
+        &s.id,
+        hoprs_ssh::testing::changed_host_key_error(&s.host, 3),
+    );
+    let mut app = loaded(&fake).await;
+    let sites = connect_effect(app.update(Message::ConnectSite(s.id.clone())));
+    drive(&mut app, &fake, sites).await;
+    let (terminal, files) = (app.tabs[0].id, app.tabs[1].id);
+
+    let effects = app.update(Message::KnownHosts {
+        tab: terminal,
+        msg: KnownHostsMsg::Start,
+    });
+    let [Effect::KnownHostEntries { site, .. }] = &effects[..] else {
+        panic!("{effects:?}");
+    };
+    assert_eq!(site, &s.id);
+    assert_eq!(app.conn(&s.id).known_hosts, KnownHostsFix::Checking);
+    app.update(Message::CloseTab(terminal));
+    app.update(Message::KnownHostEntries {
+        site: s.id.clone(),
+        result: Ok(Vec::new()),
+    });
+    assert_eq!(
+        app.conn(&s.id).known_hosts,
+        KnownHostsFix::Confirm(Vec::new()),
+        "the result landed for the site"
+    );
+
+    // Confirmed from the files tab: the removal restarts the site.
+    let effects = app.update(Message::KnownHosts {
+        tab: files,
+        msg: KnownHostsMsg::Confirm,
+    });
+    assert!(matches!(effects[..], [Effect::RemoveKnownHost { .. }]));
+    let effects = app.update(Message::KnownHostRemoved {
+        site: s.id.clone(),
+        result: Ok(0),
+    });
+    let [Effect::RestartSite { site, .. }] = &effects[..] else {
+        panic!("{effects:?}");
+    };
+    assert_eq!(site, &s.id);
+    assert_eq!(app.tab_conn(0).state, TabState::Connecting);
+    assert_eq!(app.tab_conn(0).known_hosts, KnownHostsFix::Idle);
+}
+
+/// A site edited from SSH to FTP has no terminal: its terminal tabs close; the session
+/// closes only if no files tab is left.
+#[tokio::test]
+async fn site_no_longer_ssh_closes_its_terminal_tabs() {
+    let both = ssh_site("both", OpenAs::Both);
+    let term = ssh_site("term", OpenAs::Terminal);
+    let fake = Arc::new(
+        FakeBackend::new()
+            .with_site(both.clone())
+            .with_site(term.clone()),
+    );
+    let mut app = loaded(&fake).await;
+    for s in [&both, &term] {
+        let sites = connect_effect(app.update(Message::ConnectSite(s.id.clone())));
+        drive(&mut app, &fake, sites).await;
+    }
+    assert_eq!(app.tabs.len(), 3);
+    let term_session = app.conn(&term.id).session().unwrap();
+
+    for s in [&both, &term] {
+        let mut ftp = s.clone();
+        ftp.protocol = Protocol::Ftp;
+        fake.save_site(ftp).await.unwrap();
+    }
+    let effects = app.update(profiles_loaded(&app, fake.profiles().await));
+    assert_eq!(kinds(&app), [TabKind::Files]);
+    assert_eq!(app.tabs[0].site, both.id);
+    assert!(
+        matches!(app.conn(&both.id).state, TabState::Connected(_)),
+        "the files tab keeps its session"
+    );
+    assert_eq!(
+        closes(&effects),
+        [term_session],
+        "the terminal-only site's session"
+    );
+}
+
+/// Review Focus 5: "Close and reconnect" on a lost session whose host key changed, from
+/// either tab, moves both tabs to the new session.
+#[tokio::test]
+async fn close_and_reconnect_moves_every_tab_to_the_new_session() {
+    let s = ssh_site("both", OpenAs::Both);
+    let (mut app, fake, old) = connected(&s).await;
+    app.update(Message::SessionState {
+        session: old,
+        state: ConnectionState::Disconnected(hoprs_ssh::testing::pinned_key_changed_error(&s.host)),
+        auth: None,
+    });
+    for tab in &app.tabs {
+        assert_eq!(
+            crate::ui::files::banner(app.conn(&tab.site)),
+            Some(crate::ui::files::Banner::HostKeyChanged)
+        );
+        assert_eq!(
+            app.failure_actions(tab),
+            [FailureAction::CloseAndReconnect, FailureAction::EditSite]
+        );
+    }
+
+    let effects = app.update(Message::RestartSession(app.tabs[1].id));
+    let Ok([Effect::RestartSite { close, site }]) = <[Effect; 1]>::try_from(effects) else {
+        panic!("one RestartSite effect");
+    };
+    assert_eq!(close, Some(old));
+    assert!((0..2).all(|i| app.tab_conn(i).state == TabState::Connecting));
+    let backend: Arc<dyn BackendApi> = fake.clone();
+    let messages: Vec<Message> = effects::restart_site(backend, close, site).collect().await;
+    let effects: Vec<Effect> = messages.into_iter().flat_map(|m| app.update(m)).collect();
+    let new = app.tab_conn(0).session().expect("connected again");
+    assert_ne!(new, old);
+    assert_eq!(app.tab_conn(1).session(), Some(new));
+    assert_eq!(app.watched_sessions(), vec![new]);
+    assert_eq!(fake.closed(), [old]);
+    // The files tab lists its remote folder on the new session.
+    assert!(effects.iter().any(|e| matches!(
+        e,
+        Effect::List { side: Side::Remote, session: Some(s), .. } if *s == new
+    )));
 }

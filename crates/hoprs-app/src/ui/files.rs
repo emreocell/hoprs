@@ -12,7 +12,9 @@ use iced::{Alignment, Element, Event, Length, Padding, Rectangle, window};
 
 use crate::app::actions::{EditKind, PaneAction};
 use crate::app::files::{Pane, PaneStatus, Row, SortKey};
-use crate::app::{App, FailureAction, FileKey, Message, Mods, PaneMsg, Tab, TabId, TabState};
+use crate::app::{
+    App, FailureAction, FileKey, Message, Mods, PaneMsg, SiteConn, Tab, TabId, TabState,
+};
 use crate::backend::Side;
 use crate::ui::fit::{self, Columns, MODIFIED_WIDTH, PERMISSIONS_WIDTH, SIZE_WIDTH};
 use crate::ui::theme::{self, palette};
@@ -176,7 +178,7 @@ pub fn view<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> {
 /// A terminal tab, until the terminal lands (Task 4): a placeholder under the same lost
 /// connection banner as a files tab, or, without a connection, why and how to retry.
 pub fn terminal_placeholder<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> {
-    let body: Element<'a, Message> = match tab.state {
+    let body: Element<'a, Message> = match app.conn(&tab.site).state {
         TabState::Failed(_) => not_connected(app, tab),
         TabState::Connecting => centered(text(strings::CONNECTING).color(palette().muted).into()),
         TabState::Connected(_) => centered(
@@ -202,10 +204,10 @@ pub enum Banner<'a> {
     HostKeyChanged,
 }
 
-/// The bar a tab shows above its panes.
-pub fn banner(tab: &Tab) -> Option<Banner<'_>> {
-    let error = tab.lost_connection()?;
-    Some(if tab.host_key_change().is_some() {
+/// The bar a site's tabs show above their content.
+pub fn banner(conn: &SiteConn) -> Option<Banner<'_>> {
+    let error = conn.lost_connection()?;
+    Some(if conn.host_key_change().is_some() {
         Banner::HostKeyChanged
     } else {
         Banner::Lost(error)
@@ -217,7 +219,8 @@ pub fn banner(tab: &Tab) -> Option<Banner<'_>> {
 /// shows its blocking explanation there instead, with "Close and reconnect" (or "Remove
 /// the old entry…").
 fn lost_banner<'a>(app: &'a App, tab: &'a Tab) -> Option<Element<'a, Message>> {
-    let error = match banner(tab)? {
+    let conn = app.conn(&tab.site);
+    let error = match banner(conn)? {
         Banner::Lost(error) => error,
         Banner::HostKeyChanged => {
             return Some(
@@ -241,7 +244,7 @@ fn lost_banner<'a>(app: &'a App, tab: &'a Tab) -> Option<Element<'a, Message>> {
                 .color(p.muted),
         );
     }
-    let label = if tab.reconnecting {
+    let label = if conn.reconnecting {
         strings::RECONNECTING_NOW
     } else {
         strings::RECONNECT
@@ -249,7 +252,7 @@ fn lost_banner<'a>(app: &'a App, tab: &'a Tab) -> Option<Element<'a, Message>> {
     let reconnect = button(text(label))
         .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
         .style(theme::button_outline)
-        .on_press_maybe((!tab.reconnecting).then_some(Message::ReconnectSession(tab.id)));
+        .on_press_maybe((!conn.reconnecting).then_some(Message::ReconnectSession(tab.id)));
     Some(
         container(
             row![reason, space::horizontal(), reconnect]
@@ -283,7 +286,8 @@ fn pane<'a>(
     let focused = tab.focus == side;
     let width = fit::pane_width(app.window_width);
     let cols = fit::columns(width, side);
-    let body: Element<'a, Message> = match tab.pane_status(side) {
+    let conn = app.conn(&tab.site);
+    let body: Element<'a, Message> = match tab.pane_status(conn, side) {
         PaneStatus::Loading => skeleton(cols),
         PaneStatus::Full => list(tab.id, side, pane, this_year, focused, cols),
         PaneStatus::Empty => column![
@@ -304,7 +308,7 @@ fn pane<'a>(
             .style(theme::pane_focus(focused)),
         path_bar(place, pane, home, msg),
         hrule(),
-        file_actions::toolbar(tab, side, fit::compact_toolbar(width, side)),
+        file_actions::toolbar(tab, conn, side, fit::compact_toolbar(width, side)),
         hrule(),
     ];
     for bar in file_actions::bars(tab.id, side, pane) {
@@ -321,7 +325,7 @@ fn pane<'a>(
     // A drag from the other pane (or files from the system, on the remote side) would
     // drop here: a 1 px accent outline.
     let target = app.drop_target() == Some((tab.id, side))
-        || (app.os_drag && side == Side::Remote && tab.can_act(Side::Remote));
+        || (app.os_drag && side == Side::Remote && tab.can_act(conn, Side::Remote));
     let content = container(content)
         .width(Length::FillPortion(1))
         .height(Length::Fill)
@@ -700,11 +704,12 @@ fn failed(error: &Error, retry: Message) -> Element<'_, Message> {
 /// The remote side without a connection: "Not connected", why, and Reconnect (the
 /// sidebar's connect path, which retries the failed session) or Edit site.
 fn not_connected<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> {
-    if tab.host_key_change().is_some() {
+    let conn = app.conn(&tab.site);
+    if conn.host_key_change().is_some() {
         return crate::ui::dialogs::host_key_changed(app, tab);
     }
     let p = palette();
-    let failure = match &tab.state {
+    let failure = match &conn.state {
         TabState::Failed(failure) => Some(failure),
         TabState::Connecting | TabState::Connected(_) => None,
     };
