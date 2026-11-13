@@ -1115,3 +1115,135 @@ async fn edit_needs_one_selected_file() {
         Some(strings::EDIT_ONE_FILE)
     );
 }
+
+/// Fix round 2 (Important 1, 2): a copy kept while its upload was under way is said in
+/// the persistent notice ("Server copy of … may be incomplete"); the upload text promises
+/// no bound the code does not keep.
+#[test]
+fn kept_during_an_upload_is_flagged_and_the_text_is_honest() {
+    use crate::backend::KeptEdit;
+    let mut app = App::new();
+    let dir = PathBuf::from("/data/hoprs/recovered");
+    app.update(edit(EditMsg::Kept {
+        kept: vec![
+            KeptEdit {
+                id: EditId(1),
+                remote: rpath("/srv/a.txt"),
+                recovered: dir.join("s/srv/a.txt.local-1"),
+                remote_may_be_truncated: false,
+            },
+            KeptEdit {
+                id: EditId(2),
+                remote: rpath("/srv/b.txt"),
+                recovered: dir.join("s/srv/b.txt.local-1"),
+                remote_may_be_truncated: true,
+            },
+        ],
+        kept_in: dir.clone(),
+    }));
+    let notice = app.kept_notice.clone().unwrap();
+    assert_eq!(notice.count, 2);
+    assert_eq!(notice.incomplete, vec![rpath("/srv/b.txt")]);
+    assert_eq!(
+        strings::UPLOADING_EDITS,
+        "Uploading… (Stop to keep local copies instead)"
+    );
+}
+
+/// Fix round 2 (minors): the window's question is never replaced by a workspace's (the
+/// workspace request is dropped, the window's shows again); a window close during a busy
+/// workspace question waits for it and is asked afterwards; forms parked by two
+/// questions both come back.
+#[tokio::test]
+async fn center_questions_never_overwrite_and_forms_stack() {
+    let a = srv_site(Protocol::Ssh);
+    let ws = workspace("Shop", &[&a.id]);
+    let fake = Arc::new(
+        FakeBackend::new()
+            .with_site(a.clone())
+            .with_workspace(ws.clone()),
+    );
+    let backend: Arc<dyn BackendApi> = fake.clone();
+    let (mut app, _, id) = editing(&fake, &a).await;
+    app.open_workspace = Some(ws.id.clone());
+    save_unseen(&fake, id, b"unsent");
+    let window = iced::window::Id::unique();
+
+    // The window's question first; "Close workspace" then changes nothing.
+    let effects = app.update(Message::CloseRequested(window));
+    let [Effect::CheckEdits { purpose, sessions }] = &effects[..] else {
+        panic!("{effects:?}");
+    };
+    app.update(effects::check_edits(backend.clone(), purpose.clone(), sessions.clone()).await);
+    assert!(
+        app.update(Message::CloseWorkspace(ws.id.clone()))
+            .is_empty()
+    );
+    assert_eq!(
+        app.center_ask.as_ref().map(|ask| ask.purpose.clone()),
+        Some(EditsFor::Quit(window))
+    );
+    assert!(matches!(app.form, Some(Form::QuitEdits)));
+    app.update(edit(EditMsg::Center(CloseAnswer::Cancel)));
+
+    // A busy workspace question: the window waits, then asks.
+    app.update(Message::EditSite(a.id.clone()));
+    let effects = app.update(Message::CloseWorkspace(ws.id.clone()));
+    let [Effect::CheckEdits { purpose, sessions }] = &effects[..] else {
+        panic!("{effects:?}");
+    };
+    app.update(effects::check_edits(backend.clone(), purpose.clone(), sessions.clone()).await);
+    assert_eq!(app.parked_forms.len(), 1, "the site form is parked");
+    let effects = app.update(edit(EditMsg::Center(CloseAnswer::Upload)));
+    assert!(matches!(effects[..], [Effect::SettleEdits { .. }]));
+    assert!(app.update(Message::CloseRequested(window)).is_empty());
+    assert_eq!(app.queued_quit, Some(window));
+    assert!(matches!(
+        app.center_ask.as_ref().map(|ask| &ask.purpose),
+        Some(EditsFor::Workspace(_))
+    ));
+    // The workspace's upload ends: it closes, its form comes back, then the window asks
+    // (nothing unsent any more: the usual close flow after its check).
+    let settled = effects::settle_edits(
+        backend.clone(),
+        EditsFor::Workspace(ws.id.clone()),
+        sessions.clone(),
+        Settle::Upload,
+        FLUSH_LIMIT,
+    )
+    .await;
+    let effects = app.update(settled);
+    assert!(app.tabs.is_empty());
+    assert_eq!(app.queued_quit, None);
+    assert!(matches!(app.form, Some(Form::Site(_))), "{:?}", app.form);
+    assert!(app.parked_forms.is_empty());
+    // The queued window close runs now: its check finds nothing unsent (the workspace's
+    // upload sent it), so the usual close flow follows.
+    let check = without_panes(effects)
+        .into_iter()
+        .find_map(|e| match e {
+            Effect::CheckEdits { purpose, sessions } => Some((purpose, sessions)),
+            _ => None,
+        })
+        .expect("the window close that waited runs");
+    assert_eq!(check.0, EditsFor::Quit(window));
+    let effects =
+        without_panes(app.update(effects::check_edits(backend.clone(), check.0, check.1).await));
+    assert!(
+        matches!(effects[..], [Effect::Shutdown { .. }]),
+        "{effects:?}"
+    );
+
+    // Two parks: both forms come back, in order.
+    let mut app = App::new();
+    app.form = Some(Form::Settings);
+    app.park_form_for_tests();
+    app.form = Some(Form::Import);
+    app.park_form_for_tests();
+    assert_eq!(app.parked_forms.len(), 2);
+    app.unpark_form_for_tests();
+    assert!(matches!(app.form, Some(Form::Import)));
+    app.form = None;
+    app.unpark_form_for_tests();
+    assert!(matches!(app.form, Some(Form::Settings)));
+}

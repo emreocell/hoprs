@@ -695,6 +695,12 @@ pub const UPLOAD_AND_QUIT: &str = "Upload and quit";
 pub const QUIT_KEEP_COPIES: &str = "Quit and keep local copies";
 pub const CHECKING_EDITS: &str = "Checking the remote edits…";
 pub const STOP_KEEP_COPIES: &str = "Stop and keep local copies";
+/// While "Upload" runs (an upload under way has no bound but its protocol's timeouts).
+pub const UPLOADING_EDITS: &str = "Uploading… (Stop to keep local copies instead)";
+/// The kept notice, before a remote path: "Server copy of".
+pub const SERVER_COPY_OF: &str = "Server copy of";
+/// …after it.
+pub const MAY_BE_INCOMPLETE: &str = "may be incomplete";
 pub const EDIT_ONE_FILE: &str = "Select one file to edit";
 pub const UPLOADED: &str = "Uploaded";
 pub const EDITING: &str = "Editing";
@@ -734,11 +740,6 @@ pub fn not_uploaded(n: usize) -> String {
     } else {
         format!("{n} files could not be uploaded")
     }
-}
-
-/// While "Upload" runs: "Uploading (up to 10 s)…".
-pub fn uploading_edits(secs: u64) -> String {
-    format!("Uploading (up to {secs} s)…")
 }
 
 /// The persistent notice after a close kept unsent edits: "Kept 2 unsent edits as

@@ -114,6 +114,9 @@ pub struct KeptNotice {
     pub count: usize,
     /// The recovered copies' root.
     pub dir: PathBuf,
+    /// Remote files whose server copy may be incomplete: an upload was under way when
+    /// they were kept (never left unsaid).
+    pub incomplete: Vec<RemotePath>,
 }
 
 /// What a close question is for.
@@ -586,8 +589,20 @@ impl App {
             return;
         }
         tracing::info!(count = kept.len(), dir = %dir.display(), "unsent remote edits kept as recovered copies");
-        let count = self.kept_notice.as_ref().map_or(0, |n| n.count) + kept.len();
-        self.kept_notice = Some(KeptNotice { count, dir });
+        let mut notice = self.kept_notice.take().unwrap_or(KeptNotice {
+            count: 0,
+            dir: dir.clone(),
+            incomplete: Vec::new(),
+        });
+        notice.count += kept.len();
+        notice.dir = dir;
+        for edit in kept.iter().filter(|edit| edit.remote_may_be_truncated) {
+            tracing::warn!(remote = %edit.remote, "kept during an upload; the server's copy may be incomplete");
+            if !notice.incomplete.contains(&edit.remote) {
+                notice.incomplete.push(edit.remote.clone());
+            }
+        }
+        self.kept_notice = Some(notice);
     }
 
     /// The delete confirmation's note when the site has files open for editing.

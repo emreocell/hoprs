@@ -5,8 +5,12 @@
 //! nothing is asked and the close goes on (it ends the edits and removes their files).
 //! Otherwise the question lists the unsent files and where kept copies go. Its answers
 //! run as one [`Effect::SettleEdits`], and only its result closes. While "Upload" runs,
-//! "Stop and keep local copies" switches to keeping (the upload's late result is then
-//! ignored). A site or workspace form open when a question takes the center is parked
+//! "Stop and keep local copies" switches to keeping: the backend's `keep` stops the flush
+//! between syncs, never waits for an upload under way (it flags that file's server copy
+//! as possibly incomplete, shown in the kept notice), and no sync writes an edit it ended;
+//! the upload's late result is ignored. The window's question takes priority: a workspace
+//! question never replaces it, and a window close during a busy workspace question is
+//! asked once that one ends. A site or workspace form open when a question takes the center is parked
 //! and comes back when the question ends without closing the window.
 
 use std::path::PathBuf;
@@ -24,19 +28,36 @@ use crate::backend::SessionId;
 impl App {
     /// Takes the center for the question, parking an open site or workspace form.
     fn show_center_question(&mut self) {
-        if !matches!(self.form, None | Some(Form::QuitEdits)) {
-            self.parked_form = self.form.take();
-        }
+        self.park_form();
         self.form = Some(Form::QuitEdits);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn park_form_for_tests(&mut self) {
+        self.park_form();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unpark_form_for_tests(&mut self) {
+        self.unpark_form();
+    }
+
+    /// An open form steps aside (onto the stack: a second question never loses the
+    /// first one's form).
+    fn park_form(&mut self) {
+        if !matches!(self.form, None | Some(Form::QuitEdits))
+            && let Some(form) = self.form.take()
+        {
+            self.parked_forms.push(form);
+        }
     }
 
     /// A question ended without closing the window: the parked form comes back (unless
     /// the user opened another one meanwhile).
     fn unpark_form(&mut self) {
+        // Unless the user opened another form meanwhile (the parked ones then wait).
         if matches!(self.form, None | Some(Form::QuitEdits)) {
-            self.form = self.parked_form.take();
-        } else {
-            self.parked_form = None;
+            self.form = self.parked_forms.pop();
         }
     }
 
@@ -77,9 +98,7 @@ impl App {
             .insert(id, Question::checking(vec![session]));
         self.active_tab = Some(index);
         // The question is in the tab: an open form steps aside until it ends.
-        if !matches!(self.form, None | Some(Form::QuitEdits)) {
-            self.parked_form = self.form.take();
-        }
+        self.park_form();
         Some(vec![Effect::CheckEdits {
             purpose: EditsFor::Tab(id),
             sessions: vec![session],
@@ -92,6 +111,17 @@ impl App {
         &mut self,
         window: iced::window::Id,
     ) -> Option<Vec<Effect>> {
+        // The window comes first: an idle workspace question gives way to it; a busy one
+        // finishes, then the window's question follows.
+        if let Some(ask) = &self.center_ask
+            && matches!(ask.purpose, EditsFor::Workspace(_))
+        {
+            if ask.question.busy.is_some() {
+                self.queued_quit = Some(window);
+                return Some(Vec::new());
+            }
+            self.center_ask = None;
+        }
         if let Some(ask) = &self.center_ask
             && ask.purpose == EditsFor::Quit(window)
         {
@@ -135,6 +165,16 @@ impl App {
         let sessions = self.edit_sessions(&sites);
         if sessions.is_empty() {
             return None;
+        }
+        // Another question in the center (the window's, or a busy one) is not replaced:
+        // it shows again and this request is dropped.
+        if let Some(ask) = &self.center_ask
+            && (ask.question.busy.is_some() || !matches!(ask.purpose, EditsFor::Workspace(_)))
+        {
+            if ask.question.files.is_some() {
+                self.show_center_question();
+            }
+            return Some(Vec::new());
         }
         let purpose = EditsFor::Workspace(id.clone());
         self.center_ask = Some(CenterAsk {
@@ -211,7 +251,9 @@ impl App {
             EditsFor::Workspace(id) => {
                 self.center_ask = None;
                 self.unpark_form();
-                self.close_workspace_now(&id)
+                let mut effects = self.close_workspace_now(&id);
+                effects.extend(self.run_queued_quit());
+                effects
             }
             EditsFor::Quit(window) => {
                 self.center_ask = None;
@@ -237,7 +279,7 @@ impl App {
                     EditsFor::Quit(_) | EditsFor::Workspace(_) => self.center_ask = None,
                 }
                 self.unpark_form();
-                return Vec::new();
+                return self.run_queued_quit();
             }
             (None, CloseAnswer::Upload) => Settle::Upload,
             // "Keep", or "Stop and keep local copies" while the upload runs.
@@ -251,6 +293,14 @@ impl App {
             sessions: question.sessions.clone(),
             how,
         }]
+    }
+
+    /// A window close that waited for a busy workspace question: asked now.
+    fn run_queued_quit(&mut self) -> Vec<Effect> {
+        match self.queued_quit.take() {
+            Some(window) => self.close_requested(window),
+            None => Vec::new(),
+        }
     }
 
     pub(in crate::app) fn close_tab_answer(

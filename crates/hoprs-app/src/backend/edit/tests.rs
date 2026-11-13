@@ -27,6 +27,8 @@ struct CountingFs {
     /// While set, `stat` waits for a permit (after telling `stat_entered`).
     stat_gate: Mutex<Option<Arc<Semaphore>>>,
     stat_entered: Notify,
+    /// Every `stat` call, counted on entry.
+    stats: AtomicUsize,
     /// While set, `open_write` truncates the file, then waits for a permit (a slow upload
     /// already under way).
     write_gate: Mutex<Option<Arc<Semaphore>>>,
@@ -56,10 +58,12 @@ impl RemoteFs for CountingFs {
         self.inner.list(path).await
     }
     async fn stat(&self, path: &RemotePath) -> Result<RemoteEntry> {
+        self.stats.fetch_add(1, Ordering::SeqCst);
         let gate = self.stat_gate.lock().unwrap().clone();
         if let Some(gate) = gate {
             self.stat_entered.notify_one();
-            let _permit = gate.acquire().await.unwrap();
+            // Each permit lets one `stat` through.
+            gate.acquire().await.unwrap().forget();
         }
         self.check()?;
         let failures = self.stat_failures.load(Ordering::SeqCst);
@@ -1255,4 +1259,93 @@ async fn preserve_saves_unsent_edits_locally_once() {
     assert!(h.edits.local_path(id).is_none());
     let local = h.root.join(SESSION.0.to_string());
     assert!(local.exists(), "the edit directory is kept");
+}
+
+/// Fix round 2, Important 1: "Stop and keep local copies" while a flush runs. Two
+/// unsent edits; the flush has sent the first and its sync of the second waits on the
+/// server. `keep` returns at once (it does not wait for that upload), saying the second's
+/// server copy may be incomplete; the waiting sync then writes nothing, the flush stops,
+/// and a sync that still holds the old handle afterwards writes nothing either.
+#[tokio::test]
+async fn stop_and_keep_during_a_flush_never_uploads_an_ended_edit() {
+    let h = harness(false);
+    h.mem.add_file(
+        "/home/alice/b.txt",
+        b"b v1\n",
+        UNIX_EPOCH + Duration::from_secs(1_000),
+    );
+    let a = h.start_with(FILE, UploadMode::InPlace).await.unwrap();
+    let b = h
+        .start_with("/home/alice/b.txt", UploadMode::InPlace)
+        .await
+        .unwrap();
+    std::fs::write(h.edits.local_path(a).unwrap(), b"a unsent\n").unwrap();
+    std::fs::write(h.edits.local_path(b).unwrap(), b"b unsent\n").unwrap();
+    let old_b = h.edits.inner.edit(b).unwrap();
+    // The first edit's sync takes two stats (before and after its upload); the third,
+    // the second edit's, waits.
+    let gate = Arc::new(Semaphore::new(2));
+    *h.fs.stat_gate.lock().unwrap() = Some(gate.clone());
+    let base = h.fs.stats.load(Ordering::SeqCst);
+
+    let edits = h.edits.clone();
+    let flush = tokio::spawn(async move { edits.flush(SESSION, Duration::from_secs(60)).await });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while h.fs.stats.load(Ordering::SeqCst) < base + 3 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the second sync reaches the server");
+    assert_eq!(
+        h.mem.read_file(FILE).unwrap(),
+        b"a unsent\n",
+        "the first went up"
+    );
+    assert_eq!(h.writes(), 1);
+
+    // Stop: keep returns while the second sync still waits.
+    let kept = tokio::time::timeout(Duration::from_secs(5), h.edits.keep(SESSION))
+        .await
+        .expect("keep does not wait for the upload under way")
+        .unwrap();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(kept[0].id, b);
+    assert!(
+        kept[0].remote_may_be_truncated,
+        "the busy upload is flagged"
+    );
+    assert_eq!(std::fs::read(&kept[0].recovered).unwrap(), b"b unsent\n");
+
+    // The waiting sync goes on: it must not write the ended edit.
+    *h.fs.stat_gate.lock().unwrap() = None;
+    gate.add_permits(10);
+    let left = flush.await.unwrap();
+    assert!(left.is_empty(), "{left:?}");
+    assert_eq!(h.writes(), 1, "the ended edit was never uploaded");
+    assert_eq!(h.mem.read_file("/home/alice/b.txt").unwrap(), b"b v1\n");
+
+    // The flush's old handle syncing after `keep` (the race of the review) writes nothing.
+    assert!(matches!(
+        h.edits.inner.sync(&old_b, false).await,
+        Outcome::Unchanged
+    ));
+    assert_eq!(h.writes(), 1);
+    assert_eq!(h.mem.read_file("/home/alice/b.txt").unwrap(), b"b v1\n");
+}
+
+/// Fix round 2 (minor): two passes racing (a forced exit during the shutdown's) copy the
+/// same bytes once.
+#[tokio::test(start_paused = true)]
+async fn racing_preserve_passes_copy_once() {
+    let mut h = harness(false);
+    let id = h.start(FILE).await.unwrap();
+    h.state
+        .send_replace(ConnectionState::Reconnecting { attempt: 1 });
+    h.save(id, b"unsent\n");
+    tokio::time::advance(DEBOUNCE).await;
+    assert_eq!(h.next_event().await, held(id));
+    let (one, two) = tokio::join!(h.edits.preserve_unsent(), h.edits.preserve_unsent());
+    assert_eq!(one[0].recovered, two[0].recovered);
+    assert_eq!(h.recovered_copies().len(), 1);
 }

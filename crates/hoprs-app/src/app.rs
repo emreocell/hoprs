@@ -166,7 +166,9 @@ pub struct App {
     /// The window's (or a workspace's) close waits for the answer about unsent edits.
     pub center_ask: Option<edit::CenterAsk>,
     /// A site or workspace form a close question stepped in front of (back after it).
-    pub parked_form: Option<Form>,
+    pub parked_forms: Vec<Form>,
+    /// The window asked to close while a workspace question was busy: asked after it.
+    pub queued_quit: Option<iced::window::Id>,
     /// Unsent edits kept as recovered copies by a close, until dismissed.
     pub kept_notice: Option<edit::KeptNotice>,
     /// The editor command as typed on the settings page, while it is not valid.
@@ -692,7 +694,8 @@ impl App {
             toast: None,
             close_asks: HashMap::new(),
             center_ask: None,
-            parked_form: None,
+            parked_forms: Vec::new(),
+            queued_quit: None,
             kept_notice: None,
             editor_input: None,
             held: HashMap::new(),
@@ -1033,33 +1036,48 @@ impl App {
     /// The form itself is closed (success) or shows the error (failure) only if it is the
     /// one that asked: same target, still waiting for this result.
     fn form_done(&mut self, op: ProfileOp, result: Result<(), Error>) -> Vec<Effect> {
-        // A form parked behind a close question still gets its result.
-        let parked =
-            self.parked_form.is_some() && matches!(self.form, None | Some(Form::QuitEdits));
-        if parked {
-            std::mem::swap(&mut self.form, &mut self.parked_form);
-        }
-        let waiting = match (&mut self.form, &op) {
-            (Some(Form::Site(form)), ProfileOp::SaveSite(id) | ProfileOp::DeleteSite(id)) => {
-                form.busy && form.site_id() == id
+        fn waiting_for(form: &Form, op: &ProfileOp) -> bool {
+            match (form, op) {
+                (Form::Site(form), ProfileOp::SaveSite(id) | ProfileOp::DeleteSite(id)) => {
+                    form.busy && form.site_id() == id
+                }
+                (
+                    Form::Workspace(form),
+                    ProfileOp::SaveWorkspace(id) | ProfileOp::DeleteWorkspace(id),
+                ) => form.busy && form.workspace_id() == id,
+                _ => false,
             }
-            (
-                Some(Form::Workspace(form)),
-                ProfileOp::SaveWorkspace(id) | ProfileOp::DeleteWorkspace(id),
-            ) => form.busy && form.workspace_id() == id,
-            _ => false,
-        };
+        }
+        fn finished(form: &mut Form, error: &Error) {
+            match form {
+                Form::Site(form) => form.finished(Some(error.clone())),
+                Form::Workspace(form) => form.finished(Some(error.clone())),
+                Form::Import | Form::Settings | Form::QuitEdits => {}
+            }
+        }
         let error = result.err();
-        if waiting {
+        if self
+            .form
+            .as_ref()
+            .is_some_and(|form| waiting_for(form, &op))
+        {
             match (&error, &mut self.form) {
                 (None, _) => self.form = None,
-                (Some(error), Some(Form::Site(form))) => form.finished(Some(error.clone())),
-                (Some(error), Some(Form::Workspace(form))) => form.finished(Some(error.clone())),
-                (Some(_), None | Some(Form::Import | Form::Settings | Form::QuitEdits)) => {}
+                (Some(error), Some(form)) => finished(form, error),
+                (Some(_), None) => {}
             }
-        }
-        if parked {
-            std::mem::swap(&mut self.form, &mut self.parked_form);
+        } else if let Some(i) = self
+            .parked_forms
+            .iter()
+            .position(|form| waiting_for(form, &op))
+        {
+            // A form parked behind a close question still gets its result.
+            match &error {
+                None => {
+                    self.parked_forms.remove(i);
+                }
+                Some(error) => finished(&mut self.parked_forms[i], error),
+            }
         }
         if error.is_some() {
             return Vec::new();

@@ -81,7 +81,7 @@ use std::hash::{BuildHasher, DefaultHasher, Hasher};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -185,6 +185,10 @@ pub struct KeptEdit {
     pub id: EditId,
     pub remote: RemotePath,
     pub recovered: PathBuf,
+    /// The server's copy may be incomplete: an upload of this edit was under way when it
+    /// was kept (the close may cut it), or an earlier cut in-place write was never
+    /// repaired. Said in the kept notice; never left silent.
+    pub remote_may_be_truncated: bool,
 }
 
 /// How a save reaches the server (see the module docs).
@@ -259,6 +263,8 @@ struct Inner {
     setup: tokio::sync::Mutex<()>,
     /// One `start` at a time per session and remote path.
     starting: Mutex<HashMap<(SessionId, RemotePath), StartLock>>,
+    /// Serializes [`Inner::preserve`].
+    preserving: tokio::sync::Mutex<()>,
 }
 
 /// A session's directory, watcher and worker.
@@ -288,6 +294,9 @@ struct Edit {
     /// One sync or resolution at a time.
     turn: Arc<tokio::sync::Mutex<()>>,
     sync: Mutex<SyncState>,
+    /// `keep`/`finish` is ending this edit: no sync may start a write any more (checked
+    /// once the turn is taken, and again right before the upload).
+    ending: AtomicBool,
 }
 
 struct SyncState {
@@ -420,6 +429,7 @@ impl EditManager {
                 sessions: Mutex::new(HashMap::new()),
                 setup: tokio::sync::Mutex::new(()),
                 starting: Mutex::new(HashMap::new()),
+                preserving: tokio::sync::Mutex::new(()),
             }),
         }
     }
@@ -515,6 +525,7 @@ impl EditManager {
             mode,
             state,
             turn: Arc::default(),
+            ending: AtomicBool::new(false),
             sync: Mutex::new(SyncState::synced(
                 RemoteStamp::of(&entry),
                 synced,
@@ -550,6 +561,9 @@ impl EditManager {
             },
             EditChoice::KeepRemote | EditChoice::SaveCopy => {
                 let _turn = edit.turn.lock().await;
+                if edit.ending.load(Ordering::SeqCst) {
+                    return Err(no_edit());
+                }
                 let local = edit.local.clone();
                 let data = blocking(move || read_local(&local)).await?;
                 // The user's version is safe on disk before anything else happens.
@@ -617,6 +631,9 @@ impl EditManager {
     /// An upload in flight finishes first.
     pub async fn finish(&self, session: SessionId, discard: bool) -> Result<Vec<EditSummary>> {
         let edits = self.inner.session_edits(session);
+        for edit in &edits {
+            edit.ending.store(true, Ordering::SeqCst);
+        }
         let mut turns = Vec::with_capacity(edits.len());
         for edit in &edits {
             turns.push(edit.turn.clone().lock_owned().await);
@@ -629,6 +646,8 @@ impl EditManager {
                 }
             }
             if !pending.is_empty() {
+                // Not ending after all: they go on as before.
+                self.unend(&edits);
                 return Ok(pending);
             }
         }
@@ -699,7 +718,8 @@ impl EditManager {
                     // The deadline is checked before each sync, never during one: an
                     // upload under way finishes (or fails) under the protocol's own
                     // timeouts, so a cut in-place write is always recorded as such.
-                    if Instant::now() >= deadline {
+                    // Stopped ("keep" ended the edits): no further sync.
+                    if Instant::now() >= deadline || edit.ending.load(Ordering::SeqCst) {
                         break;
                     }
                     let unsent = unsent(edit).await;
@@ -709,7 +729,12 @@ impl EditManager {
                 }
             }
             let left = self.pending(session).await;
-            let closed = state.has_changed().is_err();
+            let closed = state.has_changed().is_err()
+                || self
+                    .inner
+                    .session_edits(session)
+                    .iter()
+                    .any(|edit| edit.ending.load(Ordering::SeqCst));
             if left.iter().all(|s| s.state == EditState::Conflict)
                 || closed
                 || Instant::now() >= deadline
@@ -732,24 +757,53 @@ impl EditManager {
     /// nothing is ended (the error says why).
     pub async fn keep(&self, session: SessionId) -> Result<Vec<KeptEdit>> {
         let edits = self.inner.session_edits(session);
-        let mut turns = Vec::with_capacity(edits.len());
+        // From here no sync of these edits starts a write (a flush's next sync, a
+        // debounce), and a flush stops between syncs.
         for edit in &edits {
-            turns.push(edit.turn.clone().lock_owned().await);
+            edit.ending.store(true, Ordering::SeqCst);
+        }
+        // An upload already under way is not waited for: its turn is taken if free, and
+        // a busy one marks the copy "the server's may be incomplete".
+        let mut turns = Vec::with_capacity(edits.len());
+        let mut busy = Vec::new();
+        for edit in &edits {
+            match edit.turn.clone().try_lock_owned() {
+                Ok(turn) => turns.push(turn),
+                Err(_) => busy.push(edit.id),
+            }
         }
         let mut kept = Vec::new();
         for edit in &edits {
-            if unsent(edit).await.is_none() {
+            let in_flight = busy.contains(&edit.id);
+            if !in_flight && unsent(edit).await.is_none() {
                 continue;
             }
             let local = edit.local.clone();
-            let Some(data) = blocking(move || read_local(&local)).await? else {
-                continue;
+            let data = match blocking(move || read_local(&local)).await {
+                Ok(Some(data)) => data,
+                Ok(None) => continue,
+                Err(error) => {
+                    self.unend(&edits);
+                    return Err(error);
+                }
             };
-            let recovered = self.inner.preserve(edit, data).await?;
+            let recovered = match self.inner.preserve(edit, data).await {
+                Ok(path) => path,
+                Err(error) => {
+                    // Nothing is ended when a copy fails.
+                    self.unend(&edits);
+                    return Err(error);
+                }
+            };
+            let remote_may_be_truncated = in_flight || edit.sync_state().truncated;
+            if remote_may_be_truncated {
+                tracing::warn!(edit = edit.id.0, remote = %edit.remote, "kept while an upload was under way; the server's copy may be incomplete");
+            }
             kept.push(KeptEdit {
                 id: edit.id,
                 remote: edit.remote.clone(),
                 recovered,
+                remote_may_be_truncated,
             });
         }
         if let Some(record) = lock(&self.inner.sessions).remove(&session) {
@@ -772,6 +826,13 @@ impl EditManager {
             self.inner.emit(EditEvent::Closed { id: edit.id });
         }
         Ok(kept)
+    }
+
+    /// A `keep` that failed leaves the edits as they were.
+    fn unend(&self, edits: &[Arc<Edit>]) {
+        for edit in edits {
+            edit.ending.store(false, Ordering::SeqCst);
+        }
     }
 
     /// The window closes: ends every session's edits. A session with nothing unsent loses
@@ -828,6 +889,9 @@ impl EditManager {
                     id: edit.id,
                     remote: edit.remote.clone(),
                     recovered,
+                    // An upload under way may be cut by the exit.
+                    remote_may_be_truncated: edit.turn.try_lock().is_err()
+                        || edit.sync_state().truncated,
                 }),
                 Err(error) => {
                     tracing::warn!(edit = edit.id.0, %error, "cannot keep an unsent edit; its local file stays");
@@ -958,6 +1022,11 @@ impl Inner {
     /// stamp check, now and, if this ends pending, on the retry.
     async fn sync(&self, edit: &Arc<Edit>, overwrite: bool) -> Outcome {
         let _turn = edit.turn.lock().await;
+        // Ended while this sync waited (a flush holding an old handle, a debounce): it
+        // writes nothing.
+        if edit.ending.load(Ordering::SeqCst) {
+            return Outcome::Unchanged;
+        }
         let id = edit.id;
         let local = edit.local.clone();
         let data = match blocking(move || read_local(&local)).await {
@@ -1001,6 +1070,10 @@ impl Inner {
             tracing::warn!(edit = id.0, remote = %edit.remote, "the remote file changed during the edit; upload held");
             self.emit(EditEvent::RemoteChanged { id });
             return Outcome::Conflict;
+        }
+        // Last chance before writing: an edit `keep` ended meanwhile is left alone.
+        if edit.ending.load(Ordering::SeqCst) {
+            return Outcome::Unchanged;
         }
         let mode_bits = before.as_ref().and_then(|entry| entry.mode);
         if let Err(cut) = upload(edit.fs.as_ref(), &edit.remote, edit.mode, &data, mode_bits).await
@@ -1118,6 +1191,9 @@ impl Inner {
     /// [`recover`](Self::recover), unless these exact bytes were saved already: then
     /// that copy.
     async fn preserve(&self, edit: &Edit, data: Vec<u8>) -> Result<PathBuf> {
+        // One at a time: a forced exit racing a shutdown's pass never copies the same
+        // bytes twice.
+        let _one = self.preserving.lock().await;
         let hash = digest(&data);
         let done = edit
             .sync_state()

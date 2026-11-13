@@ -8,7 +8,7 @@ use iced::widget::{button, column, container, row, scrollable, space, text};
 use iced::{Alignment, Element, Length, Padding};
 
 use crate::app::edit::{
-    CloseAnswer, EditMsg, EditStatus, EditsFor, FLUSH_LIMIT, Question, QuestionFile, RemoteEdit,
+    CloseAnswer, EditMsg, EditStatus, EditsFor, Question, QuestionFile, RemoteEdit,
 };
 use crate::app::{App, Message, Tab};
 use crate::backend::EditChoice;
@@ -293,7 +293,7 @@ fn question_body<'a>(
     match question.busy {
         Some(CloseAnswer::Upload) => {
             actions = actions.push(
-                text(strings::uploading_edits(FLUSH_LIMIT.as_secs()))
+                text(strings::UPLOADING_EDITS)
                     .size(theme::TEXT_XS)
                     .color(p.muted),
             );
@@ -389,23 +389,33 @@ pub fn with_toast<'a>(app: &'a App, base: Element<'a, Message>) -> Element<'a, M
 /// any tab, until dismissed.
 pub fn kept_notice(app: &App) -> Option<Element<'_, Message>> {
     let notice = app.kept_notice.as_ref()?;
+    let mut lines = column![
+        row![
+            text(strings::kept_notice(notice.count)).size(theme::TEXT_XS),
+            container(path_text(notice.dir.display().to_string())).width(Length::Fill),
+            small_button(
+                strings::DISMISS,
+                Some(edit_msg(EditMsg::DismissKept)),
+                false
+            ),
+        ]
+        .spacing(theme::SPACE_XS)
+        .align_y(Alignment::Center)
+    ]
+    .spacing(theme::SPACE_3XS);
+    for remote in &notice.incomplete {
+        lines = lines.push(with_name(
+            format!("{} ", strings::SERVER_COPY_OF),
+            remote.as_str().to_owned(),
+            format!(" {}", strings::MAY_BE_INCOMPLETE),
+            palette().error,
+        ));
+    }
     Some(
-        container(
-            row![
-                text(strings::kept_notice(notice.count)).size(theme::TEXT_XS),
-                container(path_text(notice.dir.display().to_string())).width(Length::Fill),
-                small_button(
-                    strings::DISMISS,
-                    Some(edit_msg(EditMsg::DismissKept)),
-                    false
-                ),
-            ]
-            .spacing(theme::SPACE_XS)
-            .align_y(Alignment::Center),
-        )
-        .width(Length::Fill)
-        .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_MD]))
-        .style(theme::pane_bar)
-        .into(),
+        container(lines)
+            .width(Length::Fill)
+            .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_MD]))
+            .style(theme::pane_bar)
+            .into(),
     )
 }
