@@ -169,10 +169,17 @@ pub enum FailureAction {
 
 impl Tab {
     /// The host key changed: why this tab failed, if so.
+    ///
+    /// A first connect fails with it (`known_hosts` has another key). A session that
+    /// already connected pins its key, so a reconnect that meets another one leaves the
+    /// tab connected with its feed reporting `Disconnected` with the change.
     pub fn host_key_change(&self) -> Option<HostKeyChange> {
-        match &self.state {
-            TabState::Failed(failure) => hoprs_ssh::host_key_change(&failure.error),
-            TabState::Connecting | TabState::Connected(_) => None,
+        match (&self.state, &self.conn) {
+            (TabState::Failed(failure), _) => hoprs_ssh::host_key_change(&failure.error),
+            (TabState::Connected(_), Some(hoprs_core::ConnectionState::Disconnected(error))) => {
+                hoprs_ssh::host_key_change(error)
+            }
+            (TabState::Connecting | TabState::Connected(_), _) => None,
         }
     }
 }
@@ -376,6 +383,16 @@ impl App {
         actions
     }
 
+    /// The tab's connection failed or was lost: remember the site's `host:port` as it is
+    /// now, the endpoint "Remove the old entry…" works on even if the site is edited
+    /// later.
+    pub(super) fn note_failed_endpoint(&mut self, index: usize) {
+        let endpoint = self
+            .site(&self.tabs[index].site)
+            .map(|s| (s.host.clone(), s.port));
+        self.tabs[index].failed_endpoint = endpoint;
+    }
+
     /// The `host:port` the tab failed with, if its host key changed in `known_hosts`.
     fn changed_endpoint(&self, index: usize) -> Option<(String, u16)> {
         let tab = &self.tabs[index];
@@ -383,19 +400,24 @@ impl App {
         tab.failed_endpoint.clone()
     }
 
-    /// Closes the tab's failed session and connects the site with a new one (the effect
-    /// closes first, then connects: a reused session would keep its old state).
+    /// Closes the tab's failed or lost session and connects the site with a new one (the
+    /// effect closes first, then connects: a reused session would keep its old state).
     pub(super) fn restart_session(&mut self, tab: TabId) -> Vec<Effect> {
         let Some(index) = self.tab_index(tab) else {
             return Vec::new();
         };
+        let lost = self.tabs[index].lost_connection().is_some();
         let tab = &mut self.tabs[index];
-        let TabState::Failed(failure) = &tab.state else {
-            return Vec::new();
+        let close = match &tab.state {
+            TabState::Failed(failure) => failure.session,
+            TabState::Connected(connected) if lost => Some(connected.session),
+            TabState::Connected(_) | TabState::Connecting => return Vec::new(),
         };
-        let close = failure.session;
         let site = tab.site.clone();
         tab.state = TabState::Connecting;
+        tab.conn = None;
+        tab.auth = None;
+        tab.reconnecting = false;
         tab.known_hosts = KnownHostsFix::Idle;
         tab.failed_endpoint = None;
         if let Some(session) = close {

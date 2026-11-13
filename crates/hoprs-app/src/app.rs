@@ -871,8 +871,7 @@ impl App {
                 };
                 // Where it failed, as the profile said then: "Remove the old entry…"
                 // works on that endpoint even if the site is edited meanwhile.
-                self.tabs[index].failed_endpoint =
-                    self.site(&site).map(|s| (s.host.clone(), s.port));
+                self.note_failed_endpoint(index);
                 self.tabs[index].state = TabState::Failed(failure);
                 effects
             }

@@ -63,7 +63,8 @@ impl super::Tab {
     }
 
     /// Why a connected session is lost for good (it gave up reconnecting, or was refused):
-    /// the tab shows it in a banner with "Reconnect".
+    /// the tab shows it in a banner with "Reconnect" (or, if the host key changed, the
+    /// blocking explanation with "Close and reconnect").
     pub fn lost_connection(&self) -> Option<&Error> {
         match (&self.state, &self.conn) {
             (TabState::Connected(_), Some(ConnectionState::Disconnected(error))) => Some(error),
@@ -134,10 +135,15 @@ impl App {
                 .conn
                 .as_ref()
                 .is_some_and(|c| *c != ConnectionState::Connected);
+        let lost = matches!(state, ConnectionState::Disconnected(_));
         tab.conn = Some(state);
+        if lost {
+            self.note_failed_endpoint(index);
+        }
         if !back {
             return Vec::new();
         }
+        let tab = &mut self.tabs[index];
         tab.reconnecting = false;
         let retry = matches!(tab.remote.listing, Listing::Failed(_));
         let site = tab.site.clone();
@@ -159,7 +165,12 @@ impl App {
         let Some(session) = tab_ref.session() else {
             return Vec::new();
         };
-        if tab_ref.reconnecting || tab_ref.lost_connection().is_none() {
+        // A changed host key fails every reconnect of this session: the banner offers
+        // "Close and reconnect" instead.
+        if tab_ref.reconnecting
+            || tab_ref.lost_connection().is_none()
+            || tab_ref.host_key_change().is_some()
+        {
             return Vec::new();
         }
         tab_ref.reconnecting = true;
@@ -192,7 +203,10 @@ impl App {
                 self.queue.site_restored(&site);
                 effects.extend(self.request_listing(index, Side::Remote));
             }
-            Err(error) => tab.conn = Some(ConnectionState::Disconnected(error)),
+            Err(error) => {
+                tab.conn = Some(ConnectionState::Disconnected(error));
+                self.note_failed_endpoint(index);
+            }
         }
         effects
     }

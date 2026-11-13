@@ -284,6 +284,14 @@ pub fn known_hosts_warning(entries: &[KnownHostEntry]) -> Option<String> {
 /// The tab's blocking explanation of a changed host key: no way to accept the key, only
 /// "Remove the old entry…" (with its confirmation in place) or "Edit site".
 pub fn host_key_changed<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> {
+    container(host_key_changed_body(app, tab))
+        .center(Length::Fill)
+        .into()
+}
+
+/// The changed host key's explanation and actions, without the centering: the failed
+/// tab's remote pane centers it, a lost session's banner spans the tab with it.
+pub fn host_key_changed_body<'a>(app: &'a App, tab: &'a Tab) -> iced::widget::Column<'a, Message> {
     let p = palette();
     let fix = |m: KnownHostsMsg| Message::KnownHosts {
         tab: tab.id,
@@ -354,7 +362,7 @@ pub fn host_key_changed<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> 
             .push(actions),
         KnownHostsFix::Confirm(entries) => body.push(confirm(entries, host, fix)),
     };
-    container(body).center(Length::Fill).into()
+    body
 }
 
 /// "Remove N lines for host from known_hosts?", the lines, the warning, Remove / Keep.

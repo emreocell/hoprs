@@ -922,28 +922,46 @@ fn tab_cycles_within_dialog_fields() {
 }
 
 /// Review Focus 4: the key changed from the one this session verified (not a known_hosts
-/// line): editing known_hosts can't help the session, so the tab offers "Close and
-/// reconnect", which closes it and connects with a new session.
+/// line). SSH pins the key on reconnect, so this only happens to a session that already
+/// connected: its feed reports `Disconnected` with the pinned-key error while the tab is
+/// still `Connected`. The lost banner then explains it (no Reconnect, which would always
+/// fail), and "Close and reconnect" closes the session and connects with a new one.
 #[tokio::test]
 async fn pinned_key_change_offers_close_and_reconnect() {
     let s = site("s", "h", "u", Protocol::Ssh);
     let fake = Arc::new(FakeBackend::new().with_site(s.clone()));
     let mut app = loaded(&fake).await;
-    fake.fail_next_connect(&s.id, hoprs_ssh::testing::pinned_key_changed_error("h"));
     let sites = connect_effect(app.update(Message::ConnectSite(s.id.clone())));
     drive(&mut app, &fake, sites).await;
     let tab = app.tabs[0].id;
-    let TabState::Failed(failure) = &app.tabs[0].state else {
-        panic!("{:?}", app.tabs[0].state);
-    };
-    let old = failure.session.unwrap();
+    let old = app.tabs[0].session().expect("connected");
+
+    // The session reconnects on its own and finds another key than the one it pinned.
+    app.update(Message::SessionState {
+        session: old,
+        state: hoprs_core::ConnectionState::Disconnected(
+            hoprs_ssh::testing::pinned_key_changed_error("h"),
+        ),
+        auth: None,
+    });
+    assert!(matches!(app.tabs[0].state, TabState::Connected(_)));
     assert_eq!(
         app.tabs[0].host_key_change(),
         Some(hoprs_ssh::HostKeyChange { line: None })
     );
     assert_eq!(
+        crate::ui::files::banner(&app.tabs[0]),
+        Some(crate::ui::files::Banner::HostKeyChanged),
+        "the banner explains the changed key"
+    );
+    assert_eq!(
         app.failure_actions(&app.tabs[0]),
-        [FailureAction::CloseAndReconnect, FailureAction::EditSite]
+        [FailureAction::CloseAndReconnect, FailureAction::EditSite],
+        "no Reconnect"
+    );
+    assert!(
+        app.update(Message::ReconnectSession(tab)).is_empty(),
+        "the session's reconnect can't help"
     );
     // No known_hosts edit for it.
     assert!(
@@ -968,6 +986,8 @@ async fn pinned_key_change_offers_close_and_reconnect() {
     assert_eq!((close, &site), (Some(old), &s.id));
     assert!(!app.dialogs.is_saving(old));
     assert_eq!(app.tabs[0].state, TabState::Connecting);
+    assert_eq!(app.tabs[0].conn, None);
+    assert_eq!(crate::ui::files::banner(&app.tabs[0]), None);
     let backend: Arc<dyn BackendApi> = fake.clone();
     let messages: Vec<Message> = effects::restart_site(backend, close, site).collect().await;
     for message in messages {
@@ -978,6 +998,7 @@ async fn pinned_key_change_offers_close_and_reconnect() {
         panic!("{:?}", app.tabs[0].state);
     };
     assert_ne!(connected.session, old, "a new session");
+    assert_eq!(app.tabs[0].host_key_change(), None);
 
     // Closing a tab forgets its session's pending save too.
     let session = connected.session;
@@ -987,4 +1008,31 @@ async fn pinned_key_change_offers_close_and_reconnect() {
     assert!(app.dialogs.is_saving(session));
     app.update(Message::CloseTab(tab));
     assert!(!app.dialogs.is_saving(session));
+}
+
+/// A connection lost for another reason keeps the plain banner with Reconnect.
+#[tokio::test]
+async fn plain_loss_keeps_reconnect() {
+    let s = site("s", "h", "u", Protocol::Ssh);
+    let fake = Arc::new(FakeBackend::new().with_site(s.clone()));
+    let mut app = loaded(&fake).await;
+    let sites = connect_effect(app.update(Message::ConnectSite(s.id.clone())));
+    drive(&mut app, &fake, sites).await;
+    let tab = app.tabs[0].id;
+    let session = app.tabs[0].session().unwrap();
+    let lost = Error::new(ErrorKind::Network, "Connection lost");
+    app.update(Message::SessionState {
+        session,
+        state: hoprs_core::ConnectionState::Disconnected(lost.clone()),
+        auth: None,
+    });
+    assert_eq!(app.tabs[0].host_key_change(), None);
+    assert_eq!(
+        crate::ui::files::banner(&app.tabs[0]),
+        Some(crate::ui::files::Banner::Lost(&lost))
+    );
+    assert!(matches!(
+        app.update(Message::ReconnectSession(tab))[..],
+        [Effect::Reconnect { .. }]
+    ));
 }

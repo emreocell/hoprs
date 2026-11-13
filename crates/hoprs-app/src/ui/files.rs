@@ -167,16 +167,49 @@ pub fn view<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> {
         pane(app, tab, Side::Remote, site_name, this_year),
     ]
     .height(Length::Fill);
-    match lost_banner(tab) {
+    match lost_banner(app, tab) {
         Some(banner) => column![banner, hrule(), panes].into(),
         None => panes.into(),
     }
 }
 
-/// The connection of a connected tab was lost for good: a thin bar across the tab with
-/// the reason and "Reconnect" (the session's own reconnect), no modal.
-fn lost_banner(tab: &Tab) -> Option<Element<'_, Message>> {
+/// What the bar across a connected tab says, if anything.
+#[derive(Debug, PartialEq)]
+pub enum Banner<'a> {
+    /// The connection was lost for good: the reason and "Reconnect".
+    Lost(&'a Error),
+    /// The session found another host key than the one it verified: the blocking
+    /// explanation and its actions, never "Reconnect" (which would always fail).
+    HostKeyChanged,
+}
+
+/// The bar a tab shows above its panes.
+pub fn banner(tab: &Tab) -> Option<Banner<'_>> {
     let error = tab.lost_connection()?;
+    Some(if tab.host_key_change().is_some() {
+        Banner::HostKeyChanged
+    } else {
+        Banner::Lost(error)
+    })
+}
+
+/// The connection of a connected tab was lost for good: a thin bar across the tab with
+/// the reason and "Reconnect" (the session's own reconnect), no modal. A changed host key
+/// shows its blocking explanation there instead, with "Close and reconnect" (or "Remove
+/// the old entry…").
+fn lost_banner<'a>(app: &'a App, tab: &'a Tab) -> Option<Element<'a, Message>> {
+    let error = match banner(tab)? {
+        Banner::Lost(error) => error,
+        Banner::HostKeyChanged => {
+            return Some(
+                container(crate::ui::dialogs::host_key_changed_body(app, tab))
+                    .width(Length::Fill)
+                    .padding(Padding::from([theme::SPACE_XS, theme::SPACE_MD]))
+                    .style(theme::pane_bar)
+                    .into(),
+            );
+        }
+    };
     let p = palette();
     let mut reason = row![text(strings::disconnected(&error.message)).color(p.error)]
         .spacing(theme::SPACE_XS)
