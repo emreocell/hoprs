@@ -265,7 +265,7 @@ impl App {
     /// folders. A failure is logged only (the tabs are not worth an error in the UI).
     pub(super) fn tabs_saved(&mut self, result: Result<(), Error>) -> Vec<Effect> {
         match result {
-            Ok(()) => vec![Effect::LoadProfiles],
+            Ok(()) => vec![self.load_profiles()],
             Err(error) => {
                 tracing::warn!(%error, "cannot save the workspace's tabs");
                 Vec::new()

@@ -26,10 +26,11 @@ use crate::ui::{dialogs, files, strings, tabs};
 pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> {
     use iced::Task;
     match effect {
-        Effect::LoadProfiles => Task::perform(
-            async move { backend.profiles().await },
-            Message::ProfilesLoaded,
-        ),
+        Effect::LoadProfiles(request) => {
+            Task::perform(async move { backend.profiles().await }, move |result| {
+                Message::ProfilesLoaded { request, result }
+            })
+        }
         Effect::SaveSite { site, password } => {
             let op = ProfileOp::SaveSite(site.id.clone());
             Task::perform(save_site(backend, site, password), move |result| {

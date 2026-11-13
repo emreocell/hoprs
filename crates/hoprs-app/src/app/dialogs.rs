@@ -369,7 +369,7 @@ impl App {
     /// connected, so the profiles are reloaded.
     pub(super) fn settle_saving(&mut self, session: SessionId, connected: bool) -> Vec<Effect> {
         if self.dialogs.saving.remove(&session).is_some() && connected {
-            vec![Effect::LoadProfiles]
+            vec![self.load_profiles()]
         } else {
             Vec::new()
         }

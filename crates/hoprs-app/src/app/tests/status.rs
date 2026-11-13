@@ -341,7 +341,7 @@ async fn closing_workspace_saves_tabs() {
     let stored = &fake.workspaces().await.unwrap()[0];
     assert_eq!(stored.sites[0].tabs, vec![saved]);
     assert_eq!(stored.sites[1].tabs, vec![kept]);
-    assert!(matches!(app.update(done)[..], [Effect::LoadProfiles]));
+    assert!(matches!(app.update(done)[..], [Effect::LoadProfiles(_)]));
 
     // A failed save is logged only: nothing to reload, nothing shown.
     assert!(

@@ -159,7 +159,7 @@ fn import_flow_steps() {
     // Step 3: the report, and the sidebar reloads.
     let done = report();
     let effects = app.update(Message::Imported(Ok(done.clone())));
-    assert!(matches!(effects[..], [Effect::LoadProfiles]));
+    assert!(matches!(effects[..], [Effect::LoadProfiles(_)]));
     assert_eq!(app.import.step, ImportStep::Report);
     assert_eq!(app.import.report, Some(done));
     assert!(!app.busy());
@@ -626,7 +626,7 @@ fn restore_replace_needs_extra_confirmation() {
     };
     // The restored profiles reach the sidebar.
     let effects = app.update(Message::BackupRestored(Ok(done.clone())));
-    assert!(matches!(effects[..], [Effect::LoadProfiles]));
+    assert!(matches!(effects[..], [Effect::LoadProfiles(_)]));
     assert_eq!(app.backup.restore, BackupState::Done(done));
 
     // Replace: the first click only asks.
@@ -686,7 +686,7 @@ fn settings_changes_apply_and_save() {
     assert!(matches!(
         boot[..],
         [
-            Effect::LoadProfiles,
+            Effect::LoadProfiles(_),
             Effect::LoadSettings,
             Effect::LoadQueueStatus
         ]
@@ -866,11 +866,14 @@ async fn reloaded_profiles_reconcile_tabs() {
     moved.host = "new-hb".into();
     let mut renamed = c.clone();
     renamed.name = "c renamed".into();
-    let effects = app.update(Message::ProfilesLoaded(Ok(ProfileSnapshot {
-        sites: vec![moved.clone(), renamed],
-        workspaces: Vec::new(),
-        unreadable: Vec::new(),
-    })));
+    let effects = app.update(profiles_loaded(
+        &app,
+        Ok(ProfileSnapshot {
+            sites: vec![moved.clone(), renamed],
+            workspaces: Vec::new(),
+            unreadable: Vec::new(),
+        }),
+    ));
     // The active tab may have moved (its strip scrolls to it); otherwise only closes.
     let mut closed: Vec<SessionId> = effects
         .iter()
@@ -902,11 +905,14 @@ async fn reloaded_profiles_reconcile_tabs() {
     assert_eq!(sites, std::slice::from_ref(&b.id));
 
     // The same reload again changes nothing.
-    let effects = app.update(Message::ProfilesLoaded(Ok(ProfileSnapshot {
-        sites: vec![moved],
-        workspaces: Vec::new(),
-        unreadable: Vec::new(),
-    })));
+    let effects = app.update(profiles_loaded(
+        &app,
+        Ok(ProfileSnapshot {
+            sites: vec![moved],
+            workspaces: Vec::new(),
+            unreadable: Vec::new(),
+        }),
+    ));
     assert!(
         effects
             .iter()

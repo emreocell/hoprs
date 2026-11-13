@@ -206,7 +206,7 @@ impl App {
                 flow.delete = source_delete(&report);
                 flow.report = Some(report);
                 flow.step = ImportStep::Report;
-                vec![Effect::LoadProfiles]
+                vec![self.load_profiles()]
             }
             Err(error) => {
                 // Nothing was applied: back to the file, with the reason.

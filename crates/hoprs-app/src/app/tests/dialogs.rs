@@ -287,7 +287,7 @@ async fn changed_host_key_has_no_accept() {
     // Another failure keeps Reconnect.
     let other = site("o", "h2", "u", Protocol::Ssh);
     fake.save_site(other.clone()).await.unwrap();
-    app.update(Message::ProfilesLoaded(fake.profiles().await));
+    app.update(profiles_loaded(&app, fake.profiles().await));
     fake.fail_next_connect(&other.id, Error::new(ErrorKind::Network, "down"));
     let sites = connect_effect(app.update(Message::ConnectSite(other.id.clone())));
     drive(&mut app, &fake, sites).await;
@@ -331,7 +331,7 @@ async fn remove_entry_warns_on_multi_host_line() {
     edited.port = 22;
     let mut profiles = fake.profiles().await.unwrap();
     profiles.sites = vec![edited];
-    let effects = app.update(Message::ProfilesLoaded(Ok(profiles)));
+    let effects = app.update(profiles_loaded(&app, Ok(profiles)));
     assert!(
         matches!(effects[..], [Effect::CloseSession(closed)] if closed == old_session),
         "{effects:?}"
@@ -755,7 +755,7 @@ async fn save_in_keyring_only_after_success() {
         let effects: Vec<Effect> = messages.into_iter().flat_map(|m| app.update(m)).collect();
         let reloads = effects
             .iter()
-            .filter(|e| matches!(e, Effect::LoadProfiles))
+            .filter(|e| matches!(e, Effect::LoadProfiles(_)))
             .count();
         if connects {
             assert_eq!(

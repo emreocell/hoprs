@@ -148,6 +148,9 @@ pub struct App {
     pub window_width: f32,
     /// The last tab or listing id handed out.
     next_id: u64,
+    /// The last profile read asked for, and the one whose result was applied last.
+    profiles_requested: RequestId,
+    profiles_applied: RequestId,
 }
 
 #[derive(Debug, Clone)]
@@ -157,7 +160,11 @@ pub enum Message {
     /// The sidebar filter changed.
     FilterSites(String),
     ReloadProfiles,
-    ProfilesLoaded(Result<ProfileSnapshot, Error>),
+    /// The profiles read for `request`; dropped if older than the read applied last.
+    ProfilesLoaded {
+        request: RequestId,
+        result: Result<ProfileSnapshot, Error>,
+    },
     ToggleWorkspace(WorkspaceId),
     OpenWorkspace(WorkspaceId),
     /// A site was clicked: open (or retry) its tab.
@@ -338,7 +345,8 @@ pub enum ProfileOp {
 /// Work for the backend.
 #[derive(Debug)]
 pub enum Effect {
-    LoadProfiles,
+    /// Reads the profiles; back as [`Message::ProfilesLoaded`] with the same id.
+    LoadProfiles(RequestId),
     /// Saves the site, then applies the password change (the only holder of a new
     /// password once the form emitted it).
     SaveSite {
@@ -545,19 +553,53 @@ impl App {
             busy_phase: 0,
             window_width: INITIAL_WINDOW_WIDTH,
             next_id: 0,
+            profiles_requested: RequestId(0),
+            profiles_applied: RequestId(0),
+        }
+    }
+
+    /// Reads the profiles again, under a new request id.
+    pub(crate) fn load_profiles(&mut self) -> Effect {
+        let request = RequestId(self.next_id());
+        self.profiles_requested = request;
+        Effect::LoadProfiles(request)
+    }
+
+    /// The last profile read asked for.
+    #[cfg(test)]
+    pub(crate) fn profiles_requested(&self) -> RequestId {
+        self.profiles_requested
+    }
+
+    /// A profile read finished. Reads can end out of order: one older than the read
+    /// applied last is dropped (its snapshot, or its error, is stale).
+    fn profiles_result(
+        &mut self,
+        request: RequestId,
+        result: Result<ProfileSnapshot, Error>,
+    ) -> Vec<Effect> {
+        if request < self.profiles_applied {
+            return Vec::new();
+        }
+        self.profiles_applied = request;
+        match result {
+            Ok(snapshot) => self.profiles_loaded(snapshot),
+            Err(error) => {
+                self.load = Load::Failed(error);
+                Vec::new()
+            }
         }
     }
 
     /// The app and the effects to run at startup.
     pub fn boot() -> (Self, Vec<Effect>) {
-        (
-            Self::new(),
-            vec![
-                Effect::LoadProfiles,
-                Effect::LoadSettings,
-                Effect::LoadQueueStatus,
-            ],
-        )
+        let mut app = Self::new();
+        let effects = vec![
+            app.load_profiles(),
+            Effect::LoadSettings,
+            Effect::LoadQueueStatus,
+        ];
+        (app, effects)
     }
 
     pub fn site(&self, id: &SiteId) -> Option<&Site> {
@@ -643,10 +685,11 @@ impl App {
             Message::FilterSites(filter) => self.site_filter = filter,
             Message::ReloadProfiles => {
                 self.load = Load::Loading;
-                return vec![Effect::LoadProfiles];
+                return vec![self.load_profiles()];
             }
-            Message::ProfilesLoaded(Ok(snapshot)) => return self.profiles_loaded(snapshot),
-            Message::ProfilesLoaded(Err(error)) => self.load = Load::Failed(error),
+            Message::ProfilesLoaded { request, result } => {
+                return self.profiles_result(request, result);
+            }
             Message::ToggleWorkspace(id) => {
                 if !self.expanded.remove(&id) {
                     self.expanded.insert(id);
@@ -955,7 +998,7 @@ impl App {
         if error.is_some() {
             return Vec::new();
         }
-        let mut effects = vec![Effect::LoadProfiles];
+        let mut effects = vec![self.load_profiles()];
         match op {
             ProfileOp::SaveSite(site) => effects.extend(self.drop_stale_session(&site)),
             ProfileOp::DeleteSite(site) => effects.extend(self.close_site_tabs(&site)),

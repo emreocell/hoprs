@@ -30,19 +30,27 @@ fn workspace(name: &str, sites: &[&SiteId]) -> Workspace {
     }
 }
 
+/// The profiles read for the app's latest request.
+fn profiles_loaded(app: &App, result: Result<ProfileSnapshot, Error>) -> Message {
+    Message::ProfilesLoaded {
+        request: app.profiles_requested(),
+        result,
+    }
+}
+
 /// An app that loaded what `fake` holds.
 async fn loaded(fake: &FakeBackend) -> App {
     let (mut app, effects) = App::boot();
     assert!(matches!(
         effects[..],
         [
-            Effect::LoadProfiles,
+            Effect::LoadProfiles(_),
             Effect::LoadSettings,
             Effect::LoadQueueStatus
         ]
     ));
     assert!(
-        app.update(Message::ProfilesLoaded(fake.profiles().await))
+        app.update(profiles_loaded(&app, fake.profiles().await))
             .is_empty()
     );
     assert_eq!(app.load, Load::Loaded);
@@ -265,8 +273,8 @@ async fn save_site_with_password_emits_set_secret() {
         result: Ok(()),
     });
     assert!(app.form.is_none(), "a successful save closes the form");
-    assert!(matches!(effects[..], [Effect::LoadProfiles]));
-    app.update(Message::ProfilesLoaded(fake.profiles().await));
+    assert!(matches!(effects[..], [Effect::LoadProfiles(_)]));
+    app.update(profiles_loaded(&app, fake.profiles().await));
 
     // Editing it: the password is never shown, only that one is saved; forgetting it
     // deletes the secret.
@@ -325,11 +333,11 @@ async fn delete_site_needs_confirmation() {
     // Its tab goes, and so does its session.
     assert!(matches!(
         effects[..],
-        [Effect::LoadProfiles, Effect::CloseSession(s)] if s == connected.session
+        [Effect::LoadProfiles(_), Effect::CloseSession(s)] if s == connected.session
     ));
     assert!(app.tabs.is_empty());
     assert_eq!(app.active_tab, None);
-    app.update(Message::ProfilesLoaded(fake.profiles().await));
+    app.update(profiles_loaded(&app, fake.profiles().await));
     assert!(app.sites.is_empty());
 }
 
@@ -576,13 +584,68 @@ async fn unreadable_entries_listed() {
 
     // A failed load shows the error with a retry.
     let broken = Error::new(ErrorKind::Io, "Permission denied");
-    app.update(Message::ProfilesLoaded(Err(broken.clone())));
+    app.update(profiles_loaded(&app, Err(broken.clone())));
     assert_eq!(app.load, Load::Failed(broken));
     assert!(matches!(
         app.update(Message::ReloadProfiles)[..],
-        [Effect::LoadProfiles]
+        [Effect::LoadProfiles(_)]
     ));
     assert_eq!(app.load, Load::Loading);
+}
+
+/// The id of the single `LoadProfiles` among `effects`.
+fn profiles_request(effects: &[Effect]) -> RequestId {
+    match effects {
+        [Effect::LoadProfiles(request)] => *request,
+        _ => panic!("expected one LoadProfiles, got {effects:?}"),
+    }
+}
+
+/// Profile reads can finish out of order: a snapshot older than the one applied last is
+/// dropped, as a stale listing is (an error included).
+#[tokio::test]
+async fn stale_profile_snapshot_is_ignored() {
+    let a = site("a", "h", "u", Protocol::Ssh);
+    let b = site("b", "h", "u", Protocol::Ssh);
+    let fake = FakeBackend::new().with_site(a.clone());
+    let mut app = loaded(&fake).await;
+    let first = profiles_request(&app.update(Message::ReloadProfiles));
+    let old = fake.profiles().await;
+    fake.save_site(b.clone()).await.unwrap();
+    let second = profiles_request(&app.update(Message::ReloadProfiles));
+    assert!(second > first);
+    let new = fake.profiles().await;
+
+    app.update(Message::ProfilesLoaded {
+        request: second,
+        result: new,
+    });
+    assert_eq!(app.sites, [a.clone(), b.clone()]);
+    assert!(
+        app.update(Message::ProfilesLoaded {
+            request: first,
+            result: old,
+        })
+        .is_empty()
+    );
+    assert_eq!(
+        app.sites,
+        [a.clone(), b.clone()],
+        "the older read is dropped"
+    );
+    app.update(Message::ProfilesLoaded {
+        request: first,
+        result: Err(Error::new(ErrorKind::Io, "late failure")),
+    });
+    assert_eq!(app.load, Load::Loaded);
+
+    // The same request again (or a newer one) still applies.
+    fake.delete_site(b.id.clone()).await.unwrap();
+    app.update(Message::ProfilesLoaded {
+        request: second,
+        result: fake.profiles().await,
+    });
+    assert_eq!(app.sites, [a]);
 }
 
 #[tokio::test]
@@ -692,14 +755,14 @@ async fn edit_after_failure_retries_with_a_new_session() {
     }));
     assert!(matches!(
         effects[..],
-        [Effect::LoadProfiles, Effect::CloseSession(s)] if s == kept
+        [Effect::LoadProfiles(_), Effect::CloseSession(s)] if s == kept
     ));
     let TabState::Failed(failure) = tab_state(&app, &a.id) else {
         panic!("{:?}", app.tabs);
     };
     assert_eq!(failure.session, None, "the tab forgets the closed session");
     fake.close(kept).await;
-    app.update(Message::ProfilesLoaded(fake.profiles().await));
+    app.update(profiles_loaded(&app, fake.profiles().await));
 
     let sites = connect_effect(app.update(Message::ConnectSite(a.id.clone())));
     drive(&mut app, &fake, sites).await;
@@ -719,7 +782,7 @@ async fn edit_after_failure_retries_with_a_new_session() {
         op: ProfileOp::SaveSite(a.id.clone()),
         result: Ok(()),
     }));
-    assert!(matches!(effects[..], [Effect::LoadProfiles]));
+    assert!(matches!(effects[..], [Effect::LoadProfiles(_)]));
 }
 
 /// The sidebar's "Edit" opens the form without connecting.
@@ -764,7 +827,7 @@ async fn late_form_result_leaves_other_form_untouched() {
         result: Ok(()),
     });
     assert!(
-        matches!(effects[..], [Effect::LoadProfiles]),
+        matches!(effects[..], [Effect::LoadProfiles(_)]),
         "the data still reloads"
     );
     assert_eq!(workspace_form(&app), ("Draft".into(), false, None));

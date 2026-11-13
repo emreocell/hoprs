@@ -397,7 +397,7 @@ impl App {
         match result {
             Ok(report) => {
                 self.backup.restore = BackupState::Done(report);
-                vec![Effect::LoadProfiles]
+                vec![self.load_profiles()]
             }
             Err(error) => {
                 self.backup.restore = BackupState::Failed(error);
