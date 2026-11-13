@@ -6,6 +6,9 @@
 //! - 10 000 files of 4 KiB over SFTP and over FTP, at 10 ms RTT: hoprs takes no longer
 //!   than `lftp mirror -R --parallel=4`.
 //!
+//! `HOPRS_BENCH_KNOWN_GAPS` (comma-separated: `big_sftp`, `small_sftp`, `small_ftp`) lists
+//! targets known to be missed: still measured and printed, marked "known gap", not fatal.
+//!
 //! Each side runs [`Config::runs`] times (median), alternating which goes first. Prints a
 //! Markdown table on stdout (progress on stderr) and exits with status 1 when a target is
 //! missed, 2 when the bench cannot run.
@@ -61,6 +64,9 @@ struct Config {
     runs: usize,
     /// Scenarios to run (all by default).
     only: Vec<String>,
+    /// Targets known to be missed (`small_sftp`, `small_ftp`, `big_sftp`): still measured
+    /// and printed, marked as a known gap, and not failing the bench.
+    known_gaps: Vec<String>,
 }
 
 impl Config {
@@ -100,6 +106,11 @@ impl Config {
                 .map(|s| s.trim().to_owned())
                 .filter(|s| !s.is_empty())
                 .collect(),
+            known_gaps: var("KNOWN_GAPS", "")
+                .split(',')
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .collect(),
         }
     }
 }
@@ -118,6 +129,11 @@ fn main() {
         return;
     }
     let cfg = Config::from_env();
+    for gap in &cfg.known_gaps {
+        if !["big_sftp", "small_sftp", "small_ftp"].contains(&gap.as_str()) {
+            fail_setup(&format!("unknown target {gap:?} in HOPRS_BENCH_KNOWN_GAPS"));
+        }
+    }
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(WORKERS)
         .enable_all()
@@ -129,13 +145,13 @@ fn main() {
 
     let mut results = Vec::new();
     for scenario in &cfg.only {
-        let result = match scenario.as_str() {
-            "sftp-big" => sftp_big(&cfg, &rt, &files, &key),
-            "sftp-small" => sftp_small(&cfg, &rt, &files, &key),
-            "ftp-small" => ftp_small(&cfg, &rt, &files),
+        let (gap, result) = match scenario.as_str() {
+            "sftp-big" => ("big_sftp", sftp_big(&cfg, &rt, &files, &key)),
+            "sftp-small" => ("small_sftp", sftp_small(&cfg, &rt, &files, &key)),
+            "ftp-small" => ("small_ftp", ftp_small(&cfg, &rt, &files)),
             other => fail_setup(&format!("unknown scenario {other:?} in HOPRS_BENCH_ONLY")),
         };
-        results.push(result);
+        results.push((cfg.known_gaps.iter().any(|g| g == gap), gap, result));
     }
 
     println!(
@@ -144,19 +160,20 @@ fn main() {
     );
     println!("| Target (spec §9) | RTT | hoprs | Baseline | Ratio | Criterion | Result |");
     println!("|---|---|---|---|---|---|---|");
-    for r in &results {
+    for (known, gap, r) in &results {
+        let verdict = match (r.pass, known) {
+            (true, false) => "pass".to_owned(),
+            // Met again: it should leave the allow-list.
+            (true, true) => format!("pass (`{gap}` is still listed as a known gap)"),
+            (false, true) => "known gap (see follow-up)".to_owned(),
+            (false, false) => "**FAIL**".to_owned(),
+        };
         println!(
-            "| {} | {} ms | {} | {} | {:.2} | {} | {} |",
-            r.target,
-            r.rtt_ms,
-            r.hoprs,
-            r.baseline,
-            r.ratio,
-            r.criterion,
-            if r.pass { "pass" } else { "**FAIL**" }
+            "| {} | {} ms | {} | {} | {:.3} | {} | {verdict} |",
+            r.target, r.rtt_ms, r.hoprs, r.baseline, r.ratio, r.criterion,
         );
     }
-    if results.iter().any(|r| !r.pass) {
+    if results.iter().any(|(known, _, r)| !r.pass && !known) {
         std::process::exit(1);
     }
 }

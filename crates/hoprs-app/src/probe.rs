@@ -9,7 +9,8 @@
 //!
 //! "Drawn" is the first message after the first `RedrawRequested`: iced draws and presents
 //! that frame before it takes the next message. Memory is `VmRSS` from `/proc/self/status`
-//! in MB (10^6 bytes); `NaN` where there is no `/proc`.
+//! in MB (10^6 bytes); `NaN` where there is no `/proc`, which [`parse_probe_line`] does
+//! not take as a reading (the probe measures on Linux).
 
 use std::fmt;
 use std::time::{Duration, Instant};
@@ -52,13 +53,19 @@ pub fn parse_probe_line(line: &str) -> Option<ProbeLine> {
         .split_whitespace()
         .map(|field| field.split_once('='))
         .collect::<Option<_>>()?;
+    let mb = |value: &str| {
+        value
+            .parse::<f64>()
+            .ok()
+            .filter(|mb| mb.is_finite() && *mb >= 0.0)
+    };
     match fields[..] {
         [("startup_ms", startup_ms), ("rss_mb", rss_mb)] => Some(ProbeLine::Startup {
             startup_ms: startup_ms.parse().ok()?,
-            rss_mb: rss_mb.parse().ok()?,
+            rss_mb: mb(rss_mb)?,
         }),
         [("idle_rss_mb", rss_mb)] => Some(ProbeLine::Idle {
-            rss_mb: rss_mb.parse().ok()?,
+            rss_mb: mb(rss_mb)?,
         }),
         _ => None,
     }
@@ -170,11 +177,17 @@ mod tests {
         ] {
             assert_eq!(parse_probe_line(&line.to_string()), Some(line));
         }
-        // No /proc: the memory is NaN, still a probe line.
-        assert!(matches!(
-            parse_probe_line("startup_ms=1 rss_mb=NaN"),
-            Some(ProbeLine::Startup { startup_ms: 1, rss_mb }) if rss_mb.is_nan()
-        ));
+        // Memory is a finite, non-negative number (no /proc prints NaN: not a reading).
+        for line in [
+            "startup_ms=1 rss_mb=NaN",
+            "startup_ms=1 rss_mb=inf",
+            "startup_ms=1 rss_mb=-1.5",
+            "idle_rss_mb=-0.1",
+            "idle_rss_mb=NaN",
+            "idle_rss_mb=infinity",
+        ] {
+            assert_eq!(parse_probe_line(line), None, "{line:?}");
+        }
     }
 
     #[test]
