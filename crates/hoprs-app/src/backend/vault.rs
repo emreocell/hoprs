@@ -157,9 +157,34 @@ impl VaultHandle {
         self.call(move |v| v.remove_workspace(&id)).await
     }
 
+    /// Pins `fingerprint` whatever the site's endpoint (the app pins through
+    /// [`set_ftps_pin_at`](Self::set_ftps_pin_at)).
+    #[cfg(test)]
     pub async fn set_ftps_pin(&self, site: SiteId, fingerprint: String) -> Result<()> {
         self.call(move |v| v.set_ftps_pin(&site, &fingerprint))
             .await
+    }
+
+    /// Pins `fingerprint` on the site if it still connects to `endpoint` (`host:port`), in
+    /// one vault call: a certificate accepted on the old endpoint of a site edited
+    /// meanwhile belongs to another server. Returns whether it pinned.
+    pub async fn set_ftps_pin_at(
+        &self,
+        site: SiteId,
+        endpoint: String,
+        fingerprint: String,
+    ) -> Result<bool> {
+        self.call(move |v| {
+            let same = v
+                .site(&site)
+                .is_some_and(|s| format!("{}:{}", s.host, s.port) == endpoint);
+            if !same {
+                return Ok(false);
+            }
+            v.set_ftps_pin(&site, &fingerprint)?;
+            Ok(true)
+        })
+        .await
     }
 
     /// Clears the site's pin if it is still `stale` (compared ignoring case): a pin the

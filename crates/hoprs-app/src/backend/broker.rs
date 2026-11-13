@@ -24,7 +24,8 @@
 //!   password the server refused before keyboard-interactive or a key succeeded, or a wrong
 //!   passphrase skipped for another method, is never reported, so never saved. A later
 //!   answer of the same kind replaces the pending one.
-//! - **Pins:** `store_pin` writes the accepted certificate to the session's site
+//! - **Pins:** `store_pin` writes the accepted certificate to the session's site, if the
+//!   site still points at the session's `host:port`
 //!   ([`Vault::set_ftps_pin`](hoprs_vault::Vault::set_ftps_pin)); `pin_superseded` (a trusted
 //!   chain beat a stale pin, ruling R5 of Plan 3) clears it.
 
@@ -575,14 +576,22 @@ impl FtpPrompter for SessionPrompter {
         self.accept(SecretKind::Password);
     }
 
+    /// Pins the certificate on the site, unless the site was edited to another `host:port`
+    /// since this session started (the pin would belong to another server).
     async fn store_pin(&self, _host: &str, _port: u16, fingerprint: &str) {
         let vault = &self.broker.inner.vault;
         let saved = vault
-            .set_ftps_pin(self.site.clone(), fingerprint.to_owned())
+            .set_ftps_pin_at(self.site.clone(), self.key.clone(), fingerprint.to_owned())
             .await;
-        if let Err(err) = saved {
-            // The session keeps the pin in memory; the next run asks again.
-            tracing::warn!(site = %self.site, error = %err, "cannot save the accepted certificate");
+        match saved {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::debug!(site = %self.site, "the site moved to another endpoint; the accepted certificate is not pinned");
+            }
+            Err(err) => {
+                // The session keeps the pin in memory; the next run asks again.
+                tracing::warn!(site = %self.site, error = %err, "cannot save the accepted certificate");
+            }
         }
     }
 
@@ -625,7 +634,8 @@ mod tests {
     fn fixture() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let mut vault = Vault::open(dir.path(), Arc::new(MemoryStore::new())).unwrap();
-        let site = Site::new("f", "ftp.example.com", "u", Protocol::FtpsExplicit);
+        // The endpoint the prompters below connect to (`h:21`).
+        let site = Site::new("f", "h", "u", Protocol::FtpsExplicit);
         vault.upsert_site(site.clone()).unwrap();
         let vault = VaultHandle::new(vault);
         let broker = PromptBroker::new(vault.clone());
@@ -1039,5 +1049,32 @@ mod tests {
         p.pin_superseded("h", 21, "SHA256:AA").await;
         let site = f.vault.site(f.site.id.clone()).await.unwrap().unwrap();
         assert!(site.ftp.pinned_fingerprint.is_none());
+    }
+
+    /// A certificate accepted by a session of the site's old endpoint is not pinned on the
+    /// site once its host or port was edited: the pin would belong to another server.
+    #[tokio::test]
+    async fn store_pin_skips_an_edited_site() {
+        let f = fixture();
+        let p = f.prompter(1);
+        let mut moved = f.site.clone();
+        moved.host = "elsewhere.example".into();
+        f.vault.upsert_site(moved).await.unwrap();
+        p.store_pin("h", 21, "SHA256:AA").await;
+        let site = f.vault.site(f.site.id.clone()).await.unwrap().unwrap();
+        assert_eq!(site.ftp.pinned_fingerprint, None, "host changed");
+
+        let mut moved = f.site.clone();
+        moved.port = 2121;
+        f.vault.upsert_site(moved).await.unwrap();
+        p.store_pin("h", 21, "SHA256:AA").await;
+        let site = f.vault.site(f.site.id.clone()).await.unwrap().unwrap();
+        assert_eq!(site.ftp.pinned_fingerprint, None, "port changed");
+
+        // Back on the endpoint the session dialled: pinned.
+        f.vault.upsert_site(f.site.clone()).await.unwrap();
+        p.store_pin("h", 21, "SHA256:AA").await;
+        let site = f.vault.site(f.site.id.clone()).await.unwrap().unwrap();
+        assert_eq!(site.ftp.pinned_fingerprint.as_deref(), Some("SHA256:AA"));
     }
 }
