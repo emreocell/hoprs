@@ -366,28 +366,34 @@ async fn deferred_item_starts_when_the_owner_pauses_fails_or_is_cancelled() {
     }
 }
 
-/// Many items for one destination do not hold back the site's other items, and leave
+/// Many items for one destination do not hold back the site's other items: those finish
+/// while the destination's owner is still copying, and the shared target ends with
 /// exactly one writer.
 #[tokio::test(flavor = "multi_thread")]
 async fn many_deferred_items_do_not_block_other_items() {
+    const SAME: usize = 100;
     let local = MemFs::new();
-    for i in 0..20 {
-        local.add_file(&format!("/same/{i}"), &bytes(i as u8, 50_000), mtime());
+    // The first item is the owner: large, so it is still copying while the others run.
+    local.add_file("/same/0", &bytes(0, 4_000_000), mtime());
+    for i in 1..SAME {
+        local.add_file(&format!("/same/{i}"), &bytes(i as u8, 1_000), mtime());
     }
     for i in 0..5 {
-        local.add_file(&format!("/other/{i}"), &bytes(100, 50_000), mtime());
+        local.add_file(&format!("/other/{i}"), &bytes(200, 1_000), mtime());
     }
     let mem = MemFs::new();
     mem.add_dir("/srv");
+    let remote = FaultFs::new(mem.clone());
+    remote.set_stream_latency(Duration::from_millis(50));
     let (engine, mut rx) = engine_with(
         Arc::new(local),
-        Arc::new(slow(&mem)),
+        Arc::new(remote),
         4,
         config(ConflictPolicy::Skip),
     )
     .await;
     let mut same = Vec::new();
-    for i in 0..20 {
+    for i in 0..SAME {
         same.push(
             engine
                 .enqueue(spec(
@@ -412,20 +418,79 @@ async fn many_deferred_items_do_not_block_other_items() {
                 .unwrap(),
         );
     }
+    let owner = same[0];
+    let mut finished = Vec::new();
+    let mut states = HashMap::new();
     let all: Vec<_> = same.iter().chain(&others).copied().collect();
-    let states = settle(&mut rx, &all).await;
+    let fut = async {
+        while states.len() < all.len() {
+            if let Ok(ev) = rx.recv().await
+                && let EventKind::StateChanged { id, state } = ev.kind
+                && all.contains(&id)
+                && state.is_terminal()
+            {
+                finished.push(id);
+                states.insert(id, state);
+            }
+        }
+    };
+    tokio::time::timeout(LONG, fut)
+        .await
+        .expect("items never settled");
+    let owner_at = finished.iter().position(|id| *id == owner).unwrap();
     for id in &others {
         assert_eq!(states[id], TransferState::Done, "{id:?}");
+        let at = finished.iter().position(|f| f == id).unwrap();
+        assert!(at < owner_at, "{id:?} waited behind the busy destination");
     }
-    let done = same
-        .iter()
-        .filter(|id| states[*id] == TransferState::Done)
-        .count();
-    assert_eq!(done, 1, "one writer for the shared target: {states:?}");
+    assert_eq!(states[&owner], TransferState::Done);
     assert!(
-        same.iter()
-            .all(|id| matches!(states[id], TransferState::Done | TransferState::Skipped(_))),
+        same[1..]
+            .iter()
+            .all(|id| matches!(states[id], TransferState::Skipped(_))),
         "{states:?}"
+    );
+    engine.shutdown().await;
+}
+
+/// The owner of a destination is paused partway; a deferred item then writes the
+/// destination. Resuming the owner must not continue its old partial copy on top of the
+/// other item's file: the bytes are never a mix of the two.
+#[tokio::test(flavor = "multi_thread")]
+async fn owner_resumed_after_another_writer_starts_over() {
+    let local = MemFs::new();
+    let (a, b) = (bytes(1, 4_000_000), bytes(2, 1_000));
+    local.add_file("/a/x", &a, mtime());
+    local.add_file("/b/x", &b, mtime());
+    let mem = MemFs::new();
+    mem.add_dir("/srv");
+    let remote = FaultFs::new(mem.clone());
+    remote.set_stream_latency(Duration::from_millis(50));
+    let (engine, mut rx) = engine_with(
+        Arc::new(local),
+        Arc::new(remote),
+        2,
+        config(ConflictPolicy::Overwrite),
+    )
+    .await;
+    let owner = engine
+        .enqueue(spec(Direction::Upload, "/a/x", "/srv/x"))
+        .await
+        .unwrap();
+    wait_for(&mut rx, |e| matches!(e, EventKind::Progress(_))).await;
+    let other = engine
+        .enqueue(spec(Direction::Upload, "/b/x", "/srv/x"))
+        .await
+        .unwrap();
+    engine.pause(owner).await.unwrap();
+    assert_eq!(wait_terminal(&mut rx, other).await, TransferState::Done);
+    assert_eq!(mem.read_file("/srv/x").unwrap(), b);
+    engine.resume(owner).await.unwrap();
+    assert_eq!(wait_terminal(&mut rx, owner).await, TransferState::Done);
+    let end = mem.read_file("/srv/x").unwrap();
+    assert!(
+        end == a || end == b,
+        "the file mixes the two writers' bytes"
     );
     engine.shutdown().await;
 }

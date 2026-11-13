@@ -261,6 +261,9 @@ pub(super) struct Actor {
     /// destination is taken waits in the queue: two items never write one file at
     /// once, and the second one's conflict check then sees the first one's file.
     pub(super) writing: HashMap<DestKey, TransferId>,
+    /// The last item that started writing each destination. An item's stored
+    /// continuation is dropped when someone else wrote its destination since.
+    pub(super) last_writer: HashMap<DestKey, TransferId>,
     pub(super) worker_tx: mpsc::UnboundedSender<WorkerMsg>,
 }
 
@@ -293,6 +296,7 @@ pub(super) async fn run(
         fresh_dirs: HashMap::new(),
         roots: HashMap::new(),
         writing: HashMap::new(),
+        last_writer: HashMap::new(),
         worker_tx,
     };
     let mut ticker = tokio::time::interval(actor.progress_interval);
@@ -600,24 +604,36 @@ impl Actor {
                     continue;
                 };
                 let route = Route::new(&item.spec, &site.endpoints);
+                let key = dest_key(&item.spec);
                 if !self.transition(id, TransferState::Active) {
+                    continue;
+                }
+                let mut policy_override = self.overrides.remove(&id);
+                // A continuation (`Resume` from the partial file, or `Overwrite` to
+                // start over) belongs to this item's own earlier copy. If another item
+                // wrote the destination since, continuing would build on (or replace
+                // without asking) that item's file: drop it, so this run gets a fresh
+                // conflict check under the queue's policy.
+                let superseded = self.last_writer.get(&key).is_some_and(|w| *w != id);
+                let stored = if superseded && policy_override.is_some() {
+                    policy_override = None;
+                    self.store.set_next_policy(id, None)
+                } else if policy_override.is_some() {
+                    // Stored with the `Active` row, so that it survives an
+                    // interruption before the copy is decided.
+                    self.store.set_next_policy(id, policy_override)
+                } else {
+                    Ok(())
+                };
+                if let Err(e) = stored {
+                    // No slot was taken yet: nothing to free.
+                    self.transition(id, TransferState::Failed(e));
                     continue;
                 }
                 if let Some(site) = self.sites.get_mut(&site_id) {
                     site.busy += 1;
                 }
-                if let Some(item) = self.items.get(&id) {
-                    self.writing.insert(dest_key(&item.spec), id);
-                }
-                let policy_override = self.overrides.remove(&id);
-                // Stored with the `Active` row, so that it survives an
-                // interruption before the copy is decided.
-                if policy_override.is_some()
-                    && let Err(e) = self.store.set_next_policy(id, policy_override)
-                {
-                    self.transition(id, TransferState::Failed(e));
-                    continue;
-                }
+                self.writing.insert(key, id);
                 let cancel = CancellationToken::new();
                 self.running.insert(
                     id,
@@ -907,6 +923,9 @@ impl Actor {
                 if let Err(e) = self.store.set_next_policy(id, Some(retry)) {
                     self.release(id, TransferState::Failed(e));
                     return;
+                }
+                if let Some(item) = self.items.get(&id) {
+                    self.last_writer.insert(dest_key(&item.spec), id);
                 }
                 let cancel = match self.running.get_mut(&id) {
                     Some(running) => {
