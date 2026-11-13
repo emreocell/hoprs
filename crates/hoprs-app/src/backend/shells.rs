@@ -236,4 +236,40 @@ mod tests {
         assert_eq!(c.closes.load(Ordering::SeqCst), 1);
         assert!(shells.resize(ic, 80, 24).await.is_err());
     }
+
+    /// Plan 6 Task 6: input to a shell (a typed line, a paste, a control byte) and
+    /// input to a closed shell never reach the log, at trace, on any thread.
+    #[test]
+    fn shell_input_never_reaches_the_log() {
+        const TYPED: &[u8] = b"typed-Shell-Wx72\r";
+        const PASTED: &[u8] = b"\x1b[200~pasted-Shell-Gb19\x1b[201~";
+        const LATE: &[u8] = b"late-Shell-Mn64";
+        let _lock = crate::subscriber_test_lock();
+        let (buffer, capture) = crate::capture_log(&crate::log_filter(Some("trace")));
+        capture.runtime().block_on(async {
+            let shells = Arc::new(Shells::default());
+            let shell = Arc::new(Counted::default());
+            let id = shells.insert(SessionId(1), shell.clone(), empty());
+            // From another task, as the effects run.
+            tokio::spawn({
+                let shells = shells.clone();
+                async move {
+                    shells.input(id, TYPED.to_vec()).await.unwrap();
+                    shells.input(id, PASTED.to_vec()).await.unwrap();
+                    shells.input(id, vec![0x03]).await.unwrap();
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(shell.inputs.lock().unwrap().len(), 3, "the shell got them");
+            shells.close(id);
+            assert!(shells.input(id, LATE.to_vec()).await.is_err());
+            crate::log_canaries().await;
+        });
+        drop(capture);
+        crate::assert_no_secrets(
+            &buffer,
+            &["typed-Shell-Wx72", "pasted-Shell-Gb19", "late-Shell-Mn64"],
+        );
+    }
 }

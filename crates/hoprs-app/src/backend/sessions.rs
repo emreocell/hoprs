@@ -2137,4 +2137,132 @@ mod tests {
         f.manager.close(id).await;
         prompts.abort();
     }
+
+    /// Plan 6 Task 6: connecting with stored secrets (a password and a key passphrase
+    /// read from the keyring; SSH, FTP and FTPS) through the real session manager and
+    /// its site mapping, then a reconnect: neither secret reaches the log, at trace, on
+    /// any thread. The connects fail fast (nothing listens on port 1), before any
+    /// dialog: typed answers are covered by the broker's
+    /// `prompt_answers_never_reach_the_log`.
+    #[test]
+    fn connect_secrets_never_reach_the_log() {
+        const STORED: &str = "stored-Sess-Pw40";
+        const PASSPHRASE: &str = "stored-Sess-Kp17";
+        let _lock = crate::subscriber_test_lock();
+        let (buffer, capture) = crate::capture_log(&crate::log_filter(Some("trace")));
+        capture.runtime().block_on(async {
+            let f = fixture();
+            let mut sites = Vec::new();
+            for (name, protocol) in [
+                ("ssh", Protocol::Ssh),
+                ("ftp", Protocol::Ftp),
+                ("ftps", Protocol::FtpsExplicit),
+            ] {
+                let mut site = Site::new(name, "127.0.0.1", "deploy", protocol);
+                site.port = 1;
+                site.ssh.use_agent = false;
+                f.vault.upsert_site(site.clone()).await.unwrap();
+                let id = site.id.clone();
+                f.vault
+                    .call(move |v| {
+                        v.set_secret(&id, SecretKind::Password, &SecretString::from(STORED))?;
+                        v.set_secret(
+                            &id,
+                            SecretKind::KeyPassphrase,
+                            &SecretString::from(PASSPHRASE),
+                        )
+                    })
+                    .await
+                    .unwrap();
+                sites.push(site.id.clone());
+            }
+            // Any dialog is answered with `pw` (none is expected).
+            let (answer, _) = answer_passwords(&f.broker);
+
+            let results = f.manager.connect_many(sites).await;
+            let mut sessions = Vec::new();
+            for (site, result) in results {
+                let err = result.expect_err("nothing listens on port 1");
+                sessions.push(err.session.unwrap_or_else(|| panic!("{site:?}: {err:?}")));
+            }
+            assert!(f.manager.reconnect(sessions[0]).await.is_err());
+            for id in sessions {
+                f.manager.close(id).await;
+            }
+            answer.abort();
+            crate::log_canaries().await;
+        });
+        drop(capture);
+        crate::assert_no_secrets(&buffer, &[STORED, PASSPHRASE]);
+        // Not vacuous: the reconnect was logged.
+        assert!(
+            buffer.text().contains("reconnect finished"),
+            "{}",
+            buffer.text()
+        );
+    }
+
+    /// Plan 6 Task 6: an upload that fails on the server (its error names the file)
+    /// never puts the file's content in the log, at trace, on any thread (the local
+    /// file is read on the blocking pool).
+    #[test]
+    fn failed_upload_never_logs_the_content() {
+        use hoprs_transfer::{Direction, TransferSpec, TransferState};
+
+        const CONTENT: &str = "content-Upload-Zp36";
+        let _lock = crate::subscriber_test_lock();
+        let (buffer, capture) = crate::capture_log(&crate::log_filter(Some("trace")));
+        let local = tempfile::tempdir().unwrap();
+        std::fs::write(local.path().join("notes.txt"), CONTENT).unwrap();
+        let Ok(local_path) = RemotePath::new(&format!(
+            "{}/notes.txt",
+            local.path().to_string_lossy().replace('\\', "/")
+        )) else {
+            return; // A drive-letter path: LocalFs("/") cannot address it (Windows).
+        };
+        let error = capture.runtime().block_on(async {
+            let f = fixture();
+            let site = SiteId::new();
+            let remote = MemFs::new();
+            remote.add_dir("/ro");
+            remote.deny_writes_under("/ro");
+            let (state, _) = watch::channel(ConnectionState::Connected);
+            let conn: Arc<dyn Connection> = Arc::new(FakeConn::new(state));
+            f.manager
+                .attach(site.clone(), conn, Arc::new(remote))
+                .await
+                .unwrap();
+            let engine = f.manager.inner.engine.clone();
+            let item = engine
+                .enqueue(TransferSpec {
+                    site,
+                    direction: Direction::Upload,
+                    local: local_path,
+                    remote: RemotePath::new("/ro/notes.txt").unwrap(),
+                })
+                .await
+                .unwrap();
+            let mut error = None;
+            for _ in 0..300 {
+                let state = engine
+                    .snapshot()
+                    .await
+                    .into_iter()
+                    .find(|i| i.id == item)
+                    .unwrap()
+                    .state;
+                if let TransferState::Failed(e) = state {
+                    error = Some(e);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            crate::log_canaries().await;
+            error.expect("the upload fails")
+        });
+        drop(capture);
+        assert!(error.to_string().contains("notes.txt"), "{error}");
+        assert!(!error.to_string().contains(CONTENT), "{error}");
+        crate::assert_no_secrets(&buffer, &[CONTENT]);
+    }
 }

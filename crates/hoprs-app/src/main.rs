@@ -438,7 +438,9 @@ fn subscriber_test_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 /// Installs [`log_subscriber`] (as `main` does, the terminal output discarded) on
-/// this thread until the guard drops; the buffer gets what the app logs here.
+/// this thread until the guard drops; the buffer gets what the app logs here, and,
+/// through [`LogCapture::runtime`], on every thread of a runtime (workers and the
+/// blocking pool).
 ///
 /// A second, silent dispatcher keeps a callsite's cached interest from another
 /// thread (no subscriber: "never") from hiding it from this one. Hold
@@ -446,9 +448,10 @@ fn subscriber_test_lock() -> std::sync::MutexGuard<'static, ()> {
 #[cfg(test)]
 fn capture_log(filter: &LogFilter) -> (logbuf::LogBuffer, LogCapture) {
     let buffer = logbuf::LogBuffer::new();
-    let subscriber = log_subscriber(filter, buffer.clone(), io::sink);
+    let dispatch = tracing::Dispatch::new(log_subscriber(filter, buffer.clone(), io::sink));
     let capture = LogCapture {
-        _default: tracing::subscriber::set_default(subscriber),
+        _default: tracing::dispatcher::set_default(&dispatch),
+        dispatch,
         _other: tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()),
     };
     (buffer, capture)
@@ -457,8 +460,57 @@ fn capture_log(filter: &LogFilter) -> (logbuf::LogBuffer, LogCapture) {
 /// What [`capture_log`] keeps alive.
 #[cfg(test)]
 struct LogCapture {
+    dispatch: tracing::Dispatch,
     _default: tracing::subscriber::DefaultGuard,
     _other: tracing::Dispatch,
+}
+
+#[cfg(test)]
+impl LogCapture {
+    /// A multi-thread runtime whose every thread (workers and the blocking pool) logs
+    /// to the capture: `spawn`ed tasks and `spawn_blocking` work included. Its threads
+    /// end with it.
+    fn runtime(&self) -> tokio::runtime::Runtime {
+        let dispatch = self.dispatch.clone();
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .on_thread_start(move || {
+                // The thread keeps it until it exits.
+                std::mem::forget(tracing::dispatcher::set_default(&dispatch));
+            })
+            .build()
+            .unwrap()
+    }
+}
+
+/// The marker [`log_canaries`] logs.
+#[cfg(test)]
+const CANARY: &str = "log-capture-canary";
+
+/// Logs [`CANARY`] from a worker task and from the blocking pool (call inside a
+/// [`LogCapture::runtime`]): with [`assert_no_secrets`], proof the capture saw those
+/// threads.
+#[cfg(test)]
+async fn log_canaries() {
+    tokio::spawn(async { tracing::info!(target: "hoprs_app", "{CANARY} worker") })
+        .await
+        .unwrap();
+    tokio::task::spawn_blocking(|| tracing::info!(target: "hoprs_app", "{CANARY} blocking"))
+        .await
+        .unwrap();
+}
+
+/// The buffer saw [`log_canaries`] and holds none of `secrets`.
+#[cfg(test)]
+fn assert_no_secrets(buffer: &logbuf::LogBuffer, secrets: &[&str]) {
+    let text = buffer.text();
+    for canary in [format!("{CANARY} worker"), format!("{CANARY} blocking")] {
+        assert!(text.contains(&canary), "{canary} missing: {text}");
+    }
+    for secret in secrets {
+        assert!(!text.contains(secret), "{secret} reached the log: {text}");
+    }
 }
 
 #[cfg(test)]
@@ -875,5 +927,18 @@ mod tests {
         tracing::info!(target: "iced_winit", "iced-winit-info-explicit");
         drop(capture);
         assert!(buffer.text().contains("iced-winit-info-explicit"));
+    }
+
+    /// The capture sees the runtime's worker threads and its blocking pool, not only
+    /// the test's thread.
+    #[test]
+    fn capture_sees_workers_and_blocking_threads() {
+        let _lock = subscriber_test_lock();
+        let (buffer, capture) = capture_log(&log_filter(Some("trace")));
+        capture.runtime().block_on(log_canaries());
+        tracing::info!(target: "hoprs_app", "main-thread-canary");
+        drop(capture);
+        assert_no_secrets(&buffer, &[]);
+        assert!(buffer.text().contains("main-thread-canary"));
     }
 }

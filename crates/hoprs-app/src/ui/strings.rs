@@ -199,8 +199,11 @@ pub const LOG_WARN: &str = "Warn";
 pub const LOG_INFO: &str = "Info";
 pub const LOG_DEBUG: &str = "Debug";
 pub const FILTER_LOG: &str = "Filter log";
-pub const COPY_ALL: &str = "Copy all";
+/// Copies the lines the filters show (all of them without a filter).
+pub const COPY_SHOWN: &str = "Copy shown";
 pub const CLEAR: &str = "Clear";
+pub const CLEAR_HINT: &str = "Empties this panel only; new lines keep coming.";
+pub const LOG_LEVEL_HINT: &str = "Shows lines at least this severe. Only info and above are recorded unless hoprs starts with RUST_LOG (for example RUST_LOG=debug).";
 pub const NO_LOG_LINES: &str = "Nothing logged yet";
 pub const NO_LOG_MATCHES: &str = "No lines match";
 

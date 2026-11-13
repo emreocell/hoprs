@@ -1,8 +1,8 @@
 //! The technical log panel, under the transfer queue: a 36 px head (title, level
-//! filter, text filter, line count, Copy all, Clear, Hide) and the lines in mono, a
+//! filter, text filter, line count, Copy shown, Clear, Hide) and the lines in mono, a
 //! virtual list. Closed, it takes no room; the status bar's "Log" opens it.
 
-use iced::widget::{Id, button, column, container, row, rule, space, text, text_input};
+use iced::widget::{Id, button, column, container, row, rule, space, text, text_input, tooltip};
 use iced::{Alignment, Color, Element, Length, Padding};
 use tracing::Level;
 
@@ -81,7 +81,7 @@ pub fn view(app: &App) -> Option<Element<'_, Message>> {
         text(strings::LOG)
             .font(theme::INTER_SEMIBOLD)
             .wrapping(text::Wrapping::None),
-        levels,
+        hint(levels, strings::LOG_LEVEL_HINT),
         filter,
         space::horizontal(),
         text(strings::log_lines(log.shown_len()))
@@ -89,10 +89,16 @@ pub fn view(app: &App) -> Option<Element<'_, Message>> {
             .color(p.muted)
             .wrapping(text::Wrapping::None),
         row![
-            small(strings::COPY_ALL, has_lines.then_some(msg(LogMsg::CopyAll))),
             small(
-                strings::CLEAR,
-                (!log.is_empty()).then_some(msg(LogMsg::Clear))
+                strings::COPY_SHOWN,
+                has_lines.then_some(msg(LogMsg::CopyShown))
+            ),
+            hint(
+                small(
+                    strings::CLEAR,
+                    (!log.is_empty()).then_some(msg(LogMsg::Clear))
+                ),
+                strings::CLEAR_HINT
             ),
             small(strings::QUEUE_HIDE, Some(msg(LogMsg::Toggle))),
         ]
@@ -149,6 +155,19 @@ pub fn view(app: &App) -> Option<Element<'_, Message>> {
     )
 }
 
+/// `content` with `label` shown above it on hover.
+fn hint<'a>(content: impl Into<Element<'a, Message>>, label: &'a str) -> Element<'a, Message> {
+    tooltip(
+        content,
+        container(text(label).size(theme::TEXT_XS))
+            .max_width(360.0)
+            .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
+            .style(theme::dialog_box),
+        tooltip::Position::Top,
+    )
+    .into()
+}
+
 /// One 30 px line: time, level, target muted; the message in ink. All mono, one line,
 /// clipped.
 fn log_row<'a>(row: &'a LogRow) -> Element<'a, Message> {
@@ -168,7 +187,7 @@ fn log_row<'a>(row: &'a LogRow) -> Element<'a, Message> {
     };
     container(
         row![
-            container(mono(&row.time, p.muted)).width(TIME_WIDTH),
+            container(mono(row.time(), p.muted)).width(TIME_WIDTH),
             container(mono(line.level.as_str(), level_color)).width(LEVEL_WIDTH),
             mono(&line.target, p.muted),
             mono(&line.message, p.ink),

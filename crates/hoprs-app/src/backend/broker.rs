@@ -1077,4 +1077,62 @@ mod tests {
         let site = f.vault.site(f.site.id.clone()).await.unwrap().unwrap();
         assert_eq!(site.ftp.pinned_fingerprint.as_deref(), Some("SHA256:AA"));
     }
+
+    /// Plan 6 Task 6: the answers to the credential dialogs (a password kept for the
+    /// keyring, a passphrase, keyboard-interactive responses, an FTP password) never
+    /// reach the log, at trace, on any thread.
+    #[test]
+    fn prompt_answers_never_reach_the_log() {
+        const PASSWORD: &str = "pw-Broker-Hq61";
+        const PASSPHRASE: &str = "phrase-Broker-Lt28";
+        const CODE: &str = "code-Broker-Vy05";
+        const FTP_PASSWORD: &str = "ftp-Broker-Rn93";
+        let _lock = crate::subscriber_test_lock();
+        let (buffer, capture) = crate::capture_log(&crate::log_filter(Some("trace")));
+        capture.runtime().block_on(async {
+            let mut f = fixture();
+            let p = f.prompter(1);
+
+            let q = p.clone();
+            let ask = tokio::spawn(async move { Prompter::password(&q, "u", "h").await });
+            let r = f.next_request().await;
+            f.broker.answer(r.id, secret(PASSWORD, true));
+            assert_eq!(join(ask).await.unwrap().expose_secret(), PASSWORD);
+
+            let q = p.clone();
+            let ask = tokio::spawn(async move { q.key_passphrase(Path::new("/k")).await });
+            let r = f.next_request().await;
+            f.broker.answer(r.id, secret(PASSPHRASE, true));
+            assert_eq!(join(ask).await.unwrap().expose_secret(), PASSPHRASE);
+
+            let q = p.clone();
+            let ask = tokio::spawn(async move {
+                let prompts = [KbdPrompt {
+                    text: "Code: ".into(),
+                    echo: false,
+                }];
+                q.keyboard_interactive("n", "i", &prompts).await
+            });
+            let r = f.next_request().await;
+            f.broker.answer(
+                r.id,
+                PromptAnswer::Responses(vec![SecretString::from(CODE)]),
+            );
+            assert_eq!(join(ask).await.unwrap()[0].expose_secret(), CODE);
+
+            // Accepted, then handed to the session manager for the keyring.
+            p.secret_accepted(AcceptedSecret::Password);
+            p.secret_accepted(AcceptedSecret::Passphrase);
+            assert_eq!(p.take_pending_secrets().len(), 2);
+
+            let q = f.prompter(2);
+            let ask = tokio::spawn(async move { FtpPrompter::password(&q, "u", "h").await });
+            let r = f.next_request().await;
+            f.broker.answer(r.id, secret(FTP_PASSWORD, false));
+            assert_eq!(join(ask).await.unwrap().expose_secret(), FTP_PASSWORD);
+            crate::log_canaries().await;
+        });
+        drop(capture);
+        crate::assert_no_secrets(&buffer, &[PASSWORD, PASSPHRASE, CODE, FTP_PASSWORD]);
+    }
 }

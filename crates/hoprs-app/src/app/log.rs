@@ -4,13 +4,15 @@
 //! scrolled to the end.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use tracing::Level;
 
 use super::{App, Effect};
 use crate::logbuf::{CAPACITY, LogBuffer, LogLine};
+use crate::ui::layout::LOG_BODY_HEIGHT;
+use crate::ui::virtual_list::ROW_HEIGHT;
 
 /// How often the open panel takes the new lines.
 pub const POLL: Duration = Duration::from_millis(250);
@@ -48,7 +50,8 @@ pub enum LogMsg {
     Tick,
     Level(LogLevel),
     Filter(String),
-    CopyAll,
+    /// "Copy shown": the lines the filters let through.
+    CopyShown,
     /// Empties the panel (the lines logged from now on still come).
     Clear,
     Scrolled {
@@ -58,34 +61,50 @@ pub enum LogMsg {
     },
 }
 
-/// One line as the panel shows and searches it.
+/// One line as the panel shows and searches it. Its time and search text are formatted
+/// lazily, the first time they are needed (a row in view, a text filter, a copy): a
+/// backlog of thousands of lines costs nothing more than sharing them.
 #[derive(Debug)]
 pub struct LogRow {
     pub line: Arc<LogLine>,
-    /// `HH:MM:SS.mmm`, local time.
-    pub time: String,
-    /// The whole line in lower case, for the text filter.
-    haystack: String,
+    time: OnceLock<String>,
+    haystack: OnceLock<String>,
 }
 
 impl LogRow {
     fn new(line: Arc<LogLine>) -> Self {
-        let time = chrono::DateTime::<chrono::Local>::from(line.time)
-            .format("%H:%M:%S%.3f")
-            .to_string();
-        let haystack = format!("{} {} {}", line.level, line.target, line.message).to_lowercase();
         Self {
             line,
-            time,
-            haystack,
+            time: OnceLock::new(),
+            haystack: OnceLock::new(),
         }
     }
 
-    /// The line as "Copy all" writes it.
+    /// `HH:MM:SS.mmm`, local time.
+    pub fn time(&self) -> &str {
+        self.time.get_or_init(|| {
+            chrono::DateTime::<chrono::Local>::from(self.line.time)
+                .format("%H:%M:%S%.3f")
+                .to_string()
+        })
+    }
+
+    /// The whole line in lower case, for the text filter.
+    fn haystack(&self) -> &str {
+        self.haystack.get_or_init(|| {
+            let line = &self.line;
+            format!("{} {} {}", line.level, line.target, line.message).to_lowercase()
+        })
+    }
+
+    /// The line as "Copy shown" writes it.
     pub fn text(&self) -> String {
         format!(
             "{} {:<5} {} {}",
-            self.time, self.line.level, self.line.target, self.line.message
+            self.time(),
+            self.line.level,
+            self.line.target,
+            self.line.message
         )
     }
 }
@@ -144,7 +163,7 @@ impl LogPanel {
     }
 
     fn matches(&self, row: &LogRow, query: &str) -> bool {
-        self.level.allows(row.line.level) && (query.is_empty() || row.haystack.contains(query))
+        self.level.allows(row.line.level) && (query.is_empty() || row.haystack().contains(query))
     }
 
     fn query_lower(&self) -> String {
@@ -159,6 +178,21 @@ impl LogPanel {
             .filter(|row| self.matches(row, &query))
             .map(|row| row.line.seq)
             .collect();
+        // A shorter list: never scrolled past its end (and at the end, it follows).
+        let max_offset = (self.shown.len() as f32 * ROW_HEIGHT - LOG_BODY_HEIGHT).max(0.0);
+        if self.offset_y >= max_offset {
+            self.offset_y = max_offset;
+            self.follow = true;
+        }
+    }
+
+    /// How many rows had their time formatted (for the tests).
+    #[cfg(test)]
+    pub fn formatted_rows(&self) -> usize {
+        self.rows
+            .iter()
+            .filter(|row| row.time.get().is_some())
+            .count()
     }
 
     /// Copies the lines logged since the last poll; whether any of them shows.
@@ -198,7 +232,7 @@ impl LogPanel {
         }
     }
 
-    /// The shown lines, one per line, oldest first ("Copy all").
+    /// The shown lines, one per line, oldest first ("Copy shown").
     pub fn shown_text(&self) -> String {
         let mut text = String::new();
         for i in 0..self.shown.len() {
@@ -244,7 +278,7 @@ impl App {
                 log.refilter();
                 return log.follow_effect();
             }
-            LogMsg::CopyAll => return vec![Effect::WriteClipboard(log.shown_text())],
+            LogMsg::CopyShown => return vec![Effect::WriteClipboard(log.shown_text())],
             LogMsg::Clear => {
                 log.rows.clear();
                 log.shown.clear();
