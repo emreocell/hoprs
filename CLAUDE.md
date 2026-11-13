@@ -17,10 +17,10 @@ Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI), open source (MIT OR Apa
 
 ## Current status (2026-11-13)
 
-- Plans 1 (hoprs-core, hoprs-remote, hoprs-transfer), 2 (hoprs-ssh, `SftpFs`, Docker OpenSSH test env), 3 (FTP + FTPS: `FtpFs`, `FtpSession` pool/keepalive/reconnect, certificate pinning, protocol-neutral `Connection` + `spawn_site_watcher`, Docker vsftpd test env) and 4 (hoprs-vault: profiles TOML, keyring secrets, encrypted export/import; hoprs-import: FileZilla `sitemanager.xml`) merged to `main`.
-- Plan 5 (hoprs-app: iced shell, sidebar, site/workspace forms, file panes with a virtual list, transfer queue, security dialogs, reconnect/status, tab persistence and shutdown, FileZilla import, settings and backup) implemented on branch `plan-5-app-shell`; every task reviewed, QA checklist executed (`docs/qa/plan-5-checklist.md`, some rows NEEDS HUMAN), final whole-branch review pending.
+- Plans 1 (hoprs-core, hoprs-remote, hoprs-transfer), 2 (hoprs-ssh, `SftpFs`, Docker OpenSSH test env), 3 (FTP + FTPS: `FtpFs`, `FtpSession` pool/keepalive/reconnect, certificate pinning, protocol-neutral `Connection` + `spawn_site_watcher`, Docker vsftpd test env), 4 (hoprs-vault: profiles TOML, keyring secrets, encrypted export/import; hoprs-import: FileZilla `sitemanager.xml`) and 5 (hoprs-app, PR #5) merged to `main`.
+- Plan 5 (hoprs-app: iced shell, sidebar, site/workspace forms, file panes with a virtual list, transfer queue, security dialogs, reconnect/status, tab persistence and shutdown, FileZilla import, settings and backup) merged; QA checklist `docs/qa/plan-5-checklist.md` still has NEEDS HUMAN rows for the author.
 - Deferred follow-ups for later plans: `docs/superpowers/plans/2026-11-12-01-followups.md` (per plan; Plan 5 section: correctness, UX, perf, Windows, later).
-- **Next step:** merge Plan 5, then write Plan 6 (terminal tab, remote editing, Ctrl+K palette, technical log, spec §9 benchmarks in CI) from the real signatures.
+- **Next step:** write Plan 6 (terminal tab, remote editing, Ctrl+K palette, technical log, spec §9 benchmarks in CI) from the real signatures.
 - Plan 6 is written only after Plan 5 is done, using the real signatures it produced.
 - Docker integration tests: `docker compose -f docker/compose.yml up -d --build --wait`, then `cargo test --workspace --all-features -- --ignored --test-threads=1`.
 
