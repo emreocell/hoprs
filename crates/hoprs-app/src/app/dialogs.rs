@@ -331,6 +331,7 @@ impl App {
             return false;
         }
         match msg {
+            Message::Edit(msg) => msg.is_user(),
             // Scroll offsets the lists report (also after a programmatic scroll).
             Message::Pane {
                 msg: super::PaneMsg::Scrolled { .. },

@@ -9,8 +9,8 @@ use crate::app::{App, Form, Message};
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
 use crate::ui::{
-    dialogs, files, import, log, queue, settings, sidebar, site_form, status, tabs, terminal,
-    workspace_form,
+    dialogs, edits, files, import, log, queue, settings, sidebar, site_form, status, tabs,
+    terminal, workspace_form,
 };
 
 pub const SIDEBAR_WIDTH: f32 = sidebar::WIDTH;
@@ -25,7 +25,7 @@ pub const LOG_BODY_HEIGHT: f32 = 180.0;
 pub const UNDERLINE: f32 = 2.0;
 
 pub fn view(app: &App) -> Element<'_, Message> {
-    let right = column![center(app), queue::view(app)]
+    let right = column![edits::with_toast(app, center(app)), queue::view(app)]
         .push(log::view(app))
         .push(status::view(app))
         .width(Length::Fill);
@@ -105,6 +105,7 @@ fn center(app: &App) -> Element<'_, Message> {
         Some(Form::Workspace(form)) => return workspace_form::view(form, &app.sites),
         Some(Form::Import) => return import::view(app),
         Some(Form::Settings) => return settings::view(app),
+        Some(Form::QuitEdits) => return edits::quit_view(app),
         None => {}
     }
     if let Some(tab) = app.active_tab.and_then(|i| app.tabs.get(i)) {

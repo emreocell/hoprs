@@ -1,0 +1,791 @@
+//! Plan 6 Task 8: remote editing in the UI (the Edit action, the notices, the inline
+//! conflict choice, and the questions before a session or the window closes: Review
+//! Focus 4). The backend's edits are the real `EditManager` behind the fake.
+
+use super::*;
+
+use crate::app::edit::{
+    CloseAnswer, EDIT_MAX_BYTES, EditStatus, EditsFor, FLUSH_LIMIT, QuestionFile, Settle,
+    TOAST_TIME,
+};
+use crate::backend::fake::Call;
+use crate::backend::{EditChoice, EditEvent, EditId};
+use crate::ui::edits::{clock, edit_line};
+use tokio::sync::broadcast;
+
+fn key(key: FileKey) -> Message {
+    Message::Key { key, shift: false }
+}
+
+fn edit(msg: EditMsg) -> Message {
+    Message::Edit(msg)
+}
+
+fn srv_site(protocol: Protocol) -> Site {
+    let mut a = site("a", "h", "u", protocol);
+    a.remote_dir = Some("/srv".into());
+    a
+}
+
+/// A connected files tab of `a`, the remote pane focused.
+async fn remote_focused(fake: &Arc<FakeBackend>, a: &Site) -> App {
+    let mut app = connected_tab(fake, a).await;
+    app.update(key(FileKey::SwitchPane));
+    assert_eq!(app.tabs[0].focus(), Some(Side::Remote));
+    app
+}
+
+/// Clicks the remote entry `name` of the first tab (selects it).
+fn click(app: &mut App, name: &str) {
+    let pane = app.tabs[0].remote();
+    let row = usize::from(pane.has_up())
+        + pane
+            .entries
+            .iter()
+            .position(|e| e.name == name)
+            .unwrap_or_else(|| panic!("no {name}"));
+    let tab = app.tabs[0].id;
+    app.update(pane_msg(tab, Side::Remote, PaneMsg::Click(row)));
+}
+
+fn start_effects(effects: &[Effect]) -> Vec<(TabId, SessionId, String, String)> {
+    effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::StartEdit {
+                tab,
+                session,
+                remote,
+                editor,
+            } => Some((*tab, *session, remote.as_str().to_owned(), editor.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Runs the one `StartEdit` of `effects` against the fake, as `effects::run` does, and
+/// feeds its result.
+async fn run_start(app: &mut App, fake: &Arc<FakeBackend>, effects: &[Effect]) -> EditId {
+    let [(tab, session, remote, editor)] = &start_effects(effects)[..] else {
+        panic!("one StartEdit expected: {effects:?}");
+    };
+    let remote = rpath(remote);
+    let result = fake
+        .start_edit(*session, remote.clone(), editor.clone())
+        .await;
+    let id = *result.as_ref().expect("the edit starts");
+    app.update(edit(EditMsg::Started {
+        tab: *tab,
+        session: *session,
+        remote,
+        result,
+    }));
+    id
+}
+
+async fn next_event(events: &mut broadcast::Receiver<EditEvent>) -> EditEvent {
+    tokio::time::timeout(Duration::from_secs(10), events.recv())
+        .await
+        .expect("an edit event in time")
+        .expect("the events go on")
+}
+
+/// A connected tab of `a` editing `/srv/a.txt` ("v1"): the app, the session and the edit.
+async fn editing(fake: &Arc<FakeBackend>, a: &Site) -> (App, SessionId, EditId) {
+    fake.remote_fs(&a.id)
+        .add_file("/srv/a.txt", b"v1", SystemTime::UNIX_EPOCH);
+    let mut app = remote_focused(fake, a).await;
+    click(&mut app, "a.txt");
+    let effects = app.update(key(FileKey::Edit));
+    let id = run_start(&mut app, fake, &effects).await;
+    let session = app.tab_session(0).unwrap();
+    (app, session, id)
+}
+
+/// The file of the edit holds `data`, saved by the editor but not seen by the watcher
+/// yet: unsent, as the backend reports it.
+fn save_unseen(fake: &FakeBackend, id: EditId, data: &[u8]) -> PathBuf {
+    let local = fake.edit_local(id).expect("a live edit");
+    std::fs::write(&local, data).unwrap();
+    local
+}
+
+fn the_edit(app: &App) -> &crate::app::edit::RemoteEdit {
+    assert_eq!(app.edits.len(), 1, "{:?}", app.edits);
+    &app.edits[0]
+}
+
+/// F4 / "Edit" on the remote pane: off for folders, links and files over 50 MB (the
+/// reason inline, nothing started); a file opens with the editor of the settings.
+#[tokio::test]
+async fn edit_action_rules() {
+    let a = srv_site(Protocol::Ftp);
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    let remote = fake.remote_fs(&a.id);
+    remote.add_file("/srv/a.txt", b"text", SystemTime::UNIX_EPOCH);
+    remote.add_file("/srv/big.bin", b"x", SystemTime::UNIX_EPOCH);
+    remote.add_file("/srv/max.bin", b"x", SystemTime::UNIX_EPOCH);
+    remote.add_dir("/srv/dir");
+    remote.add_symlink("/srv/link", "/srv/a.txt");
+    let mut app = remote_focused(&fake, &a).await;
+    let tab = app.tabs[0].id;
+    // The sizes as listed (a 50 MB file is not worth writing for a test).
+    for entry in &mut app.tabs[0].remote_mut().entries {
+        match entry.name.as_str() {
+            "big.bin" => entry.size = EDIT_MAX_BYTES + 1,
+            "max.bin" => entry.size = EDIT_MAX_BYTES,
+            _ => {}
+        }
+    }
+    assert_eq!(EDIT_MAX_BYTES, 50 * 1024 * 1024);
+
+    // Nothing selected: nothing to edit.
+    assert_eq!(app.edit_target(0, Side::Remote), None);
+    assert!(app.update(key(FileKey::Edit)).is_empty());
+
+    for (name, reason) in [
+        ("dir", strings::EDIT_NO_FOLDERS),
+        ("link", strings::EDIT_NO_LINKS),
+        ("big.bin", strings::EDIT_TOO_LARGE),
+    ] {
+        click(&mut app, name);
+        assert_eq!(
+            app.edit_target(0, Side::Remote),
+            Some(Err(reason)),
+            "{name}: the toolbar's Edit is off, with the reason"
+        );
+        let effects = app.update(key(FileKey::Edit));
+        assert!(start_effects(&effects).is_empty(), "{name}: {effects:?}");
+        let effects = app.update(pane_msg(tab, Side::Remote, PaneMsg::Edit));
+        assert!(start_effects(&effects).is_empty(), "{name}: {effects:?}");
+        assert_eq!(
+            app.tabs[0].remote().note.as_deref(),
+            Some(reason),
+            "{name}: the reason shows inline"
+        );
+    }
+
+    // Exactly 50 MB is fine; F4 opens it with the default editor.
+    click(&mut app, "max.bin");
+    assert_eq!(
+        app.edit_target(0, Side::Remote),
+        Some(Ok(rpath("/srv/max.bin")))
+    );
+    let session = app.tab_session(0).unwrap();
+    let effects = app.update(key(FileKey::Edit));
+    assert_eq!(
+        start_effects(&effects),
+        vec![(tab, session, "/srv/max.bin".into(), "xdg-open".into())]
+    );
+    // Meanwhile the strip says it is opening.
+    assert_eq!(app.edit_opening.len(), 1);
+
+    // The toolbar's button does the same, with the editor the settings name.
+    app.update(Message::Settings(settings::SettingsMsg::EditorCommand(
+        "gedit --wait".into(),
+    )));
+    click(&mut app, "a.txt");
+    let effects = app.update(pane_msg(tab, Side::Remote, PaneMsg::Edit));
+    assert_eq!(
+        start_effects(&effects),
+        vec![(tab, session, "/srv/a.txt".into(), "gedit --wait".into())]
+    );
+    let id = run_start(&mut app, &fake, &effects).await;
+    assert_eq!(
+        fake.edits_launched()
+            .last()
+            .map(|(editor, _)| editor.as_str()),
+        Some("gedit --wait")
+    );
+    assert_eq!(app.edits[0].id, id);
+
+    // The local pane has no Edit.
+    app.update(key(FileKey::SwitchPane));
+    assert_eq!(app.edit_target(0, Side::Local), None);
+    assert!(app.update(key(FileKey::Edit)).is_empty());
+}
+
+/// Each upload: the line says when it was saved, and a toast shows for 3 s (a newer
+/// toast is not ended by an older one's timer). A held save and a failure say so.
+#[tokio::test]
+async fn uploaded_shows_toast_and_status() {
+    let a = srv_site(Protocol::Ssh);
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    let mut events = fake.subscribe_edits();
+    let (mut app, session, id) = editing(&fake, &a).await;
+    assert!(app.edit_opening.is_empty());
+    assert_eq!(the_edit(&app).status, EditStatus::Editing { saved: None });
+    assert_eq!(edit_line(the_edit(&app)), "Editing a.txt");
+
+    fake.save_edit(session, id, b"v2");
+    let uploaded = next_event(&mut events).await;
+    let EditEvent::Uploaded { at, .. } = uploaded else {
+        panic!("{uploaded:?}");
+    };
+    let effects = app.update(edit(EditMsg::Event(uploaded)));
+    assert_eq!(
+        fake.remote_fs(&a.id).read_file("/srv/a.txt").unwrap(),
+        b"v2"
+    );
+    assert_eq!(
+        the_edit(&app).status,
+        EditStatus::Editing { saved: Some(at) }
+    );
+    assert_eq!(
+        edit_line(the_edit(&app)),
+        format!("Editing a.txt — saved {}", clock(at))
+    );
+    assert_eq!(
+        strings::editing_saved("config.php", "14:02"),
+        "Editing config.php — saved 14:02"
+    );
+    let toast = app.toast.clone().expect("a toast");
+    assert_eq!(toast.text, "Uploaded a.txt");
+    assert_eq!(TOAST_TIME, Duration::from_secs(3));
+    let [Effect::Later { after, message }] = &effects[..] else {
+        panic!("{effects:?}");
+    };
+    assert_eq!(*after, TOAST_TIME);
+    assert!(matches!(**message, Message::Edit(EditMsg::ToastExpired(t)) if t == toast.id));
+
+    // A second upload: a new toast, which the first one's timer leaves alone.
+    app.update(edit(EditMsg::Event(EditEvent::Uploaded {
+        id,
+        at: SystemTime::now(),
+    })));
+    let second = app.toast.clone().unwrap();
+    assert_ne!(second.id, toast.id);
+    app.update(edit(EditMsg::ToastExpired(toast.id)));
+    assert_eq!(app.toast.as_ref(), Some(&second));
+    app.update(edit(EditMsg::ToastExpired(second.id)));
+    assert_eq!(app.toast, None);
+
+    // Held while the connection is down; a possibly truncated copy is said too.
+    app.update(edit(EditMsg::Event(EditEvent::Pending {
+        id,
+        remote_may_be_truncated: true,
+    })));
+    assert_eq!(
+        edit_line(the_edit(&app)),
+        format!(
+            "Editing a.txt — {} {}",
+            strings::WAITING_FOR_CONNECTION,
+            strings::REMOTE_MAY_BE_TRUNCATED
+        )
+    );
+    assert_eq!(app.toast, None, "only uploads make a toast");
+
+    // A failure: the reason and "Retry".
+    app.update(edit(EditMsg::Event(EditEvent::Failed {
+        id,
+        error: Error::new(ErrorKind::Io, "Disk full"),
+        remote_may_be_truncated: false,
+        recovered: None,
+    })));
+    assert_eq!(edit_line(the_edit(&app)), "a.txt: Upload failed: Disk full");
+    let effects = app.update(edit(EditMsg::Retry(id)));
+    assert!(matches!(effects[..], [Effect::RetryEdit(got)] if got == id));
+
+    // The edit ends: its line goes.
+    app.update(edit(EditMsg::Event(EditEvent::Closed { id })));
+    assert!(app.edits.is_empty());
+}
+
+/// Review Focus 2 in the UI: a change on the server holds the upload and offers
+/// "Overwrite / Keep remote / Save a copy" inline (no dialog); the choice runs once.
+#[tokio::test]
+async fn remote_changed_choice_inline() {
+    let a = srv_site(Protocol::Ssh);
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    let mut events = fake.subscribe_edits();
+    let (mut app, session, id) = editing(&fake, &a).await;
+    let remote = fake.remote_fs(&a.id);
+    let later = SystemTime::UNIX_EPOCH + Duration::from_secs(5_000);
+    remote.add_file("/srv/a.txt", b"theirs", later);
+
+    fake.save_edit(session, id, b"mine");
+    let changed = next_event(&mut events).await;
+    assert_eq!(changed, EditEvent::RemoteChanged { id });
+    app.update(edit(EditMsg::Event(changed)));
+    assert_eq!(
+        the_edit(&app).status,
+        EditStatus::Conflict {
+            busy: false,
+            error: None,
+            recovered: None
+        }
+    );
+    assert_eq!(
+        edit_line(the_edit(&app)),
+        "a.txt: Changed on the server since you opened it"
+    );
+    assert!(!app.dialogs.is_open(), "inline, never a dialog");
+    assert!(app.form.is_none());
+    assert_eq!(remote.read_file("/srv/a.txt").unwrap(), b"theirs");
+
+    // "Keep remote": one request, the buttons off meanwhile.
+    let effects = app.update(edit(EditMsg::Resolve {
+        id,
+        choice: EditChoice::KeepRemote,
+    }));
+    assert!(matches!(
+        effects[..],
+        [Effect::ResolveEdit {
+            id: got,
+            choice: EditChoice::KeepRemote
+        }] if got == id
+    ));
+    assert!(matches!(
+        the_edit(&app).status,
+        EditStatus::Conflict { busy: true, .. }
+    ));
+    assert!(
+        app.update(edit(EditMsg::Resolve {
+            id,
+            choice: EditChoice::Overwrite
+        }))
+        .is_empty()
+    );
+    let result = fake.resolve_edit(id, EditChoice::KeepRemote).await;
+    let replaced = next_event(&mut events).await;
+    app.update(edit(EditMsg::Event(replaced)));
+    app.update(edit(EditMsg::Done { id, result }));
+    let EditStatus::Replaced {
+        recovered: Some(copy),
+    } = &the_edit(&app).status
+    else {
+        panic!("{:?}", the_edit(&app).status);
+    };
+    assert_eq!(
+        std::fs::read(copy).unwrap(),
+        b"mine",
+        "the user's version is safe"
+    );
+    assert_eq!(remote.read_file("/srv/a.txt").unwrap(), b"theirs");
+
+    // A choice that fails keeps the choice, with the reason.
+    app.update(edit(EditMsg::Event(EditEvent::RemoteChanged { id })));
+    app.update(edit(EditMsg::Resolve {
+        id,
+        choice: EditChoice::Overwrite,
+    }));
+    app.update(edit(EditMsg::Done {
+        id,
+        result: Err(Error::new(ErrorKind::Network, "Connection lost")),
+    }));
+    let EditStatus::Conflict {
+        busy: false,
+        error: Some(error),
+        ..
+    } = &the_edit(&app).status
+    else {
+        panic!("{:?}", the_edit(&app).status);
+    };
+    assert_eq!(error.message, "Connection lost");
+}
+
+/// Review Focus 4: the last tab of a session with edits asks inline before closing
+/// (another tab of the session closes as usual). "Upload pending changes and close" sends
+/// the unsent change first; the tab and the session close only after. An upload that
+/// cannot finish keeps the question, and "Close and keep local copies" keeps the files.
+#[tokio::test]
+async fn closing_last_tab_with_edits_asks() {
+    assert_eq!(FLUSH_LIMIT, Duration::from_secs(10));
+    let a = srv_site(Protocol::Ssh);
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    let backend: Arc<dyn BackendApi> = fake.clone();
+    let (mut app, session, id) = editing(&fake, &a).await;
+    let first = app.tabs[0].id;
+    app.update(Message::NewTab {
+        tab: first,
+        kind: TabKind::Files,
+    });
+    assert_eq!(app.tabs.len(), 2);
+    let second = app.tabs[1].id;
+    let local = save_unseen(&fake, id, b"unsent");
+
+    // Not the last tab: it closes, no question.
+    let effects = app.update(Message::CloseTab(second));
+    assert!(!effects.iter().any(|e| matches!(e, Effect::CloseSession(_))));
+    assert_eq!(app.tabs.len(), 1);
+    assert!(app.close_asks.is_empty());
+
+    // The last one: the backend is asked what is unsent; nothing closes.
+    let effects = app.update(Message::CloseTab(first));
+    let [Effect::CheckEdits { purpose, sessions }] = &effects[..] else {
+        panic!("{effects:?}");
+    };
+    assert_eq!(
+        (*purpose, sessions.clone()),
+        (EditsFor::Tab(first), vec![session])
+    );
+    assert_eq!(app.tabs.len(), 1);
+    assert!(
+        app.update(Message::CloseTab(first)).is_empty(),
+        "asked once"
+    );
+    let checked = effects::check_edits(backend.clone(), *purpose, sessions.clone()).await;
+    assert!(app.update(checked).is_empty());
+    let question = &app.close_asks[&first];
+    assert_eq!(
+        question.files,
+        Some(vec![QuestionFile {
+            remote: rpath("/srv/a.txt"),
+            unsent: true,
+            conflict: false,
+        }])
+    );
+    assert_eq!(question.kept_in, Some(fake.recovered_dir()));
+
+    // Cancel: the tab stays, so does the edit.
+    assert!(
+        app.update(edit(EditMsg::CloseTab {
+            tab: first,
+            answer: CloseAnswer::Cancel
+        }))
+        .is_empty()
+    );
+    assert!(app.close_asks.is_empty());
+    assert_eq!(app.tabs.len(), 1);
+
+    // Asked again, the upload can't finish (the connection is down): the question stays
+    // with what is left; nothing closes.
+    let effects = app.update(Message::CloseTab(first));
+    let [Effect::CheckEdits { purpose, sessions }] = &effects[..] else {
+        panic!("{effects:?}");
+    };
+    app.update(effects::check_edits(backend.clone(), *purpose, sessions.clone()).await);
+    fake.drop_connection(session, Error::new(ErrorKind::Network, "Connection lost"));
+    let effects = app.update(edit(EditMsg::CloseTab {
+        tab: first,
+        answer: CloseAnswer::Upload,
+    }));
+    let [
+        Effect::SettleEdits {
+            purpose,
+            sessions,
+            how: Settle::Upload,
+        },
+    ] = &effects[..]
+    else {
+        panic!("{effects:?}");
+    };
+    assert_eq!(app.close_asks[&first].busy, Some(CloseAnswer::Upload));
+    let settled = effects::settle_edits(
+        backend.clone(),
+        *purpose,
+        sessions.clone(),
+        Settle::Upload,
+        Duration::from_millis(200),
+    )
+    .await;
+    let effects = app.update(settled);
+    assert!(!effects.iter().any(|e| matches!(e, Effect::CloseSession(_))));
+    assert_eq!(app.tabs.len(), 1);
+    let question = &app.close_asks[&first];
+    assert_eq!(question.busy, None);
+    assert_eq!(question.not_uploaded, 1);
+    assert_eq!(fake.calls(), vec![Call::FlushEdits(session)]);
+
+    // Back: "Upload pending changes and close" sends it, then the tab and the session go.
+    fake.reconnect(session).await.unwrap();
+    let effects = app.update(edit(EditMsg::CloseTab {
+        tab: first,
+        answer: CloseAnswer::Upload,
+    }));
+    let [
+        Effect::SettleEdits {
+            purpose,
+            sessions,
+            how,
+        },
+    ] = &effects[..]
+    else {
+        panic!("{effects:?}");
+    };
+    let settled = effects::settle_edits(
+        backend.clone(),
+        *purpose,
+        sessions.clone(),
+        *how,
+        FLUSH_LIMIT,
+    )
+    .await;
+    // Uploaded before anything closed.
+    assert_eq!(
+        fake.remote_fs(&a.id).read_file("/srv/a.txt").unwrap(),
+        b"unsent"
+    );
+    assert!(!fake.calls().contains(&Call::Close(session)));
+    let effects = app.update(settled);
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::CloseSession(s) if *s == session)),
+        "{effects:?}"
+    );
+    assert!(app.tabs.is_empty());
+    assert!(app.close_asks.is_empty());
+    // All sent: the edit directory goes with the edits.
+    assert!(!local.exists());
+    assert_eq!(effects::close_session(backend.clone(), session).await, None);
+}
+
+/// Review Focus 4: closing the window with an unsent edit asks in the center *before*
+/// the Plan 5 flow (save, engine, sessions); "Upload and quit" sends it, then that flow
+/// runs. Nothing unsent: the usual flow at once. "Cancel" keeps the window.
+#[tokio::test]
+async fn window_close_with_pending_edits_asks_before_saving() {
+    let a = srv_site(Protocol::Ssh);
+    let ws = workspace("Shop", &[&a.id]);
+    let fake = Arc::new(
+        FakeBackend::new()
+            .with_site(a.clone())
+            .with_workspace(ws.clone()),
+    );
+    let backend: Arc<dyn BackendApi> = fake.clone();
+    let (mut app, session, id) = editing(&fake, &a).await;
+    app.open_workspace = Some(ws.id.clone());
+    save_unseen(&fake, id, b"unsent");
+    let window = iced::window::Id::unique();
+
+    let effects = app.update(Message::CloseRequested(window));
+    let [Effect::CheckEdits { purpose, sessions }] = &effects[..] else {
+        panic!("no save, no shutdown before the question: {effects:?}");
+    };
+    assert_eq!(*purpose, EditsFor::Quit(window));
+    assert!(!app.closing, "the window stays open");
+    let checked = effects::check_edits(backend.clone(), *purpose, sessions.clone()).await;
+    assert!(app.update(checked).is_empty());
+    assert!(matches!(app.form, Some(Form::QuitEdits)), "in the center");
+    let quit = app.quit.as_ref().unwrap();
+    assert_eq!(
+        quit.question.files.as_deref(),
+        Some(
+            &[QuestionFile {
+                remote: rpath("/srv/a.txt"),
+                unsent: true,
+                conflict: false,
+            }][..]
+        )
+    );
+    // Asked again while the question shows: still the question.
+    assert!(app.update(Message::CloseRequested(window)).is_empty());
+    assert!(!app.closing);
+
+    // "Cancel": the window stays, nothing was saved or closed.
+    app.update(edit(EditMsg::Quit(CloseAnswer::Cancel)));
+    assert!(app.quit.is_none());
+    assert!(app.form.is_none());
+    assert!(!app.closing);
+    assert!(fake.calls().is_empty());
+
+    // "Upload and quit": the upload, then the Plan 5 flow.
+    let effects = app.update(Message::CloseRequested(window));
+    let [Effect::CheckEdits { purpose, sessions }] = &effects[..] else {
+        panic!("{effects:?}");
+    };
+    app.update(effects::check_edits(backend.clone(), *purpose, sessions.clone()).await);
+    let effects = app.update(edit(EditMsg::Quit(CloseAnswer::Upload)));
+    let [
+        Effect::SettleEdits {
+            purpose,
+            sessions,
+            how,
+        },
+    ] = &effects[..]
+    else {
+        panic!("{effects:?}");
+    };
+    assert_eq!(*how, Settle::Upload);
+    assert!(!app.closing);
+    let settled = effects::settle_edits(
+        backend.clone(),
+        *purpose,
+        sessions.clone(),
+        *how,
+        FLUSH_LIMIT,
+    )
+    .await;
+    // (The tab shows again: its lists' scroll offsets are restored.)
+    let effects = without_panes(app.update(settled));
+    let [Effect::Shutdown { save, window: w }] = &effects[..] else {
+        panic!("{effects:?}");
+    };
+    assert_eq!(*w, window);
+    assert!(app.closing);
+    assert!(app.form.is_none());
+    // While closing, the edit buttons do nothing.
+    assert!(
+        app.update(edit(EditMsg::Retry(id))).is_empty(),
+        "input is ignored while closing"
+    );
+    let outcome = effects::shutdown(backend.clone(), save.clone(), effects::SHUTDOWN_LIMIT).await;
+    assert_eq!(outcome, effects::ShutdownOutcome::Done);
+    assert_eq!(
+        fake.calls(),
+        vec![
+            Call::FlushEdits(session),
+            Call::SaveTabs(ws.id.clone()),
+            Call::Shutdown,
+            Call::Close(session),
+        ],
+        "the edits are settled before the save"
+    );
+    assert_eq!(
+        fake.remote_fs(&a.id).read_file("/srv/a.txt").unwrap(),
+        b"unsent"
+    );
+
+    // Active edits all on the server: no question, the usual flow.
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    let backend: Arc<dyn BackendApi> = fake.clone();
+    let (mut app, _, _) = editing(&fake, &a).await;
+    let effects = app.update(Message::CloseRequested(window));
+    let [Effect::CheckEdits { purpose, sessions }] = &effects[..] else {
+        panic!("{effects:?}");
+    };
+    let effects = app.update(effects::check_edits(backend, *purpose, sessions.clone()).await);
+    assert!(
+        matches!(effects[..], [Effect::Shutdown { .. }]),
+        "{effects:?}"
+    );
+    assert!(app.closing);
+    assert!(app.form.is_none());
+}
+
+/// Review Focus 4: "Quit and keep local copies" says where the copies go, saves the
+/// unsent change as a recovered copy and deletes nothing, before or after the shutdown.
+#[tokio::test]
+async fn keep_local_copies_never_deletes() {
+    let a = srv_site(Protocol::Ssh);
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    let backend: Arc<dyn BackendApi> = fake.clone();
+    let (mut app, session, id) = editing(&fake, &a).await;
+    let local = save_unseen(&fake, id, b"unsent");
+    let window = iced::window::Id::unique();
+
+    let effects = app.update(Message::CloseRequested(window));
+    let [Effect::CheckEdits { purpose, sessions }] = &effects[..] else {
+        panic!("{effects:?}");
+    };
+    app.update(effects::check_edits(backend.clone(), *purpose, sessions.clone()).await);
+    let kept_in = fake.recovered_dir();
+    assert_eq!(
+        app.quit.as_ref().unwrap().question.kept_in.as_ref(),
+        Some(&kept_in),
+        "the question says where the copies go"
+    );
+
+    let effects = app.update(edit(EditMsg::Quit(CloseAnswer::Keep)));
+    let [
+        Effect::SettleEdits {
+            purpose,
+            sessions,
+            how,
+        },
+    ] = &effects[..]
+    else {
+        panic!("{effects:?}");
+    };
+    assert_eq!(*how, Settle::Keep);
+    let settled = effects::settle_edits(
+        backend.clone(),
+        *purpose,
+        sessions.clone(),
+        *how,
+        FLUSH_LIMIT,
+    )
+    .await;
+    let Message::Edit(EditMsg::Settled {
+        result: Ok(result), ..
+    }) = &settled
+    else {
+        panic!("{settled:?}");
+    };
+    assert_eq!(result.kept.len(), 1);
+    let copy = result.kept[0].recovered.clone();
+    assert!(copy.starts_with(&kept_in));
+    let effects = app.update(settled);
+    let shutdown = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::Shutdown { save, .. } => Some(save.clone()),
+            _ => None,
+        })
+        .expect("the close flow goes on");
+    assert!(app.closing);
+    assert!(
+        app.toast
+            .as_ref()
+            .is_some_and(|t| t.text.starts_with("Local copy kept in")),
+        "{:?}",
+        app.toast
+    );
+    assert_eq!(fake.calls(), vec![Call::KeepEdits(session)]);
+    assert_eq!(std::fs::read(&local).unwrap(), b"unsent", "nothing deleted");
+    assert_eq!(std::fs::read(&copy).unwrap(), b"unsent");
+    assert_eq!(
+        fake.remote_fs(&a.id).read_file("/srv/a.txt").unwrap(),
+        b"v1",
+        "nothing uploaded"
+    );
+
+    effects::shutdown(backend, shutdown, effects::SHUTDOWN_LIMIT).await;
+    assert_eq!(
+        std::fs::read(&local).unwrap(),
+        b"unsent",
+        "the shutdown deletes nothing either"
+    );
+    assert_eq!(std::fs::read(&copy).unwrap(), b"unsent");
+}
+
+/// `editor_command`: `xdg-open` by default; a typed command applies and is saved; a blank
+/// one is refused inline (the last valid one stays); the file keeps it and the keys this
+/// version does not know.
+#[tokio::test]
+async fn editor_setting_roundtrip() {
+    use crate::settings::{self as file, EDITOR_DEFAULT};
+
+    let mut app = App::new();
+    assert_eq!(app.settings.editor_command, "xdg-open");
+    assert_eq!(EDITOR_DEFAULT, "xdg-open");
+
+    let effects = app.update(Message::Settings(settings::SettingsMsg::EditorCommand(
+        "code --wait".into(),
+    )));
+    let [Effect::SaveSettings(saved)] = &effects[..] else {
+        panic!("{effects:?}");
+    };
+    assert_eq!(saved.editor_command, "code --wait");
+    app.update(Message::SettingsSaved(Ok(())));
+
+    // Blank: refused inline, nothing saved, the command in force stays.
+    let effects = app.update(Message::Settings(settings::SettingsMsg::EditorCommand(
+        "   ".into(),
+    )));
+    assert!(effects.is_empty());
+    assert_eq!(app.editor_input.as_deref(), Some("   "));
+    assert_eq!(app.settings.editor_command, "code --wait");
+    // Leaving the page forgets the blank field.
+    app.update(Message::Settings(settings::SettingsMsg::Close));
+    assert_eq!(app.editor_input, None);
+
+    // The file: written and read back, unknown keys kept; blank in the file is the default.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(file::FILE_NAME);
+    std::fs::write(&path, "future_key = 1\neditor_command = \"  \"\n").unwrap();
+    let loaded = file::load(&path);
+    assert_eq!(loaded.error, None);
+    assert_eq!(loaded.settings.editor_command, "xdg-open");
+    file::save(&path, saved).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("editor_command = \"code --wait\""), "{text}");
+    assert!(text.contains("future_key = 1"), "{text}");
+    assert_eq!(file::load(&path).settings, *saved);
+    // A file from before the setting: the default.
+    assert_eq!(
+        file::parse("workers_per_site = 2").unwrap().editor_command,
+        "xdg-open"
+    );
+}

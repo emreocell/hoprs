@@ -4,7 +4,7 @@
 //! with "Dismiss") and the inline name editor. Nothing here is a modal.
 
 use hoprs_core::{EntryKind, Error};
-use iced::widget::{button, checkbox, column, container, row, space, text, text_input};
+use iced::widget::{button, checkbox, column, container, row, space, text, text_input, tooltip};
 use iced::{Alignment, Element, Length, Padding};
 
 use crate::app::actions::{BusyKind, Edit, EditKind, PERMISSION_BITS, PaneAction, Permissions};
@@ -68,15 +68,20 @@ pub fn toolbar<'a>(
         Side::Remote => strings::DOWNLOAD,
     };
     let mut bar = row![];
+    // Edit (remote): the selected file, or why it can't be (the hint, on the right).
+    let edit = tab.edit_target(conn, side);
     // A narrow pane while an operation runs: only its progress (every action is dim).
     if !(compact && pane.busy.is_some()) {
+        bar = bar.push(action(
+            transfer,
+            Some(strings::KEY_TRANSFER),
+            tab.can_transfer(conn, side),
+            PaneMsg::Transfer,
+        ));
+        if side == Side::Remote {
+            bar = bar.push(edit_action(edit, compact, msg(PaneMsg::Edit)));
+        }
         bar = bar
-            .push(action(
-                transfer,
-                Some(strings::KEY_TRANSFER),
-                tab.can_transfer(conn, side),
-                PaneMsg::Transfer,
-            ))
             .push(action(
                 strings::NEW_FOLDER,
                 Some(strings::KEY_NEW_FOLDER),
@@ -128,6 +133,61 @@ pub fn toolbar<'a>(
             theme::SPACE_MD
         }))
         .into()
+}
+
+/// "Edit F4" (remote). Off without a selection. On a folder, a link or a file over
+/// 50 MB it looks off too, but a click (like F4) still answers: the reason shows inline
+/// in the bar above the table; hovering shows it as well.
+fn edit_action<'a>(
+    edit: Option<Result<hoprs_core::RemotePath, &'static str>>,
+    compact: bool,
+    on_press: Message,
+) -> Element<'a, Message> {
+    let p = palette();
+    let mut content = row![
+        text(strings::EDIT_FILE)
+            .size(theme::TEXT_XS)
+            .wrapping(text::Wrapping::None)
+    ]
+    .spacing(theme::SPACE_2XS);
+    if !compact {
+        content = content.push(
+            text(strings::KEY_EDIT)
+                .font(theme::MONO)
+                .size(theme::TEXT_TAG)
+                .color(p.rule_2),
+        );
+    }
+    let refused = matches!(edit, Some(Err(_)));
+    let pad_x = if compact {
+        theme::SPACE_2XS
+    } else {
+        theme::SPACE_XS
+    };
+    let button = button(content.align_y(Alignment::Center))
+        .padding(Padding::from([theme::SPACE_3XS, pad_x]))
+        .style(move |t, status| {
+            theme::button_text(
+                t,
+                if refused {
+                    button::Status::Disabled
+                } else {
+                    status
+                },
+            )
+        })
+        .on_press_maybe(edit.is_some().then_some(on_press));
+    match edit {
+        Some(Err(reason)) => tooltip(
+            button,
+            container(text(reason).size(theme::TEXT_XS))
+                .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
+                .style(theme::dialog_box),
+            tooltip::Position::Bottom,
+        )
+        .into(),
+        _ => button.into(),
+    }
 }
 
 /// The bars above the table, top to bottom: the open confirmation or dialog (or the

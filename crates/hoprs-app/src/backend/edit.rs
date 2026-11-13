@@ -56,10 +56,20 @@
 //! durable, `0700`/`0600`, never overwriting another copy), then replace the local file by
 //! the server's version ([`EditEvent::ReplacedByRemote`]).
 //!
-//! **Closing.** [`EditManager::finish`] removes a session's local files only when none of
-//! them holds unsent changes (or the user said to discard them); it waits for an upload in
-//! flight first. A closed session leaves its edits as they are until then. Recovered
-//! copies live elsewhere and are never removed.
+//! **A cut in-place write** stays flagged (`remote_may_be_truncated` on every `Pending`
+//! and `Failed` event) until an upload succeeds, and its bytes are sent again even if
+//! the user reverts the file to what was last synced.
+//!
+//! **Closing.** Once a session is closed its worker stops retrying (later saves are held
+//! without touching the network) until the UI's close flow decides:
+//! [`EditManager::flush`] uploads what is unsent within a limit, [`EditManager::keep`]
+//! saves the unsent edits as recovered copies and ends them without deleting anything,
+//! and [`EditManager::finish`] removes a session's local files only when none of them
+//! holds unsent changes (or the user said to discard them). Each waits for an upload in
+//! flight first. [`EditManager::end_all`] (the window closes) finishes what is all sent
+//! and keeps the rest. Recovered copies live elsewhere and are never removed. A "Keep
+//! remote" or "Save a copy" that fails after saving the user's version says where it is
+//! ([`EditEvent::Failed`] with `recovered`).
 //!
 //! Two `start`s of the same file at once make one edit (a lock per session and path).
 //!
@@ -116,6 +126,8 @@ pub enum EditEvent {
         id: EditId,
         error: Error,
         remote_may_be_truncated: bool,
+        /// "Keep remote" or "Save a copy" failed after saving the user's version here.
+        recovered: Option<PathBuf>,
     },
     /// "Keep remote" or "Save a copy": the local file now holds the server's version; the
     /// user's version was saved at `recovered` (`None`: there was no local file). With
@@ -165,6 +177,14 @@ pub struct EditSummary {
     pub remote: RemotePath,
     pub local: PathBuf,
     pub state: EditState,
+}
+
+/// An unsent edit [`EditManager::keep`] saved as a recovered copy.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KeptEdit {
+    pub id: EditId,
+    pub remote: RemotePath,
+    pub recovered: PathBuf,
 }
 
 /// How a save reaches the server (see the module docs).
@@ -244,6 +264,12 @@ struct Inner {
 /// A session's directory, watcher and worker.
 struct SessionEdits {
     dir: PathBuf,
+    /// Keeps the worker's channel open (the watcher holds a clone); tests and the fake
+    /// backend report saves through it ([`EditManager::file_event`]).
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "only read by the test-only `file_event`")
+    )]
     files: mpsc::UnboundedSender<PathBuf>,
     worker: JoinHandle<()>,
     /// Watches the directory of each edited file; dropping it stops it.
@@ -274,6 +300,9 @@ struct SyncState {
     skip_check: bool,
     /// Temporary upload files a cut may have left on the server.
     orphans: Vec<RemotePath>,
+    /// An in-place write of ours was cut: the server's copy may be incomplete until an
+    /// upload succeeds (every `Pending`/`Failed` event says so meanwhile).
+    truncated: bool,
 }
 
 impl SyncState {
@@ -284,13 +313,17 @@ impl SyncState {
             state: EditState::Synced,
             skip_check: false,
             orphans,
+            truncated: false,
         }
     }
 }
 
 impl Edit {
+    /// The session says `Connected` and is not closed (a closed session's last state
+    /// may still read `Connected`).
     fn connected(&self) -> bool {
-        matches!(*self.state.borrow(), ConnectionState::Connected)
+        self.state.has_changed().is_ok()
+            && matches!(*self.state.borrow(), ConnectionState::Connected)
     }
 
     fn sync_state(&self) -> MutexGuard<'_, SyncState> {
@@ -403,11 +436,45 @@ impl EditManager {
             state,
             mode,
         } = target;
+        let key = (session, remote.clone());
         let starting = lock(&self.inner.starting)
-            .entry((session, remote.clone()))
+            .entry(key.clone())
             .or_default()
             .clone();
-        let _starting = starting.lock().await;
+        let result = {
+            let _starting = starting.lock().await;
+            let target = EditSession {
+                session,
+                site,
+                fs,
+                state,
+                mode,
+            };
+            self.start_locked(target, remote, editor).await
+        };
+        // The lock goes once no other `start` holds or waits for it (they clone it under
+        // the map's lock, so the count cannot grow behind this check).
+        let mut map = lock(&self.inner.starting);
+        if Arc::strong_count(&starting) <= 2 {
+            map.remove(&key);
+        }
+        result
+    }
+
+    /// [`start`](Self::start), under the lock of its session and path.
+    async fn start_locked(
+        &self,
+        target: EditSession,
+        remote: RemotePath,
+        editor: &str,
+    ) -> Result<EditId> {
+        let EditSession {
+            session,
+            site,
+            fs,
+            state,
+            mode,
+        } = target;
         let existing = lock(&self.inner.edits)
             .values()
             .find(|edit| edit.session == session && edit.remote == remote)
@@ -486,20 +553,36 @@ impl EditManager {
                     Some(data) => Some(self.inner.recover(&edit, data.clone()).await?),
                     None => None,
                 };
-                if choice == EditChoice::SaveCopy {
-                    let data = data
-                        .ok_or_else(|| Error::new(ErrorKind::NotFound, "The local file is gone"))?;
-                    let name = edit.remote.file_name().unwrap_or("file");
-                    let parent = edit.remote.parent().unwrap_or_else(RemotePath::root);
-                    let copy = parent.join(&format!("{name}.hoprs-{}", timestamp()));
-                    if edit.fs.stat(&copy).await.is_ok() {
-                        return Err(Error::new(ErrorKind::Conflict, "The copy already exists")
-                            .with_detail(copy.to_string()));
+                let replaced = async {
+                    if choice == EditChoice::SaveCopy {
+                        let data = data.ok_or_else(|| {
+                            Error::new(ErrorKind::NotFound, "The local file is gone")
+                        })?;
+                        let name = edit.remote.file_name().unwrap_or("file");
+                        let parent = edit.remote.parent().unwrap_or_else(RemotePath::root);
+                        let copy = parent.join(&format!("{name}.hoprs-{}", timestamp()));
+                        if edit.fs.stat(&copy).await.is_ok() {
+                            return Err(Error::new(ErrorKind::Conflict, "The copy already exists")
+                                .with_detail(copy.to_string()));
+                        }
+                        write_remote(edit.fs.as_ref(), &copy, &data).await?;
+                        tracing::info!(edit = id.0, copy = %copy, size = data.len(), "saved the local version beside the remote file");
                     }
-                    write_remote(edit.fs.as_ref(), &copy, &data).await?;
-                    tracing::info!(edit = id.0, copy = %copy, size = data.len(), "saved the local version beside the remote file");
+                    self.inner.adopt_remote(&edit).await
                 }
-                self.inner.adopt_remote(&edit).await?;
+                .await;
+                if let Err(error) = replaced {
+                    // Half way: the edit still waits for a choice, and the user's version
+                    // is safe at `recovered` (the event says where).
+                    tracing::warn!(edit = id.0, remote = %edit.remote, %error, "the conflict could not be settled");
+                    self.inner.emit(EditEvent::Failed {
+                        id,
+                        error: error.clone(),
+                        remote_may_be_truncated: edit.sync_state().truncated,
+                        recovered,
+                    });
+                    return Err(error);
+                }
                 self.inner.emit(EditEvent::ReplacedByRemote {
                     id,
                     recovered,
@@ -580,17 +663,161 @@ impl EditManager {
         Ok(Vec::new())
     }
 
+    /// "Retry" on a failed upload: syncs the edit now (with the usual stamp check).
+    pub async fn retry(&self, id: EditId) -> Result<()> {
+        let edit = self.inner.edit(id).ok_or_else(no_edit)?;
+        match self.inner.sync(&edit, false).await {
+            Outcome::Failed(error) => Err(error),
+            Outcome::Conflict => Err(Error::new(ErrorKind::Conflict, "The remote file changed")),
+            Outcome::Unchanged | Outcome::Uploaded | Outcome::Pending => Ok(()),
+        }
+    }
+
+    /// "Upload pending changes": syncs every unsent edit of the session now, and again
+    /// whenever the session is `Connected`, for at most `within`; returns what is still
+    /// unsent. A conflict is never overwritten here (it is reported at once), and a closed
+    /// session ends the wait at once.
+    pub async fn flush(&self, session: SessionId, within: Duration) -> Vec<EditSummary> {
+        let deadline = Instant::now() + within;
+        let Some(mut state) = self
+            .inner
+            .session_edits(session)
+            .first()
+            .map(|edit| edit.state.clone())
+        else {
+            return Vec::new();
+        };
+        loop {
+            state.borrow_and_update();
+            let edits = self.inner.session_edits(session);
+            if edits.iter().any(|edit| edit.connected()) {
+                for edit in &edits {
+                    let unsent = unsent(edit).await;
+                    if unsent.is_some_and(|s| s.state != EditState::Conflict) {
+                        let sync = self.inner.sync(edit, false);
+                        if tokio::time::timeout_at(deadline, sync).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            let left = self.pending(session).await;
+            let closed = state.has_changed().is_err();
+            if left.iter().all(|s| s.state == EditState::Conflict)
+                || closed
+                || Instant::now() >= deadline
+            {
+                return left;
+            }
+            // Wait for the session to change (a reconnect), else retry a little later.
+            let retry = (Instant::now() + RETRY_MIN).min(deadline);
+            tokio::select! {
+                _ = state.changed() => {}
+                () = tokio::time::sleep_until(retry) => {}
+            }
+        }
+    }
+
+    /// "Keep local copies": saves each unsent edit of the session as a recovered copy
+    /// (see the module docs), then ends the session's edits (worker and watcher stopped,
+    /// [`EditEvent::Closed`] for each) **without deleting anything**: the edit directory
+    /// stays as it is. An upload in flight finishes first. If a copy cannot be written,
+    /// nothing is ended (the error says why).
+    pub async fn keep(&self, session: SessionId) -> Result<Vec<KeptEdit>> {
+        let edits = self.inner.session_edits(session);
+        let mut turns = Vec::with_capacity(edits.len());
+        for edit in &edits {
+            turns.push(edit.turn.clone().lock_owned().await);
+        }
+        let mut kept = Vec::new();
+        for edit in &edits {
+            if unsent(edit).await.is_none() {
+                continue;
+            }
+            let local = edit.local.clone();
+            let Some(data) = blocking(move || read_local(&local)).await? else {
+                continue;
+            };
+            let recovered = self.inner.recover(edit, data).await?;
+            kept.push(KeptEdit {
+                id: edit.id,
+                remote: edit.remote.clone(),
+                recovered,
+            });
+        }
+        if let Some(record) = lock(&self.inner.sessions).remove(&session) {
+            record.worker.abort();
+        }
+        {
+            let mut all = lock(&self.inner.edits);
+            for edit in &edits {
+                all.remove(&edit.id);
+            }
+        }
+        drop(turns);
+        tracing::info!(
+            session = session.0,
+            edits = edits.len(),
+            kept = kept.len(),
+            "remote edits ended; local copies kept"
+        );
+        for edit in &edits {
+            self.inner.emit(EditEvent::Closed { id: edit.id });
+        }
+        Ok(kept)
+    }
+
+    /// The window closes: ends every session's edits. A session with nothing unsent loses
+    /// its edit directory ([`finish`](Self::finish)); unsent edits are kept as recovered
+    /// copies ([`keep`](Self::keep)) and nothing of theirs is deleted. Failures are logged.
+    pub async fn end_all(&self) -> Vec<KeptEdit> {
+        let mut sessions: Vec<SessionId> = lock(&self.inner.edits)
+            .values()
+            .map(|edit| edit.session)
+            .collect();
+        sessions.sort();
+        sessions.dedup();
+        let mut kept = Vec::new();
+        for session in sessions {
+            let ended = match self.finish(session, false).await {
+                Ok(unsent) if unsent.is_empty() => Ok(Vec::new()),
+                Ok(_) => self.keep(session).await,
+                Err(error) => Err(error),
+            };
+            match ended {
+                Ok(copies) => kept.extend(copies),
+                Err(error) => {
+                    tracing::warn!(session = session.0, %error, "cannot end the remote edits; their files stay");
+                }
+            }
+        }
+        kept
+    }
+
+    /// How many `start` locks are held (tests: they go once the starts are done).
+    #[cfg(test)]
+    fn starting_len(&self) -> usize {
+        lock(&self.inner.starting).len()
+    }
+
     /// The edits' events, from now on.
     pub fn subscribe(&self) -> broadcast::Receiver<EditEvent> {
         self.inner.events.subscribe()
     }
 
+    /// Where recovered copies go (see the module docs).
+    pub fn recovered_dir(&self) -> &Path {
+        &self.inner.recovered
+    }
+
     /// The local copy of an edit, while it lasts.
+    #[cfg(test)]
     pub fn local_path(&self, id: EditId) -> Option<PathBuf> {
         self.inner.edit(id).map(|edit| edit.local.clone())
     }
 
     /// The watcher's report that `path` (in the session's directory) changed.
+    #[cfg(test)]
     pub fn file_event(&self, session: SessionId, path: PathBuf) {
         if let Some(record) = lock(&self.inner.sessions).get(&session) {
             let _ = record.files.send(path);
@@ -694,7 +921,7 @@ impl Inner {
             Ok(Some(data)) => data,
             // Mid-save (removed, not recreated yet): the creation brings another event.
             Ok(None) => return Outcome::Unchanged,
-            Err(error) => return self.failed(edit, error, false),
+            Err(error) => return self.failed(edit, error),
         };
         let hash = digest(&data);
         let (stamp, skip_check) = {
@@ -702,20 +929,22 @@ impl Inner {
             if overwrite {
                 st.skip_check = true;
             }
-            if hash == st.synced && !overwrite {
+            // A server copy our cut may have truncated needs these bytes even if they are
+            // the ones last synced (the user undid the change).
+            if hash == st.synced && !overwrite && !st.truncated {
                 st.state = EditState::Synced;
                 return Outcome::Unchanged;
             }
             (st.stamp, st.skip_check)
         };
         if !edit.connected() {
-            return self.pending(edit, false);
+            return self.pending(edit);
         }
         let before = match edit.fs.stat(&edit.remote).await {
             Ok(entry) => Some(entry),
             Err(error) if error.kind == ErrorKind::NotFound => None,
-            Err(error) if error.kind == ErrorKind::Network => return self.pending(edit, false),
-            Err(error) => return self.failed(edit, error, false),
+            Err(error) if error.kind == ErrorKind::Network => return self.pending(edit),
+            Err(error) => return self.failed(edit, error),
         };
         if skip_check {
             // This attempt reached the server: the one pass is used.
@@ -738,12 +967,13 @@ impl Inner {
             }
             if cut.clobbered {
                 tracing::warn!(edit = id.0, remote = %edit.remote, error = %cut.error, "an in-place upload was cut; the remote file may be truncated");
+                edit.sync_state().truncated = true;
             }
             if cut.error.kind == ErrorKind::Network {
                 if cut.clobbered {
                     edit.sync_state().skip_check = true;
                 }
-                return self.pending(edit, cut.clobbered);
+                return self.pending(edit);
             }
             if cut.clobbered {
                 // The damage is the new baseline: later saves are checked against it.
@@ -751,7 +981,7 @@ impl Inner {
                     edit.sync_state().stamp = RemoteStamp::of(&entry);
                 }
             }
-            return self.failed(edit, cut.error, cut.clobbered);
+            return self.failed(edit, cut.error);
         }
         let stamp = match edit.fs.stat(&edit.remote).await {
             Ok(entry) => RemoteStamp::of(&entry),
@@ -791,8 +1021,12 @@ impl Inner {
         edit.sync_state().orphans.extend(left);
     }
 
-    fn pending(&self, edit: &Edit, remote_may_be_truncated: bool) -> Outcome {
-        edit.set_state(EditState::Pending);
+    fn pending(&self, edit: &Edit) -> Outcome {
+        let remote_may_be_truncated = {
+            let mut st = edit.sync_state();
+            st.state = EditState::Pending;
+            st.truncated
+        };
         tracing::info!(edit = edit.id.0, remote = %edit.remote, "session not connected; edit held until it reconnects");
         self.emit(EditEvent::Pending {
             id: edit.id,
@@ -801,13 +1035,18 @@ impl Inner {
         Outcome::Pending
     }
 
-    fn failed(&self, edit: &Edit, error: Error, remote_may_be_truncated: bool) -> Outcome {
-        edit.set_state(EditState::Failed);
+    fn failed(&self, edit: &Edit, error: Error) -> Outcome {
+        let remote_may_be_truncated = {
+            let mut st = edit.sync_state();
+            st.state = EditState::Failed;
+            st.truncated
+        };
         tracing::warn!(edit = edit.id.0, remote = %edit.remote, %error, "remote edit upload failed");
         self.emit(EditEvent::Failed {
             id: edit.id,
             error: error.clone(),
             remote_may_be_truncated,
+            recovered: None,
         });
         Outcome::Failed(error)
     }
@@ -900,8 +1139,12 @@ async fn run_worker(
             }
             changed = state.changed(), if state_open => {
                 if changed.is_err() {
-                    // The session is gone: its pending edits wait for `finish`.
+                    // The session is gone: no more retries; its held edits wait for the
+                    // close flow (`flush`, `keep` or `finish`). Later saves are held
+                    // without touching the network (`Edit::connected` is false now).
                     state_open = false;
+                    due.clear();
+                    backoff.clear();
                     continue;
                 }
                 // Whatever came before: a drop and a reconnect may arrive as one change.
@@ -914,7 +1157,7 @@ async fn run_worker(
                     if edit.sync_state().state == EditState::Pending {
                         tracing::info!(edit = edit.id.0, remote = %edit.remote, "session connected; uploading the held edit");
                         let outcome = inner.sync(&edit, false).await;
-                        schedule_retry(&edit, &outcome, &mut due, &mut backoff);
+                        schedule_retry(edit.id, edit.connected(), &outcome, &mut due, &mut backoff);
                     }
                 }
             }
@@ -926,9 +1169,14 @@ async fn run_worker(
                 let Some(inner) = inner.upgrade() else { break };
                 for id in ready {
                     due.remove(&id);
-                    if let Some(edit) = inner.edit(id) {
-                        let outcome = inner.sync(&edit, false).await;
-                        schedule_retry(&edit, &outcome, &mut due, &mut backoff);
+                    match inner.edit(id) {
+                        Some(edit) => {
+                            let outcome = inner.sync(&edit, false).await;
+                            schedule_retry(edit.id, edit.connected(), &outcome, &mut due, &mut backoff);
+                        }
+                        None => {
+                            backoff.remove(&id);
+                        }
                     }
                 }
             }
@@ -939,19 +1187,21 @@ async fn run_worker(
 /// A save held while the session still says `Connected` (the link died first) is retried
 /// after a growing delay; one held while it is down waits for `Connected`.
 fn schedule_retry(
-    edit: &Edit,
+    id: EditId,
+    connected: bool,
     outcome: &Outcome,
     due: &mut HashMap<EditId, Instant>,
     backoff: &mut HashMap<EditId, Duration>,
 ) {
-    if matches!(outcome, Outcome::Pending) && edit.connected() {
+    if matches!(outcome, Outcome::Pending) && connected {
         let wait = backoff
-            .get(&edit.id)
+            .get(&id)
             .map_or(RETRY_MIN, |wait| (*wait * 2).min(RETRY_MAX));
-        backoff.insert(edit.id, wait);
-        due.insert(edit.id, Instant::now() + wait);
-    } else if !matches!(outcome, Outcome::Pending) {
-        backoff.remove(&edit.id);
+        backoff.insert(id, wait);
+        due.insert(id, Instant::now() + wait);
+    } else {
+        // Sent, settled, or held for `Connected`: no backoff to remember.
+        backoff.remove(&id);
     }
 }
 
@@ -1109,8 +1359,19 @@ fn write_private(path: &Path, data: &[u8]) -> Result<()> {
 }
 
 /// Writes `data` to a new file named `base` + `suffix`, or `base` + `suffix-N` if taken
-/// (never replacing a file), `0600`, its directories `0700`. Returns its path.
+/// (never replacing a file), `0600`, its directories `0700`. Returns its path. A file
+/// whose write fails is removed (never left half written).
 fn write_new_private(base: &Path, suffix: &str, data: &[u8]) -> Result<PathBuf> {
+    write_new_private_with(base, suffix, data, |file, data| file.write_all(data))
+}
+
+/// [`write_new_private`] with the write itself given (tests make it fail).
+fn write_new_private_with(
+    base: &Path,
+    suffix: &str,
+    data: &[u8],
+    write: impl Fn(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+) -> Result<PathBuf> {
     let parent = base
         .parent()
         .ok_or_else(|| Error::new(ErrorKind::Io, "No parent directory"))?;
@@ -1130,8 +1391,11 @@ fn write_new_private(base: &Path, suffix: &str, data: &[u8]) -> Result<PathBuf> 
         }
         match options.open(&path) {
             Ok(mut file) => {
-                file.write_all(data)
-                    .map_err(|e| Error::from(e).with_detail(path.display().to_string()))?;
+                if let Err(e) = write(&mut file, data).and_then(|()| file.sync_all()) {
+                    drop(file);
+                    let _ = std::fs::remove_file(&path);
+                    return Err(Error::from(e).with_detail(path.display().to_string()));
+                }
                 set_private(&path, 0o600)?;
                 return Ok(path);
             }

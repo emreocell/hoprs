@@ -109,7 +109,8 @@ impl App {
                 | Effect::FileOp {
                     session: Some(session),
                     ..
-                } => self.site_of_session(*session),
+                }
+                | Effect::StartEdit { session, .. } => self.site_of_session(*session),
                 _ => None,
             };
             let Some(site) = site.filter(|site| self.conn(site).awaits_reconnection()) else {
@@ -214,6 +215,12 @@ impl App {
                 Effect::FileOp { tab, side, op, .. } => {
                     self.file_op_done(tab, side, op, Err(error.clone()))
                 }
+                Effect::StartEdit {
+                    tab,
+                    session,
+                    remote,
+                    ..
+                } => self.edit_started(tab, session, remote, Err(error.clone())),
                 _ => Vec::new(),
             });
         }

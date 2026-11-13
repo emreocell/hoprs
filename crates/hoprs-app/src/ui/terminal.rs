@@ -215,8 +215,12 @@ pub fn view<'a>(app: &'a App, tab: &'a Tab, terminal: &'a TerminalTab) -> Elemen
             col.height(Length::Fill).into()
         }
     };
-    match crate::ui::files::lost_banner(app, tab) {
+    let body = match crate::ui::files::lost_banner(app, tab) {
         Some(banner) => column![banner, hrule(), body].into(),
+        None => body,
+    };
+    match crate::ui::edits::close_ask(app, tab) {
+        Some(ask) => column![ask, hrule(), body].into(),
         None => body,
     }
 }

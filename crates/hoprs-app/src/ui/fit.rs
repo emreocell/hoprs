@@ -14,8 +14,8 @@ pub const PERMISSIONS_WIDTH: f32 = 110.0;
 pub const NAME_MIN: f32 = 120.0;
 
 /// Below these pane widths the toolbar drops its key hints and tightens its padding
-/// (the full remote toolbar needs ~500 px, the local one ~385 px).
-const TOOLBAR_FULL_REMOTE: f32 = 500.0;
+/// (the full remote toolbar, with Edit, needs ~540 px; the local one ~385 px).
+const TOOLBAR_FULL_REMOTE: f32 = 545.0;
 const TOOLBAR_FULL_LOCAL: f32 = 390.0;
 /// Below this center width the queue head uses short labels.
 const QUEUE_HEAD_FULL: f32 = 900.0;
@@ -164,7 +164,9 @@ mod tests {
 
     #[test]
     fn toolbars_and_queue_head_go_compact_when_narrow() {
-        assert!(!compact_toolbar(pane_width(1280.0), Side::Remote));
+        // The remote toolbar has Edit too (Plan 6 Task 8): full from a 1346 px window.
+        assert!(compact_toolbar(pane_width(1280.0), Side::Remote));
+        assert!(!compact_toolbar(pane_width(1346.0), Side::Remote));
         assert!(!compact_toolbar(pane_width(1280.0), Side::Local));
         assert!(compact_toolbar(pane_width(960.0), Side::Remote));
         assert!(compact_toolbar(pane_width(960.0), Side::Local));

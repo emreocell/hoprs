@@ -828,7 +828,7 @@ async fn effects_reach_the_backend() {
         default_policy: ConflictPolicy::Overwrite,
         ..Settings::default()
     };
-    let message = effects::save_settings(backend.clone(), saved).await;
+    let message = effects::save_settings(backend.clone(), saved.clone()).await;
     assert!(matches!(message, Message::SettingsSaved(Ok(()))));
     backend.set_policy(ConflictPolicy::Skip).await;
     backend.set_workers(3);

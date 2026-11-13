@@ -129,7 +129,8 @@ fn view(state: &Hoprs) -> iced::Element<'_, Message> {
 }
 
 /// The keyboard for the file panes and dialogs, the mouse button and dropped files
-/// (drags), the transfer engine's events, the prompt broker's dialogs, each connected
+/// (drags), the transfer engine's events, the prompt broker's dialogs, the remote edits'
+/// events, each connected
 /// session's state, each terminal's shell output, and the window's close requests.
 fn subscription(state: &Hoprs) -> iced::Subscription<Message> {
     let fixed = [
@@ -140,6 +141,9 @@ fn subscription(state: &Hoprs) -> iced::Subscription<Message> {
         }),
         iced::Subscription::run_with(PromptFeed(Arc::clone(&state.backend)), |feed| {
             effects::prompt_feed(feed.0.as_ref())
+        }),
+        iced::Subscription::run_with(EditFeed(Arc::clone(&state.backend)), |feed| {
+            effects::edit_feed(feed.0.as_ref())
         }),
         iced::window::close_requests().map(Message::CloseRequested),
         iced::window::resize_events().map(|(_, size)| Message::WindowResized(size.width)),
@@ -207,6 +211,15 @@ struct PromptFeed(Arc<dyn BackendApi>);
 impl std::hash::Hash for PromptFeed {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         "prompt-feed".hash(state);
+    }
+}
+
+/// The backend, as the identity of the remote edits' events (one for the whole run).
+struct EditFeed(Arc<dyn BackendApi>);
+
+impl std::hash::Hash for EditFeed {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        "edit-feed".hash(state);
     }
 }
 

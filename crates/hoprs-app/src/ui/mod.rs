@@ -1,6 +1,7 @@
 //! Everything iced draws: theme, strings and the views.
 
 pub mod dialogs;
+pub mod edits;
 pub mod file_actions;
 pub mod files;
 pub mod fit;

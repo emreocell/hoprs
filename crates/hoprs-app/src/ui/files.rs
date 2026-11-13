@@ -131,6 +131,7 @@ fn file_key(named: Named) -> Option<FileKey> {
         Named::F7 => FileKey::NewFolder,
         Named::F2 => FileKey::Rename,
         Named::Delete => FileKey::Delete,
+        Named::F4 => FileKey::Edit,
         Named::Escape => FileKey::Escape,
         _ => return None,
     })
@@ -169,10 +170,17 @@ pub fn view<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> {
         pane(app, tab, Side::Remote, site_name, this_year),
     ]
     .height(Length::Fill);
-    match lost_banner(app, tab) {
-        Some(banner) => column![banner, hrule(), panes].into(),
-        None => panes.into(),
+    let mut col = column![];
+    if let Some(ask) = crate::ui::edits::close_ask(app, tab) {
+        col = col.push(ask).push(hrule());
     }
+    if let Some(banner) = lost_banner(app, tab) {
+        col = col.push(banner).push(hrule());
+    }
+    if let Some(strip) = crate::ui::edits::strip(app, tab) {
+        col = col.push(strip).push(hrule());
+    }
+    col.push(panes).into()
 }
 
 /// What the bar across a connected tab says, if anything.

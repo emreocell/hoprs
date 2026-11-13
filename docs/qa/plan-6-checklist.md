@@ -45,3 +45,25 @@ iced `window::screenshot` captures 2.5 s apart (shorter waits caught half-drawn 
 | Text filter | `reconnect`: the three matching lines (case-insensitive, over level, target, message and fields), "3 lines"; `zzz`: "No lines match", Copy shown disabled. Fix round 1: "Copy shown" label rechecked in a new capture | Pass |
 | Copy shown / Clear | Covered by `panel_filters_by_level_and_text` (clipboard text, one line each, oldest first; Clear empties, new lines still come) | Pass via messages. NEEDS HUMAN: click Copy shown, paste into an editor; hover Clear and the level buttons for their hints |
 | Following | New lines scroll the list only while it is at its end | Pass in tests. NEEDS HUMAN: scroll up with the panel open while connecting a site; the list must stay put |
+
+## Task 8: remote editing UI (2026-11-13)
+
+Setup: release build under XWayland (2560×1600 @2x, captures scaled to 1280×800), isolated `HOME`/`XDG_*`
+(`known_hosts` seeded with `ssh-keyscan`), Docker sshd (`127.0.0.1:2222`, alice, key), site opened as Files at
+`/home/alice/edit-demo` (`notes.txt`, folder `sub/`). A throwaway driver (not committed) sent the app's own
+messages and took iced `window::screenshot` captures. The editor was a script standing in for a person saving
+three times in a row: `sh -c 'sleep 1; for i in 1 2 3; do printf "save %s\n" "$i" >> "$0"; sleep 0.15; done'`.
+
+| Check | Result |
+| --- | --- |
+| Three saves in a row | 3 saves 150 ms apart → exactly one `remote edit uploaded` (size 27 = `hello` + the 3 lines), ~1.8 s after F4 (1 s script delay + 0.3 s of saves + 500 ms debounce); the server holds all three lines | Pass |
+| Edit action | Remote toolbar: `Edit F4` after Download (local pane has none). On `sub/` it looks off; F4 (or a click) shows "Folders can't be edited" in the thin bar above the table with Dismiss; hovering shows the same as a tooltip. Links and files over 50 MB likewise (unit test) | Pass. Tooltip hover NEEDS HUMAN |
+| Remote toolbar width | With Edit the full remote toolbar needs ~540 px: at the default 1280 px window the remote toolbar is compact (no key hints), full from 1346 px. The local toolbar is unchanged | Pass (visual change, for Task 11 to judge) |
+| Strip and toast | Thin `paper_2` strip across the files tab: "Editing notes.txt — saved 13:42"; toast "Uploaded notes.txt" at the bottom right of the center (`dialog_box` style, no shadow), gone after 3 s, no animation | Pass |
+| Conflict choice | After a foreign change on the server, the next save: "notes.txt: Changed on the server since you opened it" with outlined Overwrite / Keep remote / Save a copy on the right, inline, no dialog; the server's change is kept | Pass |
+| Close the last tab | × on the tab: inline at the top of the tab, "Files are open for editing", `/home/alice/edit-demo/notes.txt  changed on the server`, "Unsent changes are copied to …/hoprs/recovered", white "Upload pending changes and close", outlined "Close and keep local copies" and "Cancel"; Cancel keeps the tab | Pass |
+| Close the window | Window close: the center shows "Some remote edits are not uploaded", the file and its state, where copies go, "Upload and quit" / "Quit and keep local copies" / "Cancel", "The window stays open until you choose. Nothing is deleted."; Cancel returns. "Quit and keep local copies" then closed the app: the recovered copy `…/recovered/<site id>/home/alice/edit-demo/notes.txt.local-<ts>` holds the local version and the edit file is still in `$XDG_RUNTIME_DIR/hoprs/edit/1/…` | Pass |
+| Settings | New "Remote editing" section: "Editor" (mono field, default `xdg-open`), the hint; emptied, "Type a command" in the error colour and the last valid command stays in force | Pass |
+| Real GUI editor | `gedit` and VS Code are not installed here; `xdg-open` maps text files to GNOME Text Editor | NEEDS HUMAN: with the Docker site open, set Editor to `gnome-text-editor` (or `gedit`, `code --wait`), F4 on a text file, save three times quickly (Ctrl+S ×3): the log panel shows one "remote edit uploaded" per 500 ms of quiet and one toast; then edit on the server (`docker exec hoprs-test-sshd-1 sh -c 'echo x >> /home/alice/<file>'`), save again, check the inline choice and each button |
+| Keep remote / Save a copy | Covered by `remote_changed_choice_inline` and the backend tests | NEEDS HUMAN visually: click "Keep remote", check the line says to reload the editor and shows "Your version was saved to …"; reload the editor |
+| Upload and quit | Covered by `window_close_with_pending_edits_asks_before_saving` (edits settled before the save) | NEEDS HUMAN: with a saved, unsent change and the network cut (`docker compose -f docker/compose.yml stop sshd`), close the window, click "Upload and quit": after ≤10 s the question stays with "1 file could not be uploaded"; start sshd, click again: the app closes and the server has the change |

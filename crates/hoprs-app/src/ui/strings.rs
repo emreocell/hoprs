@@ -372,6 +372,7 @@ pub const PERMISSIONS: &str = "Permissions…";
 pub const KEY_NEW_FOLDER: &str = "F7";
 pub const KEY_RENAME: &str = "F2";
 pub const KEY_DELETE: &str = "Del";
+pub const KEY_EDIT: &str = "F4";
 pub const UPLOAD: &str = "Upload";
 pub const DOWNLOAD: &str = "Download";
 pub const KEY_TRANSFER: &str = "Ctrl ↵";
@@ -673,5 +674,87 @@ fn count(n: usize, one: &str, many: &str) -> String {
         format!("1 {one}")
     } else {
         format!("{n} {many}")
+    }
+}
+
+// Remote editing.
+/// The Edit action (remote pane).
+pub const EDIT_FILE: &str = "Edit";
+pub const EDIT_NO_FOLDERS: &str = "Folders can't be edited";
+pub const EDIT_NO_LINKS: &str = "Links can't be edited";
+pub const EDIT_TOO_LARGE: &str = "Files over 50 MB can't be edited";
+pub const WAITING_FOR_CONNECTION: &str = "Waiting for connection…";
+pub const REMOTE_MAY_BE_TRUNCATED: &str = "The server's copy may be incomplete until then.";
+pub const CHANGED_ON_SERVER: &str = "Changed on the server since you opened it";
+pub const KEEP_REMOTE: &str = "Keep remote";
+pub const SAVE_A_COPY: &str = "Save a copy";
+pub const RELOAD_IN_EDITOR: &str = "Now the server's version: reload it in your editor.";
+pub const UPLOAD_AND_CLOSE: &str = "Upload pending changes and close";
+pub const CLOSE_KEEP_COPIES: &str = "Close and keep local copies";
+pub const UPLOAD_AND_QUIT: &str = "Upload and quit";
+pub const QUIT_KEEP_COPIES: &str = "Quit and keep local copies";
+pub const CHECKING_EDITS: &str = "Checking the remote edits…";
+pub const UPLOADING_EDITS: &str = "Uploading (up to 10 s)…";
+pub const KEEPING_COPIES: &str = "Saving the local copies…";
+pub const CLOSE_EDITS_TITLE: &str = "Files are open for editing";
+pub const QUIT_EDITS_TITLE: &str = "Some remote edits are not uploaded";
+pub const QUIT_EDITS_HINT: &str = "The window stays open until you choose. Nothing is deleted.";
+pub const EDIT_UNSENT: &str = "not uploaded";
+pub const EDIT_CONFLICT: &str = "changed on the server";
+pub const EDITOR_COMMAND: &str = "Editor";
+pub const EDITOR_COMMAND_HINT: &str = "The command remote files open with; the file's path is added last. For example: xdg-open, gedit, code --wait.";
+pub const EDITOR_COMMAND_EMPTY: &str = "Type a command";
+pub const SETTINGS_EDITING: &str = "Remote editing";
+
+/// A line of the edits strip: "Editing config.php".
+pub fn editing(name: &str) -> String {
+    format!("Editing {name}")
+}
+
+/// "Editing config.php — saved 14:02".
+pub fn editing_saved(name: &str, at: &str) -> String {
+    format!("Editing {name} — saved {at}")
+}
+
+/// "Opening config.php…".
+pub fn opening_edit(name: &str) -> String {
+    format!("Opening {name}…")
+}
+
+/// "Upload failed: Permission denied".
+pub fn upload_failed(reason: &str) -> String {
+    format!("Upload failed: {reason}")
+}
+
+/// The toast of an upload: "Uploaded config.php".
+pub fn uploaded(name: &str) -> String {
+    format!("Uploaded {name}")
+}
+
+/// "Your version was saved to <path>".
+pub fn your_version_at(path: &str) -> String {
+    format!("Your version was saved to {path}")
+}
+
+/// After keeping: "2 local copies kept in <dir>".
+pub fn kept_copies(n: usize, dir: &str) -> String {
+    if n == 1 {
+        format!("Local copy kept in {dir}")
+    } else {
+        format!("{n} local copies kept in {dir}")
+    }
+}
+
+/// Where "keep" puts the copies: "Unsent changes are copied to <dir>".
+pub fn copies_go_to(dir: &str) -> String {
+    format!("Unsent changes are copied to {dir}")
+}
+
+/// "2 files could not be uploaded".
+pub fn not_uploaded(n: usize) -> String {
+    if n == 1 {
+        "1 file could not be uploaded".to_owned()
+    } else {
+        format!("{n} files could not be uploaded")
     }
 }

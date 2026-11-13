@@ -281,6 +281,32 @@ pub fn view(app: &App) -> Element<'_, Message> {
     ]
     .spacing(theme::SPACE_SM);
 
+    let editor_value = app
+        .editor_input
+        .as_deref()
+        .unwrap_or(&settings.editor_command);
+    let mut editing = column![
+        heading(strings::SETTINGS_EDITING),
+        field(
+            strings::EDITOR_COMMAND,
+            input(editor_value, false, |command| {
+                msg(SettingsMsg::EditorCommand(command))
+            })
+            .width(320)
+            .into(),
+            None
+        ),
+        muted(strings::EDITOR_COMMAND_HINT),
+    ]
+    .spacing(theme::SPACE_SM);
+    if app.editor_input.is_some() {
+        editing = editing.push(
+            text(strings::EDITOR_COMMAND_EMPTY)
+                .size(theme::TEXT_SM)
+                .color(palette().error),
+        );
+    }
+
     let content = column![
         row![
             text(strings::SETTINGS_TITLE)
@@ -294,6 +320,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
         transfers,
         hrule(),
         terminal,
+        hrule(),
+        editing,
         hrule(),
         backup_view(&app.backup, app.busy_phase),
     ]

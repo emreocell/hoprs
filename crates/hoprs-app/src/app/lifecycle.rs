@@ -7,7 +7,9 @@
 //! the one whose tabs the window close saves. "Close tabs" on it saves its tabs, then
 //! closes every tab of its sites, also a tab opened from "All sites" for one of them.
 //!
-//! Closing the window: the app asks for one [`Effect::Shutdown`], which saves the open
+//! Closing the window: unsent remote edits are asked about first, before anything else
+//! happens (the window stays open meanwhile, see [`super::edit`]). Then the app asks
+//! for one [`Effect::Shutdown`], which saves the open
 //! workspace's tabs, shuts the transfer engine down (its running items keep their stored
 //! state and reopen paused on the next start), then closes the sessions, all within
 //! 5 s (the save gets 2 s of them). Only its [`Message::ShutdownDone`] closes the window,
@@ -349,7 +351,20 @@ impl App {
             tracing::warn!("close requested again while shutting down; closing now");
             return vec![Effect::ExitWindow(window)];
         }
+        // Unsent remote edits: the question comes before the save (Review Focus 4).
+        if let Some(effects) = self.ask_before_quitting(window) {
+            return effects;
+        }
+        self.begin_close(window)
+    }
+
+    /// The close flow proper (see the module docs): from here on the window closes.
+    pub(super) fn begin_close(&mut self, window: iced::window::Id) -> Vec<Effect> {
         self.closing = true;
+        self.quit = None;
+        if matches!(self.form, Some(super::Form::QuitEdits)) {
+            self.form = None;
+        }
         let mut effects = self.cancel_all_prompts();
         let save = self
             .open_workspace
@@ -370,6 +385,7 @@ impl App {
                 id: request.id,
                 answer: PromptAnswer::Cancel,
             }]),
+            Message::Edit(msg) if msg.is_user() => Some(Vec::new()),
             Message::ToggleQueue
             | Message::FilterSites(_)
             | Message::ReloadProfiles

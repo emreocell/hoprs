@@ -581,6 +581,7 @@ impl App {
     /// keep the session (and its connect) as it is.
     pub(super) fn close_tab(&mut self, index: usize) -> Vec<Effect> {
         let tab = self.tabs.remove(index);
+        self.close_asks.remove(&tab.id);
         self.active_tab = match self.active_tab {
             _ if self.tabs.is_empty() => None,
             Some(active) if active > index => Some(active - 1),

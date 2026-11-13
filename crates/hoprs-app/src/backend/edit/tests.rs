@@ -796,6 +796,7 @@ async fn cut_in_place_upload_by_quota_adopts_the_damage_as_baseline() {
             id: got,
             error,
             remote_may_be_truncated,
+            recovered: None,
         } => {
             assert_eq!(got, id);
             assert_eq!(error.kind, ErrorKind::Permission);
@@ -876,4 +877,309 @@ async fn concurrent_starts_make_one_edit() {
         2,
         "the editor opened for each"
     );
+}
+
+/// Carried minor: the "may be truncated" warning lasts until the server's copy is whole
+/// again; a retry that fails on the way does not clear it.
+#[tokio::test(start_paused = true)]
+async fn truncation_warning_lasts_until_an_upload_succeeds() {
+    let mut h = harness(false);
+    let id = h.start_with(FILE, UploadMode::InPlace).await.unwrap();
+    *h.fs.cut_next_write.lock().unwrap() = Some(ErrorKind::Network);
+    h.save(id, b"mine\n");
+    tokio::time::advance(DEBOUNCE).await;
+    let truncated = EditEvent::Pending {
+        id,
+        remote_may_be_truncated: true,
+    };
+    assert_eq!(h.next_event().await, truncated);
+
+    // The retry after the reconnect fails again (its stat): still possibly truncated.
+    h.fs.stat_failures.store(1, Ordering::SeqCst);
+    h.state
+        .send_replace(ConnectionState::Reconnecting { attempt: 1 });
+    settle().await;
+    h.state.send_replace(ConnectionState::Connected);
+    assert_eq!(h.next_event().await, truncated);
+    // A failure for another reason says so too.
+    *h.fs.cut_next_write.lock().unwrap() = Some(ErrorKind::Permission);
+    tokio::time::advance(RETRY_MIN).await;
+    match h.next_event().await {
+        EditEvent::Failed {
+            remote_may_be_truncated,
+            ..
+        } => assert!(remote_may_be_truncated),
+        other => panic!("{other:?}"),
+    }
+    // A whole upload ends the warning.
+    h.save(id, b"mine, whole\n");
+    tokio::time::advance(DEBOUNCE).await;
+    assert!(matches!(h.next_event().await, EditEvent::Uploaded { .. }));
+    h.state
+        .send_replace(ConnectionState::Reconnecting { attempt: 1 });
+    h.save(id, b"later\n");
+    tokio::time::advance(DEBOUNCE).await;
+    assert_eq!(h.next_event().await, held(id));
+}
+
+/// Carried minor: after a cut truncated the server's copy, reverting the local file to
+/// the bytes last synced must still upload them (the server no longer holds them).
+#[tokio::test(start_paused = true)]
+async fn reverting_to_the_synced_bytes_still_repairs_a_truncated_remote() {
+    let mut h = harness(false);
+    let id = h.start_with(FILE, UploadMode::InPlace).await.unwrap();
+    *h.fs.cut_next_write.lock().unwrap() = Some(ErrorKind::Network);
+    h.save(id, b"mine\n");
+    tokio::time::advance(DEBOUNCE).await;
+    assert!(matches!(h.next_event().await, EditEvent::Pending { .. }));
+    assert_eq!(h.mem.read_file(FILE).unwrap(), b"");
+
+    h.state
+        .send_replace(ConnectionState::Reconnecting { attempt: 1 });
+    // The user undoes the change: the file holds what was downloaded.
+    h.save(id, b"version 1\n");
+    tokio::time::advance(DEBOUNCE).await;
+    assert_eq!(
+        h.next_event().await,
+        EditEvent::Pending {
+            id,
+            remote_may_be_truncated: true
+        }
+    );
+    assert_eq!(h.edits.pending(SESSION).await.len(), 1, "still unsent");
+    h.state.send_replace(ConnectionState::Connected);
+    assert!(matches!(h.next_event().await, EditEvent::Uploaded { .. }));
+    assert_eq!(h.mem.read_file(FILE).unwrap(), b"version 1\n");
+    assert!(h.edits.pending(SESSION).await.is_empty());
+}
+
+/// Carried minor: "Keep remote" or "Save a copy" that fails after the recovered copy was
+/// written says where that copy is.
+#[tokio::test(start_paused = true)]
+async fn failed_resolution_reports_the_recovered_copy() {
+    for choice in [EditChoice::KeepRemote, EditChoice::SaveCopy] {
+        let mut h = harness(false);
+        let id = h.start(FILE).await.unwrap();
+        h.mem
+            .add_file(FILE, b"theirs\n", UNIX_EPOCH + Duration::from_secs(2_000));
+        h.save(id, b"mine\n");
+        tokio::time::advance(DEBOUNCE).await;
+        assert_eq!(h.next_event().await, EditEvent::RemoteChanged { id });
+
+        h.fs.offline.store(true, Ordering::SeqCst);
+        let error = h.edits.resolve(id, choice).await.unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Network, "{choice:?}");
+        let copies = h.recovered_copies();
+        assert_eq!(copies.len(), 1, "{choice:?}: {copies:?}");
+        assert_eq!(std::fs::read(&copies[0]).unwrap(), b"mine\n");
+        match h.next_event().await {
+            EditEvent::Failed {
+                id: got, recovered, ..
+            } => {
+                assert_eq!(got, id);
+                assert_eq!(recovered, Some(copies[0].clone()), "{choice:?}");
+            }
+            other => panic!("{choice:?}: {other:?}"),
+        }
+        // The edit still waits for a choice.
+        let pending = h.edits.pending(SESSION).await;
+        assert_eq!(pending[0].state, EditState::Conflict, "{choice:?}");
+    }
+}
+
+/// Carried minor: a recovered copy whose write fails is not left half written.
+#[test]
+fn recovered_copy_is_removed_when_its_write_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("site").join("notes.txt");
+    let failing = |_: &mut std::fs::File, _: &[u8]| -> std::io::Result<()> {
+        Err(std::io::Error::other("disk full"))
+    };
+    let error = write_new_private_with(&base, ".local-1", b"data", failing).unwrap_err();
+    assert!(error.detail.is_some());
+    let left: Vec<_> = std::fs::read_dir(base.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert!(left.is_empty(), "nothing half written: {left:?}");
+    // The plain write still works.
+    let path = write_new_private(&base, ".local-1", b"data").unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), b"data");
+}
+
+/// Carried minor: once the session is closed (its state sender is gone), the worker stops
+/// retrying; saves are held without touching the network until the close flow decides.
+#[tokio::test(start_paused = true)]
+async fn closing_the_session_stops_the_retries() {
+    let mut h = harness(false);
+    let id = h.start(FILE).await.unwrap();
+    h.fs.stat_failures.store(1_000, Ordering::SeqCst);
+    h.save(id, b"held\n");
+    tokio::time::advance(DEBOUNCE).await;
+    assert_eq!(h.next_event().await, held(id));
+    // A backoff retry is scheduled (the state still says connected)...
+    tokio::time::advance(RETRY_MIN).await;
+    assert_eq!(h.next_event().await, held(id));
+
+    // ...then the session closes.
+    drop(std::mem::replace(
+        &mut h.state,
+        watch::channel(ConnectionState::Connected).0,
+    ));
+    settle().await;
+    let left = h.fs.stat_failures.load(Ordering::SeqCst);
+    tokio::time::advance(RETRY_MAX * 4).await;
+    settle().await;
+    assert_eq!(
+        h.fs.stat_failures.load(Ordering::SeqCst),
+        left,
+        "no retry after the close"
+    );
+    // A later save is held at once, without a stat.
+    h.save(id, b"held again\n");
+    tokio::time::advance(DEBOUNCE).await;
+    assert_eq!(h.next_event().await, held(id));
+    assert_eq!(h.fs.stat_failures.load(Ordering::SeqCst), left);
+    // A flush cannot send it either: it is reported, not lost.
+    let unsent = h.edits.flush(SESSION, Duration::from_secs(10)).await;
+    assert_eq!(unsent.len(), 1);
+    assert_eq!(h.fs.stat_failures.load(Ordering::SeqCst), left);
+    assert_eq!(h.writes(), 0);
+}
+
+/// Carried minor: the backoff of an edit goes once it is no longer held on a connected
+/// session, and the start locks go once the start is done.
+#[tokio::test]
+async fn bookkeeping_maps_shrink() {
+    let mut due = HashMap::new();
+    let mut backoff = HashMap::new();
+    let id = EditId(3);
+    schedule_retry(id, true, &Outcome::Pending, &mut due, &mut backoff);
+    assert_eq!(backoff.get(&id), Some(&RETRY_MIN));
+    schedule_retry(id, true, &Outcome::Pending, &mut due, &mut backoff);
+    assert_eq!(backoff.get(&id), Some(&(RETRY_MIN * 2)));
+    // Held while the session is down: it waits for `Connected`, no backoff kept.
+    schedule_retry(id, false, &Outcome::Pending, &mut due, &mut backoff);
+    assert!(backoff.is_empty());
+    schedule_retry(id, true, &Outcome::Pending, &mut due, &mut backoff);
+    schedule_retry(id, true, &Outcome::Uploaded, &mut due, &mut backoff);
+    assert!(backoff.is_empty());
+
+    let h = harness(false);
+    let (a, b) = tokio::join!(h.start(FILE), h.start(FILE));
+    assert_eq!(a.unwrap(), b.unwrap());
+    h.start("/home/alice/missing.txt").await.unwrap_err();
+    assert_eq!(h.edits.starting_len(), 0);
+}
+
+/// Task 8: "Upload pending changes" sends what it can within the limit (here once the
+/// session is back) and reports what is still unsent.
+#[tokio::test(start_paused = true)]
+async fn flush_sends_unsent_edits_within_the_limit() {
+    let mut h = harness(false);
+    let id = h.start(FILE).await.unwrap();
+    h.state
+        .send_replace(ConnectionState::Reconnecting { attempt: 1 });
+    h.save(id, b"unsent\n");
+    tokio::time::advance(DEBOUNCE).await;
+    assert_eq!(h.next_event().await, held(id));
+
+    // Never back within the limit: reported after 10 s.
+    let started = Instant::now();
+    let unsent = h.edits.flush(SESSION, Duration::from_secs(10)).await;
+    assert_eq!(unsent.len(), 1);
+    assert_eq!(unsent[0].state, EditState::Pending);
+    let waited = started.elapsed();
+    assert!(
+        waited >= Duration::from_secs(10) && waited < Duration::from_secs(11),
+        "{waited:?}"
+    );
+
+    // Back during the flush: sent, nothing left.
+    let edits = h.edits.clone();
+    let flush = tokio::spawn(async move { edits.flush(SESSION, Duration::from_secs(10)).await });
+    tokio::time::advance(Duration::from_secs(2)).await;
+    h.state.send_replace(ConnectionState::Connected);
+    let unsent = flush.await.unwrap();
+    assert!(unsent.is_empty(), "{unsent:?}");
+    assert_eq!(h.mem.read_file(FILE).unwrap(), b"unsent\n");
+
+    // A save not seen by the worker yet is sent too.
+    let local = h.edits.local_path(id).unwrap();
+    std::fs::write(&local, b"just saved\n").unwrap();
+    assert!(
+        h.edits
+            .flush(SESSION, Duration::from_secs(10))
+            .await
+            .is_empty()
+    );
+    assert_eq!(h.mem.read_file(FILE).unwrap(), b"just saved\n");
+
+    // A conflict is never overwritten by a flush: reported at once.
+    h.mem
+        .add_file(FILE, b"theirs\n", UNIX_EPOCH + Duration::from_secs(9_000));
+    std::fs::write(&local, b"mine\n").unwrap();
+    let started = Instant::now();
+    let unsent = h.edits.flush(SESSION, Duration::from_secs(10)).await;
+    assert_eq!(unsent.len(), 1);
+    assert_eq!(unsent[0].state, EditState::Conflict);
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(h.mem.read_file(FILE).unwrap(), b"theirs\n");
+}
+
+/// Task 8: "Close and keep local copies" saves each unsent edit as a recovered copy,
+/// stops the edits and deletes nothing.
+#[tokio::test(start_paused = true)]
+async fn keep_saves_recovered_copies_and_deletes_nothing() {
+    let mut h = harness(false);
+    let unsent = h.start(FILE).await.unwrap();
+    h.mem.add_file("/home/alice/synced.txt", b"s\n", UNIX_EPOCH);
+    let synced = h.start("/home/alice/synced.txt").await.unwrap();
+    let unsent_local = h.edits.local_path(unsent).unwrap();
+    let synced_local = h.edits.local_path(synced).unwrap();
+    h.state
+        .send_replace(ConnectionState::Reconnecting { attempt: 1 });
+    h.save(unsent, b"mine\n");
+    tokio::time::advance(DEBOUNCE).await;
+    assert_eq!(h.next_event().await, held(unsent));
+
+    let kept = h.edits.keep(SESSION).await.unwrap();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(kept[0].id, unsent);
+    assert_eq!(kept[0].remote, rp(FILE));
+    assert_eq!(std::fs::read(&kept[0].recovered).unwrap(), b"mine\n");
+    assert!(kept[0].recovered.starts_with(&h.recovered));
+    // Nothing deleted: the local copies are where they were.
+    assert_eq!(std::fs::read(&unsent_local).unwrap(), b"mine\n");
+    assert!(synced_local.exists());
+    let mut closed = vec![h.next_event().await, h.next_event().await];
+    closed.sort_by_key(|e| format!("{e:?}"));
+    assert_eq!(
+        closed,
+        vec![
+            EditEvent::Closed { id: unsent },
+            EditEvent::Closed { id: synced }
+        ]
+    );
+    assert!(h.edits.pending(SESSION).await.is_empty());
+    // The edits are over: a reconnect uploads nothing.
+    h.state.send_replace(ConnectionState::Connected);
+    settle().await;
+    assert_eq!(h.writes(), 0);
+    assert_eq!(h.mem.read_file(FILE).unwrap(), b"version 1\n");
+}
+
+/// Task 8: "Retry" on a failed upload tries again now.
+#[tokio::test(start_paused = true)]
+async fn retry_uploads_a_failed_edit() {
+    let mut h = harness(false);
+    let id = h.start_with(FILE, UploadMode::InPlace).await.unwrap();
+    *h.fs.cut_next_write.lock().unwrap() = Some(ErrorKind::Permission);
+    h.save(id, b"mine\n");
+    tokio::time::advance(DEBOUNCE).await;
+    assert!(matches!(h.next_event().await, EditEvent::Failed { .. }));
+    h.edits.retry(id).await.unwrap();
+    assert!(matches!(h.next_event().await, EditEvent::Uploaded { .. }));
+    assert_eq!(h.mem.read_file(FILE).unwrap(), b"mine\n");
+    assert!(h.edits.retry(EditId(999)).await.is_err());
 }

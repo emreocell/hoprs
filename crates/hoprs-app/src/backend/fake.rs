@@ -82,8 +82,9 @@ use super::edit::{EditManager, EditSession, Launcher, UploadMode};
 use super::shells::{ShellControl, Shells, shell_closed};
 use super::{
     AuthMethod, BackendApi, BrokerEvent, ConnectError, ConnectResult, Connected, ControlOp,
-    DeleteTarget, EditChoice, EditEvent, EditId, EditSummary, KnownHostEntry, ProfileSnapshot,
-    PromptAnswer, PromptId, SessionId, ShellId, ShellOutput, Side, TransferSnapshot, WorkspaceTabs,
+    DeleteTarget, EditChoice, EditEvent, EditId, EditSummary, KeptEdit, KnownHostEntry,
+    ProfileSnapshot, PromptAnswer, PromptId, SessionId, ShellId, ShellOutput, Side,
+    TransferSnapshot, WorkspaceTabs,
 };
 use crate::settings::{Settings, SettingsLoad};
 use hoprs_vault::SecretKind;
@@ -121,6 +122,8 @@ pub enum Call {
     Close(SessionId),
     OpenShell(SessionId),
     CloseShell(ShellId),
+    FlushEdits(SessionId),
+    KeepEdits(SessionId),
 }
 
 /// A scripted shell (see the module docs).
@@ -307,6 +310,11 @@ impl FakeBackend {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// The local copy of a live edit.
+    pub fn edit_local(&self, id: EditId) -> Option<PathBuf> {
+        self.edits().local_path(id)
     }
 
     /// The editor saves `data` into the edit's local file (and the watcher reports it).
@@ -903,6 +911,9 @@ impl BackendApi for FakeBackend {
         for session in sessions {
             self.close(session).await;
         }
+        if let Some((_, edits)) = self.edits.get() {
+            edits.end_all().await;
+        }
     }
 
     async fn open_shell(&self, session: SessionId, cols: u16, rows: u16) -> Result<ShellId> {
@@ -1198,8 +1209,30 @@ impl BackendApi for FakeBackend {
         self.edits().finish(session, discard).await
     }
 
+    async fn retry_edit(&self, id: EditId) -> Result<()> {
+        self.edits().retry(id).await
+    }
+
+    async fn flush_edits(
+        &self,
+        session: SessionId,
+        within: std::time::Duration,
+    ) -> Vec<EditSummary> {
+        self.state().calls.push(Call::FlushEdits(session));
+        self.edits().flush(session, within).await
+    }
+
+    async fn keep_edits(&self, session: SessionId) -> Result<Vec<KeptEdit>> {
+        self.state().calls.push(Call::KeepEdits(session));
+        self.edits().keep(session).await
+    }
+
     fn subscribe_edits(&self) -> broadcast::Receiver<EditEvent> {
         self.edits().subscribe()
+    }
+
+    fn recovered_dir(&self) -> PathBuf {
+        self.edits().recovered_dir().to_owned()
     }
 }
 

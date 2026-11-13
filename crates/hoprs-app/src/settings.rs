@@ -30,6 +30,8 @@ pub const SCROLLBACK_DEFAULT: usize = 10_000;
 pub const KEEPALIVE_MIN: u64 = 10;
 pub const KEEPALIVE_MAX: u64 = 300;
 pub const KEEPALIVE_DEFAULT: u64 = 30;
+/// The command remote edits open files with (the path is added as its last argument).
+pub const EDITOR_DEFAULT: &str = "xdg-open";
 /// Largest `settings.toml` read; a real one is under 200 bytes.
 const MAX_BYTES: u64 = 64 * 1024;
 
@@ -74,7 +76,7 @@ impl TerminalTheme {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
     /// Transfer workers per site (`1..=16`), for the connections made from now on.
     pub workers_per_site: usize,
@@ -89,6 +91,9 @@ pub struct Settings {
     /// Seconds between keepalives on an idle SSH or FTP connection (`10..=300`), for the
     /// connections made from now on.
     pub keepalive_secs: u64,
+    /// The editor of remote edits: a command split with shell quoting rules (no shell
+    /// runs), the file's path added last. Never empty ([`valid_editor`]).
+    pub editor_command: String,
 }
 
 impl Default for Settings {
@@ -100,8 +105,14 @@ impl Default for Settings {
             terminal_scrollback: SCROLLBACK_DEFAULT,
             terminal_theme: TerminalTheme::HoprsDark,
             keepalive_secs: KEEPALIVE_DEFAULT,
+            editor_command: EDITOR_DEFAULT.to_owned(),
         }
     }
+}
+
+/// Whether `command` can be the editor command: something besides blanks.
+pub fn valid_editor(command: &str) -> bool {
+    !command.trim().is_empty()
 }
 
 /// `size` within `10..=24`.
@@ -148,6 +159,8 @@ struct File {
     terminal_theme: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     keepalive_secs: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    editor_command: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -216,6 +229,11 @@ pub fn parse(content: &str) -> Result<Settings> {
         keepalive_secs: file.keepalive_secs.map_or(defaults.keepalive_secs, |n| {
             clamp_keepalive(u64::try_from(n.max(0)).unwrap_or(KEEPALIVE_MAX))
         }),
+        // An empty command is not a command: the default.
+        editor_command: file
+            .editor_command
+            .filter(|command| valid_editor(command))
+            .unwrap_or(defaults.editor_command),
     })
 }
 
@@ -228,6 +246,11 @@ fn file_of(settings: &Settings) -> File {
         terminal_scrollback: i64::try_from(clamp_scrollback(settings.terminal_scrollback)).ok(),
         terminal_theme: Some(settings.terminal_theme.key().to_owned()),
         keepalive_secs: i64::try_from(clamp_keepalive(settings.keepalive_secs)).ok(),
+        editor_command: Some(if valid_editor(&settings.editor_command) {
+            settings.editor_command.clone()
+        } else {
+            EDITOR_DEFAULT.to_owned()
+        }),
     }
 }
 

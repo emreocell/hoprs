@@ -14,13 +14,14 @@ use hoprs_import::ImportOptions;
 use hoprs_vault::ImportMode;
 use secrecy::SecretString;
 
+use crate::app::edit::{EditsFor, FLUSH_LIMIT, Settle, Settled};
 use crate::app::terminal::ShellSignal;
 use crate::app::{
-    Effect, FileAction, Message, PickTarget, ProfileOp, RequestId, TabId, TerminalMsg,
+    EditMsg, Effect, FileAction, Message, PickTarget, ProfileOp, RequestId, TabId, TerminalMsg,
 };
 use crate::backend::{
-    BackendApi, KnownHostEntry, PromptAnswer, PromptId, SessionId, ShellId, ShellOutput, Side,
-    WorkspaceTabs,
+    BackendApi, KeptEdit, KnownHostEntry, PromptAnswer, PromptId, SessionId, ShellId, ShellOutput,
+    Side, WorkspaceTabs,
 };
 use crate::settings::Settings;
 use crate::ui::site_form::PasswordChange;
@@ -63,9 +64,8 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
             )
         }
         Effect::ConnectSites(sites) => Task::run(connect_sites(backend, sites), |m| m),
-        Effect::CloseSession(session) => {
-            Task::future(async move { backend.close(session).await }).discard()
-        }
+        Effect::CloseSession(session) => Task::future(close_session(backend, session))
+            .and_then(|kept| Task::done(Message::Edit(EditMsg::Kept(kept)))),
         Effect::OpenProfileFolder => Task::perform(
             open_folder(backend.profile_dir()),
             Message::ProfileFolderOpened,
@@ -245,6 +245,36 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
         Effect::FocusTerminalSearch(tab) => {
             iced::widget::operation::focus(crate::ui::terminal::search_id(tab))
         }
+        Effect::StartEdit {
+            tab,
+            session,
+            remote,
+            editor,
+        } => Task::future(async move {
+            let result = backend.start_edit(session, remote.clone(), editor).await;
+            Message::Edit(EditMsg::Started {
+                tab,
+                session,
+                remote,
+                result,
+            })
+        }),
+        Effect::ResolveEdit { id, choice } => Task::future(async move {
+            let result = backend.resolve_edit(id, choice).await;
+            Message::Edit(EditMsg::Done { id, result })
+        }),
+        Effect::RetryEdit(id) => Task::future(async move {
+            let result = backend.retry_edit(id).await;
+            Message::Edit(EditMsg::Done { id, result })
+        }),
+        Effect::CheckEdits { purpose, sessions } => {
+            Task::future(check_edits(backend, purpose, sessions))
+        }
+        Effect::SettleEdits {
+            purpose,
+            sessions,
+            how,
+        } => Task::future(settle_edits(backend, purpose, sessions, how, FLUSH_LIMIT)),
         Effect::ScrollLogToEnd => iced::widget::operation::snap_to(
             crate::ui::log::scroll_id(),
             iced::widget::operation::RelativeOffset {
@@ -625,6 +655,109 @@ pub fn session_feed(
                 auth: backend.session_auth(session),
             };
             Some((message, (Some(watch), false)))
+        }
+    })
+}
+
+/// Closes a session, then ends its remote edits: all sent, their files go; unsent ones
+/// (a close that did not ask, e.g. the site was deleted) are kept as recovered copies,
+/// nothing deleted. Returns the copies kept (none: no message).
+pub async fn close_session(
+    backend: Arc<dyn BackendApi>,
+    session: SessionId,
+) -> Option<Vec<KeptEdit>> {
+    backend.close(session).await;
+    match backend.finish_edits(session, false).await {
+        Ok(unsent) if unsent.is_empty() => None,
+        Ok(_) => match backend.keep_edits(session).await {
+            Ok(kept) => Some(kept),
+            Err(error) => {
+                tracing::warn!(session = session.0, %error, "cannot keep the unsent remote edits; their files stay");
+                None
+            }
+        },
+        Err(error) => {
+            tracing::warn!(session = session.0, %error, "cannot end the remote edits; their files stay");
+            None
+        }
+    }
+}
+
+/// Which edits of `sessions` are unsent, for a close question.
+pub async fn check_edits(
+    backend: Arc<dyn BackendApi>,
+    purpose: EditsFor,
+    sessions: Vec<SessionId>,
+) -> Message {
+    let mut unsent = Vec::new();
+    for session in sessions {
+        unsent.extend(backend.edits_pending(session).await);
+    }
+    Message::Edit(EditMsg::Checked {
+        purpose,
+        unsent,
+        kept_in: backend.recovered_dir(),
+    })
+}
+
+/// A close question's answer: "Upload" sends every session's unsent edits (all at once,
+/// within `limit`), then ends the sessions with nothing left unsent (their files go);
+/// "Keep" saves the unsent edits as recovered copies and ends them, deleting nothing.
+pub async fn settle_edits(
+    backend: Arc<dyn BackendApi>,
+    purpose: EditsFor,
+    sessions: Vec<SessionId>,
+    how: Settle,
+    limit: Duration,
+) -> Message {
+    let result = async {
+        let mut settled = Settled::default();
+        match how {
+            Settle::Upload => {
+                let flushes = sessions
+                    .iter()
+                    .map(|session| backend.flush_edits(*session, limit));
+                let left = futures_util::future::join_all(flushes).await;
+                for (session, left) in sessions.iter().zip(left) {
+                    if left.is_empty() {
+                        // A save made since the flush is reported, not deleted.
+                        settled
+                            .unsent
+                            .extend(backend.finish_edits(*session, false).await?);
+                    } else {
+                        settled.unsent.extend(left);
+                    }
+                }
+            }
+            Settle::Keep => {
+                for session in &sessions {
+                    settled.kept.extend(backend.keep_edits(*session).await?);
+                }
+            }
+        }
+        Ok(settled)
+    }
+    .await;
+    Message::Edit(EditMsg::Settled {
+        purpose,
+        how,
+        result,
+    })
+}
+
+/// The edits' events for their subscription. A receiver that lagged lost events: the
+/// strip may be stale until the next event of each edit (logged).
+pub fn edit_feed(backend: &dyn BackendApi) -> impl Stream<Item = Message> + Send + use<> {
+    let events = backend.subscribe_edits();
+    stream::unfold(events, |mut events| async move {
+        loop {
+            match events.recv().await {
+                Ok(event) => return Some((Message::Edit(EditMsg::Event(event)), events)),
+                Err(broadcast::error::RecvError::Lagged(lost)) => {
+                    tracing::warn!(lost, "the remote edit notices lagged behind");
+                }
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
         }
     })
 }

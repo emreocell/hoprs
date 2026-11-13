@@ -317,6 +317,8 @@ pub enum PaneMsg {
     Rename,
     Delete,
     Permissions,
+    /// "Edit" (remote): opens the file in the editor ([`super::edit`]).
+    Edit,
     /// The inline name editor.
     EditChanged(String),
     EditCommit,
@@ -356,6 +358,8 @@ pub enum FileKey {
     Rename,
     /// Del.
     Delete,
+    /// F4: edit the remote file in the editor.
+    Edit,
     /// Closes the inline editor, confirmation or dialog (or the error bar).
     Escape,
     /// Ctrl+Enter: the selection to the other pane's folder.
@@ -524,6 +528,10 @@ impl App {
             PaneMsg::Permissions => {
                 self.tabs[index].set_focus(side);
                 return self.start_permissions(index, side);
+            }
+            PaneMsg::Edit => {
+                self.tabs[index].set_focus(side);
+                return self.start_edit(index, side);
             }
             PaneMsg::EditChanged(value) => {
                 if let Some(PaneAction::Edit(edit)) = &mut pane.action {
@@ -718,6 +726,7 @@ impl App {
             (None, FileKey::NewFolder) => return self.start_new_folder(index, side),
             (None, FileKey::Rename) => return self.start_rename(index, side),
             (None, FileKey::Delete) => return self.start_delete(index, side),
+            (None, FileKey::Edit) => return self.start_edit(index, side),
             (None, FileKey::Transfer) => return self.transfer_selection(index, side),
             (None, _) => {}
         }
@@ -765,6 +774,7 @@ impl App {
             | FileKey::NewFolder
             | FileKey::Rename
             | FileKey::Delete
+            | FileKey::Edit
             | FileKey::Transfer
             | FileKey::Escape => unreachable!("handled above"),
         };

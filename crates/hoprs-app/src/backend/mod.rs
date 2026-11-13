@@ -3,7 +3,6 @@
 //! behind [`BackendApi`].
 
 pub mod broker;
-#[allow(dead_code, reason = "the remote edit effects come with Plan 6 Task 8")]
 pub mod edit;
 #[cfg(test)]
 pub mod fake;
@@ -15,6 +14,7 @@ pub mod vault;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
@@ -35,7 +35,10 @@ use secrecy::SecretString;
 use tokio::sync::{broadcast, mpsc, watch};
 
 pub use broker::{BrokerEvent, PromptAnswer, PromptBroker, PromptId};
-pub use edit::{EditChoice, EditEvent, EditId, EditManager, EditSession, EditSummary, UploadMode};
+pub use edit::{
+    EditChoice, EditEvent, EditId, EditManager, EditSession, EditState, EditSummary, KeptEdit,
+    UploadMode,
+};
 pub use ops::DeleteTarget;
 pub use sessions::{
     ConnectError, ConnectResult, Connected, SessionConfig, SessionId, SessionManager,
@@ -153,7 +156,6 @@ pub trait BackendApi: Send + Sync {
     /// [`edit::DEBOUNCE`] of quiet, unless the server's copy changed meanwhile
     /// ([`EditEvent::RemoteChanged`]); a save while the session is down is held and goes up
     /// on its next `Connected`. A file already being edited opens again (same id).
-    #[allow(dead_code, reason = "the remote edit effects come with Plan 6 Task 8")]
     async fn start_edit(
         &self,
         session: SessionId,
@@ -161,18 +163,25 @@ pub trait BackendApi: Send + Sync {
         editor: String,
     ) -> Result<EditId>;
     /// The user's answer to [`EditEvent::RemoteChanged`] (see [`EditChoice`]).
-    #[allow(dead_code, reason = "the remote edit effects come with Plan 6 Task 8")]
     async fn resolve_edit(&self, id: EditId, choice: EditChoice) -> Result<()>;
     /// The session's edits holding something not on the server yet.
-    #[allow(dead_code, reason = "the remote edit effects come with Plan 6 Task 8")]
     async fn edits_pending(&self, session: SessionId) -> Vec<EditSummary>;
     /// Ends the session's edits and deletes their local files, unless some hold unsent
     /// changes and `discard` is false: then nothing changes and those are returned.
-    #[allow(dead_code, reason = "the remote edit effects come with Plan 6 Task 8")]
     async fn finish_edits(&self, session: SessionId, discard: bool) -> Result<Vec<EditSummary>>;
+    /// "Retry" on a failed upload: tries the edit again now (with the stamp check).
+    async fn retry_edit(&self, id: EditId) -> Result<()>;
+    /// "Upload pending changes": sends the session's unsent edits, waiting at most
+    /// `within` for the session to be back; returns what is still unsent (conflicts are
+    /// never overwritten here).
+    async fn flush_edits(&self, session: SessionId, within: Duration) -> Vec<EditSummary>;
+    /// "Keep local copies": saves each unsent edit as a recovered copy and ends the
+    /// session's edits, deleting nothing (see [`EditManager::keep`]).
+    async fn keep_edits(&self, session: SessionId) -> Result<Vec<KeptEdit>>;
     /// A new receiver of the edits' events.
-    #[allow(dead_code, reason = "the remote edit effects come with Plan 6 Task 8")]
     fn subscribe_edits(&self) -> broadcast::Receiver<EditEvent>;
+    /// Where "keep" saves the recovered copies (the close questions say so).
+    fn recovered_dir(&self) -> PathBuf;
 
     /// Lists `path` on the local disk, or on the remote side of `session` (an error
     /// without one).
@@ -334,7 +343,6 @@ pub struct Backend {
     vault: VaultHandle,
     engine: TransferEngine,
     sessions: SessionManager,
-    #[allow(dead_code, reason = "the remote edit effects come with Plan 6 Task 8")]
     edits: EditManager,
     broker: PromptBroker,
 }
@@ -504,6 +512,9 @@ impl BackendApi for Backend {
     async fn shutdown(&self) {
         self.engine.clone().shutdown().await;
         self.sessions.close_all().await;
+        // The close flow settled the edits it knew of; anything unsent since is kept as a
+        // recovered copy, never deleted.
+        self.edits.end_all().await;
     }
 
     async fn open_shell(&self, session: SessionId, cols: u16, rows: u16) -> Result<ShellId> {
@@ -569,8 +580,24 @@ impl BackendApi for Backend {
         self.edits.finish(session, discard).await
     }
 
+    async fn retry_edit(&self, id: EditId) -> Result<()> {
+        self.edits.retry(id).await
+    }
+
+    async fn flush_edits(&self, session: SessionId, within: Duration) -> Vec<EditSummary> {
+        self.edits.flush(session, within).await
+    }
+
+    async fn keep_edits(&self, session: SessionId) -> Result<Vec<KeptEdit>> {
+        self.edits.keep(session).await
+    }
+
     fn subscribe_edits(&self) -> broadcast::Receiver<EditEvent> {
         self.edits.subscribe()
+    }
+
+    fn recovered_dir(&self) -> PathBuf {
+        self.edits.recovered_dir().to_owned()
     }
 
     async fn list(
@@ -1434,7 +1461,7 @@ mod tests {
             default_policy: ConflictPolicy::Resume,
             ..Settings::default()
         };
-        backend.save_settings(saved).await.unwrap();
+        backend.save_settings(saved.clone()).await.unwrap();
         assert_eq!(settings::load(&file).settings, saved);
         drop(backend);
 

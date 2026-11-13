@@ -41,6 +41,8 @@ pub enum Form {
     Import,
     /// The settings page ([`App::settings`], [`App::backup`]).
     Settings,
+    /// The window's question about unsent remote edits ([`App::quit`]).
+    QuitEdits,
 }
 
 /// What a system file dialog is for.
@@ -56,6 +58,7 @@ pub enum PickTarget {
 
 pub mod actions;
 pub mod dialogs;
+pub mod edit;
 pub mod files;
 pub mod import;
 pub mod lifecycle;
@@ -69,6 +72,7 @@ pub mod transfers;
 
 pub use actions::FileAction;
 pub use dialogs::{Dialog, DialogMsg, Dialogs, FailureAction, KnownHostsFix, KnownHostsMsg, Typed};
+pub use edit::EditMsg;
 pub use files::{FileKey, Mods, PaneMsg, RequestId};
 pub use lifecycle::ConnStatus;
 pub use log::{LogLevel, LogMsg};
@@ -150,6 +154,18 @@ pub struct App {
     /// The window's width, as the last resize reported it: what fits in the file panes,
     /// toolbars and queue head ([`crate::ui::fit`]).
     pub window_width: f32,
+    /// The remote files being edited, in the order they started ([`edit`]).
+    pub edits: Vec<edit::RemoteEdit>,
+    /// Edits whose download and editor are on their way.
+    pub edit_opening: Vec<edit::Opening>,
+    /// The notice at the bottom right (an upload, kept copies).
+    pub toast: Option<edit::Toast>,
+    /// Last tabs of a session whose close waits for the answer about its edits.
+    pub close_asks: HashMap<TabId, edit::CloseAsk>,
+    /// The window's close waits for the answer about unsent edits.
+    pub quit: Option<edit::QuitAsk>,
+    /// The editor command as typed on the settings page, while it is not valid.
+    pub editor_input: Option<String>,
     /// Actions waiting for their site's lost session to reconnect ([`reconnect`]).
     held: HashMap<SiteId, Vec<Effect>>,
     /// Listings sent again after a reconnection, which the reconnect's result does not
@@ -379,6 +395,9 @@ pub enum Message {
         request: RequestId,
         result: Result<ShellId, Error>,
     },
+    /// Remote editing: the strip's choices, the close questions, the backend's events
+    /// and results ([`edit`]).
+    Edit(EditMsg),
 }
 
 /// The profile change a form asked for, carried back with its result.
@@ -583,6 +602,32 @@ pub enum Effect {
     FocusTerminalSearch(TabId),
     /// Scrolls the log panel to its newest line.
     ScrollLogToEnd,
+    /// Downloads `remote` and opens it with `editor`; back as [`EditMsg::Started`].
+    StartEdit {
+        tab: TabId,
+        session: SessionId,
+        remote: RemotePath,
+        editor: String,
+    },
+    /// The user's choice on a conflict; back as [`EditMsg::Done`].
+    ResolveEdit {
+        id: crate::backend::EditId,
+        choice: crate::backend::EditChoice,
+    },
+    /// "Retry" on a failed upload; back as [`EditMsg::Done`].
+    RetryEdit(crate::backend::EditId),
+    /// Asks which edits of `sessions` are unsent; back as [`EditMsg::Checked`].
+    CheckEdits {
+        purpose: edit::EditsFor,
+        sessions: Vec<SessionId>,
+    },
+    /// Uploads or keeps the edits of `sessions` (see [`edit::Settle`]); back as
+    /// [`EditMsg::Settled`].
+    SettleEdits {
+        purpose: edit::EditsFor,
+        sessions: Vec<SessionId>,
+        how: edit::Settle,
+    },
 }
 
 /// The window's width before the first resize event (`main`'s initial size).
@@ -637,6 +682,12 @@ impl App {
             backup: settings::Backup::default(),
             busy_phase: 0,
             window_width: INITIAL_WINDOW_WIDTH,
+            edits: Vec::new(),
+            edit_opening: Vec::new(),
+            toast: None,
+            close_asks: HashMap::new(),
+            quit: None,
+            editor_input: None,
             held: HashMap::new(),
             replayed: HashSet::new(),
             next_id: 0,
@@ -823,6 +874,10 @@ impl App {
             Message::ProfileFolderOpened(result) => self.sidebar_error = result.err(),
             Message::CloseTab(id) => {
                 if let Some(index) = self.tab_index(id) {
+                    // The last tab of a session with remote edits asks first.
+                    if let Some(effects) = self.ask_before_closing_tab(index) {
+                        return effects;
+                    }
                     return self.close_tab(index);
                 }
             }
@@ -922,6 +977,7 @@ impl App {
                 request,
                 result,
             } => return self.shell_opened(tab, request, result),
+            Message::Edit(msg) => return self.edit_msg(msg),
         }
         Vec::new()
     }
@@ -986,7 +1042,7 @@ impl App {
                 (None, _) => self.form = None,
                 (Some(error), Some(Form::Site(form))) => form.finished(Some(error.clone())),
                 (Some(error), Some(Form::Workspace(form))) => form.finished(Some(error.clone())),
-                (Some(_), None | Some(Form::Import | Form::Settings)) => {}
+                (Some(_), None | Some(Form::Import | Form::Settings | Form::QuitEdits)) => {}
             }
         }
         if error.is_some() {

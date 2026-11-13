@@ -18,6 +18,7 @@ use secrecy::SecretString;
 use super::{App, Effect, Form, PickTarget};
 use crate::settings::{
     SettingsLoad, TerminalTheme, clamp_font_size, clamp_keepalive, clamp_scrollback, clamp_workers,
+    valid_editor,
 };
 use crate::ui::site_form::Password;
 use crate::ui::strings;
@@ -33,6 +34,8 @@ pub enum SettingsMsg {
     TerminalTheme(TerminalTheme),
     /// Seconds between keepalives (clamped to `10..=300`), for the next connections.
     Keepalive(u64),
+    /// The editor command as typed: applied (and saved) when not empty.
+    EditorCommand(String),
     Backup(BackupMsg),
     Close,
 }
@@ -228,13 +231,28 @@ impl App {
                 effects.extend(self.save_settings_effect());
                 effects
             }
+            SettingsMsg::EditorCommand(command) => {
+                // Blank is not a command: it stays as typed (with the hint), and the
+                // command in force is the last valid one.
+                if !valid_editor(&command) {
+                    self.editor_input = Some(command);
+                    return Vec::new();
+                }
+                self.editor_input = None;
+                if command == self.settings.editor_command {
+                    return Vec::new();
+                }
+                self.settings.editor_command = command;
+                self.save_settings_effect().into_iter().collect()
+            }
             SettingsMsg::Backup(msg) => self.backup_msg(msg),
             SettingsMsg::Close => {
                 if matches!(self.form, Some(Form::Settings)) {
                     self.form = None;
                 }
-                // Typed passwords don't outlive the page.
+                // Typed passwords don't outlive the page, nor does a blank editor field.
                 self.backup.forget_passwords();
+                self.editor_input = None;
                 Vec::new()
             }
         }
@@ -252,7 +270,7 @@ impl App {
             return None;
         }
         self.settings_saving = true;
-        Some(Effect::SaveSettings(self.settings))
+        Some(Effect::SaveSettings(self.settings.clone()))
     }
 
     pub(super) fn settings_saved(&mut self, result: Result<(), Error>) -> Vec<Effect> {
