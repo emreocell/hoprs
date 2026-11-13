@@ -223,7 +223,14 @@ fn render_over(existing: &str, settings: &Settings) -> Result<String> {
     let mut table: toml::Table = toml::from_str(existing).map_err(|err| {
         Error::new(ErrorKind::Protocol, "Can't read settings.toml").with_detail(err.message())
     })?;
-    let ours = toml::Table::try_from(file_of(settings)).expect("plain keys always serialize");
+    let mut ours = toml::Table::try_from(file_of(settings)).expect("plain keys always serialize");
+    // A theme this version does not know reads as the default: unless the user picked
+    // another one, the name stays as written (a newer hoprs may know it).
+    if let Some(existing) = table.get("terminal_theme").and_then(toml::Value::as_str)
+        && TerminalTheme::from_key(existing) == settings.terminal_theme
+    {
+        ours.remove("terminal_theme");
+    }
     table.extend(ours);
     Ok(toml::to_string(&table).expect("a parsed table always serializes"))
 }
@@ -441,9 +448,23 @@ mod tests {
         assert_eq!(clamp_font_size(9), 10);
         assert_eq!(clamp_scrollback(250_000), 100_000);
 
-        // A theme this version does not know falls back to "hoprs dark", without an error.
+        // A theme this version does not know falls back to "hoprs dark", without an error,
+        // and saving keeps its name.
         let parsed = parse("terminal_theme = \"solarized\"").unwrap();
         assert_eq!(parsed.terminal_theme, TerminalTheme::HoprsDark);
+        std::fs::write(&path, "terminal_theme = \"solarized\"\n").unwrap();
+        let loaded = load(&path).settings;
+        save(
+            &path,
+            &Settings {
+                terminal_font_size: 15,
+                ..loaded
+            },
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("terminal_theme = \"solarized\""), "{text}");
+        assert!(text.contains("terminal_font_size = 15"), "{text}");
         assert_eq!(TerminalTheme::HoprsDark.label(), "hoprs dark");
 
         // An unreadable file is still never written over: save only merges into a file

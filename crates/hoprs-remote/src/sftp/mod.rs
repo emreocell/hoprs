@@ -60,8 +60,8 @@ const S_IFLNK: u32 = 0o120_000;
 pub struct SftpConfig {
     /// SFTP channels for file streams, clamped to `1..=8`, then capped by the session's
     /// channel budget ([`SshSession::sftp_stream_channels`]): with the default budget of 10,
-    /// at most 7, so the metadata channel and the streams leave 2 channels: one for a
-    /// terminal, and the one PTYs never take (see `hoprs_ssh::channels`).
+    /// at most 6, so the metadata channel and the streams leave 3 channels: two terminals,
+    /// and the one PTYs never take (see `hoprs_ssh::channels`).
     pub stream_channels: usize,
 }
 
@@ -817,8 +817,9 @@ mod tests {
     #[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
     async fn stream_channels_clamped() {
         let (session, _dir) = alice().await;
-        // At most 7 under the default budget of 10: metadata + 7 leaves 2 for terminals.
-        for (asked, got) in [(0, 1), (1, 1), (4, 4), (7, 7), (8, 7), (100, 7)] {
+        // At most 6 under the default budget of 10: metadata + 6 leaves 3 (two terminals
+        // and the spare PTYs never take).
+        for (asked, got) in [(0, 1), (1, 1), (4, 4), (6, 6), (7, 6), (8, 6), (100, 6)] {
             let config = SftpConfig {
                 stream_channels: asked,
             };
@@ -840,16 +841,18 @@ mod tests {
             .await
             .unwrap();
         let mut streams = Vec::new();
-        for _ in 0..7 {
+        for _ in 0..6 {
             streams.push(fs.stream_channel().await.unwrap());
         }
-        assert_eq!(session.open_channels(), 8, "metadata + 7 streams");
+        assert_eq!(session.open_channels(), 7, "metadata + 6 streams");
+        // Two terminals fit next to a full SFTP (ruling R2).
         let first = session.open_shell(PtyRequest::default()).await.unwrap();
+        let second = session.open_shell(PtyRequest::default()).await.unwrap();
         // The last slot is never a PTY's (the metadata channel may need it again).
         let e = session.open_shell(PtyRequest::default()).await.unwrap_err();
         assert!(hoprs_ssh::is_channel_limit(&e), "{e:?}");
         assert_eq!(session.open_channels(), 9);
-        drop((first, streams));
+        drop((first, second, streams));
         session.disconnect().await;
 
         // Terminals first: a stream that cannot get its own channel shares one.

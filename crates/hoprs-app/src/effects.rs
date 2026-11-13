@@ -14,6 +14,7 @@ use hoprs_import::ImportOptions;
 use hoprs_vault::ImportMode;
 use secrecy::SecretString;
 
+use crate::app::terminal::ShellSignal;
 use crate::app::{
     Effect, FileAction, Message, PickTarget, ProfileOp, RequestId, TabId, TerminalMsg,
 };
@@ -251,9 +252,29 @@ pub async fn later(after: Duration, message: Message) -> Message {
 
 /// The longest a terminal frame lasts: output is delivered at most this often.
 pub const FRAME: Duration = Duration::from_millis(16);
-/// The most output one frame takes; past it the shell's pump holds the rest (its own
-/// limit then decides, see `hoprs_ssh::shell`).
-pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
+/// The most output one batch holds: what the model parses well within a frame.
+pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+/// Batches of one shell that may wait for `update` at once. While they all wait, the feed
+/// pulls nothing more: the shell's pump holds the output, and past its own limit closes
+/// the shell and says so (`Overflowed`), instead of the app queueing without bound.
+pub const MAX_IN_FLIGHT: usize = 2;
+
+/// One batch's place among the [`MAX_IN_FLIGHT`] of its shell; the place frees when the
+/// last clone is dropped, i.e. once `update` has handled the [`Message::TerminalOutput`]
+/// carrying it. `Default` holds no place.
+#[derive(Clone, Debug, Default)]
+pub struct Credit {
+    /// Held only to be dropped.
+    _permit: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+}
+
+/// What [`batch_output`] yields.
+#[derive(Debug)]
+pub enum Batched {
+    /// Every byte gathered for one frame, with its credit.
+    Data(Vec<u8>, Credit),
+    Signal(ShellSignal),
+}
 
 /// A shell's output as the terminal tab takes it: [`batch_output`] over the stream the
 /// backend hands out once, as [`Message::TerminalOutput`] (data) and
@@ -267,57 +288,87 @@ pub fn shell_feed(
     let output = backend
         .shell_output(shell)
         .unwrap_or_else(|| stream::empty().boxed());
+    let credits = Arc::new(tokio::sync::Semaphore::new(MAX_IN_FLIGHT));
     let mut closed = false;
-    batch_output(output, FRAME)
-        .chain(stream::once(std::future::ready(ShellOutput::Closed)))
+    batch_output(output, FRAME, credits)
+        .chain(stream::once(std::future::ready(Batched::Signal(
+            ShellSignal::Closed,
+        ))))
         .filter_map(move |item| {
             // Exactly one `Closed`, last.
             let item = (!closed).then_some(item);
-            closed |= item == Some(ShellOutput::Closed);
+            closed |= matches!(item, Some(Batched::Signal(ShellSignal::Closed)));
             std::future::ready(item)
         })
         .map(move |item| match item {
-            ShellOutput::Data(bytes) => Message::TerminalOutput { tab, shell, bytes },
-            event => Message::ShellEvent { tab, shell, event },
+            Batched::Data(bytes, credit) => Message::TerminalOutput {
+                tab,
+                shell,
+                bytes,
+                credit,
+            },
+            Batched::Signal(event) => Message::ShellEvent { tab, shell, event },
         })
 }
 
-/// Joins a shell's `Data` into at most one item per `frame` (Review Focus 1): a burst
-/// after a quiet moment goes out at once, with whatever else is already waiting; the
-/// output that keeps coming is held until a frame after the previous item, then goes out
-/// as one. Each item holds at most [`MAX_FRAME_BYTES`] (beyond it the stream stops
-/// pulling until the frame ends). `Exit`, `Overflowed` and `Closed` keep their place:
-/// the data before them goes out first, in its frame, and they right after it.
-pub fn batch_output<S>(output: S, frame: Duration) -> impl Stream<Item = ShellOutput> + Send
+/// Joins a shell's `Data` into at most one item per `frame` (Review Focus 1):
+/// - a burst after a quiet moment goes out at once, with whatever else is already
+///   waiting; output that keeps coming is held until a frame after the previous item,
+///   then goes out as one;
+/// - an item holds at most [`MAX_FRAME_BYTES`] (past it the stream stops pulling until
+///   the frame ends);
+/// - each data item takes one of `credits` before the stream pulls its first byte, and
+///   gives it back when its [`Credit`] is dropped: while the consumer has not handled
+///   them, nothing more is pulled (the producer's own bound applies);
+/// - `Exit`, `Overflowed` and `Closed` keep their order: data received before one of them
+///   goes out first, at the end of its frame, and the event right after it. An event with
+///   no data before it goes out at once.
+pub fn batch_output<S>(
+    output: S,
+    frame: Duration,
+    credits: Arc<tokio::sync::Semaphore>,
+) -> impl Stream<Item = Batched> + Send
 where
     S: Stream<Item = ShellOutput> + Send + Unpin + 'static,
 {
     struct Batcher<S> {
         output: S,
+        credits: Arc<tokio::sync::Semaphore>,
         /// When the last item went out.
         last: Option<tokio::time::Instant>,
         /// An event that ended a batch, to send after it.
-        held: Option<ShellOutput>,
+        held: Option<ShellSignal>,
         ended: bool,
+    }
+
+    fn signal(output: ShellOutput) -> Option<ShellSignal> {
+        match output {
+            ShellOutput::Data(_) => None,
+            ShellOutput::Exit(code) => Some(ShellSignal::Exit(code)),
+            ShellOutput::Overflowed => Some(ShellSignal::Overflowed),
+            ShellOutput::Closed => Some(ShellSignal::Closed),
+        }
     }
 
     let state = Batcher {
         output,
+        credits,
         last: None,
         held: None,
         ended: false,
     };
     stream::unfold(state, move |mut st| async move {
         if let Some(event) = st.held.take() {
-            return Some((event, st));
+            return Some((Batched::Signal(event), st));
         }
         if st.ended {
             return None;
         }
-        let mut batch = match st.output.next().await {
-            Some(ShellOutput::Data(bytes)) => bytes,
-            Some(event) => return Some((event, st)),
-            None => return None,
+        // Backpressure: no credit, no pulling.
+        let permit = st.credits.clone().acquire_owned().await.ok();
+        let mut batch = match st.output.next().await? {
+            ShellOutput::Data(bytes) => bytes,
+            event => return signal(event).map(|s| (Batched::Signal(s), st)),
         };
         let now = tokio::time::Instant::now();
         let due = st.last.map_or(now, |last| (last + frame).max(now));
@@ -335,7 +386,7 @@ where
                     Some(ShellOutput::Data(bytes)) => batch.extend_from_slice(&bytes),
                     // The data keeps its frame; the event follows it.
                     Some(event) => {
-                        st.held = Some(event);
+                        st.held = signal(event);
                         wait.as_mut().await;
                         break;
                     }
@@ -349,7 +400,15 @@ where
             }
         }
         st.last = Some(tokio::time::Instant::now());
-        Some((ShellOutput::Data(batch), st))
+        Some((
+            Batched::Data(
+                batch,
+                Credit {
+                    _permit: permit.map(Arc::new),
+                },
+            ),
+            st,
+        ))
     })
 }
 

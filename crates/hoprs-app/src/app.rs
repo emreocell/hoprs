@@ -14,7 +14,7 @@ use secrecy::SecretString;
 
 use crate::backend::{
     AuthMethod, BrokerEvent, ConnectResult, ControlOp, KnownHostEntry, ProfileSnapshot,
-    PromptAnswer, PromptId, SessionId, ShellId, ShellOutput, Side, TransferSnapshot, WorkspaceTabs,
+    PromptAnswer, PromptId, SessionId, ShellId, Side, TransferSnapshot, WorkspaceTabs,
 };
 use crate::settings::{Settings, SettingsLoad};
 use crate::ui::sidebar;
@@ -347,17 +347,19 @@ pub enum Message {
         cols: u16,
         rows: u16,
     },
-    /// One frame's worth of a shell's output (every byte since the last one).
+    /// One frame's worth of a shell's output (every byte since the last one). Its
+    /// `credit` lets the feed pull more once this message is handled (and dropped).
     TerminalOutput {
         tab: TabId,
         shell: ShellId,
         bytes: Vec<u8>,
+        credit: crate::effects::Credit,
     },
     /// The end of a shell's output: its exit status, an overflow, then `Closed`.
     ShellEvent {
         tab: TabId,
         shell: ShellId,
-        event: ShellOutput,
+        event: terminal::ShellSignal,
     },
     /// The shell [`Effect::OpenShell`] asked for under `request` opened (or not).
     ShellOpened {
@@ -881,7 +883,10 @@ impl App {
             Message::TerminalResized { tab, cols, rows } => {
                 return self.terminal_resized(tab, cols, rows);
             }
-            Message::TerminalOutput { tab, shell, bytes } => {
+            // The credit drops at the end of this arm: the feed may pull the next batch.
+            Message::TerminalOutput {
+                tab, shell, bytes, ..
+            } => {
                 return self.terminal_output(tab, shell, &bytes);
             }
             Message::ShellEvent { tab, shell, event } => {

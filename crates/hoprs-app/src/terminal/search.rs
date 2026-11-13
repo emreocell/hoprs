@@ -48,7 +48,8 @@ impl Searcher {
 
     /// Searches for `query` from now on; compiles only when it changed.
     pub fn set_query(&mut self, query: &str) {
-        if query == self.query && (self.regex.is_some() || query.is_empty()) {
+        // Same query: same matcher, even one that failed to compile (it would fail again).
+        if query == self.query {
             return;
         }
         query.clone_into(&mut self.query);
@@ -125,7 +126,14 @@ mod tests {
         searcher.set_query("");
         assert_eq!(searcher.find(&model, top, false), None);
         assert_eq!(searcher.compiles, 2, "an empty query compiles nothing");
-        assert_eq!(searcher.query(), "");
+        // A query too big to compile fails once, not on every step.
+        let huge = "ab".repeat(100_000);
+        searcher.set_query(&huge);
+        assert!(searcher.regex.is_none(), "too big to compile");
+        assert_eq!(searcher.find(&model, top, false), None);
+        searcher.set_query(&huge);
+        assert_eq!(searcher.compiles, 3, "a failed compile is cached too");
+        assert!(searcher.query() == huge);
     }
 
     #[test]

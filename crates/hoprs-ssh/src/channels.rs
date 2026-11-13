@@ -15,16 +15,16 @@
 //!
 //! **Reservation for terminals (ruling R2).** SFTP opens at most
 //! [`sftp_stream_channels`]`(max_channels, configured)` =
-//! `min(configured, max_channels - 1 metadata - 2 reserved)` stream channels (at least 1),
-//! so with the default 10 the transfers use at most 1 + 7 slots and at least
-//! [`PTY_RESERVE`] = 2 stay free for terminals. Below 4 the reservation shrinks: the one
-//! stream channel SFTP needs comes first.
+//! `min(configured, max_channels - 1 metadata - 3 reserved)` stream channels (at least 1),
+//! so with the default 10 the transfers use at most 1 + 6 slots and [`PTY_RESERVE`] = 3
+//! stay free: two for terminals, and the last one, which a PTY never takes (below). Two
+//! terminals therefore always fit next to a busy SFTP. Below 5 the reservation shrinks:
+//! the one stream channel SFTP needs comes first.
 //!
 //! **PTYs never take the last slot.** A PTY opens only while fewer than
 //! `max_channels - 1` channels are open: the SFTP metadata channel can always be opened
 //! (again: after a reconnect the terminals may reopen before SFTP does), however many
-//! terminals there are. So of the [`PTY_RESERVE`] slots SFTP leaves, one takes a PTY when
-//! every stream channel is open (default budget: metadata + 7 streams + 1 PTY + the spare).
+//! terminals there are.
 //!
 //! **Over the limit.** Opening a channel past `max_channels` fails at once, without asking
 //! the server, with `ErrorKind::Protocol`, "Too many channels on this connection (limit N)".
@@ -42,8 +42,9 @@ use hoprs_core::{Error, ErrorKind, Result};
 /// OpenSSH's default `MaxSessions`.
 pub const DEFAULT_MAX_CHANNELS: usize = 10;
 
-/// Slots the SFTP stream channels leave free for terminals.
-pub const PTY_RESERVE: usize = 2;
+/// Slots the SFTP stream channels leave free: two terminals, plus the slot PTYs never take
+/// (kept for the metadata channel).
+pub const PTY_RESERVE: usize = 3;
 
 /// The SFTP metadata channel.
 const METADATA_CHANNELS: usize = 1;
@@ -64,7 +65,7 @@ pub fn is_channel_limit(error: &Error) -> bool {
 }
 
 /// How many SFTP stream channels fit under `max_channels` beside the metadata channel and
-/// the terminal reserve: `min(configured, max_channels - 1 - 2)`, at least 1.
+/// the terminal reserve: `min(configured, max_channels - 1 - 3)`, at least 1.
 pub fn sftp_stream_channels(max_channels: usize, configured: usize) -> usize {
     configured
         .min(max_channels.saturating_sub(METADATA_CHANNELS + PTY_RESERVE))
@@ -178,31 +179,39 @@ mod tests {
 
     #[test]
     fn channel_budget_reserves_room_for_a_pty() {
-        // Metadata + streams never take the last two slots (ruling R2).
-        assert_eq!(sftp_stream_channels(10, 8), 7);
+        // Metadata + streams leave three slots (ruling R2): two PTYs and the spare.
+        assert_eq!(sftp_stream_channels(10, 8), 6);
         assert_eq!(sftp_stream_channels(10, 4), 4);
+        assert_eq!(sftp_stream_channels(5, 8), 1);
         assert_eq!(sftp_stream_channels(4, 8), 1);
         assert_eq!(sftp_stream_channels(1, 8), 1);
 
+        // stream_channels = 8 on the default budget: two terminals still fit.
         let budget = ChannelBudget::new(10);
         budget.reset(1);
         let streams = sftp_stream_channels(budget.limit(), 8);
         let mut held: Vec<ChannelSlot> = (0..1 + streams)
             .map(|_| budget.acquire(1).expect("metadata and stream channels"))
             .collect();
-        held.push(budget.acquire(1).expect("first PTY"));
-        held.push(budget.acquire(1).expect("second PTY"));
-        assert_eq!(budget.open(), 10);
+        assert_eq!(budget.open(), 7);
+        held.push(budget.acquire_pty(1).expect("first PTY"));
+        held.push(budget.acquire_pty(1).expect("second PTY"));
+        assert_eq!(budget.open(), 9);
 
-        let e = budget.acquire(1).unwrap_err();
+        // A third PTY would take the metadata's spare slot: refused.
+        let e = budget.acquire_pty(1).unwrap_err();
         assert_eq!(e.kind, ErrorKind::Protocol);
         assert_eq!(e.message, "Too many channels on this connection (limit 10)");
         assert!(is_channel_limit(&e));
-        assert_eq!(budget.open(), 10, "a refused slot is not counted");
+        assert_eq!(budget.open(), 9, "a refused slot is not counted");
+        // The spare still takes a plain channel; past it, nothing does.
+        held.push(budget.acquire(1).expect("the spare slot"));
+        assert!(is_channel_limit(&budget.acquire(1).unwrap_err()));
 
         held.pop();
-        assert_eq!(budget.open(), 9, "a closed channel frees its slot");
-        let _pty = budget.acquire(1).expect("the freed slot");
+        held.pop();
+        assert_eq!(budget.open(), 8, "a closed channel frees its slot");
+        let _pty = budget.acquire_pty(1).expect("the freed slot");
     }
 
     #[test]
@@ -230,12 +239,15 @@ mod tests {
         let sftp: Vec<ChannelSlot> = (0..1 + sftp_stream_channels(10, 8))
             .map(|_| budget.acquire(1).unwrap())
             .collect();
-        let first = budget.acquire_pty(1).expect("a PTY fits");
+        let ptys = [
+            budget.acquire_pty(1).unwrap(),
+            budget.acquire_pty(1).unwrap(),
+        ];
         assert!(
             budget.acquire_pty(1).is_err(),
             "the last slot is not a PTY's"
         );
-        drop(first);
+        drop(ptys);
         assert!(budget.acquire_pty(1).is_ok());
         // An old generation is "Not connected", as for any channel.
         assert_eq!(budget.acquire_pty(0).unwrap_err().kind, ErrorKind::Network);

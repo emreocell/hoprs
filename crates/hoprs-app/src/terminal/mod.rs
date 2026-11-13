@@ -409,6 +409,32 @@ impl TerminalModel {
         self.term.scroll_display(Scroll::Bottom);
     }
 
+    /// Puts the terminal back in the modes a fresh shell expects, keeping the grid and
+    /// the history: for a new shell after the old one died mid-program. It ends any
+    /// sequence the old shell left unfinished (CAN, ST), leaves the alternate screen,
+    /// turns off application cursor and keypad keys, bracketed paste, mouse and focus
+    /// reporting, restores alternate scroll, autowrap and the visible cursor, resets the
+    /// scroll region (cursor kept), the character set and the colours.
+    pub fn reset_modes(&mut self) {
+        const RESET: &[u8] = concat!(
+            "\x18\x1b\\",                                   // abort any sequence, end any string
+            "\x1b[?1049l\x1b[?1047l\x1b[?47l",              // main screen
+            "\x1b[?1l\x1b>",                                // normal cursor and keypad keys
+            "\x1b[?2004l",                                  // no bracketed paste
+            "\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l",    // no mouse reporting...
+            "\x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1015l", // ...focus or mouse encodings
+            "\x1b[?1007h",                                  // alternate scroll (the default)
+            "\x1b[?6l\x1b[?7h\x1b[4l\x1b[20l",              // origin, autowrap, insert, newline
+            "\x1b7\x1b[r\x1b8",                             // whole-screen scroll region
+            "\x1b[?25h\x1b[0 q",                            // visible cursor, default shape
+            "\x1b(B\x1b)B\x0f",                             // ASCII character sets
+            "\x1b[0m",                                      // default colours
+        )
+        .as_bytes();
+        // Nothing here asks for a reply.
+        let _ = self.feed(RESET);
+    }
+
     /// Scrolls the view just enough for grid line `line` (negative: scrollback) to show.
     pub fn scroll_to_show(&mut self, line: Line) {
         let top = -i32::try_from(self.display_offset()).unwrap_or(i32::MAX);
@@ -795,6 +821,61 @@ pub(crate) mod tests {
         assert_eq!(model.cursor().shape, CursorShape::Beam);
         model.feed(b"\x1b[?25l");
         assert!(!model.cursor().visible);
+    }
+
+    /// The text of viewport row `line`.
+    fn row_text(model: &TerminalModel, line: usize) -> String {
+        model
+            .cells()
+            .filter(|c| c.line == line)
+            .map(|c| c.ch)
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    }
+
+    #[test]
+    fn reset_modes_clears_a_dead_programs_state() {
+        let mut model = TerminalModel::new(20, 5, 100);
+        for i in 0..8 {
+            model.feed(format!("history {i}\r\n").as_bytes());
+        }
+        model.feed(b"before\r\n");
+        let history = model.history_len();
+        assert!(history > 0);
+        // A full-screen program: alternate screen, application keys, bracketed paste,
+        // mouse, a hidden cursor, a scroll region, red, then a title it never finished.
+        model.feed(
+            b"\x1b[?1049h\x1b[?1h\x1b=\x1b[?2004h\x1b[?1000h\x1b[?1006h\x1b[?25l\
+              \x1b[2;4r\x1b[31mvim screen\x1b]0;half a tit",
+        );
+        let mode = model.mode();
+        assert!(
+            mode.contains(TermMode::ALT_SCREEN | TermMode::APP_CURSOR | TermMode::BRACKETED_PASTE)
+        );
+        assert!(!model.cursor().visible);
+
+        model.reset_modes();
+        assert_eq!(
+            model.mode(),
+            TermMode::default(),
+            "every mode back to its default"
+        );
+        assert!(model.cursor().visible);
+        // The unfinished title did not swallow what follows; the main screen is back, with
+        // its history.
+        let events = model.feed(b"after");
+        assert!(events.is_empty(), "{events:?}");
+        let rows: Vec<String> = (0..5).map(|l| row_text(&model, l)).collect();
+        assert!(rows.contains(&"before".to_owned()), "{rows:?}");
+        assert!(rows.contains(&"after".to_owned()), "{rows:?}");
+        assert!(!rows.iter().any(|r| r.contains("vim")), "{rows:?}");
+        assert_eq!(model.history_len(), history);
+        let after = model
+            .cells()
+            .find(|c| c.ch == 'a' && row_text(&model, c.line) == "after")
+            .unwrap();
+        assert_eq!(after.fg, model.theme().fg, "default colours");
     }
 
     #[test]

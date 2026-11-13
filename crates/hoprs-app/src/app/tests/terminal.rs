@@ -10,9 +10,10 @@ use futures_util::stream;
 use hoprs_core::{ConnectionState, OpenAs, TabKind};
 
 use super::*;
-use crate::app::terminal::{RESIZE_DEBOUNCE, SEARCH_DEBOUNCE, ShellEnd, ShellState};
+use crate::app::terminal::{RESIZE_DEBOUNCE, SEARCH_DEBOUNCE, ShellEnd, ShellSignal, ShellState};
 use crate::backend::fake::Call;
 use crate::backend::{ShellId, ShellOutput};
+use crate::effects::Batched;
 use crate::terminal::input::{Key, Modifiers};
 use crate::terminal::selection::SelectionKind;
 
@@ -198,6 +199,7 @@ async fn typing_sends_encoded_bytes() {
         tab,
         shell,
         bytes: b"\x1b[?1h".to_vec(),
+        credit: Default::default(),
     });
     let effects = app.update(key(tab, Key::Up, NONE));
     assert_eq!(inputs(&effects), [b"\x1bOA".to_vec()]);
@@ -216,6 +218,7 @@ async fn typing_sends_encoded_bytes() {
         tab,
         shell,
         bytes: b"\x1b[c".to_vec(),
+        credit: Default::default(),
     });
     assert_eq!(inputs(&effects), [b"\x1b[?6c".to_vec()]);
     run(&mut app, &fake, effects).await;
@@ -269,6 +272,7 @@ async fn copy_paste_shortcuts() {
         tab,
         shell,
         bytes: b"hello world\r\n".to_vec(),
+        credit: Default::default(),
     });
 
     // Nothing selected: Ctrl+Shift+C copies nothing, and never sends ^C.
@@ -316,6 +320,7 @@ async fn copy_paste_shortcuts() {
         tab,
         shell,
         bytes: b"\x1b[?2004h".to_vec(),
+        credit: Default::default(),
     });
     let effects = app.update(select(TerminalMsg::Pasted(Some(
         "rm -rf /\x1b[201~\x03".into(),
@@ -424,6 +429,76 @@ async fn resize_is_debounced_100ms() {
     assert_eq!(fake.shell_sizes(shell), [(80, 24), (120, 40)]);
 }
 
+/// Credits for one shell, as `shell_feed` makes them.
+fn credits() -> Arc<tokio::sync::Semaphore> {
+    Arc::new(tokio::sync::Semaphore::new(effects::MAX_IN_FLIGHT))
+}
+
+/// A batch as the shell output it stands for (its credit dropped: handled).
+fn plain(item: Batched) -> ShellOutput {
+    match item {
+        Batched::Data(bytes, _) => ShellOutput::Data(bytes),
+        Batched::Signal(ShellSignal::Exit(code)) => ShellOutput::Exit(code),
+        Batched::Signal(ShellSignal::Overflowed) => ShellOutput::Overflowed,
+        Batched::Signal(ShellSignal::Closed) => ShellOutput::Closed,
+    }
+}
+
+/// Review Focus 1: a consumer that falls behind holds at most `MAX_IN_FLIGHT` batches
+/// (bounded memory): the feed stops pulling, the shell's own pump fills up, and the
+/// overflow is reported inline instead of output piling up in the app.
+#[tokio::test]
+async fn slow_consumer_is_bounded_and_overflow_is_reported() {
+    let (handle, output) = hoprs_ssh::testing::flooding_shell().into_output();
+    let mut batches = Box::pin(effects::batch_output(
+        Box::pin(output),
+        effects::FRAME,
+        credits(),
+    ));
+    // The consumer takes the batches in flight and then stalls (it holds their credits).
+    let mut held = Vec::new();
+    for _ in 0..effects::MAX_IN_FLIGHT {
+        match batches.next().await {
+            Some(Batched::Data(bytes, credit)) => {
+                assert!(bytes.len() <= effects::MAX_FRAME_BYTES + 1024 * 1024);
+                held.push(credit);
+            }
+            other => panic!("expected data, got {other:?}"),
+        }
+    }
+    // Nothing more comes while they are held: the feed does not pull.
+    let more = tokio::time::timeout(Duration::from_millis(300), batches.next()).await;
+    assert!(more.is_err(), "a third batch while two wait: {more:?}");
+    // Meanwhile the shell's pump gives up on the stalled consumer.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !handle.overflowed() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the pump never overflowed"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // Handled at last: what the pump kept drains (bounded), then the overflow, then the end.
+    drop(held);
+    let mut drained = 0usize;
+    let mut tail = Vec::new();
+    while let Some(item) = tokio::time::timeout(Duration::from_secs(10), batches.next())
+        .await
+        .expect("the feed drains")
+    {
+        match plain(item) {
+            ShellOutput::Data(bytes) => {
+                assert!(tail.is_empty(), "data after the overflow");
+                drained += bytes.len();
+            }
+            other => tail.push(other),
+        }
+    }
+    assert_eq!(tail, [ShellOutput::Overflowed, ShellOutput::Closed]);
+    // The pump's queue (256 x 64 KiB) plus its pending limit (16 MiB), and a batch.
+    assert!(drained <= 34 * 1024 * 1024, "drained {drained} bytes");
+}
+
 /// Review Focus 1: a flood of output reaches the app as few big messages, at most one
 /// per 16 ms frame, every byte kept and in order, the end events after the data.
 #[tokio::test(start_paused = true)]
@@ -446,10 +521,11 @@ async fn output_batches_one_message_per_frame() {
         tx.send(ShellOutput::Closed).unwrap();
     });
     let start = tokio::time::Instant::now();
-    let mut batches = Box::pin(effects::batch_output(output, effects::FRAME));
+    let mut batches = Box::pin(effects::batch_output(output, effects::FRAME, credits()));
     let mut received: Vec<(Duration, ShellOutput)> = Vec::new();
+    // A consumer that keeps up: each batch's credit is dropped as it is handled.
     while let Some(item) = batches.next().await {
-        received.push((tokio::time::Instant::now() - start, item));
+        received.push((tokio::time::Instant::now() - start, plain(item)));
     }
     producer.await.unwrap();
 
@@ -499,10 +575,13 @@ async fn output_batches_one_message_per_frame() {
     let output = Box::pin(stream::unfold(rx, |mut rx| async move {
         rx.recv().await.map(|item| (item, rx))
     }));
-    let mut batches = Box::pin(effects::batch_output(output, effects::FRAME));
+    let mut batches = Box::pin(effects::batch_output(output, effects::FRAME, credits()));
     tx.send(ShellOutput::Data(b"a".to_vec())).unwrap();
     let start = tokio::time::Instant::now();
-    assert_eq!(batches.next().await, Some(ShellOutput::Data(b"a".to_vec())));
+    assert_eq!(
+        batches.next().await.map(plain),
+        Some(ShellOutput::Data(b"a".to_vec()))
+    );
     assert_eq!(tokio::time::Instant::now(), start);
 }
 
@@ -523,8 +602,8 @@ async fn shell_feed_maps_output_to_messages() {
         &messages[..],
         [
             Message::TerminalOutput { bytes, .. },
-            Message::ShellEvent { event: ShellOutput::Exit(Some(2)), .. },
-            Message::ShellEvent { event: ShellOutput::Closed, .. },
+            Message::ShellEvent { event: ShellSignal::Exit(Some(2)), .. },
+            Message::ShellEvent { event: ShellSignal::Closed, .. },
         ] if bytes == b"hi"
     ));
     // Taken already: just `Closed`.
@@ -534,7 +613,7 @@ async fn shell_feed_maps_output_to_messages() {
     assert!(matches!(
         &messages[..],
         [Message::ShellEvent {
-            event: ShellOutput::Closed,
+            event: ShellSignal::Closed,
             ..
         }]
     ));
@@ -609,7 +688,7 @@ async fn exit_shows_restart() {
         app.update(Message::ShellEvent {
             tab,
             shell: ShellId(999),
-            event: ShellOutput::Closed,
+            event: ShellSignal::Closed,
         })
         .is_empty()
     );
@@ -657,7 +736,7 @@ async fn exit_shows_restart() {
     app.update(Message::ShellEvent {
         tab,
         shell,
-        event: ShellOutput::Closed,
+        event: ShellSignal::Closed,
     });
     assert_eq!(term(&app, 0).end_banner().unwrap().message, "Shell closed");
 
@@ -800,7 +879,7 @@ async fn connection_lost_banner_then_new_shell() {
         app.update(Message::ShellEvent {
             tab,
             shell: current,
-            event: ShellOutput::Closed,
+            event: ShellSignal::Closed,
         })
         .is_empty()
     );
@@ -857,6 +936,7 @@ async fn output_title_scroll_and_search() {
         tab,
         shell,
         bytes: bytes.to_vec(),
+        credit: Default::default(),
     };
     app.update(out(b"\x1b]0;vim notes.txt\x07"));
     assert_eq!(term(&app, 0).title.as_deref(), Some("vim notes.txt"));
@@ -871,6 +951,7 @@ async fn output_title_scroll_and_search() {
         tab,
         shell: ShellId(999),
         bytes: b"stale".to_vec(),
+        credit: Default::default(),
     });
     assert!(!screen(&app, 0).iter().any(|r| r.contains("stale")));
 
@@ -956,6 +1037,7 @@ async fn new_scrollback_setting_applies_to_new_terminals() {
             tab,
             shell,
             bytes: format!("line {i}\r\n").into_bytes(),
+            credit: Default::default(),
         });
     }
     assert_eq!(term(&app, 1).model.history_len(), 1_000);
@@ -1121,7 +1203,7 @@ async fn terminal_tab_end_to_end() {
     assert!(matches!(
         rest.last(),
         Some(Message::ShellEvent {
-            event: ShellOutput::Closed,
+            event: ShellSignal::Closed,
             ..
         })
     ));
@@ -1160,4 +1242,205 @@ async fn a_new_session_replaces_the_old_shell() {
     );
     run(&mut app, &fake, effects).await;
     assert_ne!(shell_of(&app, 0), old);
+}
+
+/// Escape in a focused terminal is the shell's alone: an open search bar stays open.
+/// Only while the search field has the keyboard does Escape close the bar.
+#[tokio::test]
+async fn escape_in_a_focused_terminal_goes_only_to_the_shell() {
+    let s = ssh_site("term", OpenAs::Terminal);
+    let (mut app, _fake, _) = connected(&s).await;
+    let tab = app.tabs[0].id;
+    app.update(Message::Terminal {
+        tab,
+        msg: TerminalMsg::OpenSearch,
+    });
+    // A click back into the terminal: it has the keyboard, the bar stays open.
+    app.update(Message::Terminal {
+        tab,
+        msg: TerminalMsg::Focus(true),
+    });
+    assert!(term(&app, 0).focused);
+    // The widget sends Escape to the shell; the global subscription also reports it.
+    let effects = app.update(key(tab, Key::Escape, NONE));
+    assert_eq!(inputs(&effects), [b"\x1b".to_vec()]);
+    let effects = app.update(Message::KeyPressed {
+        key: FileKey::Escape,
+        shift: false,
+    });
+    assert!(effects.is_empty(), "{effects:?}");
+    assert!(
+        term(&app, 0).search.is_some(),
+        "Escape went to the shell only"
+    );
+
+    // With the search field focused (the terminal not), Escape closes the bar.
+    app.update(Message::Terminal {
+        tab,
+        msg: TerminalMsg::Focus(false),
+    });
+    app.update(Message::KeyPressed {
+        key: FileKey::Escape,
+        shift: false,
+    });
+    assert!(term(&app, 0).search.is_none());
+    assert!(term(&app, 0).focused);
+}
+
+/// Review Focus 5: a shell that died inside a full-screen program (alternate screen,
+/// application keys, bracketed paste, mouse, hidden cursor, a sequence cut in half) does
+/// not hand its modes to the new shell after a reconnect; the history stays.
+#[tokio::test]
+async fn reconnect_resets_the_dead_shells_modes() {
+    use alacritty_terminal::term::TermMode;
+
+    let s = ssh_site("term", OpenAs::Terminal);
+    let (mut app, fake, session) = connected(&s).await;
+    let tab = app.tabs[0].id;
+    let old = shell_of(&app, 0);
+    let out = |bytes: &[u8]| Message::TerminalOutput {
+        tab,
+        shell: old,
+        bytes: bytes.to_vec(),
+        credit: Default::default(),
+    };
+    for i in 0..40 {
+        app.update(out(format!("history {i}\r\n").as_bytes()));
+    }
+    app.update(out(b"$ vim notes\r\n"));
+    app.update(out(
+        b"\x1b[?1049h\x1b[?1h\x1b[?2004h\x1b[?1000h\x1b[?1006h\x1b[?25l\x1b[31mvim\x1b]0;half",
+    ));
+    let mode = term(&app, 0).model.mode();
+    assert!(mode.contains(TermMode::ALT_SCREEN | TermMode::APP_CURSOR | TermMode::BRACKETED_PASTE));
+    assert!(!term(&app, 0).model.cursor().visible);
+    let history = term(&app, 0).model.history_len();
+
+    // The connection drops and comes back.
+    let lost = Error::new(hoprs_core::ErrorKind::Network, "Connection reset");
+    fake.drop_connection(session, lost.clone());
+    app.update(Message::SessionState {
+        session,
+        state: ConnectionState::Disconnected(lost),
+        auth: None,
+    });
+    app.update(Message::ShellEvent {
+        tab,
+        shell: old,
+        event: ShellSignal::Closed,
+    });
+    let effects = app.update(Message::ReconnectSession(tab));
+    assert!(matches!(&effects[..], [Effect::Reconnect { .. }]));
+    let backend: Arc<dyn BackendApi> = fake.clone();
+    let effects = app.update(effects::reconnect(backend, session).await);
+    run(&mut app, &fake, effects).await;
+    assert_ne!(shell_of(&app, 0), old);
+
+    let model = &term(&app, 0).model;
+    assert_eq!(
+        model.mode(),
+        TermMode::default(),
+        "no mode of the dead program left"
+    );
+    assert!(model.cursor().visible);
+    assert!(model.history_len() >= history, "the history stays");
+    let rows = screen(&app, 0);
+    assert!(
+        rows.iter().any(|r| r == "$ vim notes"),
+        "main screen back: {rows:?}"
+    );
+    assert!(rows.iter().any(|r| r == "— reconnected —"), "{rows:?}");
+    assert!(!rows.iter().any(|r| r.contains("vim") && r != "$ vim notes"));
+    // Keys are plain again: an arrow is CSI, a paste is not bracketed.
+    let effects = app.update(key(tab, Key::Up, NONE));
+    assert_eq!(inputs(&effects), [b"\x1b[A".to_vec()]);
+}
+
+/// "Restart shell" never clicks into nothing: without a live session it is dim, with a
+/// hint, and does nothing.
+#[tokio::test]
+async fn restart_waits_for_the_connection() {
+    let s = ssh_site("term", OpenAs::Terminal);
+    let (mut app, fake, session) = connected(&s).await;
+    let tab = app.tabs[0].id;
+    let shell = shell_of(&app, 0);
+    app.update(Message::ShellEvent {
+        tab,
+        shell,
+        event: ShellSignal::Exit(Some(0)),
+    });
+    app.update(Message::ShellEvent {
+        tab,
+        shell,
+        event: ShellSignal::Closed,
+    });
+    assert!(app.can_restart_terminal(0));
+    // Then the connection drops: the button waits for it.
+    let lost = Error::new(hoprs_core::ErrorKind::Network, "Connection reset");
+    fake.drop_connection(session, lost.clone());
+    app.update(Message::SessionState {
+        session,
+        state: ConnectionState::Reconnecting { attempt: 1 },
+        auth: None,
+    });
+    assert!(!app.can_restart_terminal(0));
+    assert!(
+        app.update(Message::Terminal {
+            tab,
+            msg: TerminalMsg::Restart,
+        })
+        .is_empty()
+    );
+    assert_eq!(term(&app, 0).end_banner().unwrap().action, "Restart shell");
+}
+
+/// The remote title is capped; input waiting behind a slow write is capped too, and the
+/// tab says when it dropped some.
+#[tokio::test]
+async fn title_and_pending_input_are_capped() {
+    use crate::app::terminal::{MAX_PENDING_INPUT, MAX_TITLE_CHARS};
+
+    let s = ssh_site("term", OpenAs::Terminal);
+    let (mut app, _fake, _) = connected(&s).await;
+    let tab = app.tabs[0].id;
+    let shell = shell_of(&app, 0);
+    let long = format!("\x1b]0;{}\x07", "t".repeat(10_000));
+    app.update(Message::TerminalOutput {
+        tab,
+        shell,
+        bytes: long.into_bytes(),
+        credit: Default::default(),
+    });
+    assert_eq!(
+        term(&app, 0).title.as_ref().map(|t| t.chars().count()),
+        Some(MAX_TITLE_CHARS)
+    );
+
+    // One write in flight; pastes pile up behind it until the cap.
+    assert_eq!(inputs(&app.update(key(tab, Key::Char('x'), NONE))).len(), 1);
+    let chunk = "p".repeat(MAX_PENDING_INPUT / 2);
+    for _ in 0..2 {
+        app.update(Message::Terminal {
+            tab,
+            msg: TerminalMsg::Pasted(Some(chunk.clone())),
+        });
+    }
+    assert!(!term(&app, 0).input_dropped);
+    app.update(Message::Terminal {
+        tab,
+        msg: TerminalMsg::Pasted(Some(chunk.clone())),
+    });
+    assert!(
+        term(&app, 0).input_dropped,
+        "the third paste is past the cap"
+    );
+    // What fit goes out whole, once the write in flight ends.
+    let effects = app.update(Message::Terminal {
+        tab,
+        msg: TerminalMsg::InputSent(shell),
+    });
+    assert_eq!(inputs(&effects)[0].len(), 2 * chunk.len());
+    // The next key clears the note.
+    app.update(key(tab, Key::Char('y'), NONE));
+    assert!(!term(&app, 0).input_dropped);
 }

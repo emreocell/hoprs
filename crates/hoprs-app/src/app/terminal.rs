@@ -33,7 +33,7 @@ use alacritty_terminal::term::TermMode;
 use hoprs_core::{ConnectionState, Error, ErrorKind, SiteId};
 
 use super::{App, Effect, Message, RequestId, TabId, TabState};
-use crate::backend::{SessionId, ShellId, ShellOutput};
+use crate::backend::{SessionId, ShellId};
 use crate::terminal::input::{Key, Modifiers, encode_key, encode_paste};
 use crate::terminal::search::{Range, Searcher};
 use crate::terminal::selection::SelectionKind;
@@ -74,6 +74,24 @@ pub enum ShellEnd {
     /// It could not open.
     Failed(Error),
 }
+
+/// The end of a shell's output, as its feed reports it (the data comes as
+/// [`Message::TerminalOutput`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShellSignal {
+    /// The exit status the server reported, if any.
+    Exit(Option<u32>),
+    /// The pump gave up on output the tab did not take fast enough.
+    Overflowed,
+    /// The last item.
+    Closed,
+}
+
+/// The longest remote title kept (characters).
+pub const MAX_TITLE_CHARS: usize = 256;
+/// The most typed or pasted input that may wait behind a write in flight; past it the
+/// rest is dropped and the tab says so.
+pub const MAX_PENDING_INPUT: usize = 1024 * 1024;
 
 /// What the bar over an ended shell says, and its button.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +139,8 @@ pub struct TerminalTab {
     writing: bool,
     /// Bytes typed meanwhile, sent together when it ends.
     pending: Vec<u8>,
+    /// Input was dropped past [`MAX_PENDING_INPUT`]: shown until the next key.
+    pub input_dropped: bool,
 }
 
 impl std::fmt::Debug for TerminalTab {
@@ -203,6 +223,7 @@ impl TerminalTab {
             reconnected: false,
             writing: false,
             pending: Vec::new(),
+            input_dropped: false,
         }
     }
 
@@ -268,7 +289,12 @@ impl TerminalTab {
             return Vec::new();
         }
         if self.writing {
-            self.pending.extend_from_slice(&data);
+            if self.pending.len() + data.len() > MAX_PENDING_INPUT {
+                // Never sent in part: a cut escape sequence or paste would be worse.
+                self.input_dropped = true;
+            } else {
+                self.pending.extend_from_slice(&data);
+            }
             return Vec::new();
         }
         self.writing = true;
@@ -282,7 +308,10 @@ impl TerminalTab {
             match event {
                 TermEvent::PtyWrite(reply) => effects.extend(self.send(tab, reply)),
                 // Empty: back to the default (the site's name alone).
-                TermEvent::Title(title) => self.title = (!title.is_empty()).then_some(title),
+                TermEvent::Title(title) => {
+                    self.title =
+                        (!title.is_empty()).then(|| title.chars().take(MAX_TITLE_CHARS).collect());
+                }
                 // No bell sound, and remote programs never fill the clipboard (OSC 52 is
                 // off by default).
                 TermEvent::Bell | TermEvent::ClipboardStore(_) => {}
@@ -345,6 +374,12 @@ impl App {
             return Vec::new();
         };
         let (cols, rows) = terminal.grid();
+        // A shell came before: the new one must not inherit its modes (alternate screen,
+        // application keys, bracketed paste, mouse, hidden cursor) or a sequence it left
+        // half written. The grid and the history stay.
+        if terminal.shell != ShellState::Idle {
+            terminal.model.reset_modes();
+        }
         terminal.shell = ShellState::Opening(request);
         terminal.exit = None;
         terminal.overflowed = false;
@@ -361,7 +396,7 @@ impl App {
     }
 
     /// The site's session, when it is connected and not lost.
-    fn live_session(&self, site: &SiteId) -> Option<SessionId> {
+    pub(crate) fn live_session(&self, site: &SiteId) -> Option<SessionId> {
         let conn = self.conn(site);
         match conn.conn {
             None | Some(ConnectionState::Connected) => conn.session(),
@@ -481,7 +516,7 @@ impl App {
         &mut self,
         tab: TabId,
         shell: ShellId,
-        event: ShellOutput,
+        event: ShellSignal,
     ) -> Vec<Effect> {
         let Some(index) = self.tab_index(tab) else {
             return Vec::new();
@@ -494,10 +529,9 @@ impl App {
             return Vec::new();
         };
         match event {
-            ShellOutput::Data(bytes) => return terminal.feed(tab, &bytes),
-            ShellOutput::Exit(code) => terminal.exit = Some(code),
-            ShellOutput::Overflowed => terminal.overflowed = true,
-            ShellOutput::Closed => {
+            ShellSignal::Exit(code) => terminal.exit = Some(code),
+            ShellSignal::Overflowed => terminal.overflowed = true,
+            ShellSignal::Closed => {
                 let end = if terminal.overflowed {
                     ShellEnd::Overflowed
                 } else if let Some(code) = terminal.exit {
@@ -658,6 +692,14 @@ impl App {
         Vec::new()
     }
 
+    /// Whether "Restart shell", "Reopen" or "Retry" can work now (the site's session is
+    /// up); the bar shows the button disabled with a hint otherwise.
+    pub fn can_restart_terminal(&self, index: usize) -> bool {
+        self.tabs
+            .get(index)
+            .is_some_and(|tab| self.live_session(&tab.site).is_some())
+    }
+
     /// "Restart shell", "Reopen" or "Retry" on an ended shell.
     fn restart_terminal(&mut self, tab: TabId) -> Vec<Effect> {
         match self.terminal_at(tab) {
@@ -675,7 +717,9 @@ impl App {
             .active_tab
             .and_then(|i| self.tabs.get_mut(i))
             .and_then(|t| t.terminal_mut())
-            .filter(|t| t.search.is_some())
+            // A focused terminal takes Escape itself (the shell's); the search field has
+            // the keyboard only while the terminal does not.
+            .filter(|t| t.search.is_some() && !t.focused)
         else {
             return false;
         };
@@ -739,6 +783,7 @@ fn terminal_key(terminal: &mut TerminalTab, tab: TabId, key: &Key, mods: Modifie
     if !terminal.focused {
         return Vec::new();
     }
+    terminal.input_dropped = false;
     let letter = match key {
         Key::Char(c) => Some(c.to_ascii_lowercase()),
         _ => None,

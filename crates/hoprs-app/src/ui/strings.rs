@@ -129,6 +129,9 @@ pub const TERMINAL_RESTART: &str = "Restart shell";
 pub const TERMINAL_SHELL_CLOSED: &str = "Shell closed";
 pub const TERMINAL_OPEN_FAILED: &str = "Can't open a shell";
 pub const TERMINAL_RETRY: &str = "Retry";
+pub const TERMINAL_WAITING_FOR_CONNECTION: &str = "Waiting for the connection";
+pub const TERMINAL_INPUT_DROPPED: &str =
+    "Some input was dropped: the shell was not taking it fast enough";
 /// Written into the scrollback when a new shell starts after a reconnect.
 pub const TERMINAL_RECONNECTED: &str = "— reconnected —";
 pub const TERMINAL_SEARCH_PLACEHOLDER: &str = "Search scrollback";

@@ -195,8 +195,14 @@ pub fn view<'a>(app: &'a App, tab: &'a Tab, terminal: &'a TerminalTab) -> Elemen
                 found: terminal.search.as_ref().and_then(|bar| bar.current.clone()),
             };
             let mut col = column![];
-            if let Some(banner) = end_banner(tab.id, terminal) {
+            let index = app.tab_index(tab.id).unwrap_or_default();
+            if let Some(banner) = end_banner(tab.id, terminal, app.can_restart_terminal(index)) {
                 col = col.push(banner).push(hrule());
+            }
+            if terminal.input_dropped {
+                col = col
+                    .push(note(strings::TERMINAL_INPUT_DROPPED))
+                    .push(hrule());
             }
             col = col.push(
                 container(Element::new(widget))
@@ -229,8 +235,22 @@ fn msg(tab: TabId, msg: TerminalMsg) -> Message {
     Message::Terminal { tab, msg }
 }
 
-/// The bar over an ended shell: why, and the button that opens a new one.
-fn end_banner(tab: TabId, terminal: &TerminalTab) -> Option<Element<'_, Message>> {
+/// A thin muted note across the tab.
+fn note<'a>(text_: &'a str) -> Element<'a, Message> {
+    container(text(text_).size(theme::TEXT_XS).color(palette().muted))
+        .width(Length::Fill)
+        .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_MD]))
+        .style(theme::pane_bar)
+        .into()
+}
+
+/// The bar over an ended shell: why, and the button that opens a new one. Without a live
+/// session the button is dim, with a hint (the connection's own bar says why).
+fn end_banner(
+    tab: TabId,
+    terminal: &TerminalTab,
+    can_restart: bool,
+) -> Option<Element<'_, Message>> {
     let banner = terminal.end_banner()?;
     let p = palette();
     let mut reason = row![text(banner.message).color(p.error)]
@@ -247,10 +267,15 @@ fn end_banner(tab: TabId, terminal: &TerminalTab) -> Option<Element<'_, Message>
     let action = button(text(banner.action))
         .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
         .style(theme::button_outline)
-        .on_press(msg(tab, TerminalMsg::Restart));
+        .on_press_maybe(can_restart.then(|| msg(tab, TerminalMsg::Restart)));
+    let hint = (!can_restart).then(|| {
+        text(strings::TERMINAL_WAITING_FOR_CONNECTION)
+            .size(theme::TEXT_XS)
+            .color(p.muted)
+    });
     Some(
         container(
-            row![reason, space::horizontal(), action]
+            row![reason, space::horizontal(), hint, action]
                 .spacing(theme::SPACE_SM)
                 .align_y(Alignment::Center),
         )
