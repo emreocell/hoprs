@@ -184,7 +184,9 @@ pub fn view<'a>(app: &'a App, tab: &'a Tab, terminal: &'a TerminalTab) -> Elemen
         TabState::Failed(_) => crate::ui::files::not_connected(app, tab),
         TabState::Connecting => centered(text(strings::CONNECTING).color(palette().muted)),
         TabState::Connected(_) => {
-            let focused = terminal.focused && !app.dialogs.is_open();
+            // An ended shell takes no keys (its cursor is an outline).
+            let focused =
+                terminal.focused && !app.dialogs.is_open() && terminal.open_shell().is_some();
             let widget = TerminalView {
                 tab: tab.id,
                 model: &terminal.model,
