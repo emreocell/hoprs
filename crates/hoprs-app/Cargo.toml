@@ -38,6 +38,9 @@ notify = "8.2"
 # Splits the editor command with shell quoting rules, without running a shell. Already in
 # the dependency tree (no new download), dependency-free, MIT OR Apache-2.0.
 shlex = "2.0"
+# Decodes the embedded window icon. iced's own `image` feature would pull in the whole
+# `image` crate with every codec; `png` is the one format needed. MIT OR Apache-2.0.
+png = "0.18"
 
 [lib]
 bench = false

@@ -10,6 +10,7 @@ mod backend;
 #[doc(hidden)]
 pub mod bench;
 mod effects;
+mod icon;
 mod logbuf;
 mod probe;
 mod settings;
@@ -27,6 +28,7 @@ use iced::Task;
 
 use crate::app::{App, Message};
 use crate::backend::{Backend, BackendApi, BackendConfig, LazyKeyringStore};
+pub use crate::icon::{APP_ID, window_icon};
 
 /// Smallest window that still fits the sidebar and two file panes.
 const MIN_WINDOW: iced::Size = iced::Size::new(960.0, 640.0);
@@ -84,6 +86,11 @@ pub fn run() -> iced::Result {
             min_size: Some(MIN_WINDOW),
             // A close request goes to `update`: tabs saved, backend shut down, then closed.
             exit_on_close_request: false,
+            icon: window_icon(),
+            platform_specific: iced::window::settings::PlatformSpecific {
+                application_id: APP_ID.to_owned(),
+                ..iced::window::settings::PlatformSpecific::default()
+            },
             ..iced::window::Settings::default()
         })
         .run()
