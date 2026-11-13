@@ -13,9 +13,10 @@ pub const PERMISSIONS_WIDTH: f32 = 110.0;
 /// (Permissions first, then Modified).
 pub const NAME_MIN: f32 = 120.0;
 
-/// Below these pane widths the toolbar drops its key hints (the remote toolbar, with
-/// Edit, needs ~490 px with them; the local one ~345 px). The buttons are flat text with
-/// 4 px sides, so the hints fit in both panes of the default 1280 px window.
+/// From these pane widths the toolbar is [`Toolbar::Full`], labels and key hints (the
+/// remote toolbar, with Edit, needs ~490 px; the local one ~345 px): both panes of the
+/// default 1280 px window, the remote one down to a ~1240 px window. Narrower panes get
+/// [`Toolbar::Compact`] (no hints) down to [`TOOLBAR_NARROW`], then [`Toolbar::Narrow`].
 const TOOLBAR_FULL_REMOTE: f32 = 492.0;
 const TOOLBAR_FULL_LOCAL: f32 = 360.0;
 /// Below this pane width (either side) the toolbar also uses short labels ("Folder",
@@ -93,6 +94,7 @@ pub fn toolbar(pane: f32, side: Side) -> Toolbar {
     }
 }
 
+/// Whether the queue head uses its short labels at this window width.
 pub fn compact_queue(window: f32) -> bool {
     center_width(window) < QUEUE_HEAD_FULL
 }

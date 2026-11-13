@@ -29,7 +29,8 @@ pub fn toolbar<'a>(
 ) -> Element<'a, Message> {
     let p = palette();
     let compact = !form.hints();
-    let (new_folder, permissions) = if form.short_labels() {
+    let short = form.short_labels();
+    let (new_folder, permissions) = if short {
         (strings::NEW_FOLDER_SHORT, strings::PERMISSIONS_SHORT)
     } else {
         (strings::NEW_FOLDER, strings::PERMISSIONS)
@@ -84,11 +85,16 @@ pub fn toolbar<'a>(
             bar = bar.push(edit_action(edit, compact, msg(PaneMsg::Edit)));
         }
         bar = bar
-            .push(action(
-                new_folder,
+            .push(full_label_tip(
+                action(
+                    new_folder,
+                    Some(strings::KEY_NEW_FOLDER),
+                    can,
+                    PaneMsg::NewFolder,
+                ),
+                short,
+                strings::NEW_FOLDER,
                 Some(strings::KEY_NEW_FOLDER),
-                can,
-                PaneMsg::NewFolder,
             ))
             .push(action(
                 strings::RENAME,
@@ -103,7 +109,12 @@ pub fn toolbar<'a>(
                 PaneMsg::Delete,
             ));
         if side == Side::Remote {
-            bar = bar.push(action(permissions, None, chmod, PaneMsg::Permissions));
+            bar = bar.push(full_label_tip(
+                action(permissions, None, chmod, PaneMsg::Permissions),
+                short,
+                strings::PERMISSIONS,
+                None,
+            ));
         }
     }
     bar = bar.push(space().width(Length::Fill));
@@ -126,6 +137,36 @@ pub fn toolbar<'a>(
         .height(ROW_HEIGHT)
         .padding(Padding::ZERO.left(theme::SPACE_XS).right(theme::SPACE_XS))
         .into()
+}
+
+/// A short-labelled toolbar button (`short`, the Narrow form) with its full label and key
+/// as a tooltip, in the Edit hint's style; otherwise the button as it is.
+fn full_label_tip<'a>(
+    button: iced::widget::Button<'a, Message>,
+    short: bool,
+    label: &'a str,
+    key: Option<&'a str>,
+) -> Element<'a, Message> {
+    if !short {
+        return button.into();
+    }
+    let hint = row![text(label).size(theme::TEXT_XS)]
+        .push(key.map(|key| {
+            text(key)
+                .font(theme::MONO)
+                .size(theme::TEXT_TAG)
+                .color(palette().muted)
+        }))
+        .spacing(theme::SPACE_XS)
+        .align_y(Alignment::Center);
+    tooltip(
+        button,
+        container(hint)
+            .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
+            .style(theme::dialog_box),
+        tooltip::Position::Bottom,
+    )
+    .into()
 }
 
 /// "Edit F4" (remote). Off without a selection. On a folder, a link or a file over
