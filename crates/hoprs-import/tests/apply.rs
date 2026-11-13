@@ -39,6 +39,8 @@ fn imports_supported_sites_with_secrets() {
     assert_eq!(report.imported.len(), 9);
     assert_eq!(report.skipped.len(), 1);
     assert_eq!(vault.sites().len(), 9);
+    // Every password reached the store.
+    assert!(report.imported.iter().all(|s| !s.secret_not_saved));
 
     let legacy = vault
         .sites()
@@ -220,6 +222,12 @@ fn keyring_failure_still_imports_site() {
     );
     assert!(!format!("{report:?}").contains("hunter2"));
     assert!(!vault.site(&legacy.id).unwrap().has_password);
+    // The flag callers act on (the source is the only copy of that password); sites
+    // without a password in the file are not flagged.
+    assert!(legacy.secret_not_saved);
+    assert!(report.imported.iter().any(
+        |s| !s.secret_not_saved && !s.notes.iter().any(|n| n.starts_with("password not saved"))
+    ));
 }
 
 #[derive(Default)]
@@ -259,6 +267,7 @@ fn unavailable_keyring_is_tried_once_per_import() {
             .notes
             .contains(&"password not saved: System keyring unavailable".to_string())
     );
+    assert!(report.imported.iter().all(|s| s.secret_not_saved));
     for site in &report.imported[1..] {
         assert!(
             site.notes

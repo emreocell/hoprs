@@ -18,6 +18,7 @@ use std::sync::Arc;
 use hoprs_core::{Error, ErrorKind, Result, Site, SiteId, Workspace, WorkspaceId};
 use secrecy::SecretString;
 
+pub use atomic::write_atomic;
 pub use export::{BackupImportReport, ExportParams, ExportReport, ImportMode};
 pub use profiles::UnreadableEntry;
 pub use secrets::{KeyringStore, MemoryStore, SecretKind, SecretStore, is_keyring_unavailable};

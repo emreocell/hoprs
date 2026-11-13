@@ -21,8 +21,8 @@ use hoprs_remote::{
 };
 use hoprs_ssh::testing::docker;
 use hoprs_transfer::{
-    ConflictPolicy, Direction, EngineConfig, Event, QueueStore, SiteEndpoints, TransferEngine,
-    TransferId, TransferSpec, TransferState, spawn_site_watcher,
+    ConflictPolicy, Direction, EngineConfig, Event, EventKind, QueueStore, SiteEndpoints,
+    TransferEngine, TransferId, TransferSpec, TransferState, spawn_site_watcher,
 };
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -147,7 +147,7 @@ async fn start_engine_with(
     local_root: &Path,
     remote: Arc<dyn RemoteFs>,
 ) -> (TransferEngine, Receiver<Event>) {
-    let engine = TransferEngine::start(QueueStore::open_in_memory().unwrap(), config);
+    let engine = TransferEngine::start(QueueStore::open_in_memory().unwrap(), config).unwrap();
     let rx = engine.subscribe();
     engine
         .register_site(
@@ -190,8 +190,10 @@ async fn run_until_terminal(
         loop {
             match rx.recv().await {
                 Ok(ev) => {
-                    let terminal = match &ev {
-                        Event::StateChanged { id: i, state } if *i == id && state.is_terminal() => {
+                    let terminal = match &ev.kind {
+                        EventKind::StateChanged { id: i, state }
+                            if *i == id && state.is_terminal() =>
+                        {
                             Some(state.clone())
                         }
                         _ => None,
@@ -215,7 +217,7 @@ async fn run_until_terminal(
 fn site_paused_count(events: &[Event]) -> usize {
     events
         .iter()
-        .filter(|e| matches!(e, Event::SitePaused { .. }))
+        .filter(|e| matches!(&e.kind, EventKind::SitePaused { .. }))
         .count()
 }
 
@@ -224,8 +226,8 @@ fn failed(events: &[Event]) -> Vec<&Event> {
         .iter()
         .filter(|e| {
             matches!(
-                e,
-                Event::StateChanged {
+                &e.kind,
+                EventKind::StateChanged {
                     state: TransferState::Failed(_),
                     ..
                 }
@@ -707,8 +709,8 @@ async fn copies_into_big_dir_do_not_list_per_file() {
         let mut pending: HashSet<TransferId> = ids.into_iter().collect();
         let all_done = async {
             while !pending.is_empty() {
-                match rx.recv().await.unwrap() {
-                    Event::StateChanged { id, state } if state.is_terminal() => {
+                match rx.recv().await.unwrap().kind {
+                    EventKind::StateChanged { id, state } if state.is_terminal() => {
                         assert_eq!(state, TransferState::Done, "{id:?}");
                         pending.remove(&id);
                     }

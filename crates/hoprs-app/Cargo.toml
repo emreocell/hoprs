@@ -1,0 +1,35 @@
+[package]
+name = "hoprs-app"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hoprs-core = { path = "../hoprs-core" }
+hoprs-vault = { path = "../hoprs-vault" }
+hoprs-ssh = { path = "../hoprs-ssh" }
+hoprs-remote = { path = "../hoprs-remote" }
+hoprs-transfer = { path = "../hoprs-transfer" }
+hoprs-import = { path = "../hoprs-import" }
+iced = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
+tokio-util = { workspace = true }
+futures-util = { workspace = true }
+async-trait = { workspace = true }
+secrecy = { workspace = true }
+dirs = { workspace = true }
+fs4 = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+# Native file dialogs. Linux: the XDG desktop portal over libdbus (loaded at run time),
+# falling back to zenity; no GTK, no extra D-Bus stack.
+rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "macros", "time", "test-util"] }
+hoprs-remote = { path = "../hoprs-remote", features = ["testing"] }
+hoprs-ssh = { path = "../hoprs-ssh", features = ["testing"] }

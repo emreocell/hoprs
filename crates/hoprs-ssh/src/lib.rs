@@ -10,10 +10,11 @@ mod shell;
 pub mod testing;
 mod watchdog;
 
+pub use auth::{AuthMethod, key_type};
 pub use config::{AuthConfig, KeySource, SshConfig};
 pub use hoprs_core::ReconnectPolicy;
-pub use prompt::{KbdPrompt, Prompter};
+pub use prompt::{AcceptedSecret, KbdPrompt, Prompter};
 #[cfg(feature = "testing")]
-pub use prompt::{PromptCalls, ScriptedPrompter};
-pub use session::{SessionState, SshSession};
+pub use prompt::{HostKeyPrompt, PromptCalls, ScriptedPrompter};
+pub use session::{HostKeyChange, SessionState, SshSession, host_key_change};
 pub use shell::{PtyRequest, ShellChannel, ShellOutput};

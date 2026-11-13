@@ -8,8 +8,8 @@ use common::*;
 use hoprs_core::ErrorKind;
 use hoprs_remote::{FaultFs, MemFs, Op, RemoteFs};
 use hoprs_transfer::{
-    Direction, EngineConfig, Event, Resolution, ResolveAction, TransferEngine, TransferId,
-    TransferItem, TransferState,
+    Direction, EngineConfig, Event, EventKind, Resolution, ResolveAction, TransferEngine,
+    TransferId, TransferItem, TransferState,
 };
 use tokio::sync::broadcast::Receiver;
 
@@ -19,7 +19,7 @@ const MIB: usize = 1 << 20;
 async fn wait_state(rx: &mut Receiver<Event>, id: TransferId, state: TransferState) {
     wait_for(
         rx,
-        |e| matches!(e, Event::StateChanged { id: i, state: s } if *i == id && *s == state),
+        |e| matches!(e, EventKind::StateChanged { id: i, state: s } if *i == id && *s == state),
     )
     .await;
 }
@@ -27,14 +27,14 @@ async fn wait_state(rx: &mut Receiver<Event>, id: TransferId, state: TransferSta
 /// Waits until `id` is `AwaitingDecision`.
 async fn wait_awaiting(rx: &mut Receiver<Event>, id: TransferId) {
     wait_for(rx, |e| {
-        matches!(e, Event::StateChanged { id: i, state: TransferState::AwaitingDecision(_) } if *i == id)
+        matches!(e, EventKind::StateChanged { id: i, state: TransferState::AwaitingDecision(_) } if *i == id)
     })
     .await;
 }
 
 /// Waits for the first `Progress` event.
 async fn wait_progress(rx: &mut Receiver<Event>) {
-    wait_for(rx, |e| matches!(e, Event::Progress(_))).await;
+    wait_for(rx, |e| matches!(e, EventKind::Progress(_))).await;
 }
 
 /// Waits until `n` distinct items reached a terminal state; returns their states.
@@ -44,9 +44,9 @@ async fn wait_terminal_count(
 ) -> HashMap<TransferId, TransferState> {
     let mut done = HashMap::new();
     while done.len() < n {
-        if let Event::StateChanged { id, state } = wait_for(
+        if let EventKind::StateChanged { id, state } = wait_for(
             rx,
-            |e| matches!(e, Event::StateChanged { state, .. } if state.is_terminal()),
+            |e| matches!(e, EventKind::StateChanged { state, .. } if state.is_terminal()),
         )
         .await
         {
@@ -255,10 +255,10 @@ async fn apply_to_all_resolves_pending() {
     }
     let mut awaiting = HashSet::new();
     while awaiting.len() < ids.len() {
-        if let Event::StateChanged { id, .. } = wait_for(&mut rx, |e| {
+        if let EventKind::StateChanged { id, .. } = wait_for(&mut rx, |e| {
             matches!(
                 e,
-                Event::StateChanged {
+                EventKind::StateChanged {
                     state: TransferState::AwaitingDecision(_),
                     ..
                 }
@@ -286,11 +286,11 @@ async fn apply_to_all_resolves_pending() {
         .await
         .unwrap();
     let ev = wait_for(&mut rx, |e| {
-        matches!(e, Event::StateChanged { id, state }
+        matches!(e, EventKind::StateChanged { id, state }
             if *id == d && (state.is_terminal() || matches!(state, TransferState::AwaitingDecision(_))))
     })
     .await;
-    let Event::StateChanged { state, .. } = ev else {
+    let EventKind::StateChanged { state, .. } = ev else {
         unreachable!()
     };
     assert_eq!(state, TransferState::Skipped("exists".to_string()));
@@ -426,7 +426,7 @@ async fn pause_and_resume_folder_does_not_relist() {
     // Wait for the in-flight file to stop.
     wait_for(
         &mut rx,
-        |e| matches!(e, Event::StateChanged { id, state: TransferState::Paused } if *id != root),
+        |e| matches!(e, EventKind::StateChanged { id, state: TransferState::Paused } if *id != root),
     )
     .await;
     let snap = engine.snapshot().await;
@@ -501,14 +501,14 @@ async fn cancelled_child_does_not_fail_folder() {
     let ev = wait_for(&mut rx, |e| {
         matches!(
             e,
-            Event::StateChanged {
+            EventKind::StateChanged {
                 state: TransferState::AwaitingDecision(_),
                 ..
             }
         )
     })
     .await;
-    let Event::StateChanged { id: a, .. } = ev else {
+    let EventKind::StateChanged { id: a, .. } = ev else {
         unreachable!()
     };
     engine.cancel(a).await.unwrap();
@@ -652,14 +652,14 @@ async fn retry_failed_child_while_sibling_copies() {
     let ev = wait_for(&mut rx, |e| {
         matches!(
             e,
-            Event::StateChanged {
+            EventKind::StateChanged {
                 state: TransferState::Failed(_),
                 ..
             }
         )
     })
     .await;
-    let Event::StateChanged { id: a, .. } = ev else {
+    let EventKind::StateChanged { id: a, .. } = ev else {
         unreachable!()
     };
     assert_ne!(a, root);
@@ -753,11 +753,11 @@ async fn apply_to_all_covers_in_flight_prepare() {
         .unwrap();
 
     let ev = wait_for(&mut rx, |e| {
-        matches!(e, Event::StateChanged { id, state }
+        matches!(e, EventKind::StateChanged { id, state }
             if *id == b && (state.is_terminal() || matches!(state, TransferState::AwaitingDecision(_))))
     })
     .await;
-    let Event::StateChanged { state, .. } = ev else {
+    let EventKind::StateChanged { state, .. } = ev else {
         unreachable!()
     };
     assert_eq!(state, TransferState::Skipped("exists".to_string()));
@@ -942,12 +942,12 @@ async fn pause_with_deferred_write_error_fails_and_retry_overwrites() {
     .expect("chunks after the lost one land");
     engine.pause(id).await.unwrap();
     let stopped = wait_for(&mut rx, |e| {
-        matches!(e, Event::StateChanged { id: i, state } if *i == id
+        matches!(e, EventKind::StateChanged { id: i, state } if *i == id
             && (state.is_terminal() || *state == TransferState::Paused))
     })
     .await;
     match stopped {
-        Event::StateChanged {
+        EventKind::StateChanged {
             state: TransferState::Failed(e),
             ..
         } => assert_eq!(e.kind, ErrorKind::Io),

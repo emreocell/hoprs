@@ -1,0 +1,117 @@
+//! The shell of mockup v2: top bar across the window; below it the
+//! 256 px sidebar on the left and, on the right, the center, the
+//! collapsible transfer queue and the status bar.
+
+use iced::widget::{column, container, row, rule, text};
+use iced::{Alignment, Element, Length, Padding};
+
+use crate::app::{App, Form, Message};
+use crate::ui::strings;
+use crate::ui::theme::{self, palette};
+use crate::ui::{
+    dialogs, files, import, queue, settings, sidebar, site_form, status, tabs, workspace_form,
+};
+
+pub const SIDEBAR_WIDTH: f32 = sidebar::WIDTH;
+/// 4 px above the 36 px tabs.
+pub const TOP_BAR_HEIGHT: f32 = 40.0;
+pub const QUEUE_HEAD_HEIGHT: f32 = 36.0;
+pub const QUEUE_MAX_HEIGHT: f32 = 210.0;
+pub const STATUS_HEIGHT: f32 = 26.0;
+/// The accent line under an active tab.
+pub const UNDERLINE: f32 = 2.0;
+
+pub fn view(app: &App) -> Element<'_, Message> {
+    let right = column![center(app), queue::view(app), status::view(app)].width(Length::Fill);
+    let body = row![sidebar::view(app), vrule(), right].height(Length::Fill);
+
+    let base = container(column![top_bar(app), hrule(), body])
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(theme::paper)
+        .into();
+    dialogs::overlay(app, base)
+}
+
+fn hrule<'a>() -> Element<'a, Message> {
+    rule::horizontal(theme::HAIRLINE)
+        .style(theme::rule_1px)
+        .into()
+}
+
+fn vrule<'a>() -> Element<'a, Message> {
+    rule::vertical(theme::HAIRLINE)
+        .style(theme::rule_1px)
+        .into()
+}
+
+fn muted<'a>(label: &'a str, size: f32) -> Element<'a, Message> {
+    text(label).size(size).color(palette().muted).into()
+}
+
+fn top_bar(app: &App) -> Element<'_, Message> {
+    let brand = container(
+        row![
+            text(strings::BRAND)
+                .size(theme::TEXT_MD)
+                .font(theme::INTER_SEMIBOLD),
+            muted(strings::VERSION, theme::TEXT_XS),
+        ]
+        .spacing(theme::SPACE_XS)
+        .align_y(Alignment::Center),
+    )
+    .width(SIDEBAR_WIDTH - theme::HAIRLINE)
+    .height(Length::Fill)
+    .padding(Padding::ZERO.left(theme::SPACE_MD).right(theme::SPACE_MD))
+    .align_y(Alignment::Center);
+
+    let tabs = tabs::view(app);
+
+    // A slot for the Ctrl+K palette (Plan 6).
+    let palette_slot = container(
+        container(
+            row![
+                text(strings::GO_TO_ANYTHING),
+                container(text(strings::GO_TO_ANYTHING_KEY).size(theme::TEXT_XS))
+                    .padding(Padding::ZERO.left(theme::SPACE_2XS).right(theme::SPACE_2XS))
+                    .style(theme::kbd),
+            ]
+            .spacing(theme::SPACE_SM)
+            .align_y(Alignment::Center),
+        )
+        .height(Length::Fill)
+        .padding(Padding::ZERO.left(theme::SPACE_SM).right(theme::SPACE_SM))
+        .align_y(Alignment::Center)
+        .style(theme::outline_box),
+    )
+    .height(Length::Fill)
+    .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_SM]));
+
+    row![brand, vrule(), tabs, palette_slot]
+        .height(TOP_BAR_HEIGHT)
+        .into()
+}
+
+/// The center: the open form, else the active tab, else the empty state.
+fn center(app: &App) -> Element<'_, Message> {
+    match &app.form {
+        Some(Form::Site(form)) => return site_form::view(form),
+        Some(Form::Workspace(form)) => return workspace_form::view(form, &app.sites),
+        Some(Form::Import) => return import::view(app),
+        Some(Form::Settings) => return settings::view(app),
+        None => {}
+    }
+    if let Some(tab) = app.active_tab.and_then(|i| app.tabs.get(i)) {
+        return files::view(app, tab);
+    }
+    container(
+        column![
+            text(strings::NO_SESSION_TITLE).font(theme::INTER_SEMIBOLD),
+            muted(strings::NO_SESSION_HINT, theme::TEXT_SM),
+        ]
+        .spacing(theme::SPACE_2XS)
+        .align_x(Alignment::Center),
+    )
+    .center(Length::Fill)
+    .into()
+}

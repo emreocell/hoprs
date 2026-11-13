@@ -22,6 +22,9 @@ pub struct ImportedSite {
     pub name: String,
     pub id: SiteId,
     pub notes: Vec<String>,
+    /// The file had a password for this site but the secret store refused it: the
+    /// source file is still the only copy of that password.
+    pub secret_not_saved: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -206,20 +209,24 @@ fn import_site(
     }
 
     let mut notes = parsed.notes;
+    let mut secret_not_saved = false;
     if let ParsedPassword::Plain(password) = &parsed.password {
         // Once the keyring is unavailable, stop asking: each attempt could
         // raise another OS unlock prompt.
         if *keyring_down {
             notes.push("password not saved: keyring unavailable".to_owned());
+            secret_not_saved = true;
         } else if let Err(err) = vault.set_secret(&id, SecretKind::Password, password) {
             *keyring_down = is_keyring_unavailable(&err);
             notes.push(format!("password not saved: {}", err.message));
+            secret_not_saved = true;
         }
     }
     report.imported.push(ImportedSite {
         name,
         id: id.clone(),
         notes,
+        secret_not_saved,
     });
     Some(id)
 }

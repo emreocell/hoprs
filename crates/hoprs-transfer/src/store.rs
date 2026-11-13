@@ -580,13 +580,34 @@ impl QueueStore {
     /// Removes terminal root items and all their descendants (via `ON DELETE CASCADE`).
     /// Returns the number of root items removed (descendants are not counted).
     pub fn clear_finished(&mut self) -> Result<usize> {
-        self.conn
-            .execute(
-                "DELETE FROM transfers WHERE parent_id IS NULL \
-             AND state IN ('done', 'skipped', 'failed', 'cancelled')",
-                [],
-            )
-            .db()
+        self.clear_finished_except(&[])
+    }
+
+    /// Like [`clear_finished`](Self::clear_finished), but keeps the roots in
+    /// `keep` (with their descendants). One transaction.
+    pub fn clear_finished_except(&mut self, keep: &[TransferId]) -> Result<usize> {
+        let tx = self.conn.transaction().db()?;
+        let roots: Vec<i64> = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT id FROM transfers WHERE parent_id IS NULL \
+                 AND state IN ('done', 'skipped', 'failed', 'cancelled')",
+                )
+                .db()?;
+            let rows = stmt.query_map([], |r| r.get(0)).db()?;
+            rows.collect::<rusqlite::Result<_>>().db()?
+        };
+        let mut removed = 0;
+        for id in roots
+            .into_iter()
+            .filter(|id| !keep.contains(&TransferId(*id)))
+        {
+            removed += tx
+                .execute("DELETE FROM transfers WHERE id = ?1", [id])
+                .db()?;
+        }
+        tx.commit().db()?;
+        Ok(removed)
     }
 }
 
@@ -1081,6 +1102,21 @@ mod tests {
         assert!(s.get(child).unwrap().is_none());
         assert!(s.get(grandchild).unwrap().is_none());
         assert!(s.get(queued_root).unwrap().is_some());
+    }
+
+    #[test]
+    fn clear_finished_except_keeps_the_listed_roots() {
+        let mut s = QueueStore::open_in_memory().unwrap();
+        let kept = new_item(&mut s);
+        let kept_child = s.insert(Some(kept), &spec("/a/k", "/b/k")).unwrap();
+        let cleared = new_item(&mut s);
+        s.set_state(kept, &TransferState::Cancelled).unwrap();
+        s.set_state(cleared, &TransferState::Done).unwrap();
+
+        assert_eq!(s.clear_finished_except(&[kept]).unwrap(), 1);
+        assert!(s.get(cleared).unwrap().is_none());
+        assert!(s.get(kept).unwrap().is_some());
+        assert!(s.get(kept_child).unwrap().is_some());
     }
 
     #[test]

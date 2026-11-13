@@ -14,7 +14,7 @@ use hoprs_remote::testing::{
     session_disconnect_inside_command, session_fail, session_quote,
 };
 use hoprs_remote::{
-    CertProblem, Connection, FtpConfig, FtpFs, FtpPrompter, FtpSecurity, RemoteFs,
+    CertProblem, CertReason, Connection, FtpConfig, FtpFs, FtpPrompter, FtpSecurity, RemoteFs,
     ScriptedFtpPrompter, TransferMode, cert_fingerprint,
 };
 use hoprs_ssh::testing::docker;
@@ -205,7 +205,12 @@ async fn explicit_tls_untrusted_prompts_and_pins() {
     assert_eq!(prompts[0].host, "127.0.0.1");
     assert_eq!(prompts[0].port, 2121);
     assert_eq!(prompts[0].fingerprint, fp);
-    assert_eq!(prompts[0].problem, CertProblem::Untrusted);
+    assert_eq!(
+        prompts[0].problem,
+        CertProblem::Untrusted {
+            reason: CertReason::UnknownIssuer
+        }
+    );
     assert_eq!(p.pins(), vec![("127.0.0.1".to_owned(), 2121, fp.clone())]);
     // The in-memory config now carries the pin.
     assert_eq!(cfg.pinned_fingerprint.as_deref(), Some(fp.as_str()));
@@ -218,6 +223,35 @@ async fn explicit_tls_untrusted_prompts_and_pins() {
     c.nlst().await.unwrap();
     assert_eq!(p.calls().certificate, 0);
     assert!(p.pins().is_empty());
+}
+
+/// Ruling R5 of Plan 3: a certificate that chains to a trusted root is accepted over a pin
+/// for another certificate, and the stale pin is reported (and dropped from the config) so
+/// the app can forget it.
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn trusted_chain_reports_a_stale_pin() {
+    let stale = other_fingerprint();
+    let mut cfg = tls_config(FtpSecurity::ExplicitTls, true);
+    cfg.pinned_fingerprint = Some(stale.clone());
+    let p = ScriptedFtpPrompter::new();
+    let mut c = open_test_control(&mut cfg, &p).await.unwrap();
+    c.nlst().await.unwrap();
+    assert_eq!(p.calls().certificate, 0);
+    assert!(p.pins().is_empty());
+    assert_eq!(
+        p.superseded_pins(),
+        vec![("127.0.0.1".to_owned(), 2121, stale)]
+    );
+    assert!(cfg.pinned_fingerprint.is_none());
+
+    // A pin for the very certificate the chain accepts is not stale.
+    let mut cfg = tls_config(FtpSecurity::ExplicitTls, true);
+    cfg.pinned_fingerprint = Some(server_fingerprint());
+    let p = ScriptedFtpPrompter::new();
+    open_test_control(&mut cfg, &p).await.unwrap();
+    assert!(p.superseded_pins().is_empty());
+    assert_eq!(cfg.pinned_fingerprint, Some(server_fingerprint()));
 }
 
 #[tokio::test]
@@ -268,7 +302,8 @@ async fn changed_certificate_prompts_again() {
     assert_eq!(
         prompts[0].problem,
         CertProblem::Changed {
-            pinned: pinned.clone()
+            pinned: pinned.clone(),
+            reason: CertReason::UnknownIssuer,
         }
     );
     assert!(p.pins().is_empty());
@@ -731,6 +766,197 @@ async fn supervisor_ends_when_last_handle_drops() {
         .await
         .expect("supervisor still running 1 s after the last handle dropped");
     assert!(closed.is_err(), "expected the state channel to close");
+}
+
+// Observable start and WaitingForUser.
+
+/// Answers the password prompt with frank's password, but only once allowed: until then it
+/// cancels (`gate: false`) or waits for [`release`](Self::release) (`gate: true`).
+struct HeldFtpPassword {
+    allowed: std::sync::atomic::AtomicBool,
+    gate: Option<tokio::sync::Semaphore>,
+    calls: AtomicU32,
+}
+
+impl HeldFtpPassword {
+    fn cancelling() -> Arc<Self> {
+        Arc::new(Self {
+            allowed: false.into(),
+            gate: None,
+            calls: 0.into(),
+        })
+    }
+
+    fn gated() -> Arc<Self> {
+        Arc::new(Self {
+            allowed: true.into(),
+            gate: Some(tokio::sync::Semaphore::new(0)),
+            calls: 0.into(),
+        })
+    }
+
+    fn allow(&self) {
+        self.allowed.store(true, Ordering::SeqCst);
+    }
+
+    fn release(&self) {
+        if let Some(gate) = &self.gate {
+            gate.add_permits(1);
+        }
+    }
+
+    fn calls(&self) -> u32 {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl FtpPrompter for HeldFtpPassword {
+    async fn password(&self, _: &str, _: &str) -> Option<SecretString> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(gate) = &self.gate {
+            gate.acquire().await.unwrap().forget();
+        }
+        self.allowed
+            .load(Ordering::SeqCst)
+            .then(|| SecretString::from("frank-pass"))
+    }
+
+    async fn confirm_certificate(&self, _: &str, _: u16, _: &str, _: &CertProblem) -> bool {
+        false
+    }
+
+    async fn store_pin(&self, _: &str, _: u16, _: &str) {}
+}
+
+fn prompted_session_config() -> FtpConfig {
+    let mut cfg = session_config();
+    cfg.password = None;
+    cfg
+}
+
+/// Current-thread runtime: the supervisor cannot run before the test yields, so the first
+/// state is deterministic.
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn ftp_start_is_observable_then_connects() {
+    let p = Arc::new(ScriptedFtpPrompter::new());
+    let fs = FtpFs::start(session_config(), p.clone() as Arc<dyn FtpPrompter>);
+    let mut rx = Connection::state(&fs);
+    assert_eq!(*rx.borrow(), ConnectionState::Connecting);
+    assert_eq!(Connection::generation(&fs), 0);
+    assert_not_connected(fs.list(&path("/home/frank")).await);
+    assert_not_connected(fs.open_read(&path("/home/frank/x"), 0).await.map(|_| ()));
+
+    wait_state(
+        &mut rx,
+        |st| *st == ConnectionState::Connected,
+        Duration::from_secs(10),
+    )
+    .await;
+    assert_eq!(Connection::generation(&fs), 1);
+    fs.list(&path("/home/frank")).await.unwrap();
+    assert_eq!(p.calls().password, 0);
+    fs.disconnect().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn ftp_failed_first_connect_can_reconnect_now() {
+    let p = HeldFtpPassword::cancelling();
+    let fs = FtpFs::start(prompted_session_config(), p.clone() as Arc<dyn FtpPrompter>);
+    let mut rx = Connection::state(&fs);
+    let state = wait_state(
+        &mut rx,
+        |st| matches!(st, ConnectionState::Disconnected(_)),
+        Duration::from_secs(10),
+    )
+    .await;
+    let e = disconnected_error(&[state]);
+    assert_eq!(e.kind, ErrorKind::Auth, "{e:?}");
+    assert_eq!(e.message, "Cancelled by user", "{e:?}");
+    assert_eq!(Connection::generation(&fs), 0);
+    assert_not_connected(fs.list(&path("/home/frank")).await);
+
+    p.allow();
+    fs.reconnect_now().await;
+    assert!(
+        !matches!(*rx.borrow(), ConnectionState::Disconnected(_)),
+        "reconnect_now returned before the state showed it: {:?}",
+        *rx.borrow()
+    );
+    wait_state(
+        &mut rx,
+        |st| *st == ConnectionState::Connected,
+        Duration::from_secs(10),
+    )
+    .await;
+    assert_eq!(Connection::generation(&fs), 1);
+    assert_eq!(p.calls(), 2);
+    fs.list(&path("/home/frank")).await.unwrap();
+    fs.disconnect().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn ftp_waiting_for_user_while_prompting() {
+    let p = HeldFtpPassword::gated();
+    let fs = FtpFs::start(prompted_session_config(), p.clone() as Arc<dyn FtpPrompter>);
+    let rec = record_until(Connection::state(&fs), |st| {
+        *st == ConnectionState::Connected
+    });
+    let mut rx = Connection::state(&fs);
+    wait_state(
+        &mut rx,
+        |st| *st == ConnectionState::WaitingForUser,
+        Duration::from_secs(10),
+    )
+    .await;
+    assert_not_connected(fs.list(&path("/home/frank")).await);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(*rx.borrow(), ConnectionState::WaitingForUser);
+
+    p.release();
+    let states = recorded(rec).await;
+    assert_eq!(
+        states.first(),
+        Some(&ConnectionState::WaitingForUser),
+        "{states:?}"
+    );
+    assert_eq!(
+        states.last(),
+        Some(&ConnectionState::Connected),
+        "{states:?}"
+    );
+    assert!(
+        states[1..states.len() - 1]
+            .iter()
+            .all(|st| *st == ConnectionState::Connecting),
+        "the prompt must hand back to Connecting: {states:?}"
+    );
+    assert_eq!(p.calls(), 1);
+    fs.disconnect().await;
+}
+
+/// The password prompted when the session started is reused by reconnections and transfer
+/// connections.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn ftp_prompted_password_reused_on_reconnect() {
+    let p = Arc::new(ScriptedFtpPrompter::new().with_password(Some("frank-pass")));
+    let fs = FtpFs::connect(prompted_session_config(), p.clone() as Arc<dyn FtpPrompter>)
+        .await
+        .unwrap();
+    assert_eq!(p.calls().password, 1);
+    let rec = record_until(Connection::state(&fs), |st| {
+        *st == ConnectionState::Connected
+    });
+    kill_ftp_sessions();
+    recorded(rec).await;
+    assert_eq!(Connection::generation(&fs), 2);
+    fs.list(&path("/home/frank")).await.unwrap();
+    assert_eq!(p.calls().password, 1);
+    fs.disconnect().await;
 }
 
 /// A minimal FTP server on 127.0.0.1 that logs anyone in and accepts any number of
@@ -2414,4 +2640,41 @@ async fn upload_into_read_only_dir_is_permission() {
     assert_eq!(e.kind, ErrorKind::NotFound, "{e:?}");
     let e = c.fs.chmod(&c.at("ro/missing"), 0o600).await.unwrap_err();
     assert_eq!(e.kind, ErrorKind::NotFound, "{e:?}");
+}
+
+/// Only a typed password the server logged in with is reported as accepted (the app
+/// saves only those); a refused one never is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn ftp_password_accepted_only_after_login() {
+    let p = Arc::new(ScriptedFtpPrompter::new().with_password(Some("frank-pass")));
+    let fs = FtpFs::connect(prompted_session_config(), p.clone() as Arc<dyn FtpPrompter>)
+        .await
+        .unwrap();
+    assert!(p.password_accepted_calls() >= 1);
+    fs.disconnect().await;
+
+    let wrong = Arc::new(ScriptedFtpPrompter::new().with_password(Some("not-franks-pass")));
+    let fs = FtpFs::start(
+        prompted_session_config(),
+        wrong.clone() as Arc<dyn FtpPrompter>,
+    );
+    let mut rx = Connection::state(&fs);
+    wait_state(
+        &mut rx,
+        |st| matches!(st, ConnectionState::Disconnected(_)),
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(wrong.calls().password >= 1);
+    assert_eq!(wrong.password_accepted_calls(), 0);
+    fs.disconnect().await;
+
+    // A configured password is not a typed one: never reported.
+    let configured = Arc::new(ScriptedFtpPrompter::new());
+    let fs = FtpFs::connect(session_config(), configured.clone() as Arc<dyn FtpPrompter>)
+        .await
+        .unwrap();
+    assert_eq!(configured.password_accepted_calls(), 0);
+    fs.disconnect().await;
 }

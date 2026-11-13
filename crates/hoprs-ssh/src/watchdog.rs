@@ -18,7 +18,11 @@ use async_trait::async_trait;
 use secrecy::SecretString;
 use tokio::sync::Notify;
 
-use crate::prompt::{KbdPrompt, Prompter};
+use crate::prompt::{AcceptedSecret, KbdPrompt, Prompter};
+
+/// Told `true` when a prompt starts waiting for the user (none was open), `false` when the
+/// last open prompt closes.
+pub(crate) type WaitingHook = Arc<dyn Fn(bool) + Send + Sync>;
 
 /// Prompter decorator that records when a prompt is waiting for the user.
 pub(crate) struct WatchedPrompter {
@@ -27,6 +31,7 @@ pub(crate) struct WatchedPrompter {
     changed: Notify,
     cancelled: AtomicBool,
     cancel: Notify,
+    hook: Option<WaitingHook>,
 }
 
 impl WatchedPrompter {
@@ -37,7 +42,14 @@ impl WatchedPrompter {
             changed: Notify::new(),
             cancelled: AtomicBool::new(false),
             cancel: Notify::new(),
+            hook: None,
         }
+    }
+
+    /// Also reports to `hook` when the user is being waited for (see [`WaitingHook`]).
+    pub(crate) fn with_hook(mut self, hook: WaitingHook) -> Self {
+        self.hook = Some(hook);
+        self
     }
 
     /// Makes every later prompt return its "cancel" answer without reaching the user.
@@ -56,7 +68,11 @@ impl WatchedPrompter {
         if self.cancelled.load(Ordering::SeqCst) {
             return cancelled;
         }
-        self.in_flight.fetch_add(1, Ordering::SeqCst);
+        if self.in_flight.fetch_add(1, Ordering::SeqCst) == 0
+            && let Some(hook) = &self.hook
+        {
+            hook(true);
+        }
         self.changed.notify_waiters();
         let _done = Done(self);
         tokio::select! {
@@ -71,7 +87,11 @@ struct Done<'a>(&'a WatchedPrompter);
 
 impl Drop for Done<'_> {
     fn drop(&mut self) {
-        self.0.in_flight.fetch_sub(1, Ordering::SeqCst);
+        if self.0.in_flight.fetch_sub(1, Ordering::SeqCst) == 1
+            && let Some(hook) = &self.0.hook
+        {
+            hook(false);
+        }
         self.0.changed.notify_waiters();
     }
 }
@@ -84,10 +104,11 @@ impl Prompter for WatchedPrompter {
         port: u16,
         key_type: &str,
         fingerprint: &str,
+        other_key_types: &[String],
     ) -> bool {
         self.watch(
             self.inner
-                .confirm_host_key(host, port, key_type, fingerprint),
+                .confirm_host_key(host, port, key_type, fingerprint, other_key_types),
             false,
         )
         .await
@@ -112,6 +133,10 @@ impl Prompter for WatchedPrompter {
             None,
         )
         .await
+    }
+
+    fn secret_accepted(&self, secret: AcceptedSecret) {
+        self.inner.secret_accepted(secret);
     }
 }
 
@@ -158,7 +183,10 @@ mod tests {
         );
         let p = WatchedPrompter::new(inner.clone());
         p.cancel();
-        assert!(!p.confirm_host_key("h", 22, "ssh-ed25519", "SHA256:x").await);
+        assert!(
+            !p.confirm_host_key("h", 22, "ssh-ed25519", "SHA256:x", &[])
+                .await
+        );
         assert!(p.password("u", "h").await.is_none());
         assert!(p.key_passphrase(Path::new("/k")).await.is_none());
         let prompts = [KbdPrompt {
@@ -179,7 +207,10 @@ mod tests {
         let start = tokio::time::Instant::now();
         let prompt = tokio::spawn({
             let p = p.clone();
-            async move { p.confirm_host_key("h", 22, "ssh-ed25519", "SHA256:x").await }
+            async move {
+                p.confirm_host_key("h", 22, "ssh-ed25519", "SHA256:x", &[])
+                    .await
+            }
         });
         tokio::time::sleep(Duration::from_secs(1)).await;
         p.cancel();
@@ -188,12 +219,38 @@ mod tests {
         assert_eq!(p.in_flight.load(Ordering::SeqCst), 0);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn waiting_hook_brackets_each_prompt() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let hook: WaitingHook = {
+            let seen = seen.clone();
+            Arc::new(move |waiting| seen.lock().unwrap().push(waiting))
+        };
+        let p = Arc::new(WatchedPrompter::new(Arc::new(Slow)).with_hook(hook));
+        let prompt = tokio::spawn({
+            let p = p.clone();
+            async move {
+                p.confirm_host_key("h", 22, "ssh-ed25519", "SHA256:x", &[])
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(*seen.lock().unwrap(), vec![true]);
+        assert!(prompt.await.unwrap());
+        assert_eq!(*seen.lock().unwrap(), vec![true, false]);
+
+        // A cancelled prompter never reaches the user, so it never reports waiting.
+        p.cancel();
+        assert!(p.password("u", "h").await.is_none());
+        assert_eq!(*seen.lock().unwrap(), vec![true, false]);
+    }
+
     /// Accepts host keys after 10 s; cancels everything else.
     struct Slow;
 
     #[async_trait]
     impl Prompter for Slow {
-        async fn confirm_host_key(&self, _: &str, _: u16, _: &str, _: &str) -> bool {
+        async fn confirm_host_key(&self, _: &str, _: u16, _: &str, _: &str, _: &[String]) -> bool {
             tokio::time::sleep(Duration::from_secs(10)).await;
             true
         }
@@ -219,7 +276,8 @@ mod tests {
         let start = tokio::time::Instant::now();
         let work = async {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            p.confirm_host_key("h", 22, "ssh-ed25519", "SHA256:x").await;
+            p.confirm_host_key("h", 22, "ssh-ed25519", "SHA256:x", &[])
+                .await;
         };
         tokio::select! {
             _ = work => {}

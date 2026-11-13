@@ -7,14 +7,18 @@ use crate::Error;
 /// Observable connection state (SSH, FTP, ...).
 #[derive(Clone, Debug, PartialEq)]
 pub enum ConnectionState {
-    /// First connection in progress. A connect call usually only returns once connected,
-    /// so a connection handle may never report it.
+    /// First connection in progress: a handle that was started, not yet connected (also a
+    /// retry of a first connection that failed).
     Connecting,
     Connected,
     /// Connection lost; `attempt` (from 1) is the reconnection attempt in progress.
     Reconnecting {
         attempt: u32,
     },
+    /// A connection attempt (first or reconnection) is held by a prompt (host key,
+    /// certificate, password, ...) until the user answers. Not connected; when the prompt
+    /// closes the state goes back to the `Connecting` or `Reconnecting` it replaced.
+    WaitingForUser,
     /// Gave up, failed for good (host key, authentication) or closed by the user.
     Disconnected(Error),
 }

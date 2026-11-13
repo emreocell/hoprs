@@ -17,8 +17,11 @@ use sha2::{Digest, Sha256};
 pub enum HostKeyStatus {
     /// The exact key is recorded for this host.
     Known,
-    /// No entry with this key algorithm exists for this host.
-    Unknown,
+    /// No entry with this key algorithm exists for this host. `other_key_types` lists the
+    /// algorithms (`ssh-ed25519`, `ecdsa-sha2-nistp256`, ...) of the keys recorded for it, in
+    /// file order (`@revoked` entries excluded): empty means the host is really new; otherwise
+    /// the server presents a key of a type not seen before, which deserves a warning.
+    Unknown { other_key_types: Vec<String> },
     /// An entry with the same algorithm but a different key exists (1-based line).
     Changed { line: usize },
     /// A `@revoked` entry lists this exact key for this host (1-based line). Must refuse.
@@ -31,14 +34,18 @@ pub fn fingerprint(key: &PublicKey) -> String {
     format!("SHA256:{}", STANDARD_NO_PAD.encode(digest))
 }
 
-/// Looks `host:port` up in the `known_hosts` file at `path`. A missing file is `Unknown`.
+/// Looks `host:port` up in the `known_hosts` file at `path`. A missing file is `Unknown`
+/// with no other key types.
 pub fn check(path: &Path, host: &str, port: u16, key: &PublicKey) -> Result<HostKeyStatus> {
     let Some(data) = read_optional(path)? else {
-        return Ok(HostKeyStatus::Unknown);
+        return Ok(HostKeyStatus::Unknown {
+            other_key_types: Vec::new(),
+        });
     };
     let name = host_name(host, port);
     let mut changed = None;
     let mut known = false;
+    let mut others: Vec<String> = Vec::new();
     for (idx, raw) in data.split_inclusive(|b| *b == b'\n').enumerate() {
         let Some(entry) = parse_line(raw) else {
             continue;
@@ -54,8 +61,13 @@ pub fn check(path: &Path, host: &str, port: u16, key: &PublicKey) -> Result<Host
         }
         if entry.key.key_data() == key.key_data() {
             known = true;
-        } else if changed.is_none() && entry.key.algorithm() == key.algorithm() {
-            changed = Some(idx + 1);
+        } else if entry.key.algorithm() == key.algorithm() {
+            changed.get_or_insert(idx + 1);
+        } else {
+            let other = entry.key.algorithm().as_str().to_owned();
+            if !others.contains(&other) {
+                others.push(other);
+            }
         }
     }
     if known {
@@ -63,7 +75,9 @@ pub fn check(path: &Path, host: &str, port: u16, key: &PublicKey) -> Result<Host
     }
     Ok(match changed {
         Some(line) => HostKeyStatus::Changed { line },
-        None => HostKeyStatus::Unknown,
+        None => HostKeyStatus::Unknown {
+            other_key_types: others,
+        },
     })
 }
 
@@ -136,6 +150,95 @@ pub fn remove(path: &Path, host: &str, port: u16) -> Result<usize> {
         write_atomic(path, &kept)?;
     }
     Ok(removed)
+}
+
+/// One `known_hosts` line that applies to a host, as [`entries_for`] reports it: what
+/// [`remove`] would delete, for the UI to show before it does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnownHostEntry {
+    /// 1-based line number.
+    pub line: usize,
+    /// The key's algorithm (`ssh-ed25519`, `ecdsa-sha2-nistp256`, ...).
+    pub key_type: String,
+    /// The line also names other hosts: a comma list with other names, or a wildcard or
+    /// negated pattern. Removing it forgets the key for those hosts too.
+    pub covers_other_hosts: bool,
+    /// The host field is hashed (`|1|salt|hash`): it names exactly one host, which cannot
+    /// be read back from the file.
+    pub hashed: bool,
+    /// The whole line, trimmed (hosts, key type, key): what [`remove_entries`] checks.
+    pub text: String,
+}
+
+/// The lines [`remove`] would delete for `host:port` (same matching: plain, pattern and
+/// hashed lines; `@revoked` and other marker lines excluded), in file order. Read-only. A
+/// missing file has none.
+pub fn entries_for(path: &Path, host: &str, port: u16) -> Result<Vec<KnownHostEntry>> {
+    let Some(data) = read_optional(path)? else {
+        return Ok(Vec::new());
+    };
+    Ok(entries_in(&data, &host_name(host, port)))
+}
+
+/// Like [`remove`], but only if the lines for `host:port` are still exactly `expected`
+/// (what [`entries_for`] showed the user: same line numbers, same text). Otherwise nothing
+/// is written and the error is `Conflict`: the file changed since, review it again.
+pub fn remove_entries(
+    path: &Path,
+    host: &str,
+    port: u16,
+    expected: &[KnownHostEntry],
+) -> Result<usize> {
+    let data = read_optional(path)?.unwrap_or_default();
+    let name = host_name(host, port);
+    if entries_in(&data, &name) != expected {
+        return Err(hoprs_core::Error::new(
+            hoprs_core::ErrorKind::Conflict,
+            "known_hosts changed; review the entries again",
+        ));
+    }
+    if expected.is_empty() {
+        return Ok(0);
+    }
+    let mut kept = Vec::with_capacity(data.len());
+    for raw in data.split_inclusive(|b| *b == b'\n') {
+        match parse_line(raw) {
+            Some(entry) if !entry.revoked && patterns_match(entry.patterns, &name) => {}
+            _ => kept.extend_from_slice(raw),
+        }
+    }
+    write_atomic(path, &kept)?;
+    Ok(expected.len())
+}
+
+/// The lines of `data` that [`remove`] would delete for the entry name `name`.
+fn entries_in(data: &[u8], name: &str) -> Vec<KnownHostEntry> {
+    let mut entries = Vec::new();
+    for (idx, raw) in data.split_inclusive(|b| *b == b'\n').enumerate() {
+        let Some(entry) = parse_line(raw) else {
+            continue;
+        };
+        if entry.revoked || !patterns_match(entry.patterns, name) {
+            continue;
+        }
+        let hashed = entry.patterns.starts_with("|1|");
+        // A hashed field is one host; otherwise any pattern other than this exact name
+        // (another name, a wildcard, a negation) reaches other hosts.
+        let covers_other_hosts = !hashed
+            && entry
+                .patterns
+                .split(',')
+                .any(|pattern| !pattern.eq_ignore_ascii_case(name));
+        entries.push(KnownHostEntry {
+            line: idx + 1,
+            key_type: entry.key.algorithm().as_str().to_owned(),
+            covers_other_hosts,
+            hashed,
+            // `parse_line` accepted it, so it is UTF-8.
+            text: String::from_utf8_lossy(raw).trim().to_owned(),
+        });
+    }
+    entries
 }
 
 struct Entry<'a> {
@@ -308,6 +411,13 @@ mod tests {
             .clone()
     }
 
+    /// `Unknown` with no other key type known for the host.
+    fn new_host() -> HostKeyStatus {
+        HostKeyStatus::Unknown {
+            other_key_types: Vec::new(),
+        }
+    }
+
     fn ed() -> PublicKey {
         key(Algorithm::Ed25519)
     }
@@ -330,7 +440,7 @@ mod tests {
     fn unknown_when_file_missing() {
         let dir = TempDir::new().unwrap();
         let status = check(&kh_path(&dir), "h", 22, &ed()).unwrap();
-        assert_eq!(status, HostKeyStatus::Unknown);
+        assert_eq!(status, new_host());
     }
 
     #[test]
@@ -386,7 +496,7 @@ mod tests {
         let k = ed();
         learn(&p, "h", 2222, &k).unwrap();
         assert_eq!(fs::read_to_string(&p).unwrap(), line_for("[h]:2222", &k));
-        assert_eq!(check(&p, "h", 22, &k).unwrap(), HostKeyStatus::Unknown);
+        assert_eq!(check(&p, "h", 22, &k).unwrap(), new_host());
         assert_eq!(check(&p, "h", 2222, &k).unwrap(), HostKeyStatus::Known);
     }
 
@@ -416,7 +526,12 @@ mod tests {
             curve: russh::keys::EcdsaCurve::NistP256,
         });
         learn(&p, "h", 22, &ecdsa).unwrap();
-        assert_eq!(check(&p, "h", 22, &ed()).unwrap(), HostKeyStatus::Unknown);
+        assert_eq!(
+            check(&p, "h", 22, &ed()).unwrap(),
+            HostKeyStatus::Unknown {
+                other_key_types: vec!["ecdsa-sha2-nistp256".to_owned()]
+            }
+        );
     }
 
     #[test]
@@ -428,10 +543,7 @@ mod tests {
             check(p, "hashed.example", 22, &k).unwrap(),
             HostKeyStatus::Known
         );
-        assert_eq!(
-            check(p, "other.example", 22, &k).unwrap(),
-            HostKeyStatus::Unknown
-        );
+        assert_eq!(check(p, "other.example", 22, &k).unwrap(), new_host());
         assert_eq!(
             check(p, "hashed.example", 22, &ed()).unwrap(),
             HostKeyStatus::Changed { line: 2 }
@@ -453,7 +565,7 @@ mod tests {
             HostKeyStatus::Known
         );
         assert_eq!(check(&p, "beta", 2200, &k).unwrap(), HostKeyStatus::Known);
-        assert_eq!(check(&p, "gamma", 22, &k).unwrap(), HostKeyStatus::Unknown);
+        assert_eq!(check(&p, "gamma", 22, &k).unwrap(), new_host());
     }
 
     #[test]
@@ -467,14 +579,8 @@ mod tests {
             HostKeyStatus::Known
         );
         assert_eq!(check(&p, "10.0.0.5", 22, &k).unwrap(), HostKeyStatus::Known);
-        assert_eq!(
-            check(&p, "10.0.0.55", 22, &k).unwrap(),
-            HostKeyStatus::Unknown
-        );
-        assert_eq!(
-            check(&p, "example.org", 22, &k).unwrap(),
-            HostKeyStatus::Unknown
-        );
+        assert_eq!(check(&p, "10.0.0.55", 22, &k).unwrap(), new_host());
+        assert_eq!(check(&p, "example.org", 22, &k).unwrap(), new_host());
     }
 
     #[test]
@@ -487,10 +593,7 @@ mod tests {
             check(&p, "ok.example.com", 22, &k).unwrap(),
             HostKeyStatus::Known
         );
-        assert_eq!(
-            check(&p, "bad.example.com", 22, &k).unwrap(),
-            HostKeyStatus::Unknown
-        );
+        assert_eq!(check(&p, "bad.example.com", 22, &k).unwrap(), new_host());
     }
 
     #[test]
@@ -501,7 +604,7 @@ mod tests {
         let mut text = String::from("# comment\n\ngarbage line\nh ssh-ed25519 !!!notbase64\n");
         text.push_str(&format!("@cert-authority {}", line_for("h", &k)));
         fs::write(&p, text).unwrap();
-        assert_eq!(check(&p, "h", 22, &k).unwrap(), HostKeyStatus::Unknown);
+        assert_eq!(check(&p, "h", 22, &k).unwrap(), new_host());
     }
 
     #[test]
@@ -583,10 +686,7 @@ mod tests {
         learn(&p, "hashed.example", 22, &k).unwrap();
         learn(&p, "keep.example", 22, &k).unwrap();
         assert_eq!(remove(&p, "hashed.example", 22).unwrap(), 2);
-        assert_eq!(
-            check(&p, "hashed.example", 22, &k).unwrap(),
-            HostKeyStatus::Unknown
-        );
+        assert_eq!(check(&p, "hashed.example", 22, &k).unwrap(), new_host());
         assert_eq!(
             check(&p, "keep.example", 22, &k).unwrap(),
             HostKeyStatus::Known
@@ -619,6 +719,38 @@ mod tests {
     }
 
     #[test]
+    fn unknown_reports_other_key_types() {
+        let dir = TempDir::new().unwrap();
+        let p = kh_path(&dir);
+        let p256 = Algorithm::Ecdsa {
+            curve: russh::keys::EcdsaCurve::NistP256,
+        };
+        let mut data = String::new();
+        data.push_str(&line_for("h.example", &key(p256.clone())));
+        let p384 = Algorithm::Ecdsa {
+            curve: russh::keys::EcdsaCurve::NistP384,
+        };
+        data.push_str(&line_for("other.example", &key(p384.clone())));
+        // Revoked entries are not "known".
+        data.push_str(&format!("@revoked {}", line_for("h.example", &key(p384))));
+        data.push_str(&line_for("h.example", &key(p256)));
+        fs::write(&p, data).unwrap();
+        assert_eq!(
+            check(&p, "h.example", 22, &ed()).unwrap(),
+            HostKeyStatus::Unknown {
+                other_key_types: vec!["ecdsa-sha2-nistp256".to_owned()]
+            }
+        );
+        // A host with no entry at all is really new.
+        assert_eq!(
+            check(&p, "new.example", 22, &ed()).unwrap(),
+            HostKeyStatus::Unknown {
+                other_key_types: vec![]
+            }
+        );
+    }
+
+    #[test]
     fn known_algorithms_lists_host_entries_in_order() {
         let dir = TempDir::new().unwrap();
         let p = kh_path(&dir);
@@ -641,5 +773,123 @@ mod tests {
             vec![p256, Algorithm::Ed25519]
         );
         assert!(known_algorithms(&p, "h.example", 2222).is_empty());
+    }
+
+    #[test]
+    fn entries_for_lists_what_remove_deletes() {
+        let dir = TempDir::new().unwrap();
+        let p = kh_path(&dir);
+        assert!(entries_for(&p, "h.example", 22).unwrap().is_empty());
+        let p256 = Algorithm::Ecdsa {
+            curve: russh::keys::EcdsaCurve::NistP256,
+        };
+        let mut data = String::from("# comment\n");
+        // 2: exactly this host.
+        data.push_str(&line_for("h.example", &ed()));
+        // 3: another host only.
+        data.push_str(&line_for("other.example", &ed()));
+        // 4: a comma list naming another host too.
+        data.push_str(&line_for("h.example,192.0.2.7", &key(p256.clone())));
+        // 5: a wildcard pattern.
+        data.push_str(&line_for("*.example", &ed()));
+        // 6: revoked lines are never removed.
+        data.push_str(&format!("@revoked {}", line_for("h.example", &ed())));
+        // 7: the same name twice is still only this host (any case).
+        data.push_str(&line_for("h.example,H.EXAMPLE", &ed()));
+        // 8: a negation excludes this host.
+        data.push_str(&line_for("*.example,!h.example", &ed()));
+        fs::write(&p, data).unwrap();
+
+        let entries = entries_for(&p, "H.example", 22).unwrap();
+        let summary: Vec<_> = entries
+            .iter()
+            .map(|e| (e.line, e.key_type.as_str(), e.covers_other_hosts, e.hashed))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (2, "ssh-ed25519", false, false),
+                (4, "ecdsa-sha2-nistp256", true, false),
+                (5, "ssh-ed25519", true, false),
+                (7, "ssh-ed25519", false, false),
+            ]
+        );
+        // Read-only, and exactly the lines `remove` deletes.
+        let before = fs::read(&p).unwrap();
+        entries_for(&p, "h.example", 22).unwrap();
+        assert_eq!(fs::read(&p).unwrap(), before);
+        assert_eq!(remove(&p, "h.example", 22).unwrap(), entries.len());
+        assert!(entries_for(&p, "h.example", 22).unwrap().is_empty());
+    }
+
+    #[test]
+    fn entries_for_bracketed_port_and_hashed_lines() {
+        let dir = TempDir::new().unwrap();
+        let p = kh_path(&dir);
+        fs::copy(format!("{FIXTURE_DIR}/known_hosts"), &p).unwrap();
+        let k = ed();
+        learn(&p, "h", 2222, &k).unwrap();
+        let mut text = fs::read_to_string(&p).unwrap();
+        text.push_str(&line_for("[h]:2222,[h]:2200", &k));
+        fs::write(&p, text).unwrap();
+
+        // A hashed line names one host: removing it touches no other.
+        assert_eq!(
+            entries_for(&p, "hashed.example", 22).unwrap(),
+            [KnownHostEntry {
+                line: 2,
+                key_type: "ssh-ed25519".into(),
+                covers_other_hosts: false,
+                hashed: true,
+                text: fs::read_to_string(&p)
+                    .unwrap()
+                    .lines()
+                    .nth(1)
+                    .unwrap()
+                    .to_owned(),
+            }]
+        );
+        // `[host]:port` off port 22; the plain name on port 22 is another entry.
+        let entries = entries_for(&p, "h", 2222).unwrap();
+        let lines: Vec<_> = entries
+            .iter()
+            .map(|e| (e.line, e.covers_other_hosts, e.hashed))
+            .collect();
+        assert_eq!(lines, [(3, false, false), (4, true, false)]);
+        assert!(entries_for(&p, "h", 22).unwrap().is_empty());
+    }
+
+    #[test]
+    fn remove_entries_refuses_a_changed_file() {
+        let dir = TempDir::new().unwrap();
+        let p = kh_path(&dir);
+        let (a, b) = (ed(), ed());
+        fs::write(&p, format!("{}{}", line_for("h", &a), line_for("keep", &a))).unwrap();
+        let shown = entries_for(&p, "h", 22).unwrap();
+        assert_eq!(shown[0].text, line_for("h", &a).trim());
+
+        // The line changed (another key) since it was shown: nothing is removed.
+        let changed = format!("{}{}", line_for("h", &b), line_for("keep", &a));
+        fs::write(&p, &changed).unwrap();
+        let err = remove_entries(&p, "h", 22, &shown).unwrap_err();
+        assert_eq!(err.kind, hoprs_core::ErrorKind::Conflict);
+        assert_eq!(fs::read_to_string(&p).unwrap(), changed);
+        // A line added for the host since: refused too.
+        let shown = entries_for(&p, "h", 22).unwrap();
+        let added = format!("{changed}{}", line_for("h,other", &a));
+        fs::write(&p, &added).unwrap();
+        assert!(remove_entries(&p, "h", 22, &shown).is_err());
+        assert_eq!(fs::read_to_string(&p).unwrap(), added);
+
+        // Unchanged since shown: removed, other hosts kept.
+        let shown = entries_for(&p, "h", 22).unwrap();
+        assert_eq!(remove_entries(&p, "h", 22, &shown).unwrap(), 2);
+        assert_eq!(fs::read_to_string(&p).unwrap(), line_for("keep", &a));
+        // Nothing shown, nothing there: fine, nothing written.
+        assert_eq!(remove_entries(&p, "h", 22, &[]).unwrap(), 0);
+        assert_eq!(
+            remove_entries(&dir.path().join("none"), "h", 22, &[]).unwrap(),
+            0
+        );
     }
 }

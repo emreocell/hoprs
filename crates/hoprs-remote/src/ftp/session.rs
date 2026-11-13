@@ -2,10 +2,11 @@
 //! [`FtpSession`] (control connection, transfer connection pool, keepalive, reconnection).
 
 use std::fmt;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, PoisonError, Weak};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use futures_util::future::BoxFuture;
 use hoprs_core::{ConnectionState, Error, ErrorKind, Result};
 use secrecy::{ExposeSecret, SecretString};
@@ -20,8 +21,8 @@ use tokio::time::Instant;
 
 use super::config::{FtpConfig, FtpSecurity, TransferMode};
 use super::errors::{data_connect_failed, is_control_loss, map_ftp_error, reply_parts};
-use super::prompt::FtpPrompter;
-use super::tls::{RejectedCert, RejectedSlot, connector, fingerprint};
+use super::prompt::{CertProblem, FtpPrompter};
+use super::tls::{RejectedCert, RejectedSlot, StalePin, connector, fingerprint};
 
 /// The suppaftp stream type for every security mode. The rustls variant also speaks plain
 /// FTP, and `into_secure` (explicit FTPS) keeps the same type.
@@ -51,6 +52,10 @@ pub(crate) struct Control {
 /// [`FtpPrompter::store_pin`], written to `cfg.pinned_fingerprint`, and the connection is
 /// opened again with that pin, once and without asking again. If the user refuses, the
 /// result is a `Tls` error "Certificate not trusted" with the fingerprint in the detail.
+///
+/// A certificate accepted by its trusted chain while `cfg.pinned_fingerprint` names another
+/// certificate makes the pin stale (ruling R5 of Plan 3): it is reported with
+/// [`FtpPrompter::pin_superseded`] and removed from `cfg`.
 pub(crate) async fn open_control(
     cfg: &mut FtpConfig,
     prompter: &dyn FtpPrompter,
@@ -64,7 +69,16 @@ pub(crate) async fn open_control(
     };
 
     let rejected = match attempt(cfg, &password).await? {
-        Attempt::Connected(control) => return Ok(control),
+        Attempt::Connected {
+            control,
+            stale_pin: true,
+        } => {
+            if let Some(pinned) = cfg.pinned_fingerprint.take() {
+                prompter.pin_superseded(&cfg.host, cfg.port, &pinned).await;
+            }
+            return Ok(control);
+        }
+        Attempt::Connected { control, .. } => return Ok(control),
         Attempt::CertificateRejected(rejected) => rejected,
     };
     let fp = fingerprint(&rejected.der);
@@ -77,7 +91,8 @@ pub(crate) async fn open_control(
     prompter.store_pin(&cfg.host, cfg.port, &fp).await;
     cfg.pinned_fingerprint = Some(fp);
     match attempt(cfg, &password).await? {
-        Attempt::Connected(control) => Ok(control),
+        // Pinned to the certificate just accepted, which the chain did not trust: never stale.
+        Attempt::Connected { control, .. } => Ok(control),
         // The server switched certificates between the two connections.
         Attempt::CertificateRejected(rejected) => Err(not_trusted(&fingerprint(&rejected.der))),
     }
@@ -88,7 +103,9 @@ fn not_trusted(fp: &str) -> Error {
 }
 
 enum Attempt {
-    Connected(Control),
+    /// `stale_pin`: the certificate was accepted by its trusted chain although the config
+    /// pins another one.
+    Connected { control: Control, stale_pin: bool },
     /// The TLS handshake failed on this certificate, which needs the user's decision.
     CertificateRejected(RejectedCert),
 }
@@ -97,9 +114,12 @@ enum Attempt {
 async fn attempt(cfg: &FtpConfig, password: &SecretString) -> Result<Attempt> {
     let target = format!("{}:{}", cfg.host, cfg.port);
     let slot = RejectedSlot::default();
+    let stale = StalePin::default();
     let tls = match cfg.security {
         FtpSecurity::Plain => None,
-        FtpSecurity::ExplicitTls | FtpSecurity::ImplicitTls => Some(connector(cfg, slot.clone())?),
+        FtpSecurity::ExplicitTls | FtpSecurity::ImplicitTls => {
+            Some(connector(cfg, slot.clone(), stale.clone())?)
+        }
     };
     let result = tokio::time::timeout(cfg.connect_timeout, connect_and_login(cfg, password, tls))
         .await
@@ -107,7 +127,10 @@ async fn attempt(cfg: &FtpConfig, password: &SecretString) -> Result<Attempt> {
             Err(Error::new(ErrorKind::Network, "Connection timed out").with_detail(target))
         });
     match result {
-        Ok(control) => Ok(Attempt::Connected(control)),
+        Ok(control) => Ok(Attempt::Connected {
+            control,
+            stale_pin: stale.load(std::sync::atomic::Ordering::SeqCst),
+        }),
         // The verifier fills the slot only when it refuses a certificate, which aborts the
         // handshake; any other TLS failure leaves it empty and is returned as is.
         Err(e) if e.kind == ErrorKind::Tls => {
@@ -274,6 +297,9 @@ const MAX_TRANSFER_CONNECTIONS: usize = 8;
 /// a `NOOP` keepalive, and automatic reconnection. Cheap to clone; the connections close
 /// when the last clone is dropped.
 ///
+/// While a connection attempt of the supervisor (the first connection or a reconnection)
+/// waits on a prompt (the password, a certificate), the state is `WaitingForUser`.
+///
 /// Every connection is opened by [`open_control`] with the session's config, so TLS,
 /// certificate checks and login are identical for all of them. A certificate accepted on
 /// any connection is pinned in that config for the following ones.
@@ -293,6 +319,9 @@ struct Shared {
     /// Config for every new connection; it holds the password (asked once) and the latest
     /// accepted certificate pin.
     cfg: StdMutex<FtpConfig>,
+    /// `cfg.password` was typed at the prompt (not configured): forgotten when the server
+    /// refuses it, so the next attempt asks again.
+    password_prompted: AtomicBool,
     prompter: Arc<dyn FtpPrompter>,
     keepalive_interval: Duration,
     /// Bounds a keepalive `NOOP` and the check of an idle transfer connection.
@@ -301,7 +330,8 @@ struct Shared {
     command_timeout: Duration,
     /// Bounds the silence of a transfer's data connection (see [`FtpConfig::data_timeout`]).
     data_timeout: Duration,
-    /// The control connection and its generation; `None` once lost or closed.
+    /// The control connection and its generation; `None` until the first connection, and
+    /// once lost or closed. The generation is 0 until the first connection.
     control: Mutex<Option<(Control, u64)>>,
     /// When the control connection last finished a command.
     last_used: StdMutex<Instant>,
@@ -346,7 +376,8 @@ impl Shared {
             .clone()
     }
 
-    /// Keeps a certificate pin accepted while opening a connection with a copy of the config.
+    /// Keeps a certificate pin accepted (or a stale pin dropped) while opening a connection
+    /// with a copy of the config.
     fn remember_pin(&self, used: &FtpConfig) {
         let mut cfg = self.cfg.lock().unwrap_or_else(PoisonError::into_inner);
         if cfg.pinned_fingerprint != used.pinned_fingerprint {
@@ -354,12 +385,84 @@ impl Shared {
         }
     }
 
-    /// Opens and logs in a new connection with the session's config.
+    /// Opens and logs in a new connection with the session's config, asking for the
+    /// password first if the session has none (see [`ensure_password`](Self::ensure_password)).
     async fn open(&self) -> Result<Control> {
+        self.ensure_password().await?;
         let mut cfg = self.cfg();
-        let result = open_control(&mut cfg, &*self.prompter).await;
+        let result = open_control(&mut cfg, &AttemptPrompter(self)).await;
         self.remember_pin(&cfg);
+        if result.is_ok() && self.password_prompted.load(Ordering::SeqCst) {
+            // The server logged in with the password typed at the prompt.
+            self.prompter.password_accepted();
+        }
         result
+    }
+
+    /// Asks for the password when the config has none, and keeps it for every following
+    /// connection. Cancelling is `Auth`, "Cancelled by user".
+    async fn ensure_password(&self) -> Result<()> {
+        let (user, host) = {
+            let cfg = self.cfg.lock().unwrap_or_else(PoisonError::into_inner);
+            if cfg.password.is_some() {
+                return Ok(());
+            }
+            (cfg.user.clone(), cfg.host.clone())
+        };
+        let password = AttemptPrompter(self)
+            .password(&user, &host)
+            .await
+            .ok_or_else(|| Error::new(ErrorKind::Auth, "Cancelled by user"))?;
+        self.cfg
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .password = Some(password);
+        self.password_prompted.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// The server refused the login: a password typed at the prompt is forgotten, so the
+    /// next attempt asks again. A configured one is kept.
+    fn forget_prompted_password(&self) {
+        if self.password_prompted.swap(false, Ordering::SeqCst) {
+            self.cfg
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .password = None;
+        }
+    }
+
+    /// `WaitingForUser` until the returned guard is dropped, if a connection attempt is in
+    /// progress (`Connecting` or `Reconnecting`); then the replaced state comes back unless
+    /// the state changed meanwhile (a disconnect). Does nothing in any other state.
+    fn waiting_for_user(&self) -> WaitingForUser<'_> {
+        let mut replaced = None;
+        self.state.send_if_modified(|s| {
+            if matches!(
+                s,
+                ConnectionState::Connecting | ConnectionState::Reconnecting { .. }
+            ) {
+                replaced = Some(std::mem::replace(s, ConnectionState::WaitingForUser));
+                true
+            } else {
+                false
+            }
+        });
+        WaitingForUser {
+            shared: self,
+            replaced,
+        }
+    }
+
+    /// Publishes a new control connection under the next generation: `Connected`.
+    async fn install(&self, control: Control) {
+        let mut slot = self.control.lock().await;
+        self.clear_idle();
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        *slot = Some((control, generation));
+        drop(slot);
+        self.touch();
+        self.set_state(ConnectionState::Connected);
     }
 
     fn touch(&self) {
@@ -399,9 +502,64 @@ impl Shared {
     }
 }
 
+/// See [`Shared::waiting_for_user`].
+struct WaitingForUser<'a> {
+    shared: &'a Shared,
+    replaced: Option<ConnectionState>,
+}
+
+impl Drop for WaitingForUser<'_> {
+    fn drop(&mut self) {
+        if let Some(previous) = self.replaced.take() {
+            self.shared.state.send_if_modified(|s| {
+                let restore = *s == ConnectionState::WaitingForUser;
+                if restore {
+                    *s = previous;
+                }
+                restore
+            });
+        }
+    }
+}
+
+/// The session's prompter, publishing `WaitingForUser` while a prompt is open during a
+/// connection attempt (see [`Shared::waiting_for_user`]).
+struct AttemptPrompter<'a>(&'a Shared);
+
+#[async_trait]
+impl FtpPrompter for AttemptPrompter<'_> {
+    async fn password(&self, user: &str, host: &str) -> Option<SecretString> {
+        let _waiting = self.0.waiting_for_user();
+        self.0.prompter.password(user, host).await
+    }
+
+    async fn confirm_certificate(
+        &self,
+        host: &str,
+        port: u16,
+        fingerprint: &str,
+        problem: &CertProblem,
+    ) -> bool {
+        let _waiting = self.0.waiting_for_user();
+        self.0
+            .prompter
+            .confirm_certificate(host, port, fingerprint, problem)
+            .await
+    }
+
+    async fn store_pin(&self, host: &str, port: u16, fingerprint: &str) {
+        self.0.prompter.store_pin(host, port, fingerprint).await;
+    }
+
+    async fn pin_superseded(&self, host: &str, port: u16, pinned: &str) {
+        self.0.prompter.pin_superseded(host, port, pinned).await;
+    }
+}
+
 /// Requests from the handles; each is acknowledged once the state reflects it.
 enum Command {
     Disconnect(oneshot::Sender<()>),
+    ReconnectNow(oneshot::Sender<()>),
 }
 
 impl fmt::Debug for FtpSession {
@@ -425,22 +583,22 @@ fn user_disconnected() -> ConnectionState {
 }
 
 impl FtpSession {
-    /// Opens the control connection (see [`open_control`]) and starts the supervisor.
+    /// Starts the supervisor, which opens the control connection (see [`open_control`]) in
+    /// the background, and returns at once, in `Connecting` (generation 0). Must be called
+    /// from within a Tokio runtime.
     ///
-    /// When `cfg.password` is `None` it is asked once, here: transfer connections and
-    /// reconnections reuse it. `cfg.transfer_connections` is clamped to 1..=8.
-    pub async fn connect(mut cfg: FtpConfig, prompter: Arc<dyn FtpPrompter>) -> Result<FtpSession> {
-        if cfg.password.is_none() {
-            let password = prompter
-                .password(&cfg.user, &cfg.host)
-                .await
-                .ok_or_else(|| Error::new(ErrorKind::Auth, "Cancelled by user"))?;
-            cfg.password = Some(password);
-        }
+    /// The first connection is a single attempt; then the state is `Connected` (generation
+    /// 1), or `Disconnected` with its error, and [`reconnect_now`](Self::reconnect_now) tries
+    /// again (in `Connecting`). Until `Connected`, every operation fails at once with
+    /// `Network`, "Not connected".
+    ///
+    /// When `cfg.password` is `None` it is asked once, by the first attempt: transfer
+    /// connections and reconnections reuse it (in memory only). If the server later refuses
+    /// it, it is forgotten and the next attempt asks again. `cfg.transfer_connections` is
+    /// clamped to 1..=8.
+    pub fn start(mut cfg: FtpConfig, prompter: Arc<dyn FtpPrompter>) -> FtpSession {
         cfg.transfer_connections = cfg.transfer_connections.clamp(1, MAX_TRANSFER_CONNECTIONS);
-        let control = open_control(&mut cfg, &*prompter).await?;
-
-        let (state, _) = watch::channel(ConnectionState::Connected);
+        let (state, _) = watch::channel(ConnectionState::Connecting);
         let (lost, lost_rx) = mpsc::unbounded_channel();
         let shared = Arc::new(Shared {
             keepalive_interval: cfg.keepalive_interval,
@@ -451,10 +609,11 @@ impl FtpSession {
             transfer_connections: cfg.transfer_connections,
             peak_checked_out: AtomicUsize::new(0),
             cfg: StdMutex::new(cfg),
+            password_prompted: AtomicBool::new(false),
             prompter,
-            control: Mutex::new(Some((control, 1))),
+            control: Mutex::new(None),
             last_used: StdMutex::new(Instant::now()),
-            generation: AtomicU64::new(1),
+            generation: AtomicU64::new(0),
             state,
             idle: StdMutex::new(Vec::new()),
             lost,
@@ -467,9 +626,31 @@ impl FtpSession {
             lost: lost_rx,
         };
         tokio::spawn(supervisor.run());
-        Ok(FtpSession {
+        FtpSession {
             inner: Arc::new(Inner { shared, commands }),
-        })
+        }
+    }
+
+    /// [`start`](Self::start), then waits for the first connection: the session once
+    /// `Connected`, or the error once `Disconnected` (the session is then dropped).
+    pub async fn connect(cfg: FtpConfig, prompter: Arc<dyn FtpPrompter>) -> Result<FtpSession> {
+        let session = Self::start(cfg, prompter);
+        let mut state = session.state();
+        let outcome = state
+            .wait_for(|s| {
+                matches!(
+                    s,
+                    ConnectionState::Connected | ConnectionState::Disconnected(_)
+                )
+            })
+            .await
+            .map(|s| s.clone());
+        match outcome {
+            Ok(ConnectionState::Disconnected(e)) => Err(e),
+            Ok(_) => Ok(session),
+            // The supervisor lives as long as a handle does; this one is still here.
+            Err(_) => Err(Error::new(ErrorKind::Network, "Connection lost")),
+        }
     }
 
     /// Watches the connection state.
@@ -477,8 +658,8 @@ impl FtpSession {
         self.inner.shared.state.subscribe()
     }
 
-    /// Starts at 1 and goes up by one after every successful reconnection. Transfer
-    /// connections of an older generation are never handed out again.
+    /// 0 until the first connection, which makes it 1; goes up by one after every successful
+    /// reconnection. Transfer connections of an older generation are never handed out again.
     pub fn generation(&self) -> u64 {
         self.inner.shared.generation()
     }
@@ -628,8 +809,20 @@ impl FtpSession {
     /// Closes every connection and stops reconnecting: the state becomes `Disconnected`
     /// with `Network`, "Disconnected by user" (or keeps its error if already disconnected).
     pub async fn disconnect(&self) {
+        self.request(Command::Disconnect).await;
+    }
+
+    /// When the state is `Disconnected`, starts a new round of reconnection attempts, the
+    /// first one without delay (`Reconnecting`), or, if the session never connected, a new
+    /// first connection attempt (`Connecting`). Does nothing otherwise. Returns once the
+    /// state shows it.
+    pub async fn reconnect_now(&self) {
+        self.request(Command::ReconnectNow).await;
+    }
+
+    async fn request(&self, command: impl FnOnce(oneshot::Sender<()>) -> Command) {
         let (ack, done) = oneshot::channel();
-        if self.inner.commands.send(Command::Disconnect(ack)).is_ok() {
+        if self.inner.commands.send(command(ack)).is_ok() {
             let _ = done.await;
         }
     }
@@ -721,8 +914,9 @@ impl Drop for PooledConn {
 
 /// What the supervisor does next.
 enum Phase {
+    Connecting,
     Connected,
-    Reconnecting(Error),
+    Reconnecting { last: Error, immediate: bool },
     Disconnected,
     Stop,
 }
@@ -737,16 +931,42 @@ struct Supervisor {
 
 impl Supervisor {
     async fn run(mut self) {
-        let mut phase = Phase::Connected;
+        let mut phase = Phase::Connecting;
         loop {
             phase = match phase {
+                Phase::Connecting => self.connecting().await,
                 Phase::Connected => self.connected().await,
-                Phase::Reconnecting(last) => self.reconnect(last).await,
+                Phase::Reconnecting { last, immediate } => self.reconnect(last, immediate).await,
                 Phase::Disconnected => self.disconnected().await,
                 Phase::Stop => break,
             };
         }
         self.shared.close();
+    }
+
+    /// One first-connection attempt. A failure is final until `reconnect_now`.
+    async fn connecting(&mut self) -> Phase {
+        let Self {
+            shared, commands, ..
+        } = self;
+        shared.set_state(ConnectionState::Connecting);
+        let result = match serve_during(shared, commands, shared.open()).await {
+            Ok(result) => result,
+            Err(phase) => return phase,
+        };
+        match result {
+            Ok(control) => {
+                shared.install(control).await;
+                Phase::Connected
+            }
+            Err(e) => {
+                if e.kind == ErrorKind::Auth {
+                    shared.forget_prompted_password();
+                }
+                shared.set_state(ConnectionState::Disconnected(e));
+                Phase::Disconnected
+            }
+        }
     }
 
     async fn connected(&mut self) -> Phase {
@@ -762,29 +982,54 @@ impl Supervisor {
                 Some((generation, e)) = lost.recv() => {
                     // Reports about an older connection are stale.
                     if generation == shared.generation() {
-                        return Phase::Reconnecting(e);
+                        return Phase::Reconnecting { last: e, immediate: false };
                     }
                     continue;
                 }
                 _ = tokio::time::sleep_until(next) => false,
                 _ = shared.probe.notified() => true,
-                command = commands.recv() => return on_command(shared, command),
+                command = commands.recv() => match on_command(shared, command) {
+                    Some(phase) => return phase,
+                    None => continue,
+                },
             };
             // Commands are served while the NOOP waits for its reply: a disconnect drops the
-            // NOOP (and its hold on the control connection) and closes the connection.
-            let result = tokio::select! {
-                result = keepalive(shared, probe) => result,
-                command = commands.recv() => return on_command(shared, command),
+            // NOOP (and its hold on the control connection) first, then closes the connection.
+            let outcome = {
+                let noop = keepalive(shared, probe);
+                tokio::pin!(noop);
+                loop {
+                    tokio::select! {
+                        result = &mut noop => break Ok(result),
+                        command = commands.recv() => match command {
+                            Some(Command::ReconnectNow(ack)) => {
+                                let _ = ack.send(());
+                            }
+                            other => break Err(other),
+                        },
+                    }
+                }
             };
-            match result {
-                Ok(at) => next = at,
-                Err(e) => return Phase::Reconnecting(e),
+            match outcome {
+                Ok(Ok(at)) => next = at,
+                Ok(Err(e)) => {
+                    return Phase::Reconnecting {
+                        last: e,
+                        immediate: false,
+                    };
+                }
+                Err(command) => {
+                    if let Some(phase) = on_command(shared, command) {
+                        return phase;
+                    }
+                }
             }
         }
     }
 
-    /// One round of attempts per `cfg.reconnect`. `Auth` and `Tls` errors end it at once.
-    async fn reconnect(&mut self, mut last: Error) -> Phase {
+    /// One round of attempts per `cfg.reconnect`, the first without delay when `immediate`.
+    /// `Auth` and `Tls` errors end it at once.
+    async fn reconnect(&mut self, mut last: Error, immediate: bool) -> Phase {
         let Self {
             shared, commands, ..
         } = self;
@@ -793,35 +1038,28 @@ impl Supervisor {
         for (index, delay) in policy.delays().into_iter().enumerate() {
             let attempt = u32::try_from(index + 1).unwrap_or(u32::MAX);
             shared.set_state(ConnectionState::Reconnecting { attempt });
+            let delay = if immediate && index == 0 {
+                Duration::ZERO
+            } else {
+                delay
+            };
             let try_once = async {
                 tokio::time::sleep(delay).await;
                 shared.open().await
             };
-            // Every command ends the round, so the attempt is never resumed.
-            let result = tokio::select! {
-                result = try_once => result,
-                command = commands.recv() => match command {
-                    None => return Phase::Stop,
-                    Some(Command::Disconnect(ack)) => {
-                        // Dropping `try_once` abandons the attempt and its prompts.
-                        shared.set_state(user_disconnected());
-                        let _ = ack.send(());
-                        return Phase::Disconnected;
-                    }
-                },
+            let result = match serve_during(shared, commands, try_once).await {
+                Ok(result) => result,
+                Err(phase) => return phase,
             };
             match result {
                 Ok(control) => {
-                    let mut slot = shared.control.lock().await;
-                    shared.clear_idle();
-                    let generation = shared.generation.fetch_add(1, Ordering::SeqCst) + 1;
-                    *slot = Some((control, generation));
-                    drop(slot);
-                    shared.touch();
-                    shared.set_state(ConnectionState::Connected);
+                    shared.install(control).await;
                     return Phase::Connected;
                 }
                 Err(e) if matches!(e.kind, ErrorKind::Auth | ErrorKind::Tls) => {
+                    if e.kind == ErrorKind::Auth {
+                        shared.forget_prompted_password();
+                    }
                     shared.set_state(ConnectionState::Disconnected(e));
                     return Phase::Disconnected;
                 }
@@ -839,21 +1077,70 @@ impl Supervisor {
                 Some(Command::Disconnect(ack)) => {
                     let _ = ack.send(());
                 }
+                Some(Command::ReconnectNow(ack)) => {
+                    if self.shared.generation() == 0 {
+                        self.shared.set_state(ConnectionState::Connecting);
+                        let _ = ack.send(());
+                        return Phase::Connecting;
+                    }
+                    let last = match &*self.shared.state.borrow() {
+                        ConnectionState::Disconnected(e) => e.clone(),
+                        _ => Error::new(ErrorKind::Network, "Disconnected by user"),
+                    };
+                    self.shared
+                        .set_state(ConnectionState::Reconnecting { attempt: 1 });
+                    let _ = ack.send(());
+                    return Phase::Reconnecting {
+                        last,
+                        immediate: true,
+                    };
+                }
             }
         }
     }
 }
 
-/// A handle command received while connected.
-fn on_command(shared: &Shared, command: Option<Command>) -> Phase {
+/// Runs a connection attempt while serving handle commands: `Err` with the next phase when
+/// a command ends it (a disconnect drops the attempt and its prompts), `Ok` with its result
+/// otherwise. `reconnect_now` is acknowledged without effect (an attempt is running).
+async fn serve_during<T>(
+    shared: &Shared,
+    commands: &mut mpsc::UnboundedReceiver<Command>,
+    attempt: impl Future<Output = T>,
+) -> std::result::Result<T, Phase> {
+    tokio::pin!(attempt);
+    loop {
+        tokio::select! {
+            result = &mut attempt => return Ok(result),
+            command = commands.recv() => match command {
+                None => return Err(Phase::Stop),
+                Some(Command::Disconnect(ack)) => {
+                    shared.set_state(user_disconnected());
+                    let _ = ack.send(());
+                    return Err(Phase::Disconnected);
+                }
+                Some(Command::ReconnectNow(ack)) => {
+                    let _ = ack.send(());
+                }
+            },
+        }
+    }
+}
+
+/// A handle command received while connected; `None` to stay connected.
+fn on_command(shared: &Shared, command: Option<Command>) -> Option<Phase> {
     match command {
-        None => Phase::Stop,
+        None => Some(Phase::Stop),
         Some(Command::Disconnect(ack)) => {
             // A running command sees the state change and closes the connection.
             shared.set_state(user_disconnected());
             shared.close();
             let _ = ack.send(());
-            Phase::Disconnected
+            Some(Phase::Disconnected)
+        }
+        Some(Command::ReconnectNow(ack)) => {
+            let _ = ack.send(());
+            None
         }
     }
 }

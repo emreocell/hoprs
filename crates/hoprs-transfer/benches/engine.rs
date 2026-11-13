@@ -9,7 +9,7 @@ use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use hoprs_core::{RemotePath, SiteId};
 use hoprs_remote::MemFs;
 use hoprs_transfer::{
-    Direction, EngineConfig, Event, QueueStore, SiteEndpoints, TransferEngine, TransferSpec,
+    Direction, EngineConfig, EventKind, QueueStore, SiteEndpoints, TransferEngine, TransferSpec,
     TransferState,
 };
 use tokio::runtime::Runtime;
@@ -66,7 +66,7 @@ async fn run_once(
 
     let start = Instant::now();
     let (store, _dir) = open_queue(queue);
-    let engine = TransferEngine::start(store, EngineConfig::default());
+    let engine = TransferEngine::start(store, EngineConfig::default()).unwrap();
     let mut rx = engine.subscribe();
     engine
         .register_site(
@@ -89,8 +89,8 @@ async fn run_once(
         .expect("enqueue");
     let done = async {
         loop {
-            match rx.recv().await {
-                Ok(Event::StateChanged { id: i, state }) if i == id && state.is_terminal() => {
+            match rx.recv().await.map(|e| e.kind) {
+                Ok(EventKind::StateChanged { id: i, state }) if i == id && state.is_terminal() => {
                     assert_eq!(state, TransferState::Done);
                     break;
                 }

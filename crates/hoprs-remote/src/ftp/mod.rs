@@ -17,7 +17,7 @@ use hoprs_core::{ConnectionState, EntryKind, Error, ErrorKind, RemoteEntry, Remo
 use tokio::sync::watch;
 
 pub use config::{FtpConfig, FtpSecurity, TransferMode};
-pub use prompt::{CertProblem, FtpPrompter};
+pub use prompt::{CertProblem, CertReason, FtpPrompter};
 #[cfg(feature = "testing")]
 pub use prompt::{CertificatePrompt, FtpPromptCalls, ScriptedFtpPrompter};
 pub use tls::fingerprint;
@@ -103,18 +103,37 @@ pub struct FtpFs {
 }
 
 impl FtpFs {
-    /// Connects and logs in (see [`FtpSession::connect`]).
+    /// Starts connecting in the background and returns at once, in `Connecting` (see
+    /// [`FtpSession::start`]): the state is observable through [`Connection::state`] from the
+    /// start, and every operation fails with `Network`, "Not connected" until `Connected`.
+    /// Must be called from within a Tokio runtime.
+    pub fn start(cfg: FtpConfig, prompter: Arc<dyn FtpPrompter>) -> FtpFs {
+        FtpFs::with_session(FtpSession::start(cfg, prompter))
+    }
+
+    /// Connects and logs in (see [`FtpSession::connect`]): [`start`](Self::start), then
+    /// waits for `Connected` (or the error that ended the first attempt).
     pub async fn connect(cfg: FtpConfig, prompter: Arc<dyn FtpPrompter>) -> Result<FtpFs> {
-        let session = FtpSession::connect(cfg, prompter).await?;
-        Ok(FtpFs {
+        Ok(FtpFs::with_session(
+            FtpSession::connect(cfg, prompter).await?,
+        ))
+    }
+
+    fn with_session(session: FtpSession) -> FtpFs {
+        FtpFs {
             session,
             listings: Arc::new(AtomicU64::new(0)),
-        })
+        }
     }
 
     /// Closes every connection and stops reconnecting.
     pub async fn disconnect(&self) {
         self.session.disconnect().await;
+    }
+
+    /// Tries again after `Disconnected` (see [`FtpSession::reconnect_now`]).
+    pub async fn reconnect_now(&self) {
+        self.session.reconnect_now().await;
     }
 
     /// The raw lines of `dir`'s listing, and whether they came from `MLSD`.

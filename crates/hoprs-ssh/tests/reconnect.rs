@@ -412,3 +412,241 @@ async fn supervisor_ends_when_last_handle_drops() {
         .expect("supervisor still running 1 s after the last handle dropped");
     assert!(closed.is_err(), "expected the state channel to close");
 }
+
+// ---------------------------------------------------------------------------------------
+// Observable start, WaitingForUser and remembered secrets.
+// ---------------------------------------------------------------------------------------
+
+/// A known_hosts directory that already trusts the container, so only auth prompts remain.
+async fn known_host_dir() -> TempDir {
+    let dir = TempDir::new().unwrap();
+    let mut cfg = test_config("bob", dir.path());
+    cfg.auth.password = Some(SecretString::from("bob-pass"));
+    let p = Arc::new(ScriptedPrompter::new().accept_host(true));
+    SshSession::connect(cfg, p as Arc<dyn Prompter>)
+        .await
+        .unwrap()
+        .disconnect()
+        .await;
+    dir
+}
+
+/// bob with the test policy, password prompted (not configured).
+fn prompted_config(dir: &TempDir) -> hoprs_ssh::SshConfig {
+    let mut cfg = test_config("bob", dir.path());
+    cfg.keepalive_interval = Duration::from_secs(1);
+    cfg.keepalive_max = 3;
+    cfg.reconnect = ReconnectPolicy {
+        max_attempts: 5,
+        base_delay: Duration::from_millis(100),
+        max_delay: Duration::from_millis(400),
+    };
+    cfg
+}
+
+/// Answers the password prompt with bob's password, but only once allowed: until then it
+/// cancels (`gate: false`) or waits for [`release`](Self::release) (`gate: true`).
+struct HeldPassword {
+    allowed: std::sync::atomic::AtomicBool,
+    gate: Option<tokio::sync::Semaphore>,
+    calls: std::sync::atomic::AtomicU32,
+}
+
+impl HeldPassword {
+    fn cancelling() -> Arc<Self> {
+        Arc::new(Self {
+            allowed: false.into(),
+            gate: None,
+            calls: 0.into(),
+        })
+    }
+
+    fn gated() -> Arc<Self> {
+        Arc::new(Self {
+            allowed: true.into(),
+            gate: Some(tokio::sync::Semaphore::new(0)),
+            calls: 0.into(),
+        })
+    }
+
+    fn allow(&self) {
+        self.allowed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn release(&self) {
+        if let Some(gate) = &self.gate {
+            gate.add_permits(1);
+        }
+    }
+
+    fn calls(&self) -> u32 {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl Prompter for HeldPassword {
+    async fn confirm_host_key(&self, _: &str, _: u16, _: &str, _: &str, _: &[String]) -> bool {
+        true
+    }
+
+    async fn password(&self, _: &str, _: &str) -> Option<SecretString> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(gate) = &self.gate {
+            gate.acquire().await.unwrap().forget();
+        }
+        self.allowed
+            .load(std::sync::atomic::Ordering::SeqCst)
+            .then(|| SecretString::from("bob-pass"))
+    }
+
+    async fn key_passphrase(&self, _: &std::path::Path) -> Option<SecretString> {
+        None
+    }
+
+    async fn keyboard_interactive(
+        &self,
+        _: &str,
+        _: &str,
+        _: &[hoprs_ssh::KbdPrompt],
+    ) -> Option<Vec<SecretString>> {
+        None
+    }
+}
+
+/// Current-thread runtime: the supervisor cannot run before the test yields, so the first
+/// state is deterministic.
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn start_is_observable_then_connects() {
+    let dir = known_host_dir().await;
+    let mut cfg = prompted_config(&dir);
+    cfg.auth.password = Some(SecretString::from("bob-pass"));
+    let p = Arc::new(ScriptedPrompter::new());
+    let s = SshSession::start(cfg, p.clone() as Arc<dyn Prompter>);
+    let mut rx = s.state();
+    assert_eq!(*rx.borrow(), SessionState::Connecting);
+    assert_eq!(s.generation(), 0);
+    assert_not_connected(s.open_channel().await);
+
+    wait_state(
+        &mut rx,
+        |st| *st == SessionState::Connected,
+        Duration::from_secs(10),
+    )
+    .await;
+    assert_eq!(s.generation(), 1);
+    s.open_channel().await.unwrap();
+    assert_eq!(p.calls().host, 0);
+    s.disconnect().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn failed_first_connect_can_reconnect_now() {
+    let dir = known_host_dir().await;
+    let p = HeldPassword::cancelling();
+    let s = SshSession::start(prompted_config(&dir), p.clone() as Arc<dyn Prompter>);
+    let mut rx = s.state();
+    let state = wait_state(
+        &mut rx,
+        |st| matches!(st, SessionState::Disconnected(_)),
+        Duration::from_secs(10),
+    )
+    .await;
+    let e = disconnected_error(&[state]);
+    assert_eq!(e.kind, ErrorKind::Auth, "{e:?}");
+    assert_eq!(e.message, "Cancelled by user", "{e:?}");
+    assert_eq!(s.generation(), 0);
+    assert_not_connected(s.open_channel().await);
+
+    p.allow();
+    s.reconnect_now().await;
+    assert!(
+        !matches!(*rx.borrow(), SessionState::Disconnected(_)),
+        "reconnect_now returned before the state showed it: {:?}",
+        *rx.borrow()
+    );
+    wait_state(
+        &mut rx,
+        |st| *st == SessionState::Connected,
+        Duration::from_secs(10),
+    )
+    .await;
+    assert_eq!(s.generation(), 1);
+    assert_eq!(p.calls(), 2);
+    s.open_channel().await.unwrap();
+    s.disconnect().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn waiting_for_user_while_prompting() {
+    let dir = known_host_dir().await;
+    let p = HeldPassword::gated();
+    let s = SshSession::start(prompted_config(&dir), p.clone() as Arc<dyn Prompter>);
+    let rec = record_until(s.state(), |st| *st == SessionState::Connected);
+    let mut rx = s.state();
+    wait_state(
+        &mut rx,
+        |st| *st == SessionState::WaitingForUser,
+        Duration::from_secs(10),
+    )
+    .await;
+    assert_not_connected(s.open_channel().await);
+    // The prompt holds the attempt without timing it out.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(*rx.borrow(), SessionState::WaitingForUser);
+
+    p.release();
+    let states = recorded(rec).await;
+    assert_eq!(
+        states.first(),
+        Some(&SessionState::WaitingForUser),
+        "{states:?}"
+    );
+    assert_eq!(states.last(), Some(&SessionState::Connected), "{states:?}");
+    assert!(
+        states[1..states.len() - 1]
+            .iter()
+            .all(|st| *st == SessionState::Connecting),
+        "the prompt must hand back to Connecting: {states:?}"
+    );
+    assert_eq!(p.calls(), 1);
+    s.disconnect().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn prompted_password_reused_on_reconnect() {
+    let dir = known_host_dir().await;
+    let p = Arc::new(
+        ScriptedPrompter::new()
+            .accept_host(true)
+            .with_password(Some("bob-pass")),
+    );
+    let s = SshSession::connect(prompted_config(&dir), p.clone() as Arc<dyn Prompter>)
+        .await
+        .unwrap();
+    assert_eq!(p.calls().password, 1);
+
+    let rec = record_until(s.state(), |st| *st == SessionState::Connected);
+    kill_ssh_sessions();
+    let states = recorded(rec).await;
+    assert_eq!(
+        states,
+        vec![
+            SessionState::Reconnecting { attempt: 1 },
+            SessionState::Connected
+        ]
+    );
+    assert_eq!(s.generation(), 2);
+    assert_eq!(
+        p.calls().password,
+        1,
+        "the prompted password must be reused"
+    );
+    s.open_channel().await.unwrap();
+    s.disconnect().await;
+}

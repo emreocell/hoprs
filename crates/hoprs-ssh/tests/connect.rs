@@ -15,7 +15,9 @@ use async_trait::async_trait;
 
 use hoprs_core::{Error, ErrorKind};
 use hoprs_ssh::testing::{fixture, test_config};
-use hoprs_ssh::{KbdPrompt, KeySource, Prompter, ScriptedPrompter, SshConfig, SshSession};
+use hoprs_ssh::{
+    AuthMethod, KbdPrompt, KeySource, Prompter, ScriptedPrompter, SshConfig, SshSession,
+};
 use secrecy::SecretString;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
@@ -65,6 +67,12 @@ async fn unknown_host_prompts_and_learns() {
     assert_eq!(session.user(), "bob");
     session.disconnect().await;
     assert_eq!(p.calls().host, 1);
+    let prompts = p.host_key_prompts();
+    assert_eq!(prompts[0].host, "127.0.0.1");
+    assert_eq!(prompts[0].port, 2222);
+    assert_eq!(prompts[0].key_type, "ssh-ed25519");
+    assert!(prompts[0].fingerprint.starts_with("SHA256:"), "{prompts:?}");
+    assert!(prompts[0].other_key_types.is_empty(), "{prompts:?}");
     let lines = known_hosts_lines(dir.path());
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(
@@ -76,6 +84,36 @@ async fn unknown_host_prompts_and_learns() {
     connect(cfg, &p2).await.unwrap().disconnect().await;
     assert_eq!(p2.calls().host, 0);
     assert_eq!(known_hosts_lines(dir.path()).len(), 1);
+}
+
+/// The server presents its ed25519 key while known_hosts only holds an ecdsa key for it:
+/// the prompt says which other key types are known, and the new key is learned.
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn unknown_host_reports_other_known_key_types() {
+    let dir = TempDir::new().unwrap();
+    let ecdsa = russh::keys::PrivateKey::random(
+        &mut rand::rng(),
+        russh::keys::Algorithm::Ecdsa {
+            curve: russh::keys::EcdsaCurve::NistP256,
+        },
+    )
+    .unwrap();
+    let line = ecdsa.public_key().to_openssh().unwrap();
+    fs::write(
+        dir.path().join("known_hosts"),
+        format!("[127.0.0.1]:2222 {line}\n"),
+    )
+    .unwrap();
+    let mut cfg = test_config("bob", dir.path());
+    cfg.auth.password = Some(SecretString::from("bob-pass"));
+    let p = Arc::new(ScriptedPrompter::new().accept_host(true));
+    connect(cfg, &p).await.unwrap().disconnect().await;
+    let prompts = p.host_key_prompts();
+    assert_eq!(prompts.len(), 1, "{prompts:?}");
+    assert_eq!(prompts[0].key_type, "ssh-ed25519");
+    assert_eq!(prompts[0].other_key_types, vec!["ecdsa-sha2-nistp256"]);
+    assert_eq!(known_hosts_lines(dir.path()).len(), 2);
 }
 
 #[tokio::test]
@@ -148,7 +186,9 @@ async fn password_auth_from_config() {
     let mut cfg = test_config("bob", dir.path());
     cfg.auth.password = Some(SecretString::from("bob-pass"));
     let p = Arc::new(ScriptedPrompter::new());
-    connect(cfg, &p).await.unwrap().disconnect().await;
+    let session = connect(cfg, &p).await.unwrap();
+    assert_eq!(session.auth_method(), Some(AuthMethod::Password));
+    session.disconnect().await;
     assert_eq!(p.calls().password, 0);
 }
 
@@ -199,7 +239,14 @@ async fn key_auth() {
         passphrase: None,
     };
     let p = Arc::new(ScriptedPrompter::new());
-    connect(cfg, &p).await.unwrap().disconnect().await;
+    let session = connect(cfg, &p).await.unwrap();
+    assert_eq!(
+        session.auth_method(),
+        Some(AuthMethod::KeyFile {
+            key_type: "ed25519".into()
+        })
+    );
+    session.disconnect().await;
     assert_eq!(p.calls().password, 0);
     assert_eq!(p.calls().passphrase, 0);
 }
@@ -326,7 +373,7 @@ struct SlowHostPrompter;
 
 #[async_trait]
 impl Prompter for SlowHostPrompter {
-    async fn confirm_host_key(&self, _: &str, _: u16, _: &str, _: &str) -> bool {
+    async fn confirm_host_key(&self, _: &str, _: u16, _: &str, _: &str, _: &[String]) -> bool {
         tokio::time::sleep(Duration::from_millis(1500)).await;
         true
     }
@@ -452,7 +499,14 @@ async fn agent_auth() {
     cfg.auth.use_agent = true;
     cfg.auth.agent_socket = Some(agent.socket.clone());
     let p = Arc::new(ScriptedPrompter::new());
-    connect(cfg, &p).await.unwrap().disconnect().await;
+    let session = connect(cfg, &p).await.unwrap();
+    assert_eq!(
+        session.auth_method(),
+        Some(AuthMethod::Agent {
+            key_type: "ed25519".into()
+        })
+    );
+    session.disconnect().await;
     assert_eq!(p.calls().passphrase, 0);
     assert_eq!(p.calls().password, 0);
 }
@@ -633,4 +687,54 @@ async fn keyboard_interactive_wrong_answer_fails() {
     let detail = e.detail.unwrap_or_default();
     assert!(detail.contains("tried: keyboard-interactive"), "{detail}");
     assert!(!detail.contains("nope"), "{detail}");
+}
+
+/// Only a typed secret that proved right is reported as accepted (the app saves only
+/// those in the keyring).
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn accepted_secret_right_password() {
+    let dir = trusted_dir().await;
+    let cfg = test_config("bob", dir.path());
+    let p = Arc::new(ScriptedPrompter::new().with_password(Some("bob-pass")));
+    connect(cfg, &p).await.unwrap().disconnect().await;
+    assert_eq!(p.accepted(), [hoprs_ssh::AcceptedSecret::Password]);
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn accepted_secret_not_for_rejected_password_then_kbd() {
+    let dir = trusted_dir().await;
+    let mut cfg = test_config("dave", dir.path());
+    cfg.auth.use_agent = false;
+    cfg.auth.allow_keyboard_interactive = true;
+    let p = Arc::new(
+        ScriptedPrompter::new()
+            .with_password(Some("not-daves-pass"))
+            .with_kbd_answers(Some(vec!["dave-pass"])),
+    );
+    connect(cfg, &p).await.unwrap().disconnect().await;
+    assert_eq!(p.calls().password, 1);
+    assert!(p.calls().kbd >= 1);
+    assert!(p.accepted().is_empty(), "{:?}", p.accepted());
+}
+
+#[tokio::test]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
+async fn accepted_secret_not_for_wrong_passphrase_then_password() {
+    let dir = trusted_dir().await;
+    let mut cfg = test_config("alice", dir.path());
+    cfg.auth.use_agent = false;
+    cfg.auth.key = KeySource::File {
+        path: fixture("id_ed25519_pp"),
+        passphrase: None,
+    };
+    let p = Arc::new(
+        ScriptedPrompter::new()
+            .with_passphrase(Some("not-the-pp"))
+            .with_password(Some("alice-pass")),
+    );
+    connect(cfg, &p).await.unwrap().disconnect().await;
+    assert_eq!(p.calls().passphrase, 1);
+    assert_eq!(p.accepted(), [hoprs_ssh::AcceptedSecret::Password]);
 }

@@ -7,8 +7,8 @@ use std::time::{Duration, SystemTime};
 use hoprs_core::{RemotePath, SiteId};
 use hoprs_remote::{MemFs, RemoteFs};
 use hoprs_transfer::{
-    Direction, EngineConfig, Event, QueueStore, SiteEndpoints, TransferEngine, TransferId,
-    TransferSpec, TransferState,
+    Direction, EngineConfig, Event, EventKind, QueueStore, SiteEndpoints, TransferEngine,
+    TransferId, TransferSpec, TransferState,
 };
 use tokio::sync::broadcast::Receiver;
 use tokio::sync::broadcast::error::RecvError;
@@ -52,7 +52,7 @@ pub fn spec(direction: Direction, local: &str, remote: &str) -> TransferSpec {
 /// Starts an engine on an in-memory store and subscribes before anything happens.
 pub fn start_engine(config: EngineConfig) -> (TransferEngine, Receiver<Event>) {
     let store = QueueStore::open_in_memory().expect("in-memory store");
-    let engine = TransferEngine::start(store, config);
+    let engine = TransferEngine::start(store, config).expect("engine start");
     let rx = engine.subscribe();
     (engine, rx)
 }
@@ -94,12 +94,15 @@ pub async fn engine_with_memfs(workers: usize) -> (TransferEngine, MemFs, MemFs,
     (engine, local, remote, rx)
 }
 
-/// Returns the first event matching `f`; panics after 5 s.
-pub async fn wait_for<F: FnMut(&Event) -> bool>(rx: &mut Receiver<Event>, mut f: F) -> Event {
+/// Returns the kind of the first event whose kind matches `f`; panics after 5 s.
+pub async fn wait_for<F: FnMut(&EventKind) -> bool>(
+    rx: &mut Receiver<Event>,
+    mut f: F,
+) -> EventKind {
     let fut = async {
         loop {
             match rx.recv().await {
-                Ok(ev) if f(&ev) => return ev,
+                Ok(ev) if f(&ev.kind) => return ev.kind,
                 Ok(_) | Err(RecvError::Lagged(_)) => {}
                 Err(RecvError::Closed) => panic!("event channel closed"),
             }
@@ -114,11 +117,11 @@ pub async fn wait_for<F: FnMut(&Event) -> bool>(rx: &mut Receiver<Event>, mut f:
 pub async fn wait_terminal(rx: &mut Receiver<Event>, id: TransferId) -> TransferState {
     match wait_for(
         rx,
-        |e| matches!(e, Event::StateChanged { id: i, state } if *i == id && state.is_terminal()),
+        |e| matches!(e, EventKind::StateChanged { id: i, state } if *i == id && state.is_terminal()),
     )
     .await
     {
-        Event::StateChanged { state, .. } => state,
+        EventKind::StateChanged { state, .. } => state,
         _ => unreachable!(),
     }
 }

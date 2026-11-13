@@ -6,10 +6,14 @@
 //! across both. For a directory, `prepare` creates the destination and lists
 //! the source; the actor frees the slot as soon as the listing arrives.
 //! Both phases watch the item's cancellation token: `prepare` stops at once
-//! (`Prepared::Stopped`), `copy` before its next block.
+//! (`Prepared::Stopped`); `copy` stops before its next block, and if a read
+//! or write is pending it gets `STOP_GRACE` to do so before it is dropped
+//! (`CopyOutcome::Cancelled`), so a stalled transfer stops at once on any
+//! backend.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use hoprs_core::{EntryKind, Error, ErrorKind, RemoteEntry, RemotePath, Result};
 use hoprs_remote::RemoteFs;
@@ -82,6 +86,13 @@ pub(super) enum WorkerMsg {
         result: Result<CopyOutcome>,
     },
 }
+
+/// How long a cancelled copy may take to stop on its own (before its next
+/// block, shutting its writer down cleanly) before it is dropped. A clean
+/// stop is preferred: a pipelined writer may only report at shutdown that
+/// an earlier block failed, which makes the copy `Failed` (and its retry
+/// start over) instead of `Cancelled`.
+const STOP_GRACE: Duration = Duration::from_millis(200);
 
 fn panicked() -> Error {
     Error::new(ErrorKind::Io, "Worker panicked")
@@ -190,7 +201,7 @@ pub(super) fn spawn_copy(
     spawn_phase(
         tx,
         async move {
-            let result = copy_file(
+            let copy = copy_file(
                 route.src.as_ref(),
                 &src,
                 route.dst.as_ref(),
@@ -199,8 +210,19 @@ pub(super) fn spawn_copy(
                 buf_size,
                 &counter,
                 &cancel,
-            )
-            .await;
+            );
+            tokio::pin!(copy);
+            let result = tokio::select! {
+                biased;
+                result = &mut copy => result,
+                () = cancel.cancelled() => {
+                    // Stopped while a read or write may be pending: let the
+                    // copy stop cleanly if it can, else drop it mid-call.
+                    tokio::time::timeout(STOP_GRACE, &mut copy)
+                        .await
+                        .unwrap_or(Ok(CopyOutcome::Cancelled))
+                }
+            };
             let bytes = counter.load(Ordering::Relaxed);
             WorkerMsg::Copied { id, bytes, result }
         },
