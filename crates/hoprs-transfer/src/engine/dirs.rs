@@ -179,14 +179,22 @@ impl Actor {
         if pending > 0 && initial == TransferState::Queued {
             self.dirs.insert(id, DirProgress { pending, failed });
         }
-        // The folder is fresh only while no other tree writes there.
+        // The folder is fresh only while no other tree writes there. When one does, the
+        // fresh folders of others that overlap this one lose their marks too (any that
+        // overlap a child overlap this folder).
         let root = self.root_of(id);
-        let fresh = created && !self.destination_shared(root, super::actor::destination(&parent));
+        let parent_dst = super::actor::destination(&parent).clone();
+        let shared = self.destination_shared(root, &parent_dst);
+        if shared {
+            self.drop_overlapping_fresh(root, &parent_dst);
+        }
+        let fresh = created && !shared;
+        let mut fresh_files = Vec::new();
         for (child_id, child) in ids.into_iter().zip(children) {
             if fresh && !child.is_dir && child.state == TransferState::Queued {
                 self.fresh_dst.insert(child_id);
+                fresh_files.push(child_id);
             }
-            self.drop_overlapping_fresh(root, &child.spec);
             self.add_item(TransferItem {
                 id: child_id,
                 parent: Some(id),
@@ -196,6 +204,16 @@ impl Actor {
                 bytes_done: 0,
                 state: child.state,
             });
+        }
+        if !fresh_files.is_empty() {
+            self.fresh_dirs.insert(
+                id,
+                super::actor::FreshDir {
+                    root,
+                    dst: parent_dst,
+                    files: fresh_files,
+                },
+            );
         }
         if initial == TransferState::Cancelled {
             self.transition(id, TransferState::Cancelled);

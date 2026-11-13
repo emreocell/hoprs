@@ -1248,3 +1248,166 @@ async fn shared_new_folder_keeps_the_conflict_check() {
         engine.shutdown().await;
     }
 }
+
+/// A file that failed, retried after another tree created and marked the folder it writes
+/// into: the retry drops the folder's marks, so the tree's `x` (dispatched after it) meets
+/// the conflict policy instead of overwriting the retried copy.
+#[tokio::test(flavor = "multi_thread")]
+async fn retried_item_drops_the_fresh_marks() {
+    use hoprs_transfer::ConflictPolicy;
+    let local = MemFs::new();
+    let (a, b) = (data(3000), data(5000));
+    local.add_file("/a/tree/x", &a, mtime());
+    local.add_file("/b/x", &b, mtime());
+    let mem = MemFs::new();
+    mem.add_dir("/srv");
+    let remote = FaultFs::new(mem.clone());
+    remote.set_latency(Duration::from_millis(30));
+    let config = EngineConfig {
+        default_policy: ConflictPolicy::Skip,
+        ..EngineConfig::default()
+    };
+    let (engine, mut rx) = engine_with(Arc::new(local), Arc::new(remote), 1, config).await;
+
+    // The folder is missing: the file fails.
+    let file = engine
+        .enqueue(spec(Direction::Upload, "/b/x", "/srv/tree/x"))
+        .await
+        .unwrap();
+    assert!(matches!(
+        wait_terminal(&mut rx, file).await,
+        TransferState::Failed(_)
+    ));
+    // The tree creates the folder and marks its `x`; the paused site keeps it queued.
+    let tree = engine
+        .enqueue(spec(Direction::Upload, "/a/tree", "/srv/tree"))
+        .await
+        .unwrap();
+    engine.pause_site(site()).await;
+    wait_for(
+        &mut rx,
+        |e| matches!(e, EventKind::Added(item) if item.parent == Some(tree)),
+    )
+    .await;
+    // The retry goes first (lower id), into the folder the tree owned until now.
+    engine.retry(file).await.unwrap();
+    engine.resume_site(site()).await;
+    assert_eq!(wait_terminal(&mut rx, file).await, TransferState::Done);
+    let x = wait_for(&mut rx, |e| {
+        matches!(e, EventKind::StateChanged { id, state }
+            if *id != tree && *id != file && state.is_terminal())
+    })
+    .await;
+    assert!(
+        matches!(
+            x,
+            EventKind::StateChanged {
+                state: TransferState::Skipped(_),
+                ..
+            }
+        ),
+        "{x:?}"
+    );
+    assert_eq!(mem.read_file("/srv/tree/x").unwrap(), b, "overwritten");
+    engine.shutdown().await;
+}
+
+/// An item enqueued after a folder's files were added (and marked) but before they run:
+/// writing below that folder, it drops the marks, so the folder's file is checked (one
+/// `stat` more than when the new item writes elsewhere).
+#[tokio::test(flavor = "multi_thread")]
+async fn enqueued_item_drops_the_fresh_marks() {
+    async fn remote_ops(target: &str) -> usize {
+        let local = MemFs::new();
+        local.add_file("/a/tree/x", &data(3000), mtime());
+        local.add_file("/b/y", &data(5000), mtime());
+        let mem = MemFs::new();
+        mem.add_dir("/srv");
+        mem.add_dir("/srv/other");
+        let remote = FaultFs::new(mem);
+        remote.set_latency(Duration::from_millis(30));
+        let (engine, mut rx) = engine_with(
+            Arc::new(local),
+            Arc::new(remote.clone()),
+            1,
+            EngineConfig::default(),
+        )
+        .await;
+        let tree = engine
+            .enqueue(spec(Direction::Upload, "/a/tree", "/srv/tree"))
+            .await
+            .unwrap();
+        engine.pause_site(site()).await;
+        wait_for(
+            &mut rx,
+            |e| matches!(e, EventKind::Added(item) if item.parent == Some(tree)),
+        )
+        .await;
+        let file = engine
+            .enqueue(spec(Direction::Upload, "/b/y", target))
+            .await
+            .unwrap();
+        engine.resume_site(site()).await;
+        let mut done = HashSet::new();
+        while done.len() < 2 {
+            if let EventKind::StateChanged { id, state } = wait_for(&mut rx, |_| true).await
+                && (id == file || id == tree)
+                && state.is_terminal()
+            {
+                assert_eq!(state, TransferState::Done);
+                done.insert(id);
+            }
+        }
+        engine.shutdown().await;
+        remote.ops()
+    }
+    assert_eq!(
+        remote_ops("/srv/tree/y").await - remote_ops("/srv/other/y").await,
+        1
+    );
+}
+
+/// 10 000 files in one new folder (the spec §9 bench layout): the folder's expansion and
+/// its marks cost the actor time linear in the files, so the first file starts at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn large_new_folder_is_expanded_quickly() {
+    let local = MemFs::new();
+    for i in 0..10_000 {
+        local.add_file(&format!("/w/tree/f{i:05}"), b"x", mtime());
+    }
+    let remote = MemFs::new();
+    remote.add_dir("/srv");
+    let (engine, mut rx) = engine_with(
+        Arc::new(local),
+        Arc::new(remote),
+        4,
+        EngineConfig::default(),
+    )
+    .await;
+    let start = std::time::Instant::now();
+    let root = engine
+        .enqueue(spec(Direction::Upload, "/w/tree", "/srv/tree"))
+        .await
+        .unwrap();
+    // The first child going `Active` comes after the whole expansion (one actor turn).
+    loop {
+        match rx.recv().await {
+            Ok(Event {
+                kind:
+                    EventKind::StateChanged {
+                        id,
+                        state: TransferState::Active,
+                    },
+                ..
+            }) if id != root => break,
+            Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+            Err(e) => panic!("{e}"),
+        }
+    }
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "expansion took {elapsed:?}"
+    );
+    engine.shutdown().await;
+}

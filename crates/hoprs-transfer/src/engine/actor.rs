@@ -220,12 +220,17 @@ pub(super) struct Actor {
     /// (resume, retry, after a restart) checks.
     ///
     /// Only while one item owns that new subtree: a folder is not marked when another
-    /// unfinished item's destination is the same path, above it or below it, and such an
-    /// item enqueued or added later drops the marks under its path
-    /// (`drop_overlapping_fresh`). Accepted risk: another client creating a file in the
-    /// new folder before the child is dispatched is not seen, and that file is
-    /// overwritten.
+    /// unfinished item's destination is the same path, above it or below it, and an item
+    /// of another tree that is enqueued or put back in the queue (retry, resume, answer)
+    /// there later drops the folder's marks (`drop_overlapping_fresh`). Accepted risk:
+    /// another client creating a file in the new folder before the child is dispatched is
+    /// not seen, and that file is overwritten.
     pub(super) fresh_dst: HashSet<TransferId>,
+    /// The folders whose files are in `fresh_dst`, by folder: what `drop_overlapping_fresh`
+    /// looks through (a few folders, not every marked file).
+    pub(super) fresh_dirs: HashMap<TransferId, FreshDir>,
+    /// The top-level item of every item added in this run (`root_of`).
+    pub(super) roots: HashMap<TransferId, TransferId>,
     pub(super) worker_tx: mpsc::UnboundedSender<WorkerMsg>,
 }
 
@@ -255,6 +260,8 @@ pub(super) async fn run(
         final_progress: Vec::new(),
         progress_off_tick: false,
         fresh_dst: HashSet::new(),
+        fresh_dirs: HashMap::new(),
+        roots: HashMap::new(),
         worker_tx,
     };
     let mut ticker = tokio::time::interval(actor.progress_interval);
@@ -326,7 +333,7 @@ impl Actor {
                         return;
                     }
                 };
-                self.drop_overlapping_fresh(id, &spec);
+                self.drop_overlapping_fresh(id, destination(&spec));
                 self.add_item(TransferItem {
                     id,
                     parent: None,
@@ -415,9 +422,12 @@ impl Actor {
         let _ = tokio::time::timeout(SHUTDOWN_GRACE, drain).await;
     }
 
-    /// Tracks a newly persisted item and emits `Added`.
-    /// The top-level item `id` belongs to.
+    /// The top-level item `id` belongs to: recorded when it was added, found through
+    /// the parents for a recovered item.
     pub(super) fn root_of(&self, mut id: TransferId) -> TransferId {
+        if let Some(root) = self.roots.get(&id) {
+            return *root;
+        }
         while let Some(parent) = self.items.get(&id).and_then(|item| item.parent) {
             id = parent;
         }
@@ -434,32 +444,29 @@ impl Actor {
         })
     }
 
-    /// A new item of the tree `root` writes `spec` to the same path as a fresh mark of
-    /// another tree, above it or below it: those marks no longer hold (the folder has
-    /// another writer).
-    pub(super) fn drop_overlapping_fresh(&mut self, root: TransferId, spec: &TransferSpec) {
-        if self.fresh_dst.is_empty() {
-            return;
-        }
-        let dst = destination(spec);
+    /// An item of the tree `root` is about to write to `dst`: the fresh folders of other
+    /// trees at that path, above it or below it, lose their marks (the folder has another
+    /// writer). Costs one look per fresh folder.
+    pub(super) fn drop_overlapping_fresh(&mut self, root: TransferId, dst: &RemotePath) {
         let stale: Vec<TransferId> = self
-            .fresh_dst
+            .fresh_dirs
             .iter()
-            .copied()
-            .filter(|marked| {
-                self.root_of(*marked) != root
-                    && self
-                        .items
-                        .get(marked)
-                        .is_some_and(|item| paths_overlap(destination(&item.spec), dst))
-            })
+            .filter(|(_, dir)| dir.root != root && paths_overlap(&dir.dst, dst))
+            .map(|(id, _)| *id)
             .collect();
-        for marked in stale {
-            self.fresh_dst.remove(&marked);
+        for dir in stale {
+            if let Some(dir) = self.fresh_dirs.remove(&dir) {
+                for file in dir.files {
+                    self.fresh_dst.remove(&file);
+                }
+            }
         }
     }
 
+    /// Tracks a newly persisted item and emits `Added`.
     pub(super) fn add_item(&mut self, item: TransferItem) {
+        let root = item.parent.map_or(item.id, |parent| self.root_of(parent));
+        self.roots.insert(item.id, root);
         if item.state == TransferState::Queued {
             self.queued
                 .entry(item.spec.site.clone())
@@ -475,6 +482,18 @@ impl Actor {
     /// An item that becomes terminal is reported to its parent directory.
     /// Returns whether `state` itself was applied.
     pub(super) fn transition(&mut self, id: TransferId, state: TransferState) -> bool {
+        // Put back in the queue (retry, resume, an answer, a network requeue): it may
+        // write into another tree's fresh folder.
+        if state == TransferState::Queued
+            && let Some(item) = self.items.get(&id)
+            && item.state != TransferState::Queued
+        {
+            let dst = destination(&item.spec).clone();
+            self.drop_overlapping_fresh(self.root_of(id), &dst);
+        }
+        if state.is_terminal() {
+            self.fresh_dirs.remove(&id);
+        }
         let (state, applied) = match self.store.set_state(id, &state) {
             Ok(()) => (state, true),
             Err(_) if matches!(state, TransferState::Failed(_)) => (state, false),
@@ -904,6 +923,13 @@ impl Actor {
         self.last_progress = Some(now);
         self.emit(EventKind::Progress(updates));
     }
+}
+
+/// A folder this run created whose files were marked fresh: its tree and destination.
+pub(super) struct FreshDir {
+    pub(super) root: TransferId,
+    pub(super) dst: RemotePath,
+    pub(super) files: Vec<TransferId>,
 }
 
 /// Where `spec` writes.
