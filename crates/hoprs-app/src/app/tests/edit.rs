@@ -717,6 +717,10 @@ async fn keep_local_copies_never_deletes() {
         .expect("the close flow goes on");
     assert!(app.closing);
     let notice = app.kept_notice.clone().expect("the kept copies are said");
+    assert!(
+        !notice.closed_unasked,
+        "the user chose: nothing more to say"
+    );
     assert_eq!((notice.count, notice.dir), (1, kept_in.clone()));
     assert_eq!(fake.calls(), vec![Call::KeepEdits(session)]);
     assert_eq!(std::fs::read(&local).unwrap(), b"unsent", "nothing deleted");
@@ -1320,4 +1324,82 @@ async fn pending_edit_on_lost_session_reconnects() {
     let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
     let (mut app, _, id) = editing(&fake, &a).await;
     assert!(reconnects(&app.update(pending(id))).is_empty());
+}
+
+/// Final review: a session closed without the question while an edit was unsent (the
+/// site's host changed, or "Close and reconnect") keeps it as a recovered copy, and the
+/// notice says that further saves in the editor won't be uploaded and where the copy is.
+#[tokio::test]
+async fn silent_close_kept_notice_says_saves_stop() {
+    // The site's endpoint changed under a connected session.
+    let a = srv_site(Protocol::Ssh);
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    let backend: Arc<dyn BackendApi> = fake.clone();
+    let (mut app, session, id) = editing(&fake, &a).await;
+    save_unseen(&fake, id, b"unsent");
+    let mut moved = a.clone();
+    moved.host = "elsewhere".into();
+    let effects = app.update(profiles_loaded(
+        &app,
+        Ok(ProfileSnapshot {
+            sites: vec![moved],
+            workspaces: Vec::new(),
+            unreadable: Vec::new(),
+        }),
+    ));
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::CloseSession(s) if *s == session)),
+        "{effects:?}"
+    );
+    let (kept, kept_in) = effects::close_session(backend.clone(), session)
+        .await
+        .expect("the unsent edit is kept");
+    app.update(edit(EditMsg::Kept {
+        kept: kept.clone(),
+        kept_in: kept_in.clone(),
+    }));
+    let notice = app.kept_notice.clone().unwrap();
+    assert!(notice.closed_unasked);
+    assert_eq!(notice.dir, kept_in);
+    assert_eq!(std::fs::read(&kept[0].recovered).unwrap(), b"unsent");
+
+    // "Close and reconnect" on a session whose host key changed.
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    let backend: Arc<dyn BackendApi> = fake.clone();
+    let (mut app, session, id) = editing(&fake, &a).await;
+    save_unseen(&fake, id, b"unsent 2");
+    app.update(Message::SessionState {
+        session,
+        state: hoprs_core::ConnectionState::Disconnected(
+            hoprs_ssh::testing::pinned_key_changed_error(&a.host),
+        ),
+        auth: None,
+    });
+    let effects = app.update(Message::RestartSession(app.tabs[0].id));
+    let Ok([Effect::RestartSite { close, site }]) = <[Effect; 1]>::try_from(effects) else {
+        panic!("one RestartSite effect");
+    };
+    let messages: Vec<Message> = effects::restart_site(backend, close, site).collect().await;
+    assert!(
+        matches!(&messages[0], Message::Edit(EditMsg::Kept { .. })),
+        "kept before the new connection: {messages:?}"
+    );
+    for message in messages {
+        app.update(message);
+    }
+    let notice = app.kept_notice.clone().expect("the kept copy is said");
+    assert!(notice.closed_unasked);
+    assert_eq!(notice.count, 1);
+    assert_eq!(fake.calls().first(), Some(&Call::KeepEdits(session)));
+    assert!(fake.closed().contains(&session));
+    let copies = files_under(&notice.dir);
+    assert_eq!(copies.len(), 1, "{copies:?}");
+    assert_eq!(std::fs::read(&copies[0]).unwrap(), b"unsent 2");
+    // The text: saves stop, the copy is where the notice points.
+    assert_eq!(
+        strings::KEPT_SAVES_STOPPED,
+        "The session closed: further saves in the editor won't be uploaded. Your changes are in the recovered copy; open the file again to go on editing."
+    );
 }

@@ -820,20 +820,26 @@ pub async fn remove_known_host(
     Message::KnownHostRemoved { site, result }
 }
 
-/// Closes `close` first, then connects `site`: the connect never finds (and reuses) the
-/// old session.
+/// Closes `close` first (as [`close_session`]: its unsent edits kept, said by
+/// [`EditMsg::Kept`]), then connects `site`: the connect never finds (and reuses) the old
+/// session.
 pub fn restart_site(
     backend: Arc<dyn BackendApi>,
     close: Option<SessionId>,
     site: SiteId,
 ) -> impl Stream<Item = Message> + Send + 'static {
     let closer = backend.clone();
+    // Closed as any session is: its remote edits settle first, unsent ones kept and said.
     stream::once(async move {
-        if let Some(session) = close {
-            closer.close(session).await;
-        }
+        let kept = match close {
+            Some(session) => close_session(closer, session).await,
+            None => None,
+        };
+        stream::iter(kept.map(|(kept, kept_in)| Message::Edit(EditMsg::Kept { kept, kept_in })))
     })
-    .flat_map(move |()| connect_sites(backend.clone(), vec![site.clone()]))
+    .flatten()
+    // Lazy: the connect starts only once the close is done.
+    .chain(connect_sites(backend, vec![site]))
 }
 
 /// The broker's dialogs for the UI's subscription: each request or withdrawal as

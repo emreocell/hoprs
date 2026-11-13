@@ -403,6 +403,9 @@ pub fn kept_notice(app: &App) -> Option<Element<'_, Message>> {
         .align_y(Alignment::Center)
     ]
     .spacing(theme::SPACE_3XS);
+    if notice.closed_unasked {
+        lines = lines.push(text(strings::KEPT_SAVES_STOPPED).size(theme::TEXT_XS));
+    }
     for remote in &notice.incomplete {
         lines = lines.push(with_name(
             format!("{} ", strings::SERVER_COPY_OF),

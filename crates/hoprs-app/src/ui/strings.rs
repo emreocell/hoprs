@@ -728,6 +728,9 @@ pub const UPLOADING_EDITS: &str = "Uploading… (Stop to keep local copies inste
 pub const SERVER_COPY_OF: &str = "Server copy of";
 /// …after it.
 pub const MAY_BE_INCOMPLETE: &str = "may be incomplete";
+/// The kept notice after a close that did not ask (the site moved, "Close and
+/// reconnect"): the editor's file is no longer linked to the server.
+pub const KEPT_SAVES_STOPPED: &str = "The session closed: further saves in the editor won't be uploaded. Your changes are in the recovered copy; open the file again to go on editing.";
 pub const EDIT_ONE_FILE: &str = "Select one file to edit";
 pub const UPLOADED: &str = "Uploaded";
 pub const EDITING: &str = "Editing";

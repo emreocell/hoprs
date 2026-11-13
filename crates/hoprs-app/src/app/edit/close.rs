@@ -336,7 +336,7 @@ impl App {
                 _ => None,
             });
         if let Ok(settled) = &result {
-            self.note_kept(&settled.kept, settled.kept_in.clone());
+            self.note_kept(&settled.kept, settled.kept_in.clone(), false);
         }
         // Cancelled meanwhile, or superseded by another answer.
         if expected != Some(Some(how)) {

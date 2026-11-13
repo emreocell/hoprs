@@ -117,6 +117,10 @@ pub struct KeptNotice {
     /// Remote files whose server copy may be incomplete: an upload was under way when
     /// they were kept (never left unsaid).
     pub incomplete: Vec<RemotePath>,
+    /// Some copies were kept by a close that did not ask (the site moved or was deleted,
+    /// "Close and reconnect"): the notice says that further saves in the editor are not
+    /// uploaded.
+    pub closed_unasked: bool,
 }
 
 /// What a close question is for.
@@ -437,7 +441,7 @@ impl App {
                 result,
             } => self.edits_settled(purpose, how, result),
             EditMsg::Kept { kept, kept_in } => {
-                self.note_kept(&kept, kept_in);
+                self.note_kept(&kept, kept_in, true);
                 Vec::new()
             }
         }
@@ -596,7 +600,8 @@ impl App {
 
     /// Recovered copies were made by a close: the notice above the center says how many
     /// and where, until dismissed (an upload's toast never replaces it); logged too.
-    pub(super) fn note_kept(&mut self, kept: &[KeptEdit], dir: PathBuf) {
+    /// `unasked`: the close did not ask (see [`KeptNotice::closed_unasked`]).
+    pub(super) fn note_kept(&mut self, kept: &[KeptEdit], dir: PathBuf, unasked: bool) {
         if kept.is_empty() {
             return;
         }
@@ -605,8 +610,10 @@ impl App {
             count: 0,
             dir: dir.clone(),
             incomplete: Vec::new(),
+            closed_unasked: false,
         });
         notice.count += kept.len();
+        notice.closed_unasked |= unasked;
         notice.dir = dir;
         for edit in kept.iter().filter(|edit| edit.remote_may_be_truncated) {
             tracing::warn!(remote = %edit.remote, "kept during an upload; the server's copy may be incomplete");
