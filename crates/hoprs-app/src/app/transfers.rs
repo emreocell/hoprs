@@ -108,7 +108,7 @@ impl App {
         let connected = self
             .shown_tab()
             .and_then(|id| self.tab_index(id))
-            .filter(|&i| self.tabs[i].session().is_some());
+            .filter(|&i| self.tabs[i].is_files() && self.tabs[i].session().is_some());
         let Some(index) = connected else {
             self.queue_error(Error::new(ErrorKind::NotFound, strings::DROP_NEEDS_SITE));
             return Vec::new();

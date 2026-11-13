@@ -82,7 +82,6 @@ pub const OPEN_AS: &str = "Open as";
 pub const OPEN_AS_TERMINAL: &str = "Terminal";
 pub const OPEN_AS_FILES: &str = "Files";
 pub const OPEN_AS_BOTH: &str = "Terminal and files";
-pub const TERMINAL_LATER: &str = "Terminal tabs arrive in a later version";
 pub const FTP_OPTIONS: &str = "FTP";
 pub const FTP_MODE: &str = "Transfer mode";
 pub const FTP_PASSIVE: &str = "Passive";
@@ -119,6 +118,11 @@ pub const EDIT_SITE: &str = "Edit site";
 
 // Tabs.
 pub const CLOSE_TAB: &str = "×";
+/// The tab strip's actions on a connected SSH tab: another tab on its session.
+pub const NEW_TERMINAL_TAB: &str = "New terminal tab";
+pub const NEW_FILES_TAB: &str = "New files tab";
+/// A terminal tab until the terminal itself lands (Plan 6 Task 4).
+pub const TERMINAL_PLACEHOLDER: &str = "Terminal starts here";
 
 // File panes.
 pub const LOCAL: &str = "Local";

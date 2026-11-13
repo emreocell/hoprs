@@ -173,6 +173,25 @@ pub fn view<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> {
     }
 }
 
+/// A terminal tab, until the terminal lands (Task 4): a placeholder under the same lost
+/// connection banner as a files tab, or, without a connection, why and how to retry.
+pub fn terminal_placeholder<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> {
+    let body: Element<'a, Message> = match tab.state {
+        TabState::Failed(_) => not_connected(app, tab),
+        TabState::Connecting => centered(text(strings::CONNECTING).color(palette().muted).into()),
+        TabState::Connected(_) => centered(
+            text(strings::TERMINAL_PLACEHOLDER)
+                .font(theme::MONO)
+                .color(palette().muted)
+                .into(),
+        ),
+    };
+    match lost_banner(app, tab) {
+        Some(banner) => column![banner, hrule(), body].into(),
+        None => body,
+    }
+}
+
 /// What the bar across a connected tab says, if anything.
 #[derive(Debug, PartialEq)]
 pub enum Banner<'a> {

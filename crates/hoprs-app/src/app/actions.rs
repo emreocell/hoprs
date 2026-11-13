@@ -9,7 +9,8 @@
 
 use hoprs_core::{EntryKind, Error, RemoteEntry, RemotePath};
 
-use super::files::{Pane, PaneStatus, RequestId, Row, Selection, Tab, TabId};
+use super::files::{Pane, PaneStatus, RequestId, Row, Selection};
+use super::tabs::{Tab, TabId};
 use super::{App, Effect};
 use crate::backend::{DeleteTarget, Side};
 use crate::ui::strings;

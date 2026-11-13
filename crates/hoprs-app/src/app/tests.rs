@@ -6,14 +6,18 @@ use hoprs_core::{ErrorKind, Protocol, WorkspaceSite};
 use secrecy::ExposeSecret;
 
 use super::*;
-use crate::backend::BackendApi;
 use crate::backend::fake::FakeBackend;
+use crate::backend::{BackendApi, ConnectError, Connected};
 use crate::effects;
 use crate::ui::site_form::Password;
 use crate::ui::strings;
 
+/// A site for the tests. An SSH one opens as files only (one tab), as the Plan 5 tests
+/// were written for; the tests of `tests/tabs.rs` choose its "Open as" themselves.
 fn site(name: &str, host: &str, user: &str, protocol: Protocol) -> Site {
-    Site::new(name, host, user, protocol)
+    let mut site = Site::new(name, host, user, protocol);
+    site.ssh.open_as = hoprs_core::OpenAs::Files;
+    site
 }
 
 fn workspace(name: &str, sites: &[&SiteId]) -> Workspace {
@@ -1387,4 +1391,5 @@ mod dialogs;
 mod file_actions;
 mod import_settings;
 mod status;
+mod tabs;
 mod transfers;

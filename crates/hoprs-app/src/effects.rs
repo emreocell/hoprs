@@ -149,7 +149,7 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
             expected,
         } => Task::future(remove_known_host(backend, tab, host, port, expected)),
         Effect::RestartSite { close, site } => Task::run(restart_site(backend, close, site), |m| m),
-        Effect::Reconnect { tab, session } => Task::future(reconnect(backend, tab, session)),
+        Effect::Reconnect { session } => Task::future(reconnect(backend, session)),
         Effect::SaveTabs { workspace, tabs } => Task::future(save_tabs(backend, workspace, tabs)),
         Effect::Shutdown { save, window } => {
             Task::perform(shutdown(backend, save, SHUTDOWN_LIMIT), move |_| {
@@ -370,13 +370,9 @@ pub async fn save_tabs(
 
 /// The banner's Reconnect: the backend's reconnect of the session (`reconnect_now`, then
 /// the wait that also settles the secrets typed with "save").
-pub async fn reconnect(backend: Arc<dyn BackendApi>, tab: TabId, session: SessionId) -> Message {
+pub async fn reconnect(backend: Arc<dyn BackendApi>, session: SessionId) -> Message {
     let result = backend.reconnect(session).await;
-    Message::Reconnected {
-        tab,
-        session,
-        result,
-    }
+    Message::Reconnected { session, result }
 }
 
 /// One session's feed for its subscription: the state now, then each change, as

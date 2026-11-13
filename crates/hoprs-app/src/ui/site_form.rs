@@ -458,7 +458,6 @@ pub fn view(form: &SiteForm) -> Element<'_, Message> {
                     .into(),
                     None,
                 ),
-                muted(strings::TERMINAL_LATER),
             ]
             .spacing(theme::SPACE_XS)
             .into(),

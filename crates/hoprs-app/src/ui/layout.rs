@@ -2,6 +2,7 @@
 //! 256 px sidebar on the left and, on the right, the center, the
 //! collapsible transfer queue and the status bar.
 
+use hoprs_core::TabKind;
 use iced::widget::{column, container, row, rule, text};
 use iced::{Alignment, Element, Length, Padding};
 
@@ -102,7 +103,10 @@ fn center(app: &App) -> Element<'_, Message> {
         None => {}
     }
     if let Some(tab) = app.active_tab.and_then(|i| app.tabs.get(i)) {
-        return files::view(app, tab);
+        return match tab.kind {
+            TabKind::Files => files::view(app, tab),
+            TabKind::Terminal => files::terminal_placeholder(app, tab),
+        };
     }
     container(
         column![

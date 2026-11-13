@@ -8,18 +8,12 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use hoprs_core::{
-    ConnectionState, EntryKind, Error, ErrorKind, RemoteEntry, RemotePath, SavedTab, SiteId,
-};
+use hoprs_core::{EntryKind, Error, ErrorKind, RemoteEntry, RemotePath};
 
 use super::actions::{Busy, PaneAction};
-use super::{App, Effect, TabState};
-use crate::backend::{AuthMethod, SessionId, Side};
+use super::{App, Effect, TabId};
+use crate::backend::Side;
 use crate::ui::virtual_list::ROW_HEIGHT;
-
-/// A tab's identity, stable while tabs open and close around it.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct TabId(pub u64);
 
 /// One listing request; only a pane's latest one is applied.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -368,70 +362,6 @@ pub enum FileKey {
     Transfer,
 }
 
-/// One file tab: a site, its connection and its two panes.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Tab {
-    pub id: TabId,
-    pub site: SiteId,
-    pub state: TabState,
-    pub local: Pane,
-    pub remote: Pane,
-    /// The pane the keyboard drives.
-    pub focus: Side,
-    /// "Remove the old entry…" after a changed host key.
-    pub known_hosts: super::KnownHostsFix,
-    /// The site's `host:port` when its connect failed (the endpoint "Remove the old
-    /// entry…" works on).
-    pub failed_endpoint: Option<(String, u16)>,
-    /// The connected session's state, as its feed last reported it (`None` until then).
-    pub conn: Option<ConnectionState>,
-    /// How the session logged in (SSH), as its feed last reported it.
-    pub auth: Option<AuthMethod>,
-    /// The banner's "Reconnect" is in flight.
-    pub reconnecting: bool,
-}
-
-impl Tab {
-    pub fn pane(&self, side: Side) -> &Pane {
-        match side {
-            Side::Local => &self.local,
-            Side::Remote => &self.remote,
-        }
-    }
-
-    pub fn pane_mut(&mut self, side: Side) -> &mut Pane {
-        match side {
-            Side::Local => &mut self.local,
-            Side::Remote => &mut self.remote,
-        }
-    }
-
-    /// The connected session, if any.
-    pub fn session(&self) -> Option<SessionId> {
-        match &self.state {
-            TabState::Connected(connected) => Some(connected.session),
-            TabState::Connecting | TabState::Failed(_) => None,
-        }
-    }
-
-    pub fn pane_status(&self, side: Side) -> PaneStatus<'_> {
-        if side == Side::Remote {
-            match self.state {
-                TabState::Connecting => return PaneStatus::Loading,
-                TabState::Failed(_) => return PaneStatus::NotConnected,
-                TabState::Connected(_) => {}
-            }
-        }
-        let pane = self.pane(side);
-        match &pane.listing {
-            Listing::Idle | Listing::Loading => PaneStatus::Loading,
-            Listing::Failed(error) => PaneStatus::Failed(error),
-            Listing::Loaded if pane.entries.is_empty() => PaneStatus::Empty,
-            Listing::Loaded => PaneStatus::Full,
-        }
-    }
-}
-
 /// `path` as a [`RemotePath`], if it is absolute and POSIX-shaped (the local side lists
 /// through `LocalFs::new("/")`).
 pub fn local_path(path: &std::path::Path) -> Option<RemotePath> {
@@ -445,84 +375,19 @@ pub fn local_fs_path(path: &RemotePath) -> std::path::PathBuf {
 }
 
 impl App {
-    pub fn tab_index(&self, id: TabId) -> Option<usize> {
-        self.tabs.iter().position(|t| t.id == id)
-    }
-
     pub(super) fn next_id(&mut self) -> u64 {
         self.next_id += 1;
         self.next_id
     }
 
-    /// A new tab for `site`, and the local listing to run. Its panes start at the folders
-    /// of `restored` (a workspace's saved tab), else at the site's (local: `local_dir`,
-    /// else home; remote: `remote_dir`, else `/`). A saved folder that is not a usable
-    /// absolute path falls back the same way.
-    pub(super) fn new_tab(&mut self, site: SiteId, restored: Option<&SavedTab>) -> (Tab, Effect) {
-        let saved = self.site(&site);
-        let remote_path = |dir: &str| RemotePath::new(dir).ok();
-        let local = restored
-            .and_then(|t| t.local_dir.as_deref())
-            .and_then(local_path)
-            .or_else(|| {
-                saved
-                    .and_then(|s| s.local_dir.as_deref())
-                    .and_then(local_path)
-            })
-            .or_else(|| self.home.clone())
-            .unwrap_or_else(RemotePath::root);
-        let remote = restored
-            .and_then(|t| t.remote_dir.as_deref())
-            .and_then(remote_path)
-            .or_else(|| {
-                saved
-                    .and_then(|s| s.remote_dir.as_deref())
-                    .and_then(remote_path)
-            })
-            .unwrap_or_else(RemotePath::root);
-        let id = TabId(self.next_id());
-        let request_id = RequestId(self.next_id());
-        let mut tab = Tab {
-            id,
-            site,
-            state: TabState::Connecting,
-            local: Pane::new(local.clone()),
-            remote: Pane::new(remote),
-            focus: Side::Local,
-            known_hosts: super::KnownHostsFix::Idle,
-            failed_endpoint: None,
-            conn: None,
-            auth: None,
-            reconnecting: false,
-        };
-        // A folder from the saved tab may be gone since: its first listing falls back.
-        let from_saved = |dir: Option<bool>| dir.unwrap_or(false).then_some(Restore::Saved);
-        tab.local.restore = from_saved(
-            restored
-                .and_then(|t| t.local_dir.as_deref())
-                .map(|d| local_path(d).as_ref() == Some(&tab.local.path)),
-        );
-        tab.remote.restore = from_saved(
-            restored
-                .and_then(|t| t.remote_dir.as_deref())
-                .map(|d| RemotePath::new(d).ok().as_ref() == Some(&tab.remote.path)),
-        );
-        tab.local.listing = Listing::Loading;
-        tab.local.request = Some(request_id);
-        let effect = Effect::List {
-            tab: id,
-            side: Side::Local,
-            request_id,
-            session: None,
-            path: local,
-        };
-        (tab, effect)
-    }
-
     /// Lists the pane's folder again, superseding any listing in flight. The remote side
     /// waits for its session. The list starts again from the top: the skeleton replaces
-    /// it meanwhile, so the scrollable that comes back is at 0 too.
+    /// it meanwhile, so the scrollable that comes back is at 0 too. A terminal tab lists
+    /// nothing.
     pub(super) fn request_listing(&mut self, index: usize, side: Side) -> Vec<Effect> {
+        if !self.tabs[index].is_files() {
+            return Vec::new();
+        }
         let request_id = RequestId(self.next_id());
         let tab = &mut self.tabs[index];
         let (tab_id, session) = (tab.id, tab.session());
@@ -590,7 +455,7 @@ impl App {
     }
 
     pub(super) fn pane_msg(&mut self, tab: TabId, side: Side, msg: PaneMsg) -> Vec<Effect> {
-        let Some(index) = self.tab_index(tab) else {
+        let Some(index) = self.tab_index(tab).filter(|&i| self.tabs[i].is_files()) else {
             return Vec::new();
         };
         let mods = self.mods;
@@ -778,7 +643,11 @@ impl App {
         if self.form.is_some() {
             return Vec::new();
         }
-        let Some(tab) = self.active_tab.and_then(|i| self.tabs.get(i)) else {
+        let Some(tab) = self
+            .active_tab
+            .and_then(|i| self.tabs.get(i))
+            .filter(|t| t.is_files())
+        else {
             return Vec::new();
         };
         if key == FileKey::Escape {
@@ -794,12 +663,16 @@ impl App {
         vec![Effect::KeyUnlessTyping { key, shift }]
     }
 
-    /// A key for the active tab's focused pane (ignored while a form is open).
+    /// A key for the active tab's focused pane (ignored while a form is open, or in a
+    /// terminal tab).
     pub(super) fn file_key(&mut self, key: FileKey, shift: bool) -> Vec<Effect> {
         if self.form.is_some() || self.dialogs.is_open() {
             return Vec::new();
         }
-        let Some(index) = self.active_tab.filter(|&i| i < self.tabs.len()) else {
+        let Some(index) = self
+            .active_tab
+            .filter(|&i| self.tabs.get(i).is_some_and(|t| t.is_files()))
+        else {
             return Vec::new();
         };
         let tab = &mut self.tabs[index];
@@ -884,7 +757,7 @@ impl App {
         let Some(tab) = self
             .active_tab
             .and_then(|i| self.tabs.get(i))
-            .filter(|_| self.form.is_none())
+            .filter(|t| self.form.is_none() && t.is_files())
         else {
             return Vec::new();
         };

@@ -220,13 +220,13 @@ async fn reconnect_banner_on_disconnected() {
 
     // Reconnect goes through the backend's reconnect (one at a time).
     let effects = app.update(Message::ReconnectSession(tab));
-    let [Effect::Reconnect { tab: t, session: s }] = &effects[..] else {
+    let [Effect::Reconnect { session: s }] = &effects[..] else {
         panic!("{effects:?}");
     };
-    assert_eq!((*t, *s), (tab, session));
+    assert_eq!(*s, session);
     assert!(app.tabs[0].reconnecting);
     assert!(app.update(Message::ReconnectSession(tab)).is_empty());
-    let done = effects::reconnect(backend.clone(), tab, session).await;
+    let done = effects::reconnect(backend.clone(), session).await;
     assert!(fake.calls().contains(&Call::Reconnect(session)));
     let effects = app.update(done);
     assert!(!app.tabs[0].reconnecting);
@@ -251,7 +251,7 @@ async fn reconnect_banner_on_disconnected() {
     fake.fail_next_connect(&a.id, refused.clone());
     app.update(next(&mut feed).await.unwrap());
     app.update(Message::ReconnectSession(tab));
-    let failed = effects::reconnect(backend.clone(), tab, session).await;
+    let failed = effects::reconnect(backend.clone(), session).await;
     app.update(failed);
     assert_eq!(app.tabs[0].lost_connection(), Some(&refused));
     assert!(!app.tabs[0].reconnecting);
@@ -268,10 +268,9 @@ async fn reconnect_banner_on_disconnected() {
             Some(other) => panic!("{other:?}"),
         }
     }
-    // A reconnect result for a tab that is gone is dropped.
+    // A reconnect result for a session no tab has any more is dropped.
     assert!(
         app.update(Message::Reconnected {
-            tab,
             session,
             result: Ok(())
         })
@@ -370,7 +369,8 @@ async fn opening_workspace_restores_dirs() {
     ws.sites[0].tabs = vec![files_tab(Some("/home/me/shop"), Some("/var/www/shop"))];
     // Only a remote folder saved: the local side uses the site's.
     ws.sites[1].tabs = vec![files_tab(None, Some("/pub"))];
-    // A terminal tab names no folder for the files tab.
+    // A saved terminal tab restores as a terminal tab (Plan 6), which takes no folder
+    // from it.
     ws.sites[2].tabs = vec![SavedTab {
         kind: TabKind::Terminal,
         remote_dir: Some("/ignored".into()),
@@ -395,8 +395,10 @@ async fn opening_workspace_restores_dirs() {
     assert_eq!(ta.remote.path, path("/var/www/shop"));
     assert_eq!(tb.local.path, path("/b-local"));
     assert_eq!(tb.remote.path, path("/pub"));
+    assert_eq!(tc.kind, TabKind::Terminal);
     assert_eq!(tc.local.path, path("/home/me"));
     assert_eq!(tc.remote.path, RemotePath::root());
+    assert_eq!(listed_path(&effects, tc.id, Side::Local), None);
     // The local listings start at the restored folders.
     assert_eq!(
         listed_path(&effects, ta.id, Side::Local),

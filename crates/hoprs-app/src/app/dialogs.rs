@@ -351,6 +351,7 @@ impl App {
             | Message::WorkspaceForm(_)
             | Message::OpenProfileFolder
             | Message::CloseTab(_)
+            | Message::NewTab { .. }
             | Message::Pane { .. }
             | Message::Key { .. }
             | Message::Queue(_)
@@ -394,14 +395,12 @@ impl App {
         actions
     }
 
-    /// The tab's connection failed or was lost: remember the site's `host:port` as it is
-    /// now, the endpoint "Remove the old entry…" works on even if the site is edited
-    /// later.
-    pub(super) fn note_failed_endpoint(&mut self, index: usize) {
-        let endpoint = self
-            .site(&self.tabs[index].site)
-            .map(|s| (s.host.clone(), s.port));
-        self.tabs[index].failed_endpoint = endpoint;
+    /// The site's connection failed or was lost: its tabs remember the site's
+    /// `host:port` as it is now, the endpoint "Remove the old entry…" works on even if
+    /// the site is edited later.
+    pub(super) fn note_failed_endpoint(&mut self, site: &SiteId) {
+        let endpoint = self.site(site).map(|s| (s.host.clone(), s.port));
+        self.each_site_tab(site, |tab| tab.failed_endpoint = endpoint.clone());
     }
 
     /// The `host:port` the tab failed with, if its host key changed in `known_hosts`.
@@ -411,26 +410,26 @@ impl App {
         tab.failed_endpoint.clone()
     }
 
-    /// Closes the tab's failed or lost session and connects the site with a new one (the
-    /// effect closes first, then connects: a reused session would keep its old state).
+    /// Closes the failed or lost session of the tab's site and connects the site with a
+    /// new one, for all its tabs (the effect closes first, then connects: a reused
+    /// session would keep its old state).
     pub(super) fn restart_session(&mut self, tab: TabId) -> Vec<Effect> {
         let Some(index) = self.tab_index(tab) else {
             return Vec::new();
         };
         let lost = self.tabs[index].lost_connection().is_some();
-        let tab = &mut self.tabs[index];
-        let close = match &tab.state {
+        let close = match &self.tabs[index].state {
             TabState::Failed(failure) => failure.session,
             TabState::Connected(connected) if lost => Some(connected.session),
             TabState::Connected(_) | TabState::Connecting => return Vec::new(),
         };
-        let site = tab.site.clone();
-        tab.state = TabState::Connecting;
-        tab.conn = None;
-        tab.auth = None;
-        tab.reconnecting = false;
-        tab.known_hosts = KnownHostsFix::Idle;
-        tab.failed_endpoint = None;
+        let site = self.tabs[index].site.clone();
+        self.each_site_tab(&site, |tab| {
+            tab.state = TabState::Connecting;
+            tab.forget_feed();
+            tab.known_hosts = KnownHostsFix::Idle;
+            tab.failed_endpoint = None;
+        });
         if let Some(session) = close {
             self.forget_session(session);
         }
@@ -442,8 +441,8 @@ impl App {
         self.dialogs.saving.remove(&session);
     }
 
-    /// The tab of `site` closed while it connected (the app doesn't know that connect's
-    /// session yet). Its dialogs, shown or waiting, are dropped unanswered, and the
+    /// The last tab of `site` closed while it connected (the app doesn't know that
+    /// connect's session yet; a site's tabs all share it, so the site names it). Its dialogs, shown or waiting, are dropped unanswered, and the
     /// sessions they and the secrets typed with "save" came from are closed: the broker
     /// withdraws their dialogs and the session manager forgets the secrets before the
     /// connect can store them. Not answered Cancel: a host key refusal would be shared
