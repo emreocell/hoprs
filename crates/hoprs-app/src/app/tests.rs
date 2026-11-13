@@ -1398,6 +1398,7 @@ fn window_resize_is_remembered() {
 mod dialogs;
 mod file_actions;
 mod import_settings;
+mod log;
 mod status;
 mod tabs;
 mod terminal;

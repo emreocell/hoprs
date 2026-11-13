@@ -9,7 +9,7 @@ use crate::app::{App, Form, Message};
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
 use crate::ui::{
-    dialogs, files, import, queue, settings, sidebar, site_form, status, tabs, terminal,
+    dialogs, files, import, log, queue, settings, sidebar, site_form, status, tabs, terminal,
     workspace_form,
 };
 
@@ -19,11 +19,16 @@ pub const TOP_BAR_HEIGHT: f32 = 40.0;
 pub const QUEUE_HEAD_HEIGHT: f32 = 36.0;
 pub const QUEUE_MAX_HEIGHT: f32 = 210.0;
 pub const STATUS_HEIGHT: f32 = 26.0;
+/// The log panel's lines (six rows); its head is as tall as the queue's.
+pub const LOG_BODY_HEIGHT: f32 = 180.0;
 /// The accent line under an active tab.
 pub const UNDERLINE: f32 = 2.0;
 
 pub fn view(app: &App) -> Element<'_, Message> {
-    let right = column![center(app), queue::view(app), status::view(app)].width(Length::Fill);
+    let right = column![center(app), queue::view(app)]
+        .push(log::view(app))
+        .push(status::view(app))
+        .width(Length::Fill);
     let body = row![sidebar::view(app), vrule(), right].height(Length::Fill);
 
     let base = container(column![top_bar(app), hrule(), body])

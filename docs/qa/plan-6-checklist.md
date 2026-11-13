@@ -28,3 +28,20 @@ XWayland (1000×700 logical @2x after the resize; 1280×800 before).
 | Wheel | Scrolling back through history; in `less` the wheel moves the pager (alternate scroll) | NEEDS HUMAN: `seq 1 500` then wheel up/down; `seq 1 500 \| less` then wheel |
 | Connection lost | Covered by `connection_lost_banner_then_new_shell` (banner, Reconnect, new shell, "— reconnected —") | NEEDS HUMAN visually: `docker compose -f docker/compose.yml restart sshd` with a terminal open, wait for the "Connection lost" bar, click Reconnect, check the "— reconnected —" line and that the new shell works |
 | Overflow | Covered by `overflow_shows_inline_and_reopen` and the hoprs-ssh pump test; did not trigger with the real 50 MB flood (the tab keeps up) | Pass (not reproducible by hand on a fast machine) |
+
+## Task 6: technical log panel (2026-11-13)
+
+Setup: debug build under XWayland (2560×1600 physical @2x), isolated `HOME`/`XDG_*`, default filter (no `RUST_LOG`).
+A throwaway driver (not committed) emitted eight sample lines like the real ones (connection transitions with
+`since_last_request_secs`, a keepalive warning, an error, a debug line), sent the panel's own messages and took
+iced `window::screenshot` captures 2.5 s apart (shorter waits caught half-drawn frames).
+
+| Check | Result |
+| --- | --- |
+| Closed by default | Status bar shows "Log" at the right; no panel until it is clicked; "Hide" closes it and gives the room back | Pass |
+| Panel open | Under the transfer queue: 1 px strong rule, 36 px head ("Log", Error / Warn / Info / Debug segments, "Filter log" field, "N lines", Copy all, Clear, Hide), six 30 px rows in JetBrains Mono: time `HH:MM:SS.mmm` muted, level (WARN/ERROR in the error colour, INFO in ink_2), target muted, message + `key=value` fields in ink, clipped on one line; scrolled to the newest line on open | Pass |
+| Default filter | The startup produced no iced / wgpu / sctk lines (the debug sample line was filtered out too: 7 sample lines + 1 `winit` "Guessed window scale factor" = 8 lines) | Pass. `winit` itself still logs one info line under XWayland (not in the brief's list) |
+| Level filter | Warn: only the WARN and ERROR lines, "2 lines"; the chosen segment on `paper_3` | Pass |
+| Text filter | `reconnect`: the three matching lines (case-insensitive, over level, target, message and fields), "3 lines"; `zzz`: "No lines match", Copy all disabled | Pass |
+| Copy all / Clear | Covered by `panel_filters_by_level_and_text` (clipboard text, one line each, oldest first; Clear empties, new lines still come) | Pass via messages. NEEDS HUMAN: click Copy all, paste into an editor |
+| Following | New lines scroll the list only while it is at its end | Pass in tests. NEEDS HUMAN: scroll up with the panel open while connecting a site; the list must stay put |

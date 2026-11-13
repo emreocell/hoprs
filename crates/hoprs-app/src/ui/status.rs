@@ -1,10 +1,11 @@
 //! The status bar (mockup v2): the active tab's connection state, `user@host:port` in
-//! mono, how the session logged in, and the open workspace's "3 of 3 sites in Shop".
+//! mono, how the session logged in, and the open workspace's "3 of 3 sites in Shop"; on
+//! the right, "Log" opens the technical log panel.
 
-use iced::widget::{column, container, row, rule, text};
+use iced::widget::{button, column, container, row, rule, space, text};
 use iced::{Alignment, Color, Element, Length, Padding};
 
-use crate::app::{App, ConnStatus, Message};
+use crate::app::{App, ConnStatus, LogMsg, Message};
 use crate::ui::layout::STATUS_HEIGHT;
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
@@ -85,12 +86,22 @@ pub fn view(app: &App) -> Element<'_, Message> {
     for extra in [line.auth, line.workspace].into_iter().flatten() {
         items = items.push(text(extra).size(theme::TEXT_XS));
     }
+    // The technical log panel opens and closes here.
+    let items = items
+        .push(space::horizontal())
+        .push(
+            button(text(strings::LOG).size(theme::TEXT_XS))
+                .padding(Padding::from([0.0, theme::SPACE_XS]))
+                .style(theme::queue_tab(app.log.open))
+                .on_press(Message::Log(LogMsg::Toggle)),
+        )
+        .width(Length::Fill);
     column![
         rule::horizontal(theme::HAIRLINE).style(theme::rule_1px),
         container(items)
             .width(Length::Fill)
             .height(STATUS_HEIGHT - theme::HAIRLINE)
-            .padding(Padding::ZERO.left(theme::SPACE_MD).right(theme::SPACE_MD))
+            .padding(Padding::ZERO.left(theme::SPACE_MD).right(theme::SPACE_XS))
             .align_y(Alignment::Center)
             .clip(true)
             .style(theme::status_bar),

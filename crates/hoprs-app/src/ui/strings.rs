@@ -192,6 +192,23 @@ pub const NOTHING_DONE: &str = "Nothing finished yet";
 pub const CLEAR_FINISHED: &str = "Clear finished and failed";
 /// [`CLEAR_FINISHED`] in a narrow window.
 pub const CLEAR_FINISHED_SHORT: &str = "Clear finished";
+// Technical log panel.
+pub const LOG: &str = "Log";
+pub const LOG_ERROR: &str = "Error";
+pub const LOG_WARN: &str = "Warn";
+pub const LOG_INFO: &str = "Info";
+pub const LOG_DEBUG: &str = "Debug";
+pub const FILTER_LOG: &str = "Filter log";
+pub const COPY_ALL: &str = "Copy all";
+pub const CLEAR: &str = "Clear";
+pub const NO_LOG_LINES: &str = "Nothing logged yet";
+pub const NO_LOG_MATCHES: &str = "No lines match";
+
+/// The log panel's count: "1 line", "120 lines".
+pub fn log_lines(n: usize) -> String {
+    count(n, "line", "lines")
+}
+
 pub const UPLOAD_ARROW: &str = "↑";
 pub const DOWNLOAD_ARROW: &str = "↓";
 pub const WAITING_FOR_WORKER: &str = "Waiting for a worker";

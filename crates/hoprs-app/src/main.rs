@@ -6,6 +6,7 @@
 mod app;
 mod backend;
 mod effects;
+mod logbuf;
 mod settings;
 mod terminal;
 mod ui;
@@ -27,8 +28,10 @@ const INITIAL_WINDOW: iced::Size = iced::Size::new(app::INITIAL_WINDOW_WIDTH, 80
 /// A frame of the indeterminate progress bar.
 const BUSY_FRAME: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// The default filter, used when `RUST_LOG` is unset or empty.
-const DEFAULT_LOG_FILTER: &str = "info,suppaftp=warn";
+/// The default filter, used when `RUST_LOG` is unset or empty: `info`, with suppaftp
+/// at its own default and the graphics stack's start-up chatter (adapters, surfaces,
+/// "No config found!", "Ignoring unknown button type") left out.
+const DEFAULT_LOG_FILTER: &str = "info,suppaftp=warn,wgpu_hal=error,wgpu_core=warn,iced_winit=warn,iced_wgpu=warn,sctk_adwaita=error";
 /// suppaftp's own default; added unless `RUST_LOG` sets plain `suppaftp`.
 const SUPPAFTP_DEFAULT: &str = "suppaftp=warn";
 /// The most suppaftp may ever log at: at trace it logs `PASS <password>`.
@@ -40,7 +43,8 @@ const TERMINAL_LOG_CAP: &str = "warn";
 
 fn main() -> iced::Result {
     let filter = log_filter(std::env::var("RUST_LOG").ok().as_deref());
-    init_logging(&filter);
+    let log = logbuf::LogBuffer::new();
+    init_logging(&filter, log.clone());
 
     let _instance = match acquire_first_instance_lock(&instance_lock_paths()) {
         Ok(Some(lock)) => Some(lock),
@@ -55,7 +59,7 @@ fn main() -> iced::Result {
         }
     };
 
-    iced::application(boot, update, view)
+    iced::application(move || boot(log.clone()), update, view)
         .subscription(subscription)
         .title(ui::strings::APP_TITLE)
         .theme(|_: &Hoprs| ui::theme::theme())
@@ -81,7 +85,7 @@ struct Hoprs {
     backend: Arc<dyn BackendApi>,
 }
 
-fn boot() -> (Hoprs, Task<Message>) {
+fn boot(log: logbuf::LogBuffer) -> (Hoprs, Task<Message>) {
     let backend = match open_backend() {
         Ok(backend) => backend,
         Err(err) => {
@@ -92,7 +96,8 @@ fn boot() -> (Hoprs, Task<Message>) {
         }
     };
     let backend: Arc<dyn BackendApi> = Arc::new(backend);
-    let (app, effects) = App::boot();
+    let (mut app, effects) = App::boot();
+    app.attach_log(log);
     let task = run_effects(&backend, effects);
     (Hoprs { app, backend }, task)
 }
@@ -158,7 +163,20 @@ fn subscription(state: &Hoprs) -> iced::Subscription<Message> {
             effects::shell_feed(feed.2.as_ref(), feed.0, feed.1)
         })
     });
-    iced::Subscription::batch(fixed.into_iter().chain(busy).chain(sessions).chain(shells))
+    // The log panel takes the new lines while it is open.
+    let log = state
+        .app
+        .log
+        .open
+        .then(|| iced::time::every(app::log::POLL).map(|_| Message::Log(app::LogMsg::Tick)));
+    iced::Subscription::batch(
+        fixed
+            .into_iter()
+            .chain(busy)
+            .chain(log)
+            .chain(sessions)
+            .chain(shells),
+    )
 }
 
 /// A terminal tab's shell, as the identity of its output feed (the backend rides along).
@@ -265,7 +283,7 @@ struct LogFilter {
 
 /// Builds the filter from `RUST_LOG`; suppaftp never goes above debug, and
 /// the terminal crates ([`TERMINAL_LOG_CRATES`]) never above warn. The
-/// unset default stays `info,suppaftp=warn`: [`terminal_log_cap`] caps the
+/// unset default is [`DEFAULT_LOG_FILTER`]: [`terminal_log_cap`] caps the
 /// terminal crates at run time in every case, span directives included.
 fn log_filter(rust_log: Option<&str>) -> LogFilter {
     let Some(rust_log) = rust_log.map(str::trim).filter(|s| !s.is_empty()) else {
@@ -375,20 +393,72 @@ where
     tracing_subscriber::EnvFilter::new(&filter.directives).and(terminal_log_cap())
 }
 
-fn init_logging(filter: &LogFilter) {
+/// What `main` logs to: the terminal output (`writer`) and the log panel's
+/// `buffer`, each behind the same filter ([`subscriber_filter`]), so the panel
+/// never shows what the terminal wouldn't.
+fn log_subscriber<W>(
+    filter: &LogFilter,
+    buffer: logbuf::LogBuffer,
+    writer: W,
+) -> impl tracing::Subscriber + Send + Sync + 'static
+where
+    W: for<'w> tracing_subscriber::fmt::MakeWriter<'w> + Send + Sync + 'static,
+{
     use tracing_subscriber::Layer;
     use tracing_subscriber::layer::SubscriberExt;
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(writer)
+                .with_filter(subscriber_filter(filter)),
+        )
+        .with(buffer.with_filter(subscriber_filter(filter)))
+}
+
+fn init_logging(filter: &LogFilter, buffer: logbuf::LogBuffer) {
     use tracing_subscriber::util::SubscriberInitExt;
     // `init` also installs the `log` bridge, through which vte and
     // alacritty_terminal log.
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer().with_filter(subscriber_filter(filter)))
-        .init();
+    log_subscriber(filter, buffer, io::stdout).init();
     if filter.capped {
         tracing::warn!(
             "RUST_LOG would log suppaftp at trace, where it logs passwords; lowered to debug"
         );
     }
+}
+
+/// Serializes the tests that install `tracing` subscribers. Callsite
+/// interest is cached across all live dispatchers: a concurrent test's
+/// `trace` subscriber would mark a callsite `always` and skip ours.
+#[cfg(test)]
+fn subscriber_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Installs [`log_subscriber`] (as `main` does, the terminal output discarded) on
+/// this thread until the guard drops; the buffer gets what the app logs here.
+///
+/// A second, silent dispatcher keeps a callsite's cached interest from another
+/// thread (no subscriber: "never") from hiding it from this one. Hold
+/// [`subscriber_test_lock`] meanwhile.
+#[cfg(test)]
+fn capture_log(filter: &LogFilter) -> (logbuf::LogBuffer, LogCapture) {
+    let buffer = logbuf::LogBuffer::new();
+    let subscriber = log_subscriber(filter, buffer.clone(), io::sink);
+    let capture = LogCapture {
+        _default: tracing::subscriber::set_default(subscriber),
+        _other: tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()),
+    };
+    (buffer, capture)
+}
+
+/// What [`capture_log`] keeps alive.
+#[cfg(test)]
+struct LogCapture {
+    _default: tracing::subscriber::DefaultGuard,
+    _other: tracing::Dispatch,
 }
 
 #[cfg(test)]
@@ -412,15 +482,6 @@ mod tests {
             acquire_instance_lock(&path).unwrap().is_some(),
             "the lock is free again once the first instance exits"
         );
-    }
-
-    /// Serializes the tests that install `tracing` subscribers. Callsite
-    /// interest is cached across all live dispatchers: a concurrent test's
-    /// `trace` subscriber would mark a callsite `always` and skip ours.
-    fn subscriber_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Whether the real `EnvFilter` built from `directives` lets a trace
@@ -501,7 +562,10 @@ mod tests {
         // Absent or empty: the default.
         for unset in [None, Some(""), Some("  ")] {
             let filter = log_filter(unset);
-            assert_eq!(filter.directives, "info,suppaftp=warn");
+            assert_eq!(
+                filter.directives,
+                "info,suppaftp=warn,wgpu_hal=error,wgpu_core=warn,iced_winit=warn,iced_wgpu=warn,sctk_adwaita=error"
+            );
             assert!(!filter.capped);
         }
 
@@ -635,15 +699,8 @@ mod tests {
     /// Whether the full subscriber filter (`EnvFilter` + terminal cap)
     /// enables a debug event from `target`, optionally inside a span `span`.
     fn debug_enabled(rust_log: Option<&str>, target: &str, in_span: bool) -> bool {
-        use tracing_subscriber::Layer;
-        use tracing_subscriber::layer::SubscriberExt;
-
         let filter = log_filter(rust_log);
-        let subscriber = tracing_subscriber::registry().with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(io::sink)
-                .with_filter(subscriber_filter(&filter)),
-        );
+        let subscriber = log_subscriber(&filter, logbuf::LogBuffer::new(), io::sink);
         tracing::subscriber::with_default(subscriber, || {
             let span = in_span.then(|| tracing::info_span!("connect").entered());
             let enabled = match target {
@@ -699,5 +756,124 @@ mod tests {
             let _span = tracing::info_span!("connect").entered();
             assert!(tracing::enabled!(target: "vte", tracing::Level::DEBUG));
         });
+    }
+
+    /// The panel's buffer sits behind the terminal's filter: the suppaftp cap (at
+    /// trace it logs `PASS <password>`), the terminal crates' cap (span directives
+    /// included) and the levels `RUST_LOG` asks for.
+    #[test]
+    fn layer_respects_the_filter_and_suppaftp_cap() {
+        let _lock = subscriber_test_lock();
+        let emit = || {
+            tracing::trace!(target: "suppaftp", "PASS hunter2");
+            tracing::trace!(target: "suppaftp::async_ftp", "PASS hunter3");
+            tracing::debug!(target: "suppaftp", "suppaftp-debug");
+            tracing::warn!(target: "suppaftp", "suppaftp-warn");
+            tracing::debug!(target: "vte", "vte-bytes");
+            tracing::warn!(target: "vte", "vte-warn");
+            tracing::debug!(target: "alacritty_terminal::term", "alacritty-bytes");
+            tracing::trace!(target: "hoprs_app", "app-trace");
+            tracing::debug!(target: "hoprs_app", "app-debug");
+            tracing::info!(target: "hoprs_app", "app-info");
+            let _span = tracing::info_span!("connect").entered();
+            tracing::debug!(target: "vte", "vte-in-span");
+            tracing::trace!(target: "suppaftp", "PASS in-span");
+            tracing::debug!(target: "hoprs_app", "app-in-span");
+        };
+        let logged = |rust_log: Option<&str>| {
+            let (buffer, capture) = capture_log(&log_filter(rust_log));
+            emit();
+            drop(capture);
+            buffer.text()
+        };
+
+        for rust_log in [
+            Some("trace"),
+            Some("suppaftp=trace,trace"),
+            Some("info,[connect]=trace"),
+            Some("vte=trace,alacritty_terminal=trace,debug"),
+        ] {
+            let text = logged(rust_log);
+            for never in [
+                "hunter2",
+                "hunter3",
+                "PASS",
+                "vte-bytes",
+                "alacritty-bytes",
+                "vte-in-span",
+            ] {
+                assert!(!text.contains(never), "{rust_log:?} logs {never}: {text}");
+            }
+            assert!(text.contains("WARN suppaftp suppaftp-warn"), "{text}");
+            assert!(text.contains("WARN vte vte-warn"), "{text}");
+        }
+        // An explicit RUST_LOG still decides, within the caps.
+        let text = logged(Some("trace"));
+        assert!(text.contains("TRACE hoprs_app app-trace"), "{text}");
+        assert!(
+            !text.contains("suppaftp-debug"),
+            "suppaftp keeps warn: {text}"
+        );
+        let text = logged(Some("info,suppaftp=debug"));
+        assert!(text.contains("DEBUG suppaftp suppaftp-debug"), "{text}");
+        assert!(!text.contains("app-debug"), "{text}");
+        assert!(text.contains("INFO hoprs_app app-info"), "{text}");
+        let text = logged(Some("info,[connect]=trace"));
+        assert!(text.contains("app-in-span"), "{text}");
+        assert!(!text.contains("app-debug"), "{text}");
+        // The default: info and up, suppaftp at warn.
+        let text = logged(None);
+        assert!(text.contains("INFO hoprs_app app-info"), "{text}");
+        assert!(text.contains("suppaftp-warn"), "{text}");
+        for never in [
+            "app-debug",
+            "app-trace",
+            "suppaftp-debug",
+            "PASS",
+            "vte-bytes",
+        ] {
+            assert!(!text.contains(never), "the default logs {never}: {text}");
+        }
+    }
+
+    /// The default leaves out the graphics stack's info chatter; the app's own info
+    /// lines stay, and so do the stack's errors.
+    #[test]
+    fn default_filter_quiets_graphics_stack() {
+        let _lock = subscriber_test_lock();
+        let (buffer, capture) = capture_log(&log_filter(None));
+        tracing::info!(target: "wgpu_hal::vulkan::instance", "adapter chatter");
+        tracing::warn!(target: "wgpu_hal", "wgpu-hal-warn");
+        tracing::info!(target: "wgpu_core::instance", "wgpu-core-info");
+        tracing::info!(target: "iced_winit", "iced-winit-info");
+        tracing::info!(target: "iced_wgpu::window::compositor", "iced-wgpu-info");
+        tracing::warn!(target: "sctk_adwaita::config", "No config found!");
+        tracing::info!(target: "hoprs_app", "app-info");
+        tracing::error!(target: "wgpu_hal", "wgpu-hal-error");
+        tracing::warn!(target: "iced_winit", "iced-winit-warn");
+        drop(capture);
+        let text = buffer.text();
+        for quiet in [
+            "adapter chatter",
+            "wgpu-hal-warn",
+            "wgpu-core-info",
+            "iced-winit-info",
+            "iced-wgpu-info",
+            "No config found!",
+        ] {
+            assert!(!text.contains(quiet), "{quiet} in {text}");
+        }
+        for kept in [
+            "INFO hoprs_app app-info",
+            "wgpu-hal-error",
+            "iced-winit-warn",
+        ] {
+            assert!(text.contains(kept), "{kept} missing from {text}");
+        }
+        // An explicit RUST_LOG replaces the default: the stack logs again.
+        let (buffer, capture) = capture_log(&log_filter(Some("info")));
+        tracing::info!(target: "iced_winit", "iced-winit-info-explicit");
+        drop(capture);
+        assert!(buffer.text().contains("iced-winit-info-explicit"));
     }
 }

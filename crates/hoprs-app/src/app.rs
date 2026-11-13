@@ -59,6 +59,7 @@ pub mod dialogs;
 pub mod files;
 pub mod import;
 pub mod lifecycle;
+pub mod log;
 pub mod queue;
 pub mod reconnect;
 pub mod settings;
@@ -70,6 +71,7 @@ pub use actions::FileAction;
 pub use dialogs::{Dialog, DialogMsg, Dialogs, FailureAction, KnownHostsFix, KnownHostsMsg, Typed};
 pub use files::{FileKey, Mods, PaneMsg, RequestId};
 pub use lifecycle::ConnStatus;
+pub use log::{LogLevel, LogMsg};
 pub use queue::{Queue, QueueMsg, QueueTab, RowAction};
 pub use tabs::{SiteConn, Tab, TabId, TabState};
 pub use terminal::TerminalMsg;
@@ -88,6 +90,8 @@ pub enum WorkspaceRow<'a> {
 pub struct App {
     /// Whether the transfer queue is expanded.
     pub queue_open: bool,
+    /// The technical log panel.
+    pub log: log::LogPanel,
     /// The sidebar's site filter, as typed.
     pub site_filter: String,
     pub load: Load,
@@ -162,6 +166,8 @@ pub struct App {
 pub enum Message {
     /// Collapse or expand the transfer queue.
     ToggleQueue,
+    /// Something in the technical log panel, or its poll.
+    Log(LogMsg),
     /// The sidebar filter changed.
     FilterSites(String),
     ReloadProfiles,
@@ -575,6 +581,8 @@ pub enum Effect {
     },
     /// Focuses the terminal tab's search field.
     FocusTerminalSearch(TabId),
+    /// Scrolls the log panel to its newest line.
+    ScrollLogToEnd,
 }
 
 /// The window's width before the first resize event (`main`'s initial size).
@@ -598,6 +606,7 @@ impl App {
     pub fn new() -> Self {
         Self {
             queue_open: true,
+            log: log::LogPanel::new(crate::logbuf::LogBuffer::new()),
             site_filter: String::new(),
             load: Load::Loading,
             sites: Vec::new(),
@@ -760,6 +769,7 @@ impl App {
         }
         match msg {
             Message::ToggleQueue => self.queue_open = !self.queue_open,
+            Message::Log(msg) => return self.log_msg(msg),
             Message::WindowResized(width) => self.window_width = width,
             Message::FilterSites(filter) => self.site_filter = filter,
             Message::ReloadProfiles => {

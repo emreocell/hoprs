@@ -245,6 +245,13 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
         Effect::FocusTerminalSearch(tab) => {
             iced::widget::operation::focus(crate::ui::terminal::search_id(tab))
         }
+        Effect::ScrollLogToEnd => iced::widget::operation::snap_to(
+            crate::ui::log::scroll_id(),
+            iced::widget::operation::RelativeOffset {
+                x: None,
+                y: Some(1.0),
+            },
+        ),
     }
 }
 

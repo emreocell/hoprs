@@ -7,6 +7,7 @@ pub mod fit;
 pub mod format;
 pub mod import;
 pub mod layout;
+pub mod log;
 pub mod queue;
 pub mod settings;
 pub mod sidebar;
