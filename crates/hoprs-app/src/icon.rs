@@ -162,4 +162,20 @@ mod tests {
     fn garbage_is_an_error_not_a_panic() {
         assert!(decode_rgba8(b"not a png").is_err());
     }
+
+    const DESKTOP: &str =
+        include_str!("../../../packaging/linux/io.github.engviniciusbs.hoprs.desktop");
+
+    #[test]
+    fn desktop_entry_icon_and_wm_class_match_app_id() {
+        let line = |key: &str| {
+            DESKTOP
+                .lines()
+                .find_map(|l| l.strip_prefix(key))
+                .map(str::to_owned)
+        };
+        assert_eq!(line("Icon=").as_deref(), Some(APP_ID));
+        assert_eq!(line("StartupWMClass=").as_deref(), Some(APP_ID));
+        assert_eq!(line("Exec=").as_deref(), Some("hoprs"));
+    }
 }

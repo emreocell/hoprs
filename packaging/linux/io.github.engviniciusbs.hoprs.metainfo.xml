@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.engviniciusbs.hoprs</id>
+  <name>hoprs</name>
+  <summary>SSH terminal, SFTP and FTP/FTPS client</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <description>
+    <p>hoprs is a fast, native desktop client for SSH, SFTP, FTP and FTPS. Save your sites, group them into workspaces, browse local and remote files side by side, and queue transfers that resume and handle conflicts.</p>
+    <p>SSH sites open a terminal, a file browser, or both over one connection. Credentials live in the system keyring, and sites can be imported from FileZilla.</p>
+  </description>
+  <launchable type="desktop-id">io.github.engviniciusbs.hoprs.desktop</launchable>
+  <categories>
+    <category>Network</category>
+    <category>FileTransfer</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="1.0.0" date="2026-11-13"/>
+  </releases>
+</component>

@@ -38,7 +38,7 @@ fn main() {
         eprintln!("startup bench: no DISPLAY; run it under `xvfb-run -a`");
         std::process::exit(2);
     }
-    let exe = env!("CARGO_BIN_EXE_hoprs-app");
+    let exe = env!("CARGO_BIN_EXE_hoprs");
     let runs: Vec<Run> = (0..RUNS)
         .map(|i| match probe(Path::new(exe)) {
             Ok(run) => {

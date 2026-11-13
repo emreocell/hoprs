@@ -9,6 +9,7 @@ mod app;
 mod backend;
 #[doc(hidden)]
 pub mod bench;
+pub mod cli;
 mod effects;
 mod icon;
 mod logbuf;

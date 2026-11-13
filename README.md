@@ -5,7 +5,7 @@ Design spec: [docs/superpowers/specs/2026-11-11-hoprs-design.md](docs/superpower
 ## Running
 
 ```sh
-cargo run -p hoprs-app --release
+cargo run --release   # builds and runs the `hoprs` binary (crate hoprs-app)
 ```
 
 Profiles live in `~/.config/hoprs` (`sites.toml`, `workspaces.toml`, `settings.toml`) and

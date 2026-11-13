@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=hoprs
+GenericName=SSH and FTP client
+Comment=SSH terminal, SFTP and FTP/FTPS file transfers
+Exec=hoprs
+Icon=io.github.engviniciusbs.hoprs
+Terminal=false
+Categories=Network;FileTransfer;RemoteAccess;
+Keywords=ssh;sftp;ftp;ftps;terminal;filezilla;
+StartupWMClass=io.github.engviniciusbs.hoprs
+StartupNotify=true
