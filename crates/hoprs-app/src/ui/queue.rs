@@ -64,13 +64,15 @@ pub fn view(app: &App) -> Element<'_, Message> {
         strings::QUEUE_FAILED,
         strings::QUEUE_DONE,
     ];
-    // A narrow window: short labels, no worker count or session policy, tighter gaps.
-    let compact = fit::compact_queue(app.window_width);
-    let mut head = row![
+    // A narrow window: short labels, no worker count, the session policy as a tag in
+    // place of the title, tighter gaps.
+    let fit = fit::queue_head(app.window_width, queue.session_policy().is_some());
+    let compact = fit.compact;
+    let mut head = row![fit.title.then(|| {
         text(strings::TRANSFERS)
             .font(theme::INTER_SEMIBOLD)
             .wrapping(text::Wrapping::None)
-    ]
+    })]
     .spacing(if compact {
         theme::SPACE_MD
     } else {
@@ -96,12 +98,22 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let head = head
         .push(space::horizontal())
         // An answer "to all" became the engine's policy for this run: say so.
-        .push(queue.session_policy().filter(|_| !compact).map(|policy| {
-            text(strings::session_policy(policy))
-                .size(theme::TEXT_XS)
-                .color(p.muted)
-                .wrapping(text::Wrapping::None)
-        }))
+        .push(
+            queue
+                .session_policy()
+                .zip(fit.policy)
+                .map(|(policy, note)| match note {
+                    fit::PolicyNote::Full => text(strings::session_policy(policy))
+                        .size(theme::TEXT_XS)
+                        .color(p.muted)
+                        .wrapping(text::Wrapping::None),
+                    fit::PolicyNote::Tag => text(strings::session_policy_tag(policy))
+                        .font(theme::MONO)
+                        .size(theme::TEXT_TAG)
+                        .color(p.muted)
+                        .wrapping(text::Wrapping::None),
+                }),
+        )
         .push(
             row![
                 text(strings::speed(queue.total_speed()))

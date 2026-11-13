@@ -63,6 +63,42 @@ pub fn compact_queue(window: f32) -> bool {
     center_width(window) < QUEUE_HEAD_FULL
 }
 
+/// How the queue head shows the session's conflict policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyNote {
+    /// "Conflicts: overwrite (this session)".
+    Full,
+    /// The short mono tag "overwrite: session".
+    Tag,
+}
+
+/// What the queue head shows at a window width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueHead {
+    /// Short labels, no worker count, tighter gaps.
+    pub compact: bool,
+    /// The "Transfers" title.
+    pub title: bool,
+    /// The session's conflict policy, if one is set.
+    pub policy: Option<PolicyNote>,
+}
+
+/// The queue head at this window width, with or without a session policy to show. The
+/// policy is never hidden: a narrow head shows its tag instead of the title.
+pub fn queue_head(window: f32, has_policy: bool) -> QueueHead {
+    let compact = compact_queue(window);
+    let policy = has_policy.then_some(if compact {
+        PolicyNote::Tag
+    } else {
+        PolicyNote::Full
+    });
+    QueueHead {
+        compact,
+        title: policy != Some(PolicyNote::Tag),
+        policy,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +171,48 @@ mod tests {
         assert!(!compact_queue(1280.0));
         assert!(compact_queue(960.0));
         assert_eq!(center_width(100.0), 0.0);
+    }
+
+    /// The session's conflict policy never disappears from the queue head: a narrow
+    /// window shows it as a short mono tag, making room by dropping the title.
+    #[test]
+    fn queue_head_keeps_the_session_policy_when_narrow() {
+        let wide = queue_head(1280.0, true);
+        assert_eq!(
+            wide,
+            QueueHead {
+                compact: false,
+                title: true,
+                policy: Some(PolicyNote::Full)
+            }
+        );
+        let narrow = queue_head(960.0, true);
+        assert_eq!(
+            narrow,
+            QueueHead {
+                compact: true,
+                title: false,
+                policy: Some(PolicyNote::Tag)
+            }
+        );
+        // The threshold: the full note while the head is not compact.
+        let edge = sidebar::WIDTH + QUEUE_HEAD_FULL;
+        assert_eq!(queue_head(edge, true).policy, Some(PolicyNote::Full));
+        assert_eq!(queue_head(edge - 1.0, true).policy, Some(PolicyNote::Tag));
+        // No policy: nothing to show, and the title stays.
+        for width in [960.0, 1280.0] {
+            let head = queue_head(width, false);
+            assert_eq!((head.title, head.policy), (true, None));
+        }
+        assert_eq!(
+            crate::ui::strings::session_policy_tag(hoprs_transfer::ConflictPolicy::Overwrite),
+            "overwrite: session"
+        );
+        assert_eq!(
+            crate::ui::strings::session_policy_tag(
+                hoprs_transfer::ConflictPolicy::OverwriteIfNewer
+            ),
+            "if newer: session"
+        );
     }
 }

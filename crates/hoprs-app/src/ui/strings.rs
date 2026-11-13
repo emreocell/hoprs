@@ -236,6 +236,19 @@ pub fn session_policy(policy: hoprs_transfer::ConflictPolicy) -> String {
     format!("Conflicts: {name} (this session)")
 }
 
+/// The same in a narrow window, as a short mono tag: "overwrite: session".
+pub fn session_policy_tag(policy: hoprs_transfer::ConflictPolicy) -> String {
+    use hoprs_transfer::ConflictPolicy::*;
+    let name = match policy {
+        Ask => "ask",
+        Overwrite => "overwrite",
+        Skip => "skip",
+        OverwriteIfNewer => "if newer",
+        Resume => "resume",
+    };
+    format!("{name}: session")
+}
+
 /// The queue database could not be opened: the engine runs on an in-memory queue.
 pub fn queue_unavailable(reason: &str) -> String {
     format!("Transfer queue unavailable: {reason}. Transfers this session won't survive a restart.")
