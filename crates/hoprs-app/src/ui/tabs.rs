@@ -1,8 +1,10 @@
 //! The session tabs in the top bar: one per open site, its name, the protocol tag in mono
 //! and a × that closes it (and its session). The active tab sits on `paper_3` over the
-//! 2 px white underline.
+//! 2 px white underline. Tabs past the window's width scroll sideways (Shift+wheel or a
+//! touchpad), as the mockup's `overflow-x: auto` strip does.
 
-use iced::widget::{button, column, container, row, space, text};
+use iced::widget::scrollable::{Direction, Scrollbar};
+use iced::widget::{button, column, container, row, scrollable, space, text};
 use iced::{Alignment, Element, Length, Padding};
 
 use crate::app::{App, Message, Tab};
@@ -24,13 +26,22 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .align_y(Alignment::Center)
         .into();
     }
+    let strip = row(app
+        .tabs
+        .iter()
+        .enumerate()
+        .map(|(i, tab)| session_tab(app, i, tab)))
+    .spacing(theme::SPACE_3XS)
+    .height(Length::Fill);
+    // A thin bar over the underlines, shown only when the tabs overflow.
+    let bar = Scrollbar::new()
+        .width(theme::SPACE_3XS)
+        .scroller_width(theme::SPACE_3XS);
     container(
-        row(app
-            .tabs
-            .iter()
-            .enumerate()
-            .map(|(i, tab)| session_tab(app, i, tab)))
-        .spacing(theme::SPACE_3XS),
+        scrollable(strip)
+            .direction(Direction::Horizontal(bar))
+            .height(Length::Fill)
+            .style(theme::scrollbar),
     )
     .width(Length::Fill)
     .height(Length::Fill)

@@ -146,13 +146,14 @@ fn group<'a>(title: &'a str, on_new: Message, body: Element<'a, Message>) -> Ele
 /// With `edit`, a muted "Edit" after it opens the site form without connecting.
 fn site_row(site: &Site, edit: bool) -> Element<'_, Message> {
     let open = button(
+        // The tag never wraps: a long name wraps instead.
         row![
-            text(&site.name).size(theme::TEXT_SM),
-            space::horizontal(),
+            text(&site.name).size(theme::TEXT_SM).width(Length::Fill),
             text(protocol_tag(site))
                 .font(theme::MONO)
                 .size(theme::TEXT_TAG)
-                .color(palette().muted),
+                .color(palette().muted)
+                .wrapping(text::Wrapping::None),
         ]
         .spacing(theme::SPACE_XS)
         .align_y(Alignment::Center),
@@ -228,8 +229,8 @@ fn workspace<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
         row![
             text(&ws.name)
                 .font(theme::INTER_MEDIUM)
-                .color(if open { p.ink } else { p.ink_2 }),
-            space::horizontal(),
+                .color(if open { p.ink } else { p.ink_2 })
+                .width(Length::Fill),
             text(strings::workspace_site_count(
                 ws.sites
                     .iter()
@@ -238,8 +239,10 @@ fn workspace<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
                 ws.sites.len(),
             ))
             .size(theme::TEXT_XS)
-            .color(p.muted),
+            .color(p.muted)
+            .wrapping(text::Wrapping::None),
         ]
+        .spacing(theme::SPACE_XS)
         .align_y(Alignment::Center),
     )
     .width(Length::Fill)

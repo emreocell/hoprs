@@ -21,9 +21,9 @@ use crate::ui::{file_actions, format, strings};
 /// The path bar (mockup `.path`: 38 px).
 const PATH_HEIGHT: f32 = 38.0;
 /// Fixed columns; the name takes the rest.
-const SIZE_WIDTH: f32 = 96.0;
-const MODIFIED_WIDTH: f32 = 128.0;
-const PERMISSIONS_WIDTH: f32 = 124.0;
+const SIZE_WIDTH: f32 = 88.0;
+const MODIFIED_WIDTH: f32 = 116.0;
+const PERMISSIONS_WIDTH: f32 = 110.0;
 /// Rows of the loading skeleton.
 const SKELETON_ROWS: usize = 8;
 
