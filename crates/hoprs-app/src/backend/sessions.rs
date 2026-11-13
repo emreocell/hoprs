@@ -904,6 +904,11 @@ impl RemoteFs for ActiveFs {
         self.inner.stat(path).await
     }
 
+    async fn size(&self, path: &hoprs_core::RemotePath) -> Result<u64> {
+        self.activity.touch();
+        self.inner.size(path).await
+    }
+
     async fn open_read(
         &self,
         path: &hoprs_core::RemotePath,

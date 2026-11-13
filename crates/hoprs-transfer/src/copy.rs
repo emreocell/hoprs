@@ -58,7 +58,7 @@ pub async fn copy_file(
     }
     writer.shutdown().await?;
 
-    let got = dst.stat(dst_path).await?.size;
+    let got = dst.size(dst_path).await?;
     if got != src_entry.size {
         return Err(
             Error::new(ErrorKind::Protocol, "Size mismatch after transfer")

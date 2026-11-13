@@ -32,7 +32,7 @@
 //! destination's size), so `retry` never skips or appends to a partial
 //! destination.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use hoprs_core::{Error, ErrorKind, RemoteEntry, Result, SiteId};
@@ -214,6 +214,11 @@ pub(super) struct Actor {
     pub(super) final_progress: Vec<ProgressUpdate>,
     /// A `Progress` went out off the ticker: the next tick is one interval after it.
     pub(super) progress_off_tick: bool,
+    /// Queued files under a folder this run created, never dispatched yet: their
+    /// destination is missing, so their first `prepare` skips the conflict check.
+    /// Leaving `Queued` (dispatch, pause, cancel) drops the mark: any later attempt
+    /// (resume, retry, after a restart) checks.
+    pub(super) fresh_dst: HashSet<TransferId>,
     pub(super) worker_tx: mpsc::UnboundedSender<WorkerMsg>,
 }
 
@@ -242,6 +247,7 @@ pub(super) async fn run(
         last_progress: None,
         final_progress: Vec::new(),
         progress_off_tick: false,
+        fresh_dst: HashSet::new(),
         worker_tx,
     };
     let mut ticker = tokio::time::interval(actor.progress_interval);
@@ -432,6 +438,9 @@ impl Actor {
         if let Some(item) = self.items.get_mut(&id) {
             let was_queued = item.state == TransferState::Queued;
             let is_queued = state == TransferState::Queued;
+            if !is_queued && state != TransferState::Active {
+                self.fresh_dst.remove(&id);
+            }
             if was_queued != is_queued {
                 let queue = self.queued.entry(item.spec.site.clone()).or_default();
                 if is_queued {
@@ -506,7 +515,10 @@ impl Actor {
                     },
                 );
                 let policy = policy_override.unwrap_or(self.policy);
-                worker::spawn_prepare(id, route, policy, cancel, self.worker_tx.clone());
+                let fresh_dst = self.fresh_dst.remove(&id);
+                // A count left from the previous run must not follow this run's own.
+                self.final_progress.retain(|u| u.id != id);
+                worker::spawn_prepare(id, route, policy, fresh_dst, cancel, self.worker_tx.clone());
             }
         }
     }
@@ -615,9 +627,9 @@ impl Actor {
             WorkerMsg::Prepared { id, route, result } => {
                 let intent = self.intent(id);
                 match (result.map(|p| *p), intent) {
-                    (Ok(Prepared::Dir { entries }), intent) => {
+                    (Ok(Prepared::Dir { entries, created }), intent) => {
                         self.free_slot(id);
-                        self.expand(id, entries, intent);
+                        self.expand(id, entries, created, intent);
                         self.dispatch();
                     }
                     // Stopped before copying anything: the prepare result is

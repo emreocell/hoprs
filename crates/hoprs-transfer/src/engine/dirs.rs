@@ -122,6 +122,7 @@ impl Actor {
         &mut self,
         id: TransferId,
         entries: Vec<RemoteEntry>,
+        created: bool,
         intent: Option<Intent>,
     ) {
         let initial = match intent {
@@ -179,6 +180,9 @@ impl Actor {
             self.dirs.insert(id, DirProgress { pending, failed });
         }
         for (child_id, child) in ids.into_iter().zip(children) {
+            if created && !child.is_dir && child.state == TransferState::Queued {
+                self.fresh_dst.insert(child_id);
+            }
             self.add_item(TransferItem {
                 id: child_id,
                 parent: Some(id),

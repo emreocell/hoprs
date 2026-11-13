@@ -64,7 +64,12 @@ pub(super) enum Prepared {
         decision: Decision,
     },
     /// A directory: the destination exists and these are the source entries.
-    Dir { entries: Vec<RemoteEntry> },
+    /// `created`: this run created the destination (it was missing), so it is
+    /// empty and the children's first attempts need no conflict check.
+    Dir {
+        entries: Vec<RemoteEntry>,
+        created: bool,
+    },
     /// A symlink, which is never followed.
     Symlink,
     /// Stopped by the item's cancellation token before the destination was
@@ -117,6 +122,7 @@ pub(super) fn spawn_prepare(
     id: TransferId,
     route: Route,
     policy: ConflictPolicy,
+    fresh_dst: bool,
     cancel: CancellationToken,
     tx: mpsc::UnboundedSender<WorkerMsg>,
 ) {
@@ -127,7 +133,7 @@ pub(super) fn spawn_prepare(
             let result = tokio::select! {
                 biased;
                 () = cancel.cancelled() => Ok(Prepared::Stopped),
-                result = prepare(&route, policy) => result,
+                result = prepare(&route, policy, fresh_dst) => result,
             }
             .map(Box::new);
             WorkerMsg::Prepared { id, route, result }
@@ -140,17 +146,23 @@ pub(super) fn spawn_prepare(
     );
 }
 
-async fn prepare(route: &Route, policy: ConflictPolicy) -> Result<Prepared> {
+/// With `fresh_dst` (the first attempt of a file under a folder this run
+/// created) the destination is known to be missing: no conflict check.
+async fn prepare(route: &Route, policy: ConflictPolicy, fresh_dst: bool) -> Result<Prepared> {
     let src = route.src.stat(&route.src_path).await?;
     match src.kind {
         EntryKind::File => {}
         EntryKind::Dir => return prepare_dir(route).await,
         EntryKind::Symlink => return Ok(Prepared::Symlink),
     }
-    let dst = match route.dst.stat(&route.dst_path).await {
-        Ok(entry) => Some(entry),
-        Err(e) if e.kind == ErrorKind::NotFound => None,
-        Err(e) => return Err(e),
+    let dst = if fresh_dst {
+        None
+    } else {
+        match route.dst.stat(&route.dst_path).await {
+            Ok(entry) => Some(entry),
+            Err(e) if e.kind == ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        }
     };
     if dst.as_ref().is_some_and(|d| d.kind != EntryKind::File) {
         return Err(
@@ -163,7 +175,13 @@ async fn prepare(route: &Route, policy: ConflictPolicy) -> Result<Prepared> {
 }
 
 /// Creates the destination directory (an existing one is fine) and lists the source.
+/// `mkdir` succeeds on an existing directory, so a `stat` first tells whether this run
+/// creates it.
 async fn prepare_dir(route: &Route) -> Result<Prepared> {
+    let missing = matches!(
+        route.dst.stat(&route.dst_path).await,
+        Err(e) if e.kind == ErrorKind::NotFound
+    );
     if let Err(e) = route.dst.mkdir(&route.dst_path).await {
         match route.dst.stat(&route.dst_path).await {
             Ok(entry) if entry.kind == EntryKind::Dir => {}
@@ -178,7 +196,10 @@ async fn prepare_dir(route: &Route) -> Result<Prepared> {
                 .with_detail(format!("{:?} in {}", bad.name, route.src_path)),
         );
     }
-    Ok(Prepared::Dir { entries })
+    Ok(Prepared::Dir {
+        entries,
+        created: missing,
+    })
 }
 
 /// Whether `name` is a single path component accepted by `RemotePath::join`.
