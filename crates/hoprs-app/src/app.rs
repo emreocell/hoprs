@@ -60,6 +60,7 @@ pub mod files;
 pub mod import;
 pub mod lifecycle;
 pub mod queue;
+pub mod reconnect;
 pub mod settings;
 pub mod tabs;
 pub mod terminal;
@@ -145,6 +146,11 @@ pub struct App {
     /// The window's width, as the last resize reported it: what fits in the file panes,
     /// toolbars and queue head ([`crate::ui::fit`]).
     pub window_width: f32,
+    /// Actions waiting for their site's lost session to reconnect ([`reconnect`]).
+    held: HashMap<SiteId, Vec<Effect>>,
+    /// Listings sent again after a reconnection, which the reconnect's result does not
+    /// repeat ([`reconnect`]).
+    replayed: HashSet<files::RequestId>,
     /// The last tab or listing id handed out.
     next_id: u64,
     /// The last profile read asked for, and the one whose result was applied last.
@@ -510,6 +516,8 @@ pub enum Effect {
     SetPolicy(ConflictPolicy),
     /// Workers per site for the next connections.
     SetWorkers(usize),
+    /// Keepalive (seconds) of the next SSH and FTP connections.
+    SetKeepalive(u64),
     /// Checks whether the typed export file exists; back as
     /// [`Message::ExportTargetChecked`].
     CheckExportTarget(PathBuf),
@@ -620,6 +628,8 @@ impl App {
             backup: settings::Backup::default(),
             busy_phase: 0,
             window_width: INITIAL_WINDOW_WIDTH,
+            held: HashMap::new(),
+            replayed: HashSet::new(),
             next_id: 0,
             profiles_requested: RequestId(0),
             profiles_applied: RequestId(0),
@@ -702,7 +712,12 @@ impl App {
     pub fn update(&mut self, msg: Message) -> Vec<Effect> {
         let shown = self.shown_tab();
         let active = self.active_tab;
+        let user = reconnect::is_user_action(&msg);
         let mut effects = self.apply(msg);
+        // An action on a site whose session was lost reconnects it first.
+        if user {
+            effects = self.hold_for_reconnection(effects);
+        }
         // Another tab became active (selected, opened or moved by a close): bring it into
         // view in the tab strip, which may be scrolled sideways.
         if self.active_tab != active

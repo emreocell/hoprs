@@ -14,6 +14,18 @@ use crate::ftp::{FtpConfig, FtpPrompter, FtpSecurity};
 pub const FTP_PORT: u16 = 2121;
 /// Host port of the `ftps-implicit` service.
 pub const FTPS_IMPLICIT_PORT: u16 = 2990;
+/// Host port of the `ftp-idle` service: plain FTP, `idle_session_timeout=20`.
+pub const FTP_IDLE_PORT: u16 = 2122;
+
+/// Config for `frank` on the `ftp-idle` service, with the default keepalive (30 s, longer
+/// than the server's 20 s idle timeout) and connect timeout; command and data timeouts 10 s.
+pub fn ftp_idle_config() -> FtpConfig {
+    let mut cfg = FtpConfig::new("127.0.0.1", FTP_IDLE_PORT, "frank", FtpSecurity::Plain);
+    cfg.password = Some(SecretString::from("frank-pass"));
+    cfg.command_timeout = Duration::from_secs(10);
+    cfg.data_timeout = Duration::from_secs(10);
+    cfg
+}
 
 /// Config for `frank` on the test containers: the `ftps-implicit` service for
 /// [`FtpSecurity::ImplicitTls`], the `ftp` service otherwise. No extra roots, no pin.
@@ -221,3 +233,34 @@ pub fn ftp_listings(fs: &crate::FtpFs) -> u64 {
 pub fn ftp_peak_transfer_connections(fs: &crate::FtpFs) -> usize {
     fs.session().peak_transfer_connections()
 }
+
+/// The TCP keepalive settings of the session's control connection socket; `None` when it
+/// has no control connection.
+pub async fn control_tcp_keepalive(session: &FtpSession) -> Option<KeepaliveSettings> {
+    session
+        .with_control(|c| {
+            Box::pin(async move {
+                Ok(hoprs_ssh::net::tcp_keepalive_of(&*c.stream.get_ref().await)
+                    .expect("read the socket options"))
+            })
+        })
+        .await
+        .ok()
+}
+
+/// The TCP keepalive settings of a pooled transfer connection's socket.
+pub async fn pooled_tcp_keepalive(conn: &mut PooledConn) -> KeepaliveSettings {
+    hoprs_ssh::net::tcp_keepalive_of(&*conn.stream().get_ref().await)
+        .expect("read the socket options")
+}
+
+/// The TCP keepalive settings of a passive data connection to `addr`, opened the way the
+/// sessions open them.
+pub async fn data_tcp_keepalive(addr: std::net::SocketAddr) -> KeepaliveSettings {
+    let socket = crate::ftp::session::connect_data(addr, Duration::from_secs(5))
+        .await
+        .expect("connect the data socket");
+    hoprs_ssh::net::tcp_keepalive_of(&socket).expect("read the socket options")
+}
+
+pub use hoprs_ssh::net::KeepaliveSettings;

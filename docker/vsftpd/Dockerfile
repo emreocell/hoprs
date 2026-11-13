@@ -1,4 +1,5 @@
-# vsftpd for hoprs integration tests (plain FTP + explicit FTPS, and implicit FTPS).
+# vsftpd for hoprs integration tests (plain FTP + explicit FTPS, implicit FTPS, and plain
+# FTP with short idle timeouts).
 # Test-only: weak password, committed certificates.
 FROM debian:bookworm-slim
 
@@ -10,7 +11,7 @@ RUN apt-get update \
 RUN useradd -m -u 1101 -s /bin/bash frank && echo 'frank:frank-pass' | chpasswd
 
 COPY fixtures/ftps/*.pem fixtures/ftps/*.key /fixtures/ftps/
-COPY vsftpd/vsftpd-plain.conf vsftpd/vsftpd-implicit.conf /etc/vsftpd/
+COPY vsftpd/vsftpd-plain.conf vsftpd/vsftpd-implicit.conf vsftpd/vsftpd-idle.conf /etc/vsftpd/
 COPY vsftpd/entrypoint.sh /entrypoint.sh
 RUN chmod 755 /entrypoint.sh && chmod 600 /fixtures/ftps/*.key
 

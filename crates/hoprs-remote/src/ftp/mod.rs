@@ -644,6 +644,10 @@ impl Connection for FtpFs {
     fn generation(&self) -> u64 {
         self.session.generation()
     }
+
+    fn last_error(&self) -> Option<hoprs_core::Error> {
+        self.session.last_error()
+    }
 }
 
 #[async_trait]

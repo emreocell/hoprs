@@ -866,3 +866,164 @@ async fn same_session_connect_keeps_the_feed_state() {
     assert_eq!(app.tab_conn(0).auth, None);
     assert_eq!(app.tab_conn(0).conn, None);
 }
+
+/// The remote listings among `effects`, for the tab's remote pane.
+fn remote_lists(effects: &[Effect], tab: TabId) -> Vec<RemotePath> {
+    effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::List {
+                tab: t,
+                side: Side::Remote,
+                path,
+                ..
+            } if *t == tab => Some(path.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn reconnects(effects: &[Effect]) -> Vec<SessionId> {
+    effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Reconnect { session } => Some(*session),
+            _ => None,
+        })
+        .collect()
+}
+
+fn navigate(app: &mut App, tab: TabId, to: &str) -> Vec<Effect> {
+    app.update(Message::Pane {
+        tab,
+        side: Side::Remote,
+        msg: PaneMsg::Navigate(path(to)),
+    })
+}
+
+/// Review Focus 3: a session lost for a network reason (the transport gave up while the
+/// user was away) comes back by itself when the user acts on its tab. The action waits for
+/// the reconnection ("Reconnecting…" in the banner instead of the error), then runs once;
+/// a reconnection that fails fails the action with its reason, never replays it later.
+#[tokio::test]
+async fn action_on_dropped_session_reconnects_and_retries() {
+    let a = site("a", "a.example", "u", Protocol::Ftp);
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    let mut app = loaded(&fake).await;
+    let sites = connect_effect(app.update(Message::ConnectSite(a.id.clone())));
+    drive(&mut app, &fake, sites).await;
+    let session = session_of(&app, &a.id);
+    let tab = app.tabs[0].id;
+    let lost = Error::new(ErrorKind::Network, "Connection lost")
+        .with_detail("no reply to the keepalive NOOP");
+    state(
+        &mut app,
+        session,
+        ConnectionState::Disconnected(lost.clone()),
+    );
+    assert_eq!(
+        crate::ui::files::banner(app.tab_conn(0)),
+        Some(crate::ui::files::Banner::Lost(&lost))
+    );
+
+    // Going to another folder reconnects first; the listing waits.
+    let effects = navigate(&mut app, tab, "/srv");
+    assert_eq!(reconnects(&effects), vec![session], "{effects:?}");
+    assert!(remote_lists(&effects, tab).is_empty(), "{effects:?}");
+    assert!(app.tab_conn(0).reconnecting);
+    assert_eq!(
+        crate::ui::files::banner(app.tab_conn(0)),
+        Some(crate::ui::files::Banner::Reconnecting),
+        "\"Reconnecting…\" instead of the error"
+    );
+    assert_eq!(app.tabs[0].remote().listing, Listing::Loading);
+    // Another action meanwhile: no second reconnection; the latest folder wins.
+    let effects = navigate(&mut app, tab, "/srv/www");
+    assert!(reconnects(&effects).is_empty(), "{effects:?}");
+    assert!(remote_lists(&effects, tab).is_empty(), "{effects:?}");
+    // The transport reports its attempts: still waiting.
+    let effects = state(
+        &mut app,
+        session,
+        ConnectionState::Reconnecting { attempt: 1 },
+    );
+    assert!(remote_lists(&effects, tab).is_empty(), "{effects:?}");
+
+    // Back: the action runs, once, for the latest folder.
+    let effects = state(&mut app, session, ConnectionState::Connected);
+    assert_eq!(remote_lists(&effects, tab), vec![path("/srv/www")]);
+    let effects = app.update(Message::Reconnected {
+        session,
+        result: Ok(()),
+    });
+    assert!(
+        remote_lists(&effects, tab).is_empty(),
+        "never replayed twice: {effects:?}"
+    );
+    assert!(!app.tab_conn(0).reconnecting);
+    assert_eq!(crate::ui::files::banner(app.tab_conn(0)), None);
+
+    // Lost again; this time the reconnection fails: the action fails with its reason.
+    state(
+        &mut app,
+        session,
+        ConnectionState::Disconnected(lost.clone()),
+    );
+    let effects = navigate(&mut app, tab, "/tmp");
+    assert_eq!(reconnects(&effects), vec![session]);
+    let refused = Error::new(ErrorKind::Network, "Connection refused");
+    let effects = app.update(Message::Reconnected {
+        session,
+        result: Err(refused.clone()),
+    });
+    assert!(remote_lists(&effects, tab).is_empty(), "{effects:?}");
+    assert_eq!(
+        app.tabs[0].remote().listing,
+        Listing::Failed(refused.clone())
+    );
+    assert_eq!(app.tab_conn(0).lost_connection(), Some(&refused));
+    // Back some other way: the failed listing is retried once, as any failed listing is
+    // when its session comes back; the held action is not replayed on top of it.
+    let effects = state(&mut app, session, ConnectionState::Connected);
+    assert_eq!(remote_lists(&effects, tab), vec![path("/tmp")]);
+    assert!(reconnects(&effects).is_empty());
+}
+
+/// A session refused for good (host key, authentication, certificate) never reconnects by
+/// itself: an action fails as before and the banner keeps the reason and its fix.
+#[tokio::test]
+async fn host_key_or_auth_failure_does_not_auto_reconnect() {
+    for refused in [
+        Error::new(ErrorKind::Auth, "Authentication failed"),
+        hoprs_ssh::testing::changed_host_key_error("a.example", 3),
+        Error::new(ErrorKind::Tls, "Certificate not trusted"),
+    ] {
+        let a = site("a", "a.example", "u", Protocol::Ssh);
+        let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+        let mut app = loaded(&fake).await;
+        let sites = connect_effect(app.update(Message::ConnectSite(a.id.clone())));
+        drive(&mut app, &fake, sites).await;
+        let session = session_of(&app, &a.id);
+        let tab = app.tabs[0].id;
+        let effects = state(
+            &mut app,
+            session,
+            ConnectionState::Disconnected(refused.clone()),
+        );
+        assert!(reconnects(&effects).is_empty(), "{refused:?}: {effects:?}");
+
+        let effects = navigate(&mut app, tab, "/srv");
+        assert!(reconnects(&effects).is_empty(), "{refused:?}: {effects:?}");
+        assert_eq!(
+            remote_lists(&effects, tab),
+            vec![path("/srv")],
+            "{refused:?}"
+        );
+        assert!(!app.tab_conn(0).reconnecting);
+        assert_eq!(app.tab_conn(0).lost_connection(), Some(&refused));
+        assert_ne!(
+            crate::ui::files::banner(app.tab_conn(0)),
+            Some(crate::ui::files::Banner::Reconnecting)
+        );
+    }
+}

@@ -1444,3 +1444,56 @@ async fn title_and_pending_input_are_capped() {
     app.update(key(tab, Key::Char('y'), NONE));
     assert!(!term(&app, 0).input_dropped);
 }
+
+/// Review Focus 3: "Restart shell" on a session lost for a network reason reconnects it,
+/// then opens the shell once the session is back (once, however the app hears of it).
+#[tokio::test]
+async fn restart_on_lost_session_reconnects_then_opens() {
+    let s = ssh_site("term", OpenAs::Terminal);
+    let (mut app, fake, session) = connected(&s).await;
+    let tab = app.tabs[0].id;
+    let shell = shell_of(&app, 0);
+    app.update(Message::ShellEvent {
+        tab,
+        shell,
+        event: ShellSignal::Exit(Some(0)),
+    });
+    app.update(Message::ShellEvent {
+        tab,
+        shell,
+        event: ShellSignal::Closed,
+    });
+    let lost = Error::new(hoprs_core::ErrorKind::Network, "Connection reset");
+    fake.drop_connection(session, lost.clone());
+    app.update(Message::SessionState {
+        session,
+        state: ConnectionState::Disconnected(lost),
+        auth: None,
+    });
+    assert!(app.can_restart_terminal(0), "a click reconnects");
+    let effects = app.update(Message::Terminal {
+        tab,
+        msg: TerminalMsg::Restart,
+    });
+    let [Effect::Reconnect { session: again }] = &effects[..] else {
+        panic!("{effects:?}");
+    };
+    assert_eq!(*again, session);
+    assert!(app.conn(&s.id).reconnecting);
+
+    let backend: Arc<dyn BackendApi> = fake.clone();
+    let effects = app.update(effects::reconnect(backend, session).await);
+    let opens = |effects: &[Effect]| {
+        effects
+            .iter()
+            .filter(|e| matches!(e, Effect::OpenShell { .. }))
+            .count()
+    };
+    assert_eq!(opens(&effects), 1, "{effects:?}");
+    let effects = app.update(Message::SessionState {
+        session,
+        state: ConnectionState::Connected,
+        auth: None,
+    });
+    assert_eq!(opens(&effects), 0, "{effects:?}");
+}

@@ -1,10 +1,10 @@
 #!/bin/sh
-# Usage: entrypoint.sh plain|implicit
+# Usage: entrypoint.sh plain|implicit|idle
 # Installs the certificate named by FTPS_CERT (default `server`) and runs vsftpd in the
 # foreground with the selected configuration.
 set -eu
 
-conf="/etc/vsftpd/vsftpd-${1:?usage: entrypoint.sh plain|implicit}.conf"
+conf="/etc/vsftpd/vsftpd-${1:?usage: entrypoint.sh plain|implicit|idle}.conf"
 cert="${FTPS_CERT:-server}"
 
 install -m 644 "/fixtures/ftps/${cert}.pem" /etc/vsftpd/certs/server.pem

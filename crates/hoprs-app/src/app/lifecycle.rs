@@ -15,7 +15,9 @@
 //! backend that hangs or panics is abandoned. Meanwhile the dialogs are answered Cancel
 //! and the user's input is ignored; a second close request closes at once.
 
-use hoprs_core::{ConnectionState, Error, ReconnectPolicy, SavedTab, TabKind, WorkspaceId};
+use hoprs_core::{
+    ConnectionState, Error, ErrorKind, ReconnectPolicy, SavedTab, TabKind, WorkspaceId,
+};
 
 use super::{App, Effect, Message, TabState};
 use crate::app::files::{Listing, Pane, local_fs_path};
@@ -147,6 +149,12 @@ impl App {
                 .conn
                 .as_ref()
                 .is_some_and(|c| *c != ConnectionState::Connected);
+        let refused = match &state {
+            ConnectionState::Disconnected(error) if error.kind != ErrorKind::Network => {
+                Some(error.clone())
+            }
+            _ => None,
+        };
         let lost = matches!(state, ConnectionState::Disconnected(_));
         let down = state != ConnectionState::Connected;
         if auth.is_some() {
@@ -159,13 +167,20 @@ impl App {
         if down {
             self.site_connection_down(&site);
         }
+        // Refused for good: the actions waiting for a reconnection fail now.
+        let mut effects = match &refused {
+            Some(error) => self.fail_held(&site, error),
+            None => Vec::new(),
+        };
         if !back {
-            return Vec::new();
+            return effects;
         }
         self.conn_mut(&site).reconnecting = false;
         self.queue.site_restored(&site);
+        // The actions that waited for the connection run (once).
+        effects.extend(self.release_held(&site));
         // The shells died with the old connection: the terminals open new ones.
-        let mut effects = self.open_site_shells(&site, true);
+        effects.extend(self.open_site_shells(&site, true));
         for index in self.tabs_of(&site) {
             if self.tabs[index]
                 .pane(Side::Remote)
@@ -226,14 +241,26 @@ impl App {
         match result {
             Ok(()) => {
                 self.queue.site_restored(&site);
+                // The actions that waited for the connection run (once), and the other
+                // remote folders are listed again.
+                effects.extend(self.release_held(&site));
                 for index in self.tabs_of(&site) {
-                    effects.extend(self.request_listing(index, Side::Remote));
+                    let replayed = self.tabs[index]
+                        .pane(Side::Remote)
+                        .and_then(|pane| pane.request)
+                        .is_some_and(|request| self.replayed.remove(&request));
+                    if !replayed {
+                        effects.extend(self.request_listing(index, Side::Remote));
+                    }
                 }
                 if back {
                     effects.extend(self.open_site_shells(&site, true));
                 }
             }
-            Err(_) => self.note_failed_endpoint(&site),
+            Err(error) => {
+                self.note_failed_endpoint(&site);
+                effects.extend(self.fail_held(&site, &error));
+            }
         }
         effects
     }

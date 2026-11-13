@@ -174,6 +174,10 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
             backend.set_workers(workers);
             Task::none()
         }
+        Effect::SetKeepalive(secs) => {
+            backend.set_keepalive(secs);
+            Task::none()
+        }
         Effect::CheckExportTarget(path) => Task::future(async move {
             // An error (no permission to look) counts as "not there": the export itself
             // then reports what is wrong.

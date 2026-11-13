@@ -1327,3 +1327,29 @@ async fn deleting_a_site_cancels_its_transfers() {
         .collect();
     assert_eq!(cancelled, [1, 2, 5, 8, 9, 10], "{effects:?}");
 }
+
+/// Review Focus 3: a transfer started on a session lost for a network reason is queued at
+/// once (the engine holds it until the site is back) and the session reconnects.
+#[tokio::test]
+async fn transfer_on_dropped_session_reconnects() {
+    let (fake, mut app, _a, tab) = transfer_tab().await;
+    let session = app.tab_conn(0).session().unwrap();
+    let lost = Error::new(ErrorKind::Network, "Connection lost");
+    fake.drop_connection(session, lost.clone());
+    app.update(Message::SessionState {
+        session,
+        state: hoprs_core::ConnectionState::Disconnected(lost),
+        auth: None,
+    });
+    let a_row = row_of(&app, Side::Local, "a.txt");
+    app.update(pane_msg(tab, Side::Local, PaneMsg::Click(a_row)));
+    let effects = app.update(pane_msg(tab, Side::Local, PaneMsg::Transfer));
+    assert_eq!(enqueued(&effects).len(), 1, "{effects:?}");
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Reconnect { session: s } if *s == session)),
+        "{effects:?}"
+    );
+    assert!(app.tab_conn(0).reconnecting);
+}

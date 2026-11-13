@@ -1,5 +1,6 @@
 #!/bin/sh
-# Prepares the test server and runs sshd in the foreground.
+# Prepares the test server and runs sshd in the foreground. Extra arguments go to sshd
+# (`sshd-idle` passes `-o ClientAliveInterval=...`).
 set -eu
 
 # Host key: generated once, kept in the sshd-hostkeys volume.
@@ -20,4 +21,4 @@ if [ -d /home/alice/small ]; then
     chmod 755 /home/alice/small
 fi
 
-exec /usr/sbin/sshd -D -e
+exec /usr/sbin/sshd -D -e "$@"

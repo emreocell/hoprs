@@ -183,10 +183,16 @@ pub enum Banner<'a> {
     /// The session found another host key than the one it verified: the blocking
     /// explanation and its actions, never "Reconnect" (which would always fail).
     HostKeyChanged,
+    /// A reconnection the app asked for (a click on "Reconnect", or an action on a lost
+    /// session) is running: "Reconnecting…", no error.
+    Reconnecting,
 }
 
 /// The bar a site's tabs show above their content.
 pub fn banner(conn: &SiteConn) -> Option<Banner<'_>> {
+    if conn.reconnecting && conn.host_key_change().is_none() {
+        return Some(Banner::Reconnecting);
+    }
     let error = conn.lost_connection()?;
     Some(if conn.host_key_change().is_some() {
         Banner::HostKeyChanged
@@ -203,6 +209,15 @@ pub(crate) fn lost_banner<'a>(app: &'a App, tab: &'a Tab) -> Option<Element<'a, 
     let conn = app.conn(&tab.site);
     let error = match banner(conn)? {
         Banner::Lost(error) => error,
+        Banner::Reconnecting => {
+            return Some(
+                container(text(strings::RECONNECTING_NOW).color(palette().muted))
+                    .width(Length::Fill)
+                    .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_MD]))
+                    .style(theme::pane_bar)
+                    .into(),
+            );
+        }
         Banner::HostKeyChanged => {
             return Some(
                 container(crate::ui::dialogs::host_key_changed_body(app, tab))

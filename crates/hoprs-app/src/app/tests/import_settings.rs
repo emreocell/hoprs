@@ -595,6 +595,29 @@ fn settings_saves_are_coalesced() {
     ));
 }
 
+/// The keepalive (Plan 6, Task 5): clamped to 10..=300 s, applied to the next
+/// connections, saved.
+#[test]
+fn keepalive_setting_applies_to_next_connections() {
+    let mut app = App::new();
+    app.update(Message::OpenSettings);
+    assert_eq!(app.settings.keepalive_secs, 30);
+    let effects = settings(&mut app, SettingsMsg::Keepalive(5));
+    match &effects[..] {
+        [Effect::SetKeepalive(10), Effect::SaveSettings(saved)] => {
+            assert_eq!(saved.keepalive_secs, 10);
+        }
+        other => panic!("{other:?}"),
+    }
+    app.update(Message::SettingsSaved(Ok(())));
+    assert!(settings(&mut app, SettingsMsg::Keepalive(10)).is_empty());
+    let effects = settings(&mut app, SettingsMsg::Keepalive(900));
+    assert!(matches!(
+        effects[..],
+        [Effect::SetKeepalive(300), Effect::SaveSettings(_)]
+    ));
+}
+
 #[test]
 fn restore_replace_needs_extra_confirmation() {
     let mut app = App::new();

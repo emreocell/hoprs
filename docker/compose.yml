@@ -62,5 +62,43 @@ services:
       retries: 30
       start_period: 2s
 
+  # Short idle timeouts (Plan 6, Task 5): the server side of idle drops. Bridge network,
+  # so `docker pause` makes a silent drop (connections accepted, never answered).
+  ftp-idle:
+    build:
+      context: .
+      dockerfile: vsftpd/Dockerfile
+    image: hoprs-test-vsftpd
+    command: ["idle"]
+    init: true
+    ports:
+      - "127.0.0.1:2122:21"
+      - "127.0.0.1:32000-32009:32000-32009"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "21"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+
+  # sshd probing its clients every 5 s and dropping one that misses a single answer.
+  sshd-idle:
+    build:
+      context: .
+      dockerfile: sshd/Dockerfile
+    image: hoprs-test-sshd
+    command: ["-o", "ClientAliveInterval=5", "-o", "ClientAliveCountMax=1"]
+    ports:
+      - "127.0.0.1:2223:22"
+    volumes:
+      - sshd-idle-hostkeys:/etc/ssh/keys
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "22"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+
 volumes:
   sshd-hostkeys:
+  sshd-idle-hostkeys:

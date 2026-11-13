@@ -239,6 +239,8 @@ pub trait BackendApi: Send + Sync {
     async fn set_policy(&self, policy: ConflictPolicy);
     /// Transfer workers per site for the connections made from now on (`1..=16`).
     fn set_workers(&self, workers: usize);
+    /// Keepalive (seconds, `10..=300`) of the SSH and FTP connections made from now on.
+    fn set_keepalive(&self, secs: u64);
 }
 
 /// A remote listing asked without a session.
@@ -308,7 +310,7 @@ impl Backend {
     /// [`BackendApi::queue_error`] reports it.
     ///
     /// `settings.toml` (beside the profiles, also read here) gives the engine its conflict
-    /// policy and the sessions their workers; an unusable file means the defaults (it is
+    /// policy and the sessions their workers and keepalive; an unusable file means the defaults (it is
     /// logged, kept as is, and [`BackendApi::settings`] reports it).
     pub fn open(mut config: BackendConfig, secrets: Arc<dyn SecretStore>) -> Result<Backend> {
         let vault = VaultHandle::new(Vault::open(&config.profile_dir, secrets)?);
@@ -325,6 +327,7 @@ impl Backend {
             },
         );
         config.sessions.workers = loaded.settings.workers_per_site;
+        config.sessions.keepalive = std::time::Duration::from_secs(loaded.settings.keepalive_secs);
         let broker = PromptBroker::new(vault.clone());
         let sessions = SessionManager::new(
             engine.clone(),
@@ -467,7 +470,7 @@ impl BackendApi for Backend {
     }
 
     async fn shell_input(&self, shell: ShellId, data: Vec<u8>) -> Result<()> {
-        self.sessions.shells().input(shell, data).await
+        self.sessions.shell_input(shell, data).await
     }
 
     async fn shell_resize(&self, shell: ShellId, cols: u16, rows: u16) -> Result<()> {
@@ -649,6 +652,13 @@ impl BackendApi for Backend {
 
     fn set_workers(&self, workers: usize) {
         self.sessions.set_workers(settings::clamp_workers(workers));
+    }
+
+    fn set_keepalive(&self, secs: u64) {
+        self.sessions
+            .set_keepalive(std::time::Duration::from_secs(settings::clamp_keepalive(
+                secs,
+            )));
     }
 }
 
@@ -927,6 +937,7 @@ mod tests {
             sessions: SessionConfig {
                 known_hosts: Some(known_hosts.clone()),
                 workers: 2,
+                ..SessionConfig::default()
             },
             backup_params: CHEAP_BACKUP,
         };
@@ -1239,7 +1250,11 @@ mod tests {
         let profiles = dir.path().join("profiles");
         std::fs::create_dir_all(&profiles).unwrap();
         let file = profiles.join(settings::FILE_NAME);
-        std::fs::write(&file, "workers_per_site = 3\ndefault_policy = \"skip\"\n").unwrap();
+        std::fs::write(
+            &file,
+            "workers_per_site = 3\ndefault_policy = \"skip\"\nkeepalive_secs = 60\n",
+        )
+        .unwrap();
         let backend = open(dir.path());
         let loaded = backend.settings();
         assert_eq!(loaded.error, None);
@@ -1248,11 +1263,16 @@ mod tests {
             Settings {
                 workers_per_site: 3,
                 default_policy: ConflictPolicy::Skip,
+                keepalive_secs: 60,
                 ..Settings::default()
             }
         );
         assert_eq!(backend.transfer_snapshot().await.workers, 3);
         assert_eq!(backend.sessions.workers(), 3);
+        assert_eq!(
+            backend.sessions.keepalive(),
+            std::time::Duration::from_secs(60)
+        );
 
         // The saved policy is the engine's from the start: an existing file is skipped,
         // never asked about.
@@ -1301,6 +1321,17 @@ mod tests {
         // Workers change for the next connections, clamped.
         backend.set_workers(40);
         assert_eq!(backend.sessions.workers(), 16);
+        // The keepalive: clamped to 10..=300 s.
+        backend.set_keepalive(2);
+        assert_eq!(
+            backend.sessions.keepalive(),
+            std::time::Duration::from_secs(10)
+        );
+        backend.set_keepalive(45);
+        assert_eq!(
+            backend.sessions.keepalive(),
+            std::time::Duration::from_secs(45)
+        );
         backend.set_workers(0);
         assert_eq!(backend.transfer_snapshot().await.workers, 1);
 

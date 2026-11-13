@@ -593,7 +593,8 @@ impl App {
         if self.tab_of(&tab.site).is_some() {
             return effects;
         }
-        // The last tab: the site's connection goes with it.
+        // The last tab: the site's connection goes with it, and what waited for it.
+        self.held.remove(&tab.site);
         let conn = self
             .conns
             .remove(&tab.site)

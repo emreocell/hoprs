@@ -96,6 +96,9 @@ struct Shared {
     auth: RwLock<Option<AuthMethod>>,
     /// Open channels of the current connection (see [`crate::channels`]).
     budget: Arc<ChannelBudget>,
+    /// Why the last connection (or the last reconnection attempt) failed; see
+    /// [`SshSession::last_error`].
+    last_error: Mutex<Option<Error>>,
 }
 
 impl Shared {
@@ -105,6 +108,16 @@ impl Shared {
             *s = new;
             changed
         });
+    }
+
+    /// `Reconnecting { attempt }`, `last` being why the connection (or the previous
+    /// attempt) failed: recorded first, so whoever sees the state can read it.
+    fn reconnecting(&self, attempt: u32, last: &Error) {
+        *self
+            .last_error
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(last.clone());
+        self.set_state(SessionState::Reconnecting { attempt });
     }
 
     fn take_handle(&self) -> Option<Arc<client::Handle<ClientHandler>>> {
@@ -198,6 +211,7 @@ impl SshSession {
             state,
             auth: RwLock::new(None),
             budget: ChannelBudget::new(config.max_channels),
+            last_error: Mutex::new(None),
         });
         let (commands, rx) = mpsc::unbounded_channel();
         let supervisor = Supervisor {
@@ -260,6 +274,18 @@ impl SshSession {
     /// [`CountedChannel::generation`].
     pub fn generation(&self) -> u64 {
         self.inner.shared.generation.load(Ordering::SeqCst)
+    }
+
+    /// Why the last connection ended, set before the state becomes `Reconnecting` (then, at
+    /// each further attempt, why the previous attempt failed). `None` until a connection
+    /// ends. A `Disconnected` state carries its own reason.
+    pub fn last_error(&self) -> Option<Error> {
+        self.inner
+            .shared
+            .last_error
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// How the latest connection authenticated (the agent and its key type, a key file, a
@@ -478,7 +504,7 @@ impl Supervisor {
         } = self;
         for (index, delay) in cfg.reconnect.delays().into_iter().enumerate() {
             let attempt = u32::try_from(index + 1).unwrap_or(u32::MAX);
-            shared.set_state(SessionState::Reconnecting { attempt });
+            shared.reconnecting(attempt, &last);
             let delay = if immediate && index == 0 {
                 Duration::ZERO
             } else {
@@ -540,8 +566,7 @@ impl Supervisor {
                         SessionState::Disconnected(e) => e.clone(),
                         _ => user_disconnected_error(),
                     };
-                    self.shared
-                        .set_state(SessionState::Reconnecting { attempt: 1 });
+                    self.shared.reconnecting(1, &last);
                     let _ = ack.send(());
                     return Phase::Reconnecting {
                         last,
@@ -625,13 +650,7 @@ async fn attempt(
     pinned: Option<&PublicKey>,
     remembered: &Remembered,
 ) -> Result<Connection> {
-    let stream = TcpStream::connect((cfg.host.as_str(), cfg.port))
-        .await
-        .map_err(|e| {
-            Error::new(ErrorKind::Network, "Connection failed").with_detail(e.to_string())
-        })?;
-    // Nagle only delays interactive traffic; a failure here is harmless.
-    let _ = stream.set_nodelay(true);
+    let stream = connect_tcp(cfg).await?;
 
     let mut known = Vec::from_iter(pinned.map(PublicKey::algorithm));
     known.extend(known_hosts::known_algorithms(
@@ -681,6 +700,21 @@ async fn attempt(
         auth,
         lost,
     })
+}
+
+/// The TCP connection to `cfg.host:cfg.port`, tuned for an interactive session.
+async fn connect_tcp(cfg: &SshConfig) -> Result<TcpStream> {
+    let stream = TcpStream::connect((cfg.host.as_str(), cfg.port))
+        .await
+        .map_err(|e| {
+            Error::new(ErrorKind::Network, "Connection failed").with_detail(e.to_string())
+        })?;
+    // Nagle only delays interactive traffic; a failure here is harmless.
+    let _ = stream.set_nodelay(true);
+    // So that routers and NATs see traffic on an idle session, and a vanished peer becomes a
+    // socket error (see `crate::net`). Best effort, like Nagle above.
+    let _ = crate::net::set_tcp_keepalive(&stream);
+    Ok(stream)
 }
 
 /// The server sent `DISCONNECT` while we authenticated: most likely `MaxAuthTries` was
@@ -839,7 +873,12 @@ pub(crate) fn map_russh_error(e: russh::Error) -> Error {
         ErrorKind::Network => "Connection lost",
         _ => "SSH protocol error",
     };
-    Error::new(kind, message).with_detail(e.to_string())
+    let detail = match e {
+        // The connection log warns about it (see `hoprs_core::KEEPALIVE_UNANSWERED`).
+        E::KeepaliveTimeout => hoprs_core::KEEPALIVE_UNANSWERED.to_owned(),
+        e => e.to_string(),
+    };
+    Error::new(kind, message).with_detail(detail)
 }
 
 impl ClientHandler {
@@ -998,6 +1037,21 @@ mod tests {
         ] {
             assert_eq!(host_key_change(&other), None, "{other:?}");
         }
+    }
+
+    /// The SSH socket has TCP keepalive (60 s idle, 10 s interval, 3 probes), so routers and
+    /// NATs see traffic on an idle session and a vanished peer becomes a socket error.
+    #[tokio::test]
+    async fn tcp_keepalive_is_set_on_sockets() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cfg = SshConfig::new("127.0.0.1", port, "u");
+        let stream = connect_tcp(&cfg).await.unwrap();
+        assert_eq!(
+            crate::net::tcp_keepalive_of(&stream).unwrap(),
+            crate::net::KeepaliveSettings::expected()
+        );
+        assert!(stream.nodelay().unwrap());
     }
 
     #[test]

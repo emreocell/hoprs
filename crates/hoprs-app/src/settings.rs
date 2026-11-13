@@ -26,6 +26,10 @@ pub const FONT_SIZE_DEFAULT: u16 = 13;
 pub const SCROLLBACK_MIN: usize = 1_000;
 pub const SCROLLBACK_MAX: usize = 100_000;
 pub const SCROLLBACK_DEFAULT: usize = 10_000;
+/// Keepalive of SSH and FTP sessions, in seconds (spec §4.3).
+pub const KEEPALIVE_MIN: u64 = 10;
+pub const KEEPALIVE_MAX: u64 = 300;
+pub const KEEPALIVE_DEFAULT: u64 = 30;
 /// Largest `settings.toml` read; a real one is under 200 bytes.
 const MAX_BYTES: u64 = 64 * 1024;
 
@@ -82,6 +86,9 @@ pub struct Settings {
     /// from now on.
     pub terminal_scrollback: usize,
     pub terminal_theme: TerminalTheme,
+    /// Seconds between keepalives on an idle SSH or FTP connection (`10..=300`), for the
+    /// connections made from now on.
+    pub keepalive_secs: u64,
 }
 
 impl Default for Settings {
@@ -92,6 +99,7 @@ impl Default for Settings {
             terminal_font_size: FONT_SIZE_DEFAULT,
             terminal_scrollback: SCROLLBACK_DEFAULT,
             terminal_theme: TerminalTheme::HoprsDark,
+            keepalive_secs: KEEPALIVE_DEFAULT,
         }
     }
 }
@@ -104,6 +112,11 @@ pub fn clamp_font_size(size: u16) -> u16 {
 /// `lines` within `1 000..=100 000`.
 pub fn clamp_scrollback(lines: usize) -> usize {
     lines.clamp(SCROLLBACK_MIN, SCROLLBACK_MAX)
+}
+
+/// `secs` within `10..=300`.
+pub fn clamp_keepalive(secs: u64) -> u64 {
+    secs.clamp(KEEPALIVE_MIN, KEEPALIVE_MAX)
 }
 
 /// `n` within `1..=16`.
@@ -133,6 +146,8 @@ struct File {
     terminal_scrollback: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     terminal_theme: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    keepalive_secs: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -198,6 +213,9 @@ pub fn parse(content: &str) -> Result<Settings> {
             .terminal_theme
             .as_deref()
             .map_or(defaults.terminal_theme, TerminalTheme::from_key),
+        keepalive_secs: file.keepalive_secs.map_or(defaults.keepalive_secs, |n| {
+            clamp_keepalive(u64::try_from(n.max(0)).unwrap_or(KEEPALIVE_MAX))
+        }),
     })
 }
 
@@ -209,6 +227,7 @@ fn file_of(settings: &Settings) -> File {
         terminal_font_size: Some(clamp_font_size(settings.terminal_font_size).into()),
         terminal_scrollback: i64::try_from(clamp_scrollback(settings.terminal_scrollback)).ok(),
         terminal_theme: Some(settings.terminal_theme.key().to_owned()),
+        keepalive_secs: i64::try_from(clamp_keepalive(settings.keepalive_secs)).ok(),
     }
 }
 
@@ -498,5 +517,29 @@ mod tests {
             ..Settings::default()
         });
         assert_eq!(parse(&rendered).unwrap().workers_per_site, 16);
+    }
+
+    /// The keepalive of SSH and FTP sessions: `10..=300` s, 30 by default, clamped on load
+    /// and on save.
+    #[test]
+    fn keepalive_clamped() {
+        assert_eq!(Settings::default().keepalive_secs, 30);
+        assert_eq!(clamp_keepalive(0), 10);
+        assert_eq!(clamp_keepalive(45), 45);
+        assert_eq!(clamp_keepalive(301), 300);
+        for (file, expected) in [
+            ("", 30),
+            ("keepalive_secs = 5", 10),
+            ("keepalive_secs = -1", 10),
+            ("keepalive_secs = 60", 60),
+            ("keepalive_secs = 99999", 300),
+        ] {
+            assert_eq!(parse(file).unwrap().keepalive_secs, expected, "{file}");
+        }
+        let rendered = render(&Settings {
+            keepalive_secs: 1,
+            ..Settings::default()
+        });
+        assert!(rendered.contains("keepalive_secs = 10"), "{rendered}");
     }
 }

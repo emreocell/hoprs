@@ -117,6 +117,11 @@ impl Shells {
             .ok_or_else(shell_closed)
     }
 
+    /// The session the shell was opened on, while it is registered.
+    pub fn session_of(&self, id: ShellId) -> Option<SessionId> {
+        self.shells().get(&id).map(|shell| shell.session)
+    }
+
     pub async fn input(&self, id: ShellId, data: Vec<u8>) -> Result<()> {
         self.control(id)?.input(data).await
     }

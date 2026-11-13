@@ -364,8 +364,11 @@ impl App {
     /// Opens a shell for the terminal tab at `index`, if its session is up: the model's
     /// size goes with it.
     pub(super) fn open_terminal_shell(&mut self, index: usize) -> Vec<Effect> {
-        let Some(session) = self.live_session(&self.tabs[index].site.clone()) else {
-            return Vec::new();
+        let site = self.tabs[index].site.clone();
+        let Some(session) = self.live_session(&site) else {
+            // A session lost to the network reconnects; the shell opens once it is back
+            // (`open_site_shells`).
+            return self.reconnect_on_demand(&site).into_iter().collect();
         };
         let request = RequestId(self.next_id());
         let tab = &mut self.tabs[index];
@@ -694,21 +697,34 @@ impl App {
 
     /// Whether "Restart shell", "Reopen" or "Retry" can work now (the site's session is
     /// up); the bar shows the button disabled with a hint otherwise.
+    /// A session lost to the network counts: the click reconnects it first.
     pub fn can_restart_terminal(&self, index: usize) -> bool {
-        self.tabs
-            .get(index)
-            .is_some_and(|tab| self.live_session(&tab.site).is_some())
+        self.tabs.get(index).is_some_and(|tab| {
+            self.live_session(&tab.site).is_some() || self.conn(&tab.site).awaits_reconnection()
+        })
     }
 
-    /// "Restart shell", "Reopen" or "Retry" on an ended shell.
+    /// "Restart shell", "Reopen" or "Retry" on an ended shell. On a session lost to the
+    /// network it reconnects the session, and the shell opens once it is back.
     fn restart_terminal(&mut self, tab: TabId) -> Vec<Effect> {
-        match self.terminal_at(tab) {
-            Some((index, terminal)) if matches!(terminal.shell, ShellState::Ended(_)) => {
-                terminal.focused = true;
-                self.open_terminal_shell(index)
-            }
-            _ => Vec::new(),
+        let Some((index, terminal)) = self.terminal_at(tab) else {
+            return Vec::new();
+        };
+        if !matches!(terminal.shell, ShellState::Ended(_)) {
+            return Vec::new();
         }
+        terminal.focused = true;
+        let site = self.tabs[index].site.clone();
+        if self.live_session(&site).is_none() {
+            if !self.conn(&site).awaits_reconnection() {
+                return Vec::new();
+            }
+            // Waits for its shell, which the session opens when it is back.
+            if let Some(terminal) = self.tabs[index].terminal_mut() {
+                terminal.shell = ShellState::Idle;
+            }
+        }
+        self.open_terminal_shell(index)
     }
 
     /// Escape in a terminal tab closes its search bar; `true` if it did.

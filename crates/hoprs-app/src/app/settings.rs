@@ -1,8 +1,8 @@
 //! The settings page (center, no modal): workers per site, the default conflict policy,
-//! and the encrypted backup (export and restore).
+//! the keepalive, the terminal, and the encrypted backup (export and restore).
 //!
-//! A change applies at once (the policy to the engine, the workers to the next
-//! connections) and is saved to `settings.toml`, unless that file was unreadable at start:
+//! A change applies at once (the policy to the engine, the workers and the keepalive to
+//! the next connections) and is saved to `settings.toml`, unless that file was unreadable at start:
 //! then nothing is saved over it.
 //!
 //! Backup passwords live in the page only while typed: they leave it inside the effect
@@ -17,7 +17,7 @@ use secrecy::SecretString;
 
 use super::{App, Effect, Form, PickTarget};
 use crate::settings::{
-    SettingsLoad, TerminalTheme, clamp_font_size, clamp_scrollback, clamp_workers,
+    SettingsLoad, TerminalTheme, clamp_font_size, clamp_keepalive, clamp_scrollback, clamp_workers,
 };
 use crate::ui::site_form::Password;
 use crate::ui::strings;
@@ -31,6 +31,8 @@ pub enum SettingsMsg {
     /// Scrollback lines (clamped to `1 000..=100 000`), for the terminals opened next.
     TerminalScrollback(usize),
     TerminalTheme(TerminalTheme),
+    /// Seconds between keepalives (clamped to `10..=300`), for the next connections.
+    Keepalive(u64),
     Backup(BackupMsg),
     Close,
 }
@@ -215,6 +217,16 @@ impl App {
                     }
                 }
                 self.save_settings_effect().into_iter().collect()
+            }
+            SettingsMsg::Keepalive(secs) => {
+                let secs = clamp_keepalive(secs);
+                if secs == self.settings.keepalive_secs {
+                    return Vec::new();
+                }
+                self.settings.keepalive_secs = secs;
+                let mut effects = vec![Effect::SetKeepalive(secs)];
+                effects.extend(self.save_settings_effect());
+                effects
             }
             SettingsMsg::Backup(msg) => self.backup_msg(msg),
             SettingsMsg::Close => {

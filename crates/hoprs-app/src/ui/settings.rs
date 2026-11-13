@@ -1,5 +1,5 @@
-//! The settings page in the center: transfers (workers per site, conflict policy), the
-//! terminal (font size, scrollback, theme) and the encrypted backup.
+//! The settings page in the center: transfers (workers per site, conflict policy,
+//! keepalive), the terminal (font size, scrollback, theme) and the encrypted backup.
 
 use std::fmt;
 
@@ -56,6 +56,19 @@ struct Lines(usize);
 impl fmt::Display for Lines {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+/// Keepalive intervals the page offers (seconds).
+const KEEPALIVE_CHOICES: [u64; 7] = [10, 15, 30, 60, 120, 180, 300];
+
+/// `pick_list` needs `Display`: a keepalive interval.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Secs(u64);
+
+impl fmt::Display for Secs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&strings::seconds(self.0))
     }
 }
 
@@ -171,6 +184,20 @@ pub fn view(app: &App) -> Element<'_, Message> {
     .style(theme::pick_list)
     .menu_style(theme::menu);
 
+    // A value from the file that is not on the list is offered too.
+    let mut intervals: Vec<Secs> = KEEPALIVE_CHOICES.into_iter().map(Secs).collect();
+    if !KEEPALIVE_CHOICES.contains(&settings.keepalive_secs) {
+        intervals.push(Secs(settings.keepalive_secs));
+        intervals.sort();
+    }
+    let keepalive = pick_list(intervals, Some(Secs(settings.keepalive_secs)), |secs| {
+        msg(SettingsMsg::Keepalive(secs.0))
+    })
+    .text_size(theme::TEXT_SM)
+    .width(120)
+    .style(theme::pick_list)
+    .menu_style(theme::menu);
+
     let mut transfers = column![heading(strings::SETTINGS_TRANSFERS)].spacing(theme::SPACE_SM);
     if app.settings_load_error.is_some() {
         transfers = transfers.push(
@@ -187,7 +214,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .push(field(strings::SETTINGS_WORKERS, stepper.into(), None))
         .push(muted(strings::SETTINGS_WORKERS_HINT))
         .push(field(strings::SETTINGS_POLICY, policy.into(), None))
-        .push(muted(strings::SETTINGS_POLICY_HINT));
+        .push(muted(strings::SETTINGS_POLICY_HINT))
+        .push(field(strings::SETTINGS_KEEPALIVE, keepalive.into(), None))
+        .push(muted(strings::SETTINGS_KEEPALIVE_HINT));
     if let Some(error) = &app.settings_save_error {
         transfers = transfers.push(
             column![

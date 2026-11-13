@@ -4,6 +4,7 @@ mod auth;
 pub mod channels;
 pub mod config;
 pub mod known_hosts;
+pub mod net;
 pub mod prompt;
 mod session;
 mod shell;

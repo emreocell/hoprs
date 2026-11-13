@@ -102,6 +102,7 @@ pub enum BackupCall {
     SaveSettings(Settings),
     SetPolicy(ConflictPolicy),
     SetWorkers(usize),
+    SetKeepalive(u64),
 }
 
 /// A recorded backend call, in [`FakeBackend::calls`].
@@ -1100,6 +1101,10 @@ impl BackendApi for FakeBackend {
 
     fn set_workers(&self, workers: usize) {
         self.record(BackupCall::SetWorkers(workers));
+    }
+
+    fn set_keepalive(&self, secs: u64) {
+        self.record(BackupCall::SetKeepalive(secs));
     }
 }
 

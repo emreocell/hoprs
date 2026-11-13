@@ -563,6 +563,13 @@ pub const SETTINGS_WORKERS_HINT: &str =
 pub const SETTINGS_POLICY: &str = "When a file already exists";
 pub const SETTINGS_POLICY_HINT: &str =
     "Applies to the next transfers. Ask shows the choice in the queue.";
+pub const SETTINGS_KEEPALIVE: &str = "Keepalive";
+pub const SETTINGS_KEEPALIVE_HINT: &str = "How often an idle connection is checked, so servers and routers keep it open. Applies to the next connections.";
+
+/// A keepalive interval: "30 s".
+pub fn seconds(secs: u64) -> String {
+    format!("{secs} s")
+}
 pub const SETTINGS_UNREADABLE: &str = "settings.toml can't be read, so the defaults apply. Changes last until hoprs closes and are not saved, to keep the file as it is: fix or delete it to save settings.";
 pub const SETTINGS_SAVE_FAILED: &str = "Can't save settings.toml";
 pub const SETTINGS_TERMINAL: &str = "Terminal";

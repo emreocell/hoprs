@@ -659,3 +659,41 @@ async fn prompted_password_reused_on_reconnect() {
     s.open_channel().await.unwrap();
     s.disconnect().await;
 }
+
+/// Host port of the `sshd-idle` service: `ClientAliveInterval 5`, `ClientAliveCountMax 1`.
+const SSH_IDLE_PORT: u16 = 2223;
+
+/// An idle session on a server that probes its clients every 5 s and drops one that misses
+/// a single answer (`sshd-idle`): the client answers the probes, so the session stays up
+/// (Plan 6, Task 5). The default keepalive (30 s) never fires meanwhile: the server's
+/// probes are the only traffic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn ssh_survives_client_alive_checks() {
+    let dir = TempDir::new().unwrap();
+    let mut cfg = test_config("bob", dir.path());
+    cfg.port = SSH_IDLE_PORT;
+    cfg.auth.password = Some(SecretString::from("bob-pass"));
+    let p = Arc::new(ScriptedPrompter::new().accept_host(true));
+    let s = SshSession::connect(cfg, p as Arc<dyn Prompter>)
+        .await
+        .unwrap();
+    let mut rx = s.state();
+    rx.mark_unchanged();
+
+    // Five server probes, each answered.
+    tokio::time::sleep(Duration::from_secs(27)).await;
+    assert!(
+        !rx.has_changed().unwrap(),
+        "state changed while idle: {:?}",
+        *rx.borrow()
+    );
+    assert_eq!(*rx.borrow(), SessionState::Connected);
+    assert_eq!(s.generation(), 1);
+    let channel = s
+        .open_channel()
+        .await
+        .expect("a channel after the idle time");
+    assert_eq!(channel.generation(), 1);
+    s.disconnect().await;
+}
