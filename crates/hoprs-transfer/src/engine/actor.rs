@@ -180,8 +180,34 @@ impl SiteQueue {
         self.dirs.remove(&id);
     }
 
-    fn pop(&mut self) -> Option<TransferId> {
-        self.files.pop_first().or_else(|| self.dirs.pop_first())
+    /// Takes the first id, in dispatch order, that `busy` does not hold back; the
+    /// ones it skips stay queued, in place.
+    fn pop_eligible(&mut self, busy: impl Fn(TransferId) -> bool) -> Option<TransferId> {
+        let id = self
+            .files
+            .iter()
+            .chain(self.dirs.iter())
+            .copied()
+            .find(|id| !busy(*id))?;
+        self.remove(id);
+        Some(id)
+    }
+}
+
+/// What a transfer writes: a path on one site's server (upload), or a local path,
+/// shared by every site (download).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(super) enum DestKey {
+    Remote(SiteId, RemotePath),
+    Local(RemotePath),
+}
+
+/// The destination `spec` writes, as a key: two items with the same key never run
+/// together.
+pub(super) fn dest_key(spec: &TransferSpec) -> DestKey {
+    match spec.direction {
+        Direction::Upload => DestKey::Remote(spec.site.clone(), spec.remote.clone()),
+        Direction::Download => DestKey::Local(spec.local.clone()),
     }
 }
 
@@ -231,6 +257,10 @@ pub(super) struct Actor {
     pub(super) fresh_dirs: HashMap<TransferId, FreshDir>,
     /// The top-level item of every item added in this run (`root_of`).
     pub(super) roots: HashMap<TransferId, TransferId>,
+    /// The item holding a worker slot that writes each destination. An item whose
+    /// destination is taken waits in the queue: two items never write one file at
+    /// once, and the second one's conflict check then sees the first one's file.
+    pub(super) writing: HashMap<DestKey, TransferId>,
     pub(super) worker_tx: mpsc::UnboundedSender<WorkerMsg>,
 }
 
@@ -262,6 +292,7 @@ pub(super) async fn run(
         fresh_dst: HashSet::new(),
         fresh_dirs: HashMap::new(),
         roots: HashMap::new(),
+        writing: HashMap::new(),
         worker_tx,
     };
     let mut ticker = tokio::time::interval(actor.progress_interval);
@@ -551,7 +582,17 @@ impl Actor {
             .collect();
         for site_id in ready {
             while self.sites.get(&site_id).is_some_and(|s| s.free() > 0) {
-                let Some(id) = self.queued.get_mut(&site_id).and_then(SiteQueue::pop) else {
+                let (items, writing) = (&self.items, &self.writing);
+                let busy = |id: TransferId| {
+                    items
+                        .get(&id)
+                        .is_some_and(|item| writing.contains_key(&dest_key(&item.spec)))
+                };
+                let Some(id) = self
+                    .queued
+                    .get_mut(&site_id)
+                    .and_then(|q| q.pop_eligible(busy))
+                else {
                     break;
                 };
                 let (Some(item), Some(site)) = (self.items.get(&id), self.sites.get(&site_id))
@@ -564,6 +605,9 @@ impl Actor {
                 }
                 if let Some(site) = self.sites.get_mut(&site_id) {
                     site.busy += 1;
+                }
+                if let Some(item) = self.items.get(&id) {
+                    self.writing.insert(dest_key(&item.spec), id);
                 }
                 let policy_override = self.overrides.remove(&id);
                 // Stored with the `Active` row, so that it survives an
@@ -596,10 +640,14 @@ impl Actor {
     /// Frees the worker slot held by `id`.
     fn free_slot(&mut self, id: TransferId) {
         self.running.remove(&id);
-        if let Some(item) = self.items.get(&id)
-            && let Some(site) = self.sites.get_mut(&item.spec.site)
-        {
-            site.busy = site.busy.saturating_sub(1);
+        if let Some(item) = self.items.get(&id) {
+            let key = dest_key(&item.spec);
+            if self.writing.get(&key) == Some(&id) {
+                self.writing.remove(&key);
+            }
+            if let Some(site) = self.sites.get_mut(&item.spec.site) {
+                site.busy = site.busy.saturating_sub(1);
+            }
         }
     }
 
@@ -958,6 +1006,43 @@ mod tests {
     use hoprs_core::ErrorKind;
 
     use super::*;
+
+    #[test]
+    fn pop_eligible_keeps_order_and_skipped_ids() {
+        let mut q = SiteQueue::default();
+        for (id, dir) in [(5, false), (2, false), (9, true), (3, false), (1, true)] {
+            q.push(TransferId(id), dir);
+        }
+        // Files before folders, lowest id first; busy ids stay queued.
+        let busy = |id: TransferId| id == TransferId(2) || id == TransferId(1);
+        assert_eq!(q.pop_eligible(busy), Some(TransferId(3)));
+        assert_eq!(q.pop_eligible(busy), Some(TransferId(5)));
+        assert_eq!(q.pop_eligible(busy), Some(TransferId(9)));
+        assert_eq!(q.pop_eligible(busy), None);
+        // The skipped ones are still there, in order.
+        assert_eq!(q.pop_eligible(|_| false), Some(TransferId(2)));
+        assert_eq!(q.pop_eligible(|_| false), Some(TransferId(1)));
+        assert_eq!(q.pop_eligible(|_| false), None);
+    }
+
+    #[test]
+    fn dest_keys_separate_sites_for_uploads_only() {
+        let up = |site: &str| TransferSpec {
+            site: SiteId(site.into()),
+            direction: Direction::Upload,
+            local: RemotePath::new("/a/x").unwrap(),
+            remote: RemotePath::new("/srv/x").unwrap(),
+        };
+        let down = |site: &str| TransferSpec {
+            site: SiteId(site.into()),
+            direction: Direction::Download,
+            local: RemotePath::new("/dl/x").unwrap(),
+            remote: RemotePath::new("/x").unwrap(),
+        };
+        assert_ne!(dest_key(&up("s1")), dest_key(&up("s2")));
+        assert_eq!(dest_key(&up("s1")), dest_key(&up("s1")));
+        assert_eq!(dest_key(&down("s1")), dest_key(&down("s2")));
+    }
 
     #[test]
     fn store_error_goes_into_the_copy_error_detail() {
