@@ -1,0 +1,45 @@
+# Spec §9 performance targets (docs/perf/README.md). A separate job, never a required
+# check: shared runners are noisy, so a miss fails this workflow but blocks no merge.
+# The numbers go to the job summary.
+name: Perf
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  schedule:
+    # Mondays, 04:17 UTC.
+    - cron: "17 4 * * 1"
+
+concurrency:
+  group: perf-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  perf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Xvfb and the X11 client libraries winit loads at run time for the start-up probe;
+      # the baselines of the network bench.
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb xauth libxkbcommon-x11-0 libx11-xcb1 libxcursor1 libxrandr2 libxi6 \
+            lftp openssh-client
+      - name: Spec §9 benchmarks
+        run: scripts/perf.sh
+      - name: Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-logs
+          path: target/perf/
+          if-no-files-found: ignore

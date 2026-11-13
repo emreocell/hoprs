@@ -26,3 +26,9 @@ criterion = { workspace = true }
 [[bench]]
 name = "engine"
 harness = false
+
+# Spec §9 network targets against docker/compose.bench.yml; does nothing unless
+# HOPRS_BENCH_NETWORK=1 (scripts/perf.sh).
+[[bench]]
+name = "network"
+harness = false

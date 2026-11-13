@@ -21,4 +21,10 @@ if [ -d /home/alice/small ]; then
     chmod 755 /home/alice/small
 fi
 
+# Benchmarks (docker/compose.bench.yml): latency on everything the container sends.
+# Needs NET_ADMIN; the bench harness may change it later with `tc qdisc replace`.
+if [ -n "${NETEM_DELAY:-}" ]; then
+    tc qdisc replace dev eth0 root netem delay "$NETEM_DELAY" limit 100000
+fi
+
 exec /usr/sbin/sshd -D -e "$@"

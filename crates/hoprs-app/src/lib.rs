@@ -1,12 +1,17 @@
 //! hoprs: desktop SSH + SFTP + FTP/FTPS client.
 //!
-//! `main` owns the process-level concerns: the single-instance lock,
-//! logging and handing the [`App`] to iced.
+//! The binary only calls [`run`], which owns the process-level concerns: the
+//! single-instance lock, logging and handing the [`App`] to iced. The crate is a
+//! library so that the benchmarks in `benches/` reach the view ([`bench`]) and the
+//! start-up probe; nothing else is public.
 
 mod app;
 mod backend;
+#[doc(hidden)]
+pub mod bench;
 mod effects;
 mod logbuf;
+mod probe;
 mod settings;
 mod terminal;
 mod ui;
@@ -16,6 +21,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use iced::Task;
 
@@ -41,7 +47,11 @@ const SUPPAFTP_CAP: &str = "debug";
 const TERMINAL_LOG_CRATES: [&str; 2] = ["vte", "alacritty_terminal"];
 const TERMINAL_LOG_CAP: &str = "warn";
 
-fn main() -> iced::Result {
+/// Runs hoprs until its window closes. With `HOPRS_PROBE_STARTUP=1` it runs the start-up
+/// probe instead (see `probe`): the same start-up, then two lines on stdout, then exit.
+pub fn run() -> iced::Result {
+    let started = Instant::now();
+    let probe = probe::enabled().then(|| probe::Probe::new(started));
     let filter = log_filter(std::env::var("RUST_LOG").ok().as_deref());
     let log = logbuf::LogBuffer::new();
     init_logging(&filter, log.clone());
@@ -59,7 +69,7 @@ fn main() -> iced::Result {
         }
     };
 
-    iced::application(move || boot(log.clone()), update, view)
+    iced::application(move || boot(log.clone(), probe), update, view)
         .subscription(subscription)
         .title(ui::strings::APP_TITLE)
         .theme(|_: &Hoprs| ui::theme::theme())
@@ -83,9 +93,19 @@ fn main() -> iced::Result {
 struct Hoprs {
     app: App,
     backend: Arc<dyn BackendApi>,
+    /// Only with `HOPRS_PROBE_STARTUP=1`.
+    probe: Option<probe::Probe>,
 }
 
-fn boot(log: logbuf::LogBuffer) -> (Hoprs, Task<Message>) {
+/// What iced carries: the app's messages, and the start-up probe's steps, which never
+/// reach the [`App`].
+#[derive(Debug)]
+enum Root {
+    App(Message),
+    Probe(probe::Step),
+}
+
+fn boot(log: logbuf::LogBuffer, probe: Option<probe::Probe>) -> (Hoprs, Task<Root>) {
     let backend = match open_backend() {
         Ok(backend) => backend,
         Err(err) => {
@@ -99,7 +119,14 @@ fn boot(log: logbuf::LogBuffer) -> (Hoprs, Task<Message>) {
     let (mut app, effects) = App::boot();
     app.attach_log(log);
     let task = run_effects(&backend, effects);
-    (Hoprs { app, backend }, task)
+    (
+        Hoprs {
+            app,
+            backend,
+            probe,
+        },
+        task,
+    )
 }
 
 /// The real backend at the standard locations, secrets in the system keyring.
@@ -111,28 +138,47 @@ fn open_backend() -> hoprs_core::Result<Backend> {
 }
 
 /// Thin wrapper: the pure update decides, `effects::run` performs.
-fn update(state: &mut Hoprs, message: Message) -> Task<Message> {
-    let effects = state.app.update(message);
-    run_effects(&state.backend, effects)
+fn update(state: &mut Hoprs, message: Root) -> Task<Root> {
+    match message {
+        Root::App(message) => {
+            let effects = state.app.update(message);
+            run_effects(&state.backend, effects)
+        }
+        Root::Probe(step) => match &mut state.probe {
+            Some(probe) => probe.step(step).map(Root::Probe),
+            None => Task::none(),
+        },
+    }
 }
 
-fn run_effects(backend: &Arc<dyn BackendApi>, effects: Vec<app::Effect>) -> Task<Message> {
+fn run_effects(backend: &Arc<dyn BackendApi>, effects: Vec<app::Effect>) -> Task<Root> {
     Task::batch(
         effects
             .into_iter()
             .map(|effect| effects::run(Arc::clone(backend), effect)),
     )
+    .map(Root::App)
 }
 
-fn view(state: &Hoprs) -> iced::Element<'_, Message> {
-    ui::layout::view(&state.app)
+fn view(state: &Hoprs) -> iced::Element<'_, Root> {
+    ui::layout::view(&state.app).map(Root::App)
+}
+
+/// The app's subscriptions, and the probe's frames while it waits for the first one.
+fn subscription(state: &Hoprs) -> iced::Subscription<Root> {
+    let probe = state
+        .probe
+        .as_ref()
+        .and_then(probe::Probe::subscription)
+        .map(|frames| frames.map(Root::Probe));
+    iced::Subscription::batch(std::iter::once(app_subscription(state).map(Root::App)).chain(probe))
 }
 
 /// The keyboard for the file panes and dialogs, the mouse button and dropped files
 /// (drags), the transfer engine's events, the prompt broker's dialogs, the remote edits'
 /// events, each connected
 /// session's state, each terminal's shell output, and the window's close requests.
-fn subscription(state: &Hoprs) -> iced::Subscription<Message> {
+fn app_subscription(state: &Hoprs) -> iced::Subscription<Message> {
     let fixed = [
         iced::event::listen_with(ui::files::key_message),
         iced::event::listen_with(ui::queue::pointer_message),
