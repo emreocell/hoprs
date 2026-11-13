@@ -160,6 +160,7 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
             iced::window::close(window)
         }
         Effect::LoadSettings => Task::done(Message::SettingsLoaded(backend.settings())),
+        Effect::LoadQueueStatus => Task::done(Message::QueueStatus(backend.queue_error())),
         Effect::SaveSettings(settings) => Task::future(save_settings(backend, settings)),
         Effect::SetPolicy(policy) => {
             Task::future(async move { backend.set_policy(policy).await }).discard()

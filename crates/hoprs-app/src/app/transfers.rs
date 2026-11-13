@@ -205,4 +205,13 @@ impl App {
         self.queue.error = Some(error);
         self.queue_open = true;
     }
+
+    /// The queue database could not be opened at start: the engine keeps this run's
+    /// transfers in memory. Said once, in the queue's error bar.
+    pub(super) fn queue_unavailable(&mut self, cause: Error) {
+        let message = crate::ui::strings::queue_unavailable(&cause.message);
+        let mut error = Error::new(cause.kind, message);
+        error.detail = cause.detail;
+        self.queue_error(error);
+    }
 }

@@ -164,6 +164,8 @@ struct State {
     backup_calls: Vec<BackupCall>,
     /// What `settings` returns.
     settings: SettingsLoad,
+    /// What `queue_error` returns.
+    queue_error: Option<Error>,
 }
 
 impl Default for FakeBackend {
@@ -205,6 +207,12 @@ impl FakeBackend {
 
     pub fn with_workspace(self, workspace: Workspace) -> Self {
         self.state().workspaces.push(workspace);
+        self
+    }
+
+    /// The queue database "could not be opened" with `error`.
+    pub fn with_queue_error(self, error: Error) -> Self {
+        self.state().queue_error = Some(error);
         self
     }
 
@@ -906,6 +914,10 @@ impl BackendApi for FakeBackend {
 
     fn settings(&self) -> SettingsLoad {
         self.state().settings.clone()
+    }
+
+    fn queue_error(&self) -> Option<Error> {
+        self.state().queue_error.clone()
     }
 
     async fn save_settings(&self, settings: Settings) -> Result<()> {

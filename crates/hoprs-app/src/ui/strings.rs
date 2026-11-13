@@ -236,6 +236,11 @@ pub fn session_policy(policy: hoprs_transfer::ConflictPolicy) -> String {
     format!("Conflicts: {name} (this session)")
 }
 
+/// The queue database could not be opened: the engine runs on an in-memory queue.
+pub fn queue_unavailable(reason: &str) -> String {
+    format!("Transfer queue unavailable: {reason}. Transfers this session won't survive a restart.")
+}
+
 /// "Skipped: exists".
 pub fn skipped(reason: &str) -> String {
     format!("{SKIPPED}: {reason}")

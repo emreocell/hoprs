@@ -209,6 +209,9 @@ pub trait BackendApi: Send + Sync {
     /// The settings read when the backend opened (the engine and the sessions started
     /// with them), with the error if the file was unusable.
     fn settings(&self) -> SettingsLoad;
+    /// Why the persistent transfer queue could not be opened, if it could not: this run
+    /// keeps its transfers in memory.
+    fn queue_error(&self) -> Option<Error>;
     /// Writes `settings.toml` (atomically). Does not apply anything.
     async fn save_settings(&self, settings: Settings) -> Result<()>;
     /// The conflict policy of the transfers dispatched from now on.
@@ -264,6 +267,8 @@ pub struct Backend {
     settings_path: PathBuf,
     /// What `settings.toml` held when the backend opened.
     settings: SettingsLoad,
+    /// Why the queue database could not be opened (the engine runs in memory then).
+    queue_error: Option<Error>,
     backup_params: ExportParams,
     vault: VaultHandle,
     engine: TransferEngine,
@@ -278,7 +283,8 @@ impl Backend {
     /// reached later, on the blocking pool ([`LazyKeyringStore`]).
     ///
     /// A queue that cannot be opened or read is logged and replaced by an in-memory one,
-    /// so the app still starts (the old file is left untouched).
+    /// so the app still starts (the old file is left untouched);
+    /// [`BackendApi::queue_error`] reports it.
     ///
     /// `settings.toml` (beside the profiles, also read here) gives the engine its conflict
     /// policy and the sessions their workers; an unusable file means the defaults (it is
@@ -290,7 +296,7 @@ impl Backend {
         if let Some(error) = &loaded.error {
             tracing::warn!(%error, "settings.toml is unusable; this run uses the defaults");
         }
-        let engine = start_engine(
+        let (engine, queue_error) = start_engine(
             config.queue_path.as_deref(),
             EngineConfig {
                 default_policy: loaded.settings.default_policy,
@@ -309,6 +315,7 @@ impl Backend {
             profile_dir: config.profile_dir,
             settings_path,
             settings: loaded,
+            queue_error,
             backup_params: config.backup_params,
             vault,
             engine,
@@ -330,23 +337,26 @@ impl Backend {
     }
 }
 
-/// The engine over the queue at `path`, or over an in-memory queue if that fails.
-fn start_engine(path: Option<&Path>, config: EngineConfig) -> TransferEngine {
+/// The engine over the queue at `path`, or over an in-memory queue if that fails (with
+/// why).
+fn start_engine(path: Option<&Path>, config: EngineConfig) -> (TransferEngine, Option<Error>) {
     let persistent = path.map(|path| {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(Error::from)?;
         }
         TransferEngine::start(QueueStore::open(path)?, config.clone())
     });
-    match persistent {
-        Some(Ok(engine)) => return engine,
+    let error = match persistent {
+        Some(Ok(engine)) => return (engine, None),
         Some(Err(err)) => {
             tracing::error!(error = %err, "cannot open the transfer queue; this run keeps it in memory");
+            Some(err)
         }
-        None => {}
-    }
+        None => None,
+    };
     let store = QueueStore::open_in_memory().expect("an in-memory queue always opens");
-    TransferEngine::start(store, config).expect("an empty queue always starts")
+    let engine = TransferEngine::start(store, config).expect("an empty queue always starts");
+    (engine, error)
 }
 
 #[async_trait]
@@ -583,6 +593,10 @@ impl BackendApi for Backend {
         self.settings.clone()
     }
 
+    fn queue_error(&self) -> Option<Error> {
+        self.queue_error.clone()
+    }
+
     async fn save_settings(&self, settings: Settings) -> Result<()> {
         let path = self.settings_path.clone();
         blocking(move || settings::save(&path, &settings)).await
@@ -626,6 +640,36 @@ mod tests {
             backup_params: CHEAP_BACKUP,
         };
         Backend::open(config, Arc::new(MemoryStore::new())).unwrap()
+    }
+
+    /// A queue database that can't be read: the backend still opens, on an in-memory
+    /// queue, and reports why (the file is left as it was).
+    #[tokio::test]
+    async fn corrupt_queue_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = dir.path().join("data").join("queue.db");
+        std::fs::create_dir_all(queue.parent().unwrap()).unwrap();
+        let garbage = vec![0x5a_u8; 8192];
+        std::fs::write(&queue, &garbage).unwrap();
+        let backend = open(dir.path());
+        let error = backend.queue_error().expect("the failure is reported");
+        assert!(!error.message.is_empty());
+        assert_eq!(std::fs::read(&queue).unwrap(), garbage, "left untouched");
+        // The in-memory queue works.
+        backend
+            .enqueue(TransferSpec {
+                site: SiteId::new(),
+                direction: hoprs_transfer::Direction::Download,
+                local: RemotePath::new("/local-x").unwrap(),
+                remote: RemotePath::new("/r").unwrap(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(backend.transfer_snapshot().await.items.len(), 1);
+
+        // A queue that opens reports nothing.
+        let fine = tempfile::tempdir().unwrap();
+        assert_eq!(open(fine.path()).queue_error(), None);
     }
 
     #[tokio::test]

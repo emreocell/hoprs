@@ -1239,3 +1239,33 @@ async fn upload_through_the_queue_end_to_end() {
     backend.close(connected.session).await;
     answers.abort();
 }
+
+/// A queue database that could not be opened: the backend runs on an in-memory queue,
+/// and the queue panel says so (transfers of this run won't survive a restart).
+#[tokio::test]
+async fn unavailable_queue_is_shown_in_the_panel() {
+    let cause = Error::new(hoprs_core::ErrorKind::Io, "Cannot open the queue database")
+        .with_detail("file is not a database");
+    let fake = Arc::new(FakeBackend::new().with_queue_error(cause.clone()));
+    let (mut app, boot) = App::boot();
+    assert!(
+        boot.iter().any(|e| matches!(e, Effect::LoadQueueStatus)),
+        "{boot:?}"
+    );
+    let backend: Arc<dyn BackendApi> = fake.clone();
+    app.update(Message::QueueStatus(backend.queue_error()));
+    let error = app.queue.error.as_ref().expect("the panel shows it");
+    assert_eq!(error.message, strings::queue_unavailable(&cause.message));
+    assert!(
+        error.message.contains("won't survive a restart"),
+        "{}",
+        error.message
+    );
+    assert_eq!(error.detail, cause.detail);
+
+    // A queue that opened: nothing to say.
+    let mut app = App::new();
+    let fine: Arc<dyn BackendApi> = Arc::new(FakeBackend::new());
+    app.update(Message::QueueStatus(fine.queue_error()));
+    assert_eq!(app.queue.error, None);
+}

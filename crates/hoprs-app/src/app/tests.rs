@@ -35,7 +35,11 @@ async fn loaded(fake: &FakeBackend) -> App {
     let (mut app, effects) = App::boot();
     assert!(matches!(
         effects[..],
-        [Effect::LoadProfiles, Effect::LoadSettings]
+        [
+            Effect::LoadProfiles,
+            Effect::LoadSettings,
+            Effect::LoadQueueStatus
+        ]
     ));
     assert!(
         app.update(Message::ProfilesLoaded(fake.profiles().await))

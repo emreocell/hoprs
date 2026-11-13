@@ -685,7 +685,11 @@ fn settings_changes_apply_and_save() {
     let (_, boot) = App::boot();
     assert!(matches!(
         boot[..],
-        [Effect::LoadProfiles, Effect::LoadSettings]
+        [
+            Effect::LoadProfiles,
+            Effect::LoadSettings,
+            Effect::LoadQueueStatus
+        ]
     ));
     app.update(Message::SettingsLoaded(SettingsLoad {
         settings: Settings {

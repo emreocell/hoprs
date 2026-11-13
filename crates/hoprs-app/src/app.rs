@@ -305,6 +305,8 @@ pub enum Message {
     OpenSettings,
     Settings(settings::SettingsMsg),
     SettingsLoaded(SettingsLoad),
+    /// Why the persistent queue could not be opened at start, if it could not.
+    QueueStatus(Option<Error>),
     SettingsSaved(Result<(), Error>),
     BackupExported(Result<ExportReport, Error>),
     BackupRestored(Result<BackupImportReport, Error>),
@@ -457,6 +459,8 @@ pub enum Effect {
     ExitWindow(iced::window::Id),
     /// Reads the settings the backend started with; back as [`Message::SettingsLoaded`].
     LoadSettings,
+    /// Asks whether the persistent queue opened; back as [`Message::QueueStatus`].
+    LoadQueueStatus,
     /// Writes `settings.toml`; back as [`Message::SettingsSaved`].
     SaveSettings(Settings),
     /// The engine's conflict policy from now on.
@@ -548,7 +552,11 @@ impl App {
     pub fn boot() -> (Self, Vec<Effect>) {
         (
             Self::new(),
-            vec![Effect::LoadProfiles, Effect::LoadSettings],
+            vec![
+                Effect::LoadProfiles,
+                Effect::LoadSettings,
+                Effect::LoadQueueStatus,
+            ],
         )
     }
 
@@ -751,6 +759,8 @@ impl App {
             Message::OpenSettings => return self.open_settings(),
             Message::Settings(msg) => return self.settings_msg(msg),
             Message::SettingsLoaded(loaded) => self.settings_loaded(loaded),
+            Message::QueueStatus(Some(error)) => self.queue_unavailable(error),
+            Message::QueueStatus(None) => {}
             Message::SettingsSaved(result) => return self.settings_saved(result),
             Message::ExportTargetChecked { path, exists } => {
                 return self.export_target_checked(path, exists);
