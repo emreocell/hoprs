@@ -64,6 +64,7 @@ pub mod files;
 pub mod import;
 pub mod lifecycle;
 pub mod log;
+pub mod palette;
 pub mod queue;
 pub mod reconnect;
 pub mod settings;
@@ -77,6 +78,7 @@ pub use edit::EditMsg;
 pub use files::{FileKey, Mods, PaneMsg, RequestId};
 pub use lifecycle::ConnStatus;
 pub use log::{LogLevel, LogMsg};
+pub use palette::PaletteMsg;
 pub use queue::{Queue, QueueMsg, QueueTab, RowAction};
 pub use tabs::{SiteConn, Tab, TabId, TabState};
 pub use terminal::TerminalMsg;
@@ -97,6 +99,8 @@ pub struct App {
     pub queue_open: bool,
     /// The technical log panel.
     pub log: log::LogPanel,
+    /// The Ctrl+K palette, while it is open ([`palette`]).
+    pub palette: Option<palette::Palette>,
     /// The sidebar's site filter, as typed.
     pub site_filter: String,
     pub load: Load,
@@ -191,6 +195,8 @@ pub enum Message {
     ToggleQueue,
     /// Something in the technical log panel, or its poll.
     Log(LogMsg),
+    /// The Ctrl+K palette: open, typed into, run or closed ([`palette`]).
+    Palette(PaletteMsg),
     /// The sidebar filter changed.
     FilterSites(String),
     ReloadProfiles,
@@ -607,6 +613,8 @@ pub enum Effect {
     },
     /// Focuses the terminal tab's search field.
     FocusTerminalSearch(TabId),
+    /// Focuses the palette's search field.
+    FocusPalette,
     /// Scrolls the log panel to its newest line.
     ScrollLogToEnd,
     /// Downloads `remote` and opens it with `editor`; back as [`EditMsg::Started`].
@@ -659,6 +667,7 @@ impl App {
         Self {
             queue_open: true,
             log: log::LogPanel::new(crate::logbuf::LogBuffer::new()),
+            palette: None,
             site_filter: String::new(),
             load: Load::Loading,
             sites: Vec::new(),
@@ -780,6 +789,8 @@ impl App {
 
     /// Applies `msg`; returns the effects to run. Never blocks.
     pub fn update(&mut self, msg: Message) -> Vec<Effect> {
+        // A palette row to run becomes the action's own message.
+        let msg = self.palette_command(msg);
         let shown = self.shown_tab();
         let active = self.active_tab;
         let user = reconnect::is_user_action(&msg);
@@ -796,6 +807,10 @@ impl App {
             effects.push(Effect::ScrollTabs {
                 x: tab_strip_offset(index, self.tabs.len()),
             });
+        }
+        // A security dialog wins over the palette, and a closing window has none.
+        if self.palette.is_some() && (self.dialogs.is_open() || self.closing) {
+            self.palette = None;
         }
         // Typed backup passwords never outlive the settings page, however it was left.
         if !matches!(self.form, Some(Form::Settings)) {
@@ -825,12 +840,13 @@ impl App {
         {
             return effects;
         }
-        if self.blocked_by_dialog(&msg) {
+        if self.blocked_by_overlay(&msg) {
             return Vec::new();
         }
         match msg {
             Message::ToggleQueue => self.queue_open = !self.queue_open,
             Message::Log(msg) => return self.log_msg(msg),
+            Message::Palette(msg) => return self.palette_msg(msg),
             Message::WindowResized(width) => self.window_width = width,
             Message::FilterSites(filter) => self.site_filter = filter,
             Message::ReloadProfiles => {

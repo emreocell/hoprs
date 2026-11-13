@@ -2,15 +2,15 @@
 //! 256 px sidebar on the left and, on the right, the center, the
 //! collapsible transfer queue and the status bar.
 
-use iced::widget::{column, container, row, rule, text};
+use iced::widget::{button, column, container, row, rule, text};
 use iced::{Alignment, Element, Length, Padding};
 
-use crate::app::{App, Form, Message};
+use crate::app::{App, Form, Message, PaletteMsg};
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
 use crate::ui::{
-    dialogs, edits, files, import, log, queue, settings, sidebar, site_form, status, tabs,
-    terminal, workspace_form,
+    dialogs, edits, files, import, log, palette as command_palette, queue, settings, sidebar,
+    site_form, status, tabs, terminal, workspace_form,
 };
 
 pub const SIDEBAR_WIDTH: f32 = sidebar::WIDTH;
@@ -42,7 +42,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .height(Length::Fill)
         .style(theme::paper)
         .into();
-    dialogs::overlay(app, base)
+    // Never both: a security dialog closes the palette, which does not open under one.
+    dialogs::overlay(app, command_palette::overlay(app, base))
 }
 
 fn hrule<'a>() -> Element<'a, Message> {
@@ -79,22 +80,26 @@ fn top_bar(app: &App) -> Element<'_, Message> {
 
     let tabs = tabs::view(app);
 
-    // A slot for the Ctrl+K palette (Plan 6).
+    // The Ctrl+K palette's button.
     let palette_slot = container(
-        container(
-            row![
-                text(strings::GO_TO_ANYTHING),
-                container(text(strings::GO_TO_ANYTHING_KEY).size(theme::TEXT_XS))
-                    .padding(Padding::ZERO.left(theme::SPACE_2XS).right(theme::SPACE_2XS))
-                    .style(theme::kbd),
-            ]
-            .spacing(theme::SPACE_SM)
+        button(
+            container(
+                row![
+                    text(strings::GO_TO_ANYTHING),
+                    container(text(strings::GO_TO_ANYTHING_KEY).size(theme::TEXT_XS))
+                        .padding(Padding::ZERO.left(theme::SPACE_2XS).right(theme::SPACE_2XS))
+                        .style(theme::kbd),
+                ]
+                .spacing(theme::SPACE_SM)
+                .align_y(Alignment::Center),
+            )
+            .height(Length::Fill)
             .align_y(Alignment::Center),
         )
         .height(Length::Fill)
         .padding(Padding::ZERO.left(theme::SPACE_SM).right(theme::SPACE_SM))
-        .align_y(Alignment::Center)
-        .style(theme::outline_box),
+        .style(theme::button_outline)
+        .on_press(Message::Palette(PaletteMsg::Open)),
     )
     .height(Length::Fill)
     .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_SM]));

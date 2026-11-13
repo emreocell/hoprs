@@ -79,3 +79,19 @@ Not re-captured (the driver was not rebuilt); covered by tests, visual check pen
 | Close workspace | With an unsent edit on one of its sites: the center question "Some remote edits of this workspace are not uploaded", Upload pending changes and close / Close and keep local copies / Cancel; an open site form comes back after Cancel | NEEDS HUMAN visually |
 | Delete site | The delete confirmation adds "1 file of this site is open for editing: its unsent changes will be kept as a recovered copy, never deleted." | NEEDS HUMAN visually |
 | Stop and keep | While "Upload…" runs, only "Stop and keep local copies" and "Uploading… (Stop to keep local copies instead)"; Stop returns at once, and a file whose upload was under way shows "Server copy of `<path>` may be incomplete" in the kept notice | NEEDS HUMAN: stop sshd, save, close the window, click Upload and quit, then Stop and keep local copies |
+
+## Task 9: Ctrl+K palette (2026-11-13)
+
+Release build under XWayland at 2560×1600 @2x, isolated `HOME`/`XDG_*` (`known_hosts` seeded with `ssh-keyscan`), Docker
+sshd (`127.0.0.1:2222`, alice, key) saved as `shop-web` (Open as: both), plus `nas`, `blog` and a workspace `Shop`. A
+throwaway driver (not committed) sent the app's own messages and took iced `window::screenshot` captures.
+
+| Check | Result |
+| --- | --- |
+| Open (terminal tab active) | Box at the top center over the dimmed window (dialog backdrop, `dialog_box` surface, 1 px `rule_2`, 4 px corners, no shadow); search field focused (white outline). Rows: Paste `Ctrl Shift V`, Find in scrollback `Ctrl Shift F`, New terminal tab, New files tab, Close tab + `shop-web · terminal` in mono, the two tabs in mono, New site, Open workspace…, Toggle queue, Toggle log, Import from FileZilla (12 rows, the rest by typing). Group tag muted on the right, keys in key caps | Pass |
+| Filtering | `sh`: Shop (Workspace), `shop-web alice@127.0.0.1` (Site, user@host muted mono), `shop-web · files`, `shop-web · terminal` (Tab); equal scores alphabetical | Pass |
+| Selected item | ↓ ↓: the third row on the accent wash (`row_selected`); the first row is highlighted by default | Pass |
+| Files tab | Remote pane, a folder selected: New folder `F7`, Rename `F2`, Delete `Del`, Download selection `Ctrl ↵` (no Edit: a folder), then the session actions | Pass |
+| No match | `zzz`: "No matches" in muted text under the field | Pass |
+| Top bar button | "Go to anything `Ctrl K`" is now an outlined button (`button_outline`) | NEEDS HUMAN: click it, hover |
+| Real keyboard | Ctrl+K from the file panes and the sidebar filter; Ctrl+Shift+K in a focused terminal (plain Ctrl+K reaches the shell: `echo abc` then Ctrl+A, Ctrl+K kills the line); Esc; click outside closes | NEEDS HUMAN (covered by unit tests through messages) |

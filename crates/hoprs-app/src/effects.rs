@@ -248,6 +248,7 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
         Effect::FocusTerminalSearch(tab) => {
             iced::widget::operation::focus(crate::ui::terminal::search_id(tab))
         }
+        Effect::FocusPalette => iced::widget::operation::focus(crate::ui::palette::input_id()),
         Effect::StartEdit {
             tab,
             session,

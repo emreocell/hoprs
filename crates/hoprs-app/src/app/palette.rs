@@ -1,0 +1,577 @@
+//! The Ctrl+K command palette (Plan 6 Task 9): an overlay at the top of the window, with
+//! a search field and up to [`MAX_RESULTS`] rows.
+//!
+//! **What it lists.** Only what makes sense now ([`App::palette_entries`]):
+//! - the active tab's own actions (the focused pane's F7 / F2 / Del / F4 / Ctrl+Enter, the
+//!   terminal's copy, paste and search), then Reconnect, the new tabs on its session and
+//!   Close tab;
+//! - "Go to": every open tab ("site · kind");
+//! - the global actions (New site, Open workspace…, the queue and log toggles, Import from
+//!   FileZilla, Settings);
+//! - every saved site (connect, or focus its tab) and workspace (open).
+//!
+//! Each row runs the message the action's own button or key sends: the palette never
+//! repeats an action's logic. A row with a key shows it.
+//!
+//! **Matching.** [`fuzzy_score`]: the query's letters in order, case-insensitive, spaces
+//! ignored; word starts and contiguous runs score more. Results go best first, equal scores
+//! alphabetically. An empty query keeps the order above.
+//!
+//! **Input.** While it is open, the palette has the keyboard: ↑/↓ move, Enter runs, Esc
+//! closes, every other key is dropped, and what the window behind could still send (a
+//! focused field, a pane, the terminal) is dropped as under a dialog
+//! ([`App::blocked_by_overlay`](super::App)). A security dialog always wins: the palette
+//! does not open under one, and closes when one arrives.
+
+use hoprs_core::{SiteId, TabKind, WorkspaceId};
+
+use super::{App, Effect, FailureAction, FileKey, LogMsg, Message, Tab, TabId, TabState};
+use crate::app::terminal::TerminalMsg;
+use crate::backend::Side;
+use crate::ui::strings;
+
+/// The most results the palette lists.
+pub const MAX_RESULTS: usize = 12;
+
+/// Every matched letter.
+const BASE: u32 = 1;
+/// A letter that starts a word (the first, one after a separator, an inner capital).
+const WORD_START: u32 = 8;
+/// A letter right after the previous matched one.
+const CONTIGUOUS: u32 = 6;
+
+/// How well `query` matches `candidate`, or `None` if it does not: every letter of the
+/// query (spaces ignored) must appear in order, case-insensitive. The best alignment
+/// counts: each letter scores [`BASE`], plus [`WORD_START`] at the start of a word, plus
+/// [`CONTIGUOUS`] right after the previous one. An empty query matches with 0.
+pub fn fuzzy_score(query: &str, candidate: &str) -> Option<u32> {
+    let query: Vec<char> = query
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .map(fold)
+        .collect();
+    if query.is_empty() {
+        return Some(0);
+    }
+    let chars: Vec<char> = candidate.chars().collect();
+    let folded: Vec<char> = chars.iter().copied().map(fold).collect();
+    if query.len() > folded.len() {
+        return None;
+    }
+    // best[j]: the best score of the query so far with its last letter at `j`.
+    let mut best: Vec<Option<u32>> = vec![None; folded.len()];
+    for (i, &letter) in query.iter().enumerate() {
+        let mut next = vec![None; folded.len()];
+        // The best of `best[..j - 1]`: the previous letter somewhere before, not adjacent.
+        let mut before: Option<u32> = None;
+        for j in 0..folded.len() {
+            if j >= 2 {
+                before = before.max(best[j - 2]);
+            }
+            if folded[j] != letter {
+                continue;
+            }
+            let own = BASE + if word_start(&chars, j) { WORD_START } else { 0 };
+            if i == 0 {
+                next[j] = Some(own);
+                continue;
+            }
+            let adjacent = j
+                .checked_sub(1)
+                .and_then(|k| best[k])
+                .map(|s| s + CONTIGUOUS);
+            next[j] = adjacent.max(before).map(|s| s + own);
+        }
+        best = next;
+    }
+    best.into_iter().flatten().max()
+}
+
+/// One letter, case-folded (its first lowercase form).
+fn fold(c: char) -> char {
+    c.to_lowercase().next().unwrap_or(c)
+}
+
+/// Whether `chars[j]` starts a word: the first letter, one after a non-alphanumeric
+/// character (space, `-`, `_`, `.`, `/`, `@`, `·`), or a capital after a lowercase letter.
+fn word_start(chars: &[char], j: usize) -> bool {
+    let Some(&previous) = j.checked_sub(1).and_then(|k| chars.get(k)) else {
+        return true;
+    };
+    !previous.is_alphanumeric() || (previous.is_lowercase() && chars[j].is_uppercase())
+}
+
+/// The `items` that `score` matches, best first; equal scores alphabetically by `label`
+/// (case-insensitive), then in their order.
+fn ranked<T>(
+    items: Vec<T>,
+    score: impl Fn(&T) -> Option<u32>,
+    label: impl Fn(&T) -> String,
+) -> Vec<T> {
+    let mut scored: Vec<(u32, String, T)> = items
+        .into_iter()
+        .filter_map(|item| score(&item).map(|s| (s, label(&item), item)))
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    scored.into_iter().map(|(_, _, item)| item).collect()
+}
+
+/// The candidates matching `query` in the palette's order, as indices.
+#[cfg(test)]
+pub fn rank(query: &str, candidates: &[&str]) -> Vec<usize> {
+    ranked(
+        (0..candidates.len()).collect(),
+        |&i| fuzzy_score(query, candidates[i]),
+        |&i| candidates[i].to_lowercase(),
+    )
+}
+
+/// What a palette row does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaletteItem {
+    /// Go to an open tab.
+    Tab(TabId),
+    /// Connect a saved site, or focus its tab.
+    Site(SiteId),
+    /// Open a workspace.
+    Workspace(WorkspaceId),
+    NewSite,
+    ImportFilezilla,
+    Settings,
+    ToggleQueue,
+    ToggleLog,
+    NewTerminalTab(TabId),
+    NewFilesTab(TabId),
+    /// The tab's lost (or failed) connection.
+    Reconnect(TabId),
+    CloseTab(TabId),
+    /// "Open workspace…": narrows the palette to the workspaces.
+    OpenWorkspace,
+    /// A key of the focused pane (`Side`) of the active files tab.
+    FileKey(FileKey, Side),
+    Copy(TabId),
+    Paste(TabId),
+    Find(TabId),
+}
+
+/// The group of a row, shown as a muted tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Group {
+    Action,
+    Tab,
+    Site,
+    Workspace,
+}
+
+/// One row: what it does and how it reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    pub item: PaletteItem,
+    pub label: String,
+    /// Shown after the label in mono: a site's `user@host`, the tab Close tab closes.
+    pub detail: Option<String>,
+    pub group: Group,
+    /// The key that does the same outside the palette.
+    pub shortcut: Option<&'static str>,
+    /// The label is data (a site, tab or workspace name): JetBrains Mono.
+    pub mono: bool,
+}
+
+impl Entry {
+    fn action(item: PaletteItem, label: &str, shortcut: Option<&'static str>) -> Self {
+        Self {
+            item,
+            label: label.to_owned(),
+            detail: None,
+            group: Group::Action,
+            shortcut,
+            mono: false,
+        }
+    }
+
+    /// How well `query` matches: the label, or for a site its `user@host` too.
+    fn score(&self, query: &str) -> Option<u32> {
+        let label = fuzzy_score(query, &self.label);
+        let detail = match (self.group, &self.detail) {
+            (Group::Site, Some(detail)) => fuzzy_score(query, detail),
+            _ => None,
+        };
+        label.max(detail)
+    }
+}
+
+/// What the palette lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Scope {
+    #[default]
+    All,
+    /// After "Open workspace…": the workspaces only.
+    Workspaces,
+}
+
+/// The open palette.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Palette {
+    /// As typed.
+    pub query: String,
+    /// The highlighted row of the results.
+    pub selected: usize,
+    pub scope: Scope,
+}
+
+#[derive(Debug, Clone)]
+pub enum PaletteMsg {
+    /// Ctrl+K (Ctrl+Shift+K in a focused terminal) or the top bar's button: opens it, or
+    /// closes it when it is open.
+    Open,
+    /// Esc, or a click outside it.
+    Close,
+    Query(String),
+    /// Enter in the field: runs the highlighted row.
+    Run,
+    /// A click on row `n`: runs it.
+    Pick(usize),
+    /// Narrows the palette to `Scope` ("Open workspace…").
+    Scope(Scope),
+}
+
+/// The tab as the palette names it: "site · kind".
+pub fn tab_label(app: &App, tab: &Tab) -> String {
+    let site = app
+        .site(&tab.site)
+        .map_or(strings::SITE_MISSING, |s| s.name.as_str());
+    let kind = match tab.kind() {
+        TabKind::Terminal => strings::PALETTE_KIND_TERMINAL,
+        TabKind::Files => strings::PALETTE_KIND_FILES,
+    };
+    format!("{site} · {kind}")
+}
+
+impl App {
+    /// A dialog or the palette covers the window: what is behind takes no input.
+    pub fn overlay_open(&self) -> bool {
+        self.dialogs.is_open() || self.palette.is_some()
+    }
+
+    /// Whether the terminal of `tab` takes the keys: it has the focus, its shell is open
+    /// and nothing covers it.
+    pub fn terminal_has_keyboard(&self, tab: &Tab) -> bool {
+        tab.terminal()
+            .is_some_and(|t| t.focused && t.open_shell().is_some())
+            && !self.overlay_open()
+    }
+
+    /// Every row the palette may list now, in its order without a query.
+    pub fn palette_entries(&self) -> Vec<Entry> {
+        let scope = self.palette.as_ref().map(|p| p.scope).unwrap_or_default();
+        let mut out = Vec::new();
+        if scope == Scope::All {
+            if let Some(index) = self.active_tab.filter(|&i| i < self.tabs.len()) {
+                self.tab_actions(index, &mut out);
+            }
+            out.extend(self.tabs.iter().map(|tab| Entry {
+                item: PaletteItem::Tab(tab.id),
+                label: tab_label(self, tab),
+                detail: None,
+                group: Group::Tab,
+                shortcut: None,
+                mono: true,
+            }));
+            out.push(Entry::action(PaletteItem::NewSite, strings::NEW_SITE, None));
+            if !self.workspaces.is_empty() {
+                out.push(Entry::action(
+                    PaletteItem::OpenWorkspace,
+                    strings::PALETTE_OPEN_WORKSPACE,
+                    None,
+                ));
+            }
+            for (item, label) in [
+                (PaletteItem::ToggleQueue, strings::PALETTE_TOGGLE_QUEUE),
+                (PaletteItem::ToggleLog, strings::PALETTE_TOGGLE_LOG),
+                (PaletteItem::ImportFilezilla, strings::IMPORT_FILEZILLA),
+                (PaletteItem::Settings, strings::SETTINGS),
+            ] {
+                out.push(Entry::action(item, label, None));
+            }
+            out.extend(self.sites.iter().map(|site| Entry {
+                item: PaletteItem::Site(site.id.clone()),
+                label: site.name.clone(),
+                detail: Some(if site.user.is_empty() {
+                    site.host.clone()
+                } else {
+                    format!("{}@{}", site.user, site.host)
+                }),
+                group: Group::Site,
+                shortcut: None,
+                mono: true,
+            }));
+        }
+        out.extend(self.workspaces.iter().map(|workspace| Entry {
+            item: PaletteItem::Workspace(workspace.id.clone()),
+            label: workspace.name.clone(),
+            detail: None,
+            group: Group::Workspace,
+            shortcut: None,
+            mono: true,
+        }));
+        out
+    }
+
+    /// The rows shown: those matching the query, best first, at most [`MAX_RESULTS`].
+    pub fn palette_results(&self) -> Vec<Entry> {
+        let entries = self.palette_entries();
+        let query = self.palette.as_ref().map_or("", |p| p.query.as_str());
+        let mut results = if query.trim().is_empty() {
+            entries
+        } else {
+            ranked(entries, |e| e.score(query), |e| e.label.to_lowercase())
+        };
+        results.truncate(MAX_RESULTS);
+        results
+    }
+
+    /// The active tab's own rows: its pane's or terminal's actions (not while a form
+    /// covers it), Reconnect, the new tabs on its session, Close tab.
+    fn tab_actions(&self, index: usize, out: &mut Vec<Entry>) {
+        let tab = &self.tabs[index];
+        if self.form.is_none() {
+            if tab.is_files() {
+                self.pane_actions(index, out);
+            } else {
+                self.terminal_actions(index, out);
+            }
+        }
+        if self.reconnect_message(tab).is_some() {
+            out.push(Entry::action(
+                PaletteItem::Reconnect(tab.id),
+                strings::RECONNECT,
+                None,
+            ));
+        }
+        if self.can_open_session_tab(index) {
+            out.push(Entry::action(
+                PaletteItem::NewTerminalTab(tab.id),
+                strings::NEW_TERMINAL_TAB,
+                None,
+            ));
+            out.push(Entry::action(
+                PaletteItem::NewFilesTab(tab.id),
+                strings::NEW_FILES_TAB,
+                None,
+            ));
+        }
+        out.push(Entry {
+            detail: Some(tab_label(self, tab)),
+            ..Entry::action(
+                PaletteItem::CloseTab(tab.id),
+                strings::PALETTE_CLOSE_TAB,
+                None,
+            )
+        });
+    }
+
+    /// The focused pane's keys, when the pane would act on them now.
+    fn pane_actions(&self, index: usize, out: &mut Vec<Entry>) {
+        let tab = &self.tabs[index];
+        let Some(side) = tab.focus() else {
+            return;
+        };
+        let Some(pane) = tab.pane(side) else {
+            return;
+        };
+        if pane.action.is_some() || !self.can_act(index, side) {
+            return;
+        }
+        let key = |key, label, shortcut| {
+            Entry::action(PaletteItem::FileKey(key, side), label, Some(shortcut))
+        };
+        out.push(key(
+            FileKey::NewFolder,
+            strings::NEW_FOLDER,
+            strings::KEY_NEW_FOLDER,
+        ));
+        if !pane.selected_entries().is_empty() {
+            out.push(key(FileKey::Rename, strings::RENAME, strings::KEY_RENAME));
+            out.push(key(FileKey::Delete, strings::DELETE, strings::KEY_DELETE));
+        }
+        if matches!(self.edit_target(index, side), Some(Ok(_))) {
+            out.push(key(FileKey::Edit, strings::PALETTE_EDIT, strings::KEY_EDIT));
+        }
+        if !self.transfer_specs(index, side).is_empty() {
+            let label = match side {
+                Side::Local => strings::PALETTE_UPLOAD,
+                Side::Remote => strings::PALETTE_DOWNLOAD,
+            };
+            out.push(key(FileKey::Transfer, label, strings::KEY_TRANSFER));
+        }
+    }
+
+    /// The terminal's copy (with a selection), paste (with a shell) and search.
+    fn terminal_actions(&self, index: usize, out: &mut Vec<Entry>) {
+        let tab = &self.tabs[index];
+        let Some(terminal) = tab.terminal() else {
+            return;
+        };
+        if !matches!(self.tab_conn(index).state, TabState::Connected(_)) {
+            return;
+        }
+        if !terminal.model.selected_text().is_empty() {
+            out.push(Entry::action(
+                PaletteItem::Copy(tab.id),
+                strings::PALETTE_COPY,
+                Some(strings::PALETTE_KEY_COPY),
+            ));
+        }
+        if terminal.open_shell().is_some() {
+            out.push(Entry::action(
+                PaletteItem::Paste(tab.id),
+                strings::PALETTE_PASTE,
+                Some(strings::PALETTE_KEY_PASTE),
+            ));
+        }
+        out.push(Entry::action(
+            PaletteItem::Find(tab.id),
+            strings::PALETTE_FIND,
+            Some(strings::PALETTE_KEY_FIND),
+        ));
+    }
+
+    /// What "Reconnect" sends for `tab`, if it can reconnect: the lost banner's
+    /// Reconnect, else the failed tab's.
+    fn reconnect_message(&self, tab: &Tab) -> Option<Message> {
+        let conn = self.conn(&tab.site);
+        if conn.session().is_some()
+            && !conn.reconnecting
+            && conn.lost_connection().is_some()
+            && conn.host_key_change().is_none()
+        {
+            return Some(Message::ReconnectSession(tab.id));
+        }
+        (matches!(conn.state, TabState::Failed(_))
+            && self
+                .failure_actions(tab)
+                .contains(&FailureAction::Reconnect))
+        .then(|| Message::ConnectSite(tab.site.clone()))
+    }
+
+    /// The message a row sends: the same as the action's own button or key.
+    fn item_message(&self, item: &PaletteItem) -> Option<Message> {
+        Some(match item {
+            PaletteItem::Tab(id) => Message::SelectTab(self.tab_index(*id)?),
+            PaletteItem::Site(id) => Message::ConnectSite(id.clone()),
+            PaletteItem::Workspace(id) => Message::OpenWorkspace(id.clone()),
+            PaletteItem::NewSite => Message::NewSite,
+            PaletteItem::ImportFilezilla => Message::OpenImport,
+            PaletteItem::Settings => Message::OpenSettings,
+            PaletteItem::ToggleQueue => Message::ToggleQueue,
+            PaletteItem::ToggleLog => Message::Log(LogMsg::Toggle),
+            PaletteItem::NewTerminalTab(tab) => Message::NewTab {
+                tab: *tab,
+                kind: TabKind::Terminal,
+            },
+            PaletteItem::NewFilesTab(tab) => Message::NewTab {
+                tab: *tab,
+                kind: TabKind::Files,
+            },
+            PaletteItem::Reconnect(id) => {
+                self.reconnect_message(&self.tabs[self.tab_index(*id)?])?
+            }
+            PaletteItem::CloseTab(id) => Message::CloseTab(*id),
+            PaletteItem::OpenWorkspace => Message::Palette(PaletteMsg::Scope(Scope::Workspaces)),
+            PaletteItem::FileKey(key, _) => Message::Key {
+                key: *key,
+                shift: false,
+            },
+            PaletteItem::Copy(tab) => Message::Terminal {
+                tab: *tab,
+                msg: TerminalMsg::Copy,
+            },
+            PaletteItem::Paste(tab) => Message::Terminal {
+                tab: *tab,
+                msg: TerminalMsg::Paste,
+            },
+            PaletteItem::Find(tab) => Message::Terminal {
+                tab: *tab,
+                msg: TerminalMsg::OpenSearch,
+            },
+        })
+    }
+
+    /// Run requests (Enter, the field's submit, a click on a row) become the row's own
+    /// message, which `update` then handles as if its button or key had sent it (the
+    /// palette closes first, so nothing blocks it). Anything else passes unchanged.
+    pub(super) fn palette_command(&mut self, msg: Message) -> Message {
+        let Some(palette) = &self.palette else {
+            return msg;
+        };
+        let results = self.palette_results();
+        let row = match &msg {
+            // The highlighted row (the list may have shrunk under it).
+            Message::Palette(PaletteMsg::Run)
+            | Message::KeyPressed {
+                key: FileKey::Enter,
+                ..
+            } => palette.selected.min(results.len().saturating_sub(1)),
+            Message::Palette(PaletteMsg::Pick(row)) => *row,
+            _ => return msg,
+        };
+        let Some(command) = results
+            .get(row)
+            .and_then(|entry| self.item_message(&entry.item))
+        else {
+            return msg;
+        };
+        // "Open workspace…" keeps it open, narrowed.
+        if !matches!(command, Message::Palette(_)) {
+            self.palette = None;
+        }
+        command
+    }
+
+    pub(super) fn palette_msg(&mut self, msg: PaletteMsg) -> Vec<Effect> {
+        match msg {
+            PaletteMsg::Open => {
+                if self.palette.take().is_none() && !self.dialogs.is_open() && !self.closing {
+                    self.palette = Some(Palette::default());
+                    return vec![Effect::FocusPalette];
+                }
+            }
+            PaletteMsg::Close => self.palette = None,
+            PaletteMsg::Query(query) => {
+                if let Some(palette) = &mut self.palette {
+                    palette.query = query;
+                    palette.selected = 0;
+                }
+            }
+            PaletteMsg::Scope(scope) => {
+                if let Some(palette) = &mut self.palette {
+                    *palette = Palette {
+                        scope,
+                        ..Palette::default()
+                    };
+                }
+            }
+            // Nothing (left) to run: `palette_command` took every row that runs.
+            PaletteMsg::Run | PaletteMsg::Pick(_) => {}
+        }
+        Vec::new()
+    }
+
+    /// A key while the palette is open: ↑/↓ move through the results (wrapping), Esc
+    /// closes; every other key is dropped (Enter with a row to run never gets here).
+    pub(super) fn palette_key(&mut self, key: FileKey) -> Vec<Effect> {
+        let count = self.palette_results().len();
+        let Some(palette) = &mut self.palette else {
+            return Vec::new();
+        };
+        match key {
+            FileKey::Escape => self.palette = None,
+            FileKey::Down if count > 0 => palette.selected = (palette.selected + 1) % count,
+            FileKey::Up if count > 0 => {
+                palette.selected = (palette.selected + count - 1) % count;
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+}

@@ -185,8 +185,7 @@ pub fn view<'a>(app: &'a App, tab: &'a Tab, terminal: &'a TerminalTab) -> Elemen
         TabState::Connecting => centered(text(strings::CONNECTING).color(palette().muted)),
         TabState::Connected(_) => {
             // An ended shell takes no keys (its cursor is an outline).
-            let focused =
-                terminal.focused && !app.dialogs.is_open() && terminal.open_shell().is_some();
+            let focused = app.terminal_has_keyboard(tab);
             let widget = TerminalView {
                 tab: tab.id,
                 model: &terminal.model,

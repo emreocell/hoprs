@@ -432,6 +432,7 @@ impl App {
             | Message::Import(_)
             | Message::OpenSettings
             | Message::Settings(_)
+            | Message::Palette(_)
             | Message::Terminal { .. } => Some(Vec::new()),
             _ => None,
         }

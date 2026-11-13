@@ -662,6 +662,10 @@ impl App {
         if self.dialogs.is_open() {
             return self.dialog_key(key, shift);
         }
+        // The palette has the keyboard: nothing reaches a pane or a form behind it.
+        if self.palette.is_some() {
+            return self.palette_key(key);
+        }
         if self.form.is_some() {
             return Vec::new();
         }

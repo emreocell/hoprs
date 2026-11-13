@@ -13,7 +13,7 @@ use iced::{Alignment, Element, Event, Length, Padding, Rectangle, window};
 use crate::app::actions::{EditKind, PaneAction};
 use crate::app::files::{Pane, PaneStatus, Row, SortKey};
 use crate::app::{
-    App, FailureAction, FileKey, Message, Mods, PaneMsg, SiteConn, Tab, TabId, TabState,
+    App, FailureAction, FileKey, Message, Mods, PaletteMsg, PaneMsg, SiteConn, Tab, TabId, TabState,
 };
 use crate::backend::Side;
 use crate::ui::fit::{self, Columns, MODIFIED_WIDTH, PERMISSIONS_WIDTH, SIZE_WIDTH};
@@ -92,6 +92,21 @@ pub fn key_message(event: Event, status: Status, _: window::Id) -> Option<Messag
         return None;
     };
     match event {
+        // Ctrl+K (or Ctrl+Shift+K): the palette, unless a widget took it (a focused
+        // terminal sends it to the shell; its Ctrl+Shift+K comes through the widget).
+        keyboard::Event::KeyPressed {
+            key,
+            physical_key,
+            modifiers,
+            ..
+        } if modifiers.command()
+            && !modifiers.alt()
+            && key
+                .to_latin(physical_key)
+                .is_some_and(|c| c.eq_ignore_ascii_case(&'k')) =>
+        {
+            (status != Status::Captured).then_some(Message::Palette(PaletteMsg::Open))
+        }
         keyboard::Event::ModifiersChanged(modifiers) => Some(Message::Modifiers(Mods {
             ctrl: modifiers.command(),
             shift: modifiers.shift(),
@@ -832,6 +847,51 @@ mod tests {
             Some(FileKey::Escape)
         );
         assert_eq!(pressed(Named::F5, Status::Ignored), None);
+    }
+
+    /// Ctrl+K opens the palette unless a widget took it: a focused terminal captures every
+    /// key (Ctrl+K is the shell's there); a text field lets it through.
+    #[test]
+    fn ctrl_k_opens_the_palette_unless_captured() {
+        let id = window::Id::unique();
+        let press = |c: &str, modifiers| {
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: Key::Character(c.into()),
+                modified_key: Key::Character(c.into()),
+                physical_key: keyboard::key::Physical::Unidentified(
+                    keyboard::key::NativeCode::Unidentified,
+                ),
+                location: keyboard::Location::Standard,
+                modifiers,
+                text: None,
+                repeat: false,
+            })
+        };
+        let opens = |m: Option<Message>| matches!(m, Some(Message::Palette(PaletteMsg::Open)));
+        let ctrl = keyboard::Modifiers::CTRL;
+        let ctrl_shift = keyboard::Modifiers::CTRL | keyboard::Modifiers::SHIFT;
+        assert!(opens(key_message(press("k", ctrl), Status::Ignored, id)));
+        assert!(opens(key_message(
+            press("K", ctrl_shift),
+            Status::Ignored,
+            id
+        )));
+        assert_eq!(
+            key_message(press("k", ctrl), Status::Captured, id).map(|m| format!("{m:?}")),
+            None
+        );
+        // Without Ctrl (typing a k), or with Alt, nothing.
+        let alt = keyboard::Modifiers::CTRL | keyboard::Modifiers::ALT;
+        for (c, modifiers) in [
+            ("k", keyboard::Modifiers::default()),
+            ("k", alt),
+            ("j", ctrl),
+        ] {
+            assert!(
+                key_message(press(c, modifiers), Status::Ignored, id).is_none(),
+                "{c} {modifiers:?}"
+            );
+        }
     }
 
     #[test]

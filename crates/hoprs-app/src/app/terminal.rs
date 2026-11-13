@@ -583,6 +583,19 @@ impl App {
         let Some((_, terminal)) = self.terminal_at(tab) else {
             return Vec::new();
         };
+        // Ctrl+Shift+K in a focused terminal: the palette (plain Ctrl+K is the shell's).
+        if let TerminalMsg::Key {
+            key: Key::Char(c),
+            mods,
+        } = &msg
+            && terminal.focused
+            && mods.ctrl
+            && mods.shift
+            && !mods.alt
+            && c.eq_ignore_ascii_case(&'k')
+        {
+            return self.palette_msg(super::PaletteMsg::Open);
+        }
         match msg {
             TerminalMsg::Resized { .. } | TerminalMsg::Restart => unreachable!("handled above"),
             TerminalMsg::ResizeDue(seq) => {

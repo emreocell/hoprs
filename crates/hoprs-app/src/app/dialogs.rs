@@ -323,58 +323,15 @@ impl App {
         }
     }
 
-    /// While a dialog is open, the window behind it takes no input: the messages its
-    /// widgets and keys send are dropped (results of work in flight still land). The
-    /// mouse is stopped by the backdrop; this covers what the keyboard could still reach.
-    pub(super) fn blocked_by_dialog(&self, msg: &Message) -> bool {
-        if !self.dialogs.is_open() {
-            return false;
+    /// While a dialog or the palette is open, the window behind it takes no input: the
+    /// messages its widgets and keys send are dropped (results of work in flight still
+    /// land). The mouse is stopped by the backdrop; this covers what the keyboard could
+    /// still reach. Under a dialog, the palette does not open either.
+    pub(super) fn blocked_by_overlay(&self, msg: &Message) -> bool {
+        if self.dialogs.is_open() {
+            return matches!(msg, Message::Palette(_)) || behind_overlay(msg);
         }
-        match msg {
-            Message::Edit(msg) => msg.is_user(),
-            // Scroll offsets the lists report (also after a programmatic scroll).
-            Message::Pane {
-                msg: super::PaneMsg::Scrolled { .. },
-                ..
-            }
-            | Message::Queue(super::QueueMsg::Scrolled { .. }) => false,
-            Message::ToggleQueue
-            | Message::FilterSites(_)
-            | Message::ToggleWorkspace(_)
-            | Message::OpenWorkspace(_)
-            | Message::ConnectSite(_)
-            | Message::SelectTab(_)
-            | Message::NewSite
-            | Message::EditSite(_)
-            | Message::NewWorkspace
-            | Message::EditWorkspace(_)
-            | Message::SiteForm(_)
-            | Message::WorkspaceForm(_)
-            | Message::OpenProfileFolder
-            | Message::CloseTab(_)
-            | Message::NewTab { .. }
-            | Message::Pane { .. }
-            | Message::Key { .. }
-            | Message::Queue(_)
-            | Message::FileDropped(_)
-            | Message::KnownHosts { .. }
-            | Message::RestartSession(_)
-            | Message::OpenImport
-            | Message::Import(_)
-            | Message::OpenSettings
-            | Message::Settings(_) => true,
-            // The terminal's keyboard, mouse and search: never while a dialog asks (its
-            // timers and replies still land).
-            Message::Terminal { msg, .. } => !matches!(
-                msg,
-                super::TerminalMsg::ResizeDue(_)
-                    | super::TerminalMsg::SearchDue(_)
-                    | super::TerminalMsg::InputSent(_)
-                    | super::TerminalMsg::Pasted(_)
-                    | super::TerminalMsg::Resized { .. }
-            ),
-            _ => false,
-        }
+        self.palette.is_some() && behind_overlay(msg)
     }
 
     /// A session's connect finished: a secret answered with "save" was stored if it
@@ -592,5 +549,54 @@ fn answer_of(dialog: &mut Dialog) -> PromptAnswer {
                 .unwrap_or_default(),
             save: dialog.save,
         },
+    }
+}
+
+/// Whether `msg` is input from the window behind a dialog or the palette.
+fn behind_overlay(msg: &Message) -> bool {
+    match msg {
+        Message::Edit(msg) => msg.is_user(),
+        // Scroll offsets the lists report (also after a programmatic scroll).
+        Message::Pane {
+            msg: super::PaneMsg::Scrolled { .. },
+            ..
+        }
+        | Message::Queue(super::QueueMsg::Scrolled { .. }) => false,
+        Message::ToggleQueue
+        | Message::FilterSites(_)
+        | Message::ToggleWorkspace(_)
+        | Message::OpenWorkspace(_)
+        | Message::ConnectSite(_)
+        | Message::SelectTab(_)
+        | Message::NewSite
+        | Message::EditSite(_)
+        | Message::NewWorkspace
+        | Message::EditWorkspace(_)
+        | Message::SiteForm(_)
+        | Message::WorkspaceForm(_)
+        | Message::OpenProfileFolder
+        | Message::CloseTab(_)
+        | Message::NewTab { .. }
+        | Message::Pane { .. }
+        | Message::Key { .. }
+        | Message::Queue(_)
+        | Message::FileDropped(_)
+        | Message::KnownHosts { .. }
+        | Message::RestartSession(_)
+        | Message::OpenImport
+        | Message::Import(_)
+        | Message::OpenSettings
+        | Message::Settings(_) => true,
+        // The terminal's keyboard, mouse and search: never under a dialog or the palette
+        // (its timers and replies still land).
+        Message::Terminal { msg, .. } => !matches!(
+            msg,
+            super::TerminalMsg::ResizeDue(_)
+                | super::TerminalMsg::SearchDue(_)
+                | super::TerminalMsg::InputSent(_)
+                | super::TerminalMsg::Pasted(_)
+                | super::TerminalMsg::Resized { .. }
+        ),
+        _ => false,
     }
 }

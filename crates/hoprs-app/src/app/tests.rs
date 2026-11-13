@@ -1400,6 +1400,7 @@ mod edit;
 mod file_actions;
 mod import_settings;
 mod log;
+mod palette;
 mod status;
 mod tabs;
 mod terminal;

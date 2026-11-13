@@ -11,6 +11,30 @@ pub const NO_SESSIONS: &str = "No open sessions";
 pub const GO_TO_ANYTHING: &str = "Go to anything";
 pub const GO_TO_ANYTHING_KEY: &str = "Ctrl K";
 
+// The Ctrl+K palette.
+pub const PALETTE_PLACEHOLDER: &str = "Go to a tab, site or workspace, or run an action";
+pub const PALETTE_WORKSPACES_PLACEHOLDER: &str = "Open workspace";
+pub const PALETTE_NO_RESULTS: &str = "No matches";
+pub const PALETTE_GROUP_ACTION: &str = "Action";
+pub const PALETTE_GROUP_TAB: &str = "Tab";
+pub const PALETTE_GROUP_SITE: &str = "Site";
+pub const PALETTE_GROUP_WORKSPACE: &str = "Workspace";
+pub const PALETTE_KIND_TERMINAL: &str = "terminal";
+pub const PALETTE_KIND_FILES: &str = "files";
+pub const PALETTE_TOGGLE_QUEUE: &str = "Toggle queue";
+pub const PALETTE_TOGGLE_LOG: &str = "Toggle log";
+pub const PALETTE_CLOSE_TAB: &str = "Close tab";
+pub const PALETTE_OPEN_WORKSPACE: &str = "Open workspace…";
+pub const PALETTE_EDIT: &str = "Edit in editor";
+pub const PALETTE_UPLOAD: &str = "Upload selection";
+pub const PALETTE_DOWNLOAD: &str = "Download selection";
+pub const PALETTE_COPY: &str = "Copy";
+pub const PALETTE_PASTE: &str = "Paste";
+pub const PALETTE_FIND: &str = "Find in scrollback";
+pub const PALETTE_KEY_COPY: &str = "Ctrl Shift C";
+pub const PALETTE_KEY_PASTE: &str = "Ctrl Shift V";
+pub const PALETTE_KEY_FIND: &str = "Ctrl Shift F";
+
 // Sidebar.
 pub const FILTER_SITES: &str = "Filter sites";
 pub const WORKSPACES: &str = "Workspaces";

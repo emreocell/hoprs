@@ -251,9 +251,14 @@ async fn ctrl_k_goes_to_the_shell_when_focused() {
         tab,
         msg: TerminalMsg::InputSent(shell),
     });
-    // Ctrl+Shift+K is the palette's (Plan 6 Task 9): never sent to the shell.
-    assert!(app.update(key(tab, Key::Char('K'), CTRL_SHIFT)).is_empty());
-    assert!(app.update(key(tab, Key::Char('k'), CTRL_SHIFT)).is_empty());
+    // Ctrl+Shift+K opens the palette (Plan 6 Task 9): never sent to the shell.
+    let effects = app.update(key(tab, Key::Char('K'), CTRL_SHIFT));
+    assert!(matches!(effects[..], [Effect::FocusPalette]), "{effects:?}");
+    assert!(app.palette.is_some());
+    app.update(Message::Palette(crate::app::PaletteMsg::Close));
+    let effects = app.update(key(tab, Key::Char('k'), CTRL_SHIFT));
+    assert!(inputs(&effects).is_empty(), "{effects:?}");
+    app.update(Message::Palette(crate::app::PaletteMsg::Close));
     // Without the focus, Ctrl+K goes nowhere.
     app.update(Message::Terminal {
         tab,
