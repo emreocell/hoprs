@@ -1,6 +1,7 @@
 //! Turns each [`Effect`] into an [`iced::Task`]: the only place that calls
 //! the backend.
 
+use crate::terminal::Redacted;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -223,7 +224,7 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
         Effect::ShellInput { tab, shell, data } => Task::future(async move {
             // A failure needs no message: a dead shell says so through its output. The
             // bytes are never logged.
-            let _ = backend.shell_input(shell, data).await;
+            let _ = backend.shell_input(shell, data.0).await;
             Message::Terminal {
                 tab,
                 msg: TerminalMsg::InputSent(shell),
@@ -239,10 +240,10 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
             backend.close_shell(shell);
             Task::none()
         }
-        Effect::WriteClipboard(text) => iced::clipboard::write(text),
+        Effect::WriteClipboard(text) => iced::clipboard::write(text.0),
         Effect::ReadClipboard(tab) => iced::clipboard::read().map(move |text| Message::Terminal {
             tab,
-            msg: TerminalMsg::Pasted(text),
+            msg: TerminalMsg::Pasted(text.into()),
         }),
         Effect::Later { after, message } => Task::future(later(after, *message)),
         Effect::FocusTerminalSearch(tab) => {
@@ -320,7 +321,7 @@ pub struct Credit {
 #[derive(Debug)]
 pub enum Batched {
     /// Every byte gathered for one frame, with its credit.
-    Data(Vec<u8>, Credit),
+    Data(Redacted<Vec<u8>>, Credit),
     Signal(ShellSignal),
 }
 
@@ -450,7 +451,7 @@ where
         st.last = Some(tokio::time::Instant::now());
         Some((
             Batched::Data(
-                batch,
+                batch.into(),
                 Credit {
                     _permit: permit.map(Arc::new),
                 },

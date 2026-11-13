@@ -73,7 +73,7 @@ fn inputs(effects: &[Effect]) -> Vec<Vec<u8>> {
     effects
         .iter()
         .filter_map(|e| match e {
-            Effect::ShellInput { data, .. } => Some(data.clone()),
+            Effect::ShellInput { data, .. } => Some(data.0.clone()),
             _ => None,
         })
         .collect()
@@ -100,7 +100,7 @@ async fn run(app: &mut App, fake: &Arc<FakeBackend>, effects: Vec<Effect>) -> Ve
                     result: fake.open_shell(session, cols, rows).await,
                 },
                 Effect::ShellInput { tab, shell, data } => {
-                    let _ = fake.shell_input(shell, data).await;
+                    let _ = fake.shell_input(shell, data.0).await;
                     Message::Terminal {
                         tab,
                         msg: TerminalMsg::InputSent(shell),
@@ -198,7 +198,7 @@ async fn typing_sends_encoded_bytes() {
     app.update(Message::TerminalOutput {
         tab,
         shell,
-        bytes: b"\x1b[?1h".to_vec(),
+        bytes: b"\x1b[?1h".to_vec().into(),
         credit: Default::default(),
     });
     let effects = app.update(key(tab, Key::Up, NONE));
@@ -217,7 +217,7 @@ async fn typing_sends_encoded_bytes() {
     let effects = app.update(Message::TerminalOutput {
         tab,
         shell,
-        bytes: b"\x1b[c".to_vec(),
+        bytes: b"\x1b[c".to_vec().into(),
         credit: Default::default(),
     });
     assert_eq!(inputs(&effects), [b"\x1b[?6c".to_vec()]);
@@ -276,7 +276,7 @@ async fn copy_paste_shortcuts() {
     app.update(Message::TerminalOutput {
         tab,
         shell,
-        bytes: b"hello world\r\n".to_vec(),
+        bytes: b"hello world\r\n".to_vec().into(),
         credit: Default::default(),
     });
 
@@ -299,7 +299,7 @@ async fn copy_paste_shortcuts() {
     for letter in ['C', 'c'] {
         let effects = app.update(key(tab, Key::Char(letter), CTRL_SHIFT));
         assert!(
-            matches!(&effects[..], [Effect::WriteClipboard(text)] if text == "hello"),
+            matches!(&effects[..], [Effect::WriteClipboard(text)] if text.0 == "hello"),
             "{effects:?}"
         );
     }
@@ -311,32 +311,35 @@ async fn copy_paste_shortcuts() {
         kind: SelectionKind::Word,
     }));
     let effects = app.update(select(TerminalMsg::Copy));
-    assert!(matches!(&effects[..], [Effect::WriteClipboard(text)] if text == "world"));
+    assert!(matches!(&effects[..], [Effect::WriteClipboard(text)] if text.0 == "world"));
 
     // Ctrl+Shift+V reads the clipboard; the text goes out as typed (line breaks as
     // Enter)...
     let effects = app.update(key(tab, Key::Char('V'), CTRL_SHIFT));
     assert!(matches!(&effects[..], [Effect::ReadClipboard(t)] if *t == tab));
-    let effects = app.update(select(TerminalMsg::Pasted(Some("a\nb".into()))));
+    let effects = app.update(select(TerminalMsg::Pasted(Some("a\nb".to_owned()).into())));
     assert_eq!(inputs(&effects), [b"a\rb".to_vec()]);
     app.update(select(TerminalMsg::InputSent(shell)));
     // ...or bracketed, when the program asked for it, without what could end the paste.
     app.update(Message::TerminalOutput {
         tab,
         shell,
-        bytes: b"\x1b[?2004h".to_vec(),
+        bytes: b"\x1b[?2004h".to_vec().into(),
         credit: Default::default(),
     });
-    let effects = app.update(select(TerminalMsg::Pasted(Some(
-        "rm -rf /\x1b[201~\x03".into(),
-    ))));
+    let effects = app.update(select(TerminalMsg::Pasted(
+        Some("rm -rf /\x1b[201~\x03".to_owned()).into(),
+    )));
     assert_eq!(
         inputs(&effects),
         [b"\x1b[200~rm -rf /[201~\x1b[201~".to_vec()]
     );
     app.update(select(TerminalMsg::InputSent(shell)));
     // An empty clipboard sends nothing.
-    assert!(app.update(select(TerminalMsg::Pasted(None))).is_empty());
+    assert!(
+        app.update(select(TerminalMsg::Pasted(None.into())))
+            .is_empty()
+    );
 
     // Ctrl+Shift+F opens the search bar and focuses it; the shell gets nothing.
     let effects = app.update(key(tab, Key::Char('F'), CTRL_SHIFT));
@@ -442,7 +445,7 @@ fn credits() -> Arc<tokio::sync::Semaphore> {
 /// A batch as the shell output it stands for (its credit dropped: handled).
 fn plain(item: Batched) -> ShellOutput {
     match item {
-        Batched::Data(bytes, _) => ShellOutput::Data(bytes),
+        Batched::Data(bytes, _) => ShellOutput::Data(bytes.0),
         Batched::Signal(ShellSignal::Exit(code)) => ShellOutput::Exit(code),
         Batched::Signal(ShellSignal::Overflowed) => ShellOutput::Overflowed,
         Batched::Signal(ShellSignal::Closed) => ShellOutput::Closed,
@@ -609,7 +612,7 @@ async fn shell_feed_maps_output_to_messages() {
             Message::TerminalOutput { bytes, .. },
             Message::ShellEvent { event: ShellSignal::Exit(Some(2)), .. },
             Message::ShellEvent { event: ShellSignal::Closed, .. },
-        ] if bytes == b"hi"
+        ] if bytes.0 == b"hi"
     ));
     // Taken already: just `Closed`.
     let messages: Vec<Message> = effects::shell_feed(fake.as_ref(), tab, shell)
@@ -940,7 +943,7 @@ async fn output_title_scroll_and_search() {
     let out = |bytes: &[u8]| Message::TerminalOutput {
         tab,
         shell,
-        bytes: bytes.to_vec(),
+        bytes: bytes.to_vec().into(),
         credit: Default::default(),
     };
     app.update(out(b"\x1b]0;vim notes.txt\x07"));
@@ -955,7 +958,7 @@ async fn output_title_scroll_and_search() {
     app.update(Message::TerminalOutput {
         tab,
         shell: ShellId(999),
-        bytes: b"stale".to_vec(),
+        bytes: b"stale".to_vec().into(),
         credit: Default::default(),
     });
     assert!(!screen(&app, 0).iter().any(|r| r.contains("stale")));
@@ -1041,7 +1044,7 @@ async fn new_scrollback_setting_applies_to_new_terminals() {
         app.update(Message::TerminalOutput {
             tab,
             shell,
-            bytes: format!("line {i}\r\n").into_bytes(),
+            bytes: format!("line {i}\r\n").into_bytes().into(),
             credit: Default::default(),
         });
     }
@@ -1134,7 +1137,7 @@ async fn terminal_tab_end_to_end() {
                         result: backend.open_shell(session, cols, rows).await,
                     },
                     Effect::ShellInput { tab, shell, data } => {
-                        backend.shell_input(shell, data).await.unwrap();
+                        backend.shell_input(shell, data.0).await.unwrap();
                         Message::Terminal {
                             tab,
                             msg: TerminalMsg::InputSent(shell),
@@ -1308,7 +1311,7 @@ async fn reconnect_resets_the_dead_shells_modes() {
     let out = |bytes: &[u8]| Message::TerminalOutput {
         tab,
         shell: old,
-        bytes: bytes.to_vec(),
+        bytes: bytes.to_vec().into(),
         credit: Default::default(),
     };
     for i in 0..40 {
@@ -1426,7 +1429,7 @@ async fn title_and_pending_input_are_capped() {
     app.update(Message::TerminalOutput {
         tab,
         shell,
-        bytes: long.into_bytes(),
+        bytes: long.into_bytes().into(),
         credit: Default::default(),
     });
     assert_eq!(
@@ -1440,13 +1443,13 @@ async fn title_and_pending_input_are_capped() {
     for _ in 0..2 {
         app.update(Message::Terminal {
             tab,
-            msg: TerminalMsg::Pasted(Some(chunk.clone())),
+            msg: TerminalMsg::Pasted(Some(chunk.clone()).into()),
         });
     }
     assert!(!term(&app, 0).input_dropped);
     app.update(Message::Terminal {
         tab,
-        msg: TerminalMsg::Pasted(Some(chunk.clone())),
+        msg: TerminalMsg::Pasted(Some(chunk.clone()).into()),
     });
     assert!(
         term(&app, 0).input_dropped,
@@ -1529,7 +1532,7 @@ fn terminal_timers_are_not_user_actions() {
             mods: NONE,
         },
         TerminalMsg::Paste,
-        TerminalMsg::Pasted(Some("x".into())),
+        TerminalMsg::Pasted(Some("x".to_owned()).into()),
         TerminalMsg::Restart,
     ] {
         assert!(is_user_action(&msg(user.clone())), "{user:?}");
@@ -1546,4 +1549,81 @@ fn terminal_timers_are_not_user_actions() {
     ] {
         assert!(!is_user_action(&msg(not_user.clone())), "{not_user:?}");
     }
+}
+
+/// Final review: what a shell prints and what the user types or pastes into it never
+/// shows in the `Debug` of the messages and effects that carry it (a password typed at a
+/// `sudo` prompt, a pasted token); only its size does.
+#[test]
+fn terminal_content_never_in_debug() {
+    const OUTPUT: &str = "OUTPUT-hunter2-Zq9";
+    const PASTE: &str = "PASTE-tok3n-Xw7";
+    const TYPED: &str = "TYPED-s3cret-Kp4";
+    let tab = TabId(1);
+    let shell = ShellId(1);
+    let shown = [
+        format!(
+            "{:?}",
+            Message::TerminalOutput {
+                tab,
+                shell,
+                bytes: OUTPUT.as_bytes().to_vec().into(),
+                credit: crate::effects::Credit::default(),
+            }
+        ),
+        format!(
+            "{:?}",
+            crate::effects::Batched::Data(
+                OUTPUT.as_bytes().to_vec().into(),
+                crate::effects::Credit::default()
+            )
+        ),
+        format!(
+            "{:?}",
+            Message::Terminal {
+                tab,
+                msg: TerminalMsg::Pasted(Some(PASTE.to_owned()).into()),
+            }
+        ),
+        format!(
+            "{:?}",
+            Message::Terminal {
+                tab,
+                msg: TerminalMsg::Key {
+                    key: Key::Text(TYPED.to_owned()),
+                    mods: NONE,
+                },
+            }
+        ),
+        format!(
+            "{:?}",
+            Message::Terminal {
+                tab,
+                msg: TerminalMsg::Key {
+                    key: Key::Char('\u{2603}'),
+                    mods: NONE,
+                },
+            }
+        ),
+        format!(
+            "{:?}",
+            Effect::ShellInput {
+                tab,
+                shell,
+                data: TYPED.as_bytes().to_vec().into(),
+            }
+        ),
+        format!("{:?}", Effect::WriteClipboard(PASTE.to_owned().into())),
+    ];
+    for debug in &shown {
+        for secret in [OUTPUT, PASTE, TYPED, "\u{2603}"] {
+            assert!(!debug.contains(secret), "{secret} in {debug}");
+            // Nor as the bytes' numbers.
+            let bytes = format!("{:?}", &secret.as_bytes()[..3]);
+            let bytes = bytes.trim_matches(['[', ']']);
+            assert!(!debug.contains(bytes), "{secret} as {bytes} in {debug}");
+        }
+    }
+    // The size still shows (enough to debug a flow).
+    assert!(shown[0].contains(&OUTPUT.len().to_string()), "{}", shown[0]);
 }

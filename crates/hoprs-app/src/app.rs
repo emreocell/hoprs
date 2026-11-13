@@ -1,6 +1,7 @@
 //! The application state and its pure update: no I/O here, only state
 //! changes and the [`Effect`]s for `effects::run` to perform.
 
+use crate::terminal::Redacted;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -393,7 +394,7 @@ pub enum Message {
     TerminalOutput {
         tab: TabId,
         shell: ShellId,
-        bytes: Vec<u8>,
+        bytes: Redacted<Vec<u8>>,
         credit: crate::effects::Credit,
     },
     /// The end of a shell's output: its exit status, an overflow, then `Closed`.
@@ -594,7 +595,7 @@ pub enum Effect {
     ShellInput {
         tab: TabId,
         shell: ShellId,
-        data: Vec<u8>,
+        data: Redacted<Vec<u8>>,
     },
     ShellResize {
         shell: ShellId,
@@ -603,7 +604,7 @@ pub enum Effect {
     },
     /// Closes the shell (and forgets it in the backend).
     CloseShell(ShellId),
-    WriteClipboard(String),
+    WriteClipboard(Redacted<String>),
     /// Reads the clipboard for a paste; back as [`TerminalMsg::Pasted`].
     ReadClipboard(TabId),
     /// Sends `message` back after `after` (the debounces).

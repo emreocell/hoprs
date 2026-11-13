@@ -137,7 +137,7 @@ fn panel_filters_by_level_and_text() {
 
     // Copy shown: the shown lines, one per line, oldest first.
     let effects = log(&mut app, LogMsg::CopyShown);
-    let [Effect::WriteClipboard(text)] = &effects[..] else {
+    let [Effect::WriteClipboard(crate::terminal::Redacted(text))] = &effects[..] else {
         panic!("{effects:?}");
     };
     let lines: Vec<&str> = text.lines().collect();
@@ -268,7 +268,7 @@ async fn drive(app: &mut App, fake: &Arc<FakeBackend>, effects: Vec<Effect>) {
                     result: backend.open_shell(session, cols, rows).await,
                 }],
                 Effect::ShellInput { tab, shell, data } => {
-                    backend.shell_input(shell, data).await.unwrap();
+                    backend.shell_input(shell, data.0).await.unwrap();
                     vec![Message::Terminal {
                         tab,
                         msg: TerminalMsg::InputSent(shell),
@@ -429,7 +429,7 @@ fn no_secret_reaches_the_log() {
         // Keys go out one at a time; a paste goes out whole (one write, one echo).
         let effects = app.update(Message::Terminal {
             tab,
-            msg: TerminalMsg::Pasted(Some(PASTED.to_owned())),
+            msg: TerminalMsg::Pasted(Some(PASTED.to_owned()).into()),
         });
         drive(&mut app, &fake, effects).await;
         let mut echoed = Vec::new();
@@ -470,7 +470,7 @@ fn no_secret_reaches_the_log() {
         crate::log_canaries().await;
         log(&mut app, LogMsg::Tick);
         let copied = match &log(&mut app, LogMsg::CopyShown)[..] {
-            [Effect::WriteClipboard(copied)] => copied.clone(),
+            [Effect::WriteClipboard(copied)] => copied.0.clone(),
             other => panic!("{other:?}"),
         };
         (copied, typing)

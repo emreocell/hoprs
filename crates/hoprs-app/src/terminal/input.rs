@@ -11,7 +11,7 @@ use alacritty_terminal::term::TermMode;
 
 /// A key press, as the terminal tab sees it. The tab maps iced's keys onto
 /// this (Plan 6 Task 4).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Key {
     /// A character key, already shifted by the layout (`A`, `é`, `{`).
     Char(char),
@@ -33,6 +33,31 @@ pub enum Key {
     Delete,
     /// F1–F12; other numbers encode to nothing.
     F(u8),
+}
+
+/// Never the character or text typed (it may be a password at a prompt).
+impl std::fmt::Debug for Key {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Char(_) => f.write_str("Char(..)"),
+            Self::Text(text) => write!(f, "Text(<{} bytes>)", text.len()),
+            Self::Enter => f.write_str("Enter"),
+            Self::Backspace => f.write_str("Backspace"),
+            Self::Tab => f.write_str("Tab"),
+            Self::Escape => f.write_str("Escape"),
+            Self::Up => f.write_str("Up"),
+            Self::Down => f.write_str("Down"),
+            Self::Left => f.write_str("Left"),
+            Self::Right => f.write_str("Right"),
+            Self::Home => f.write_str("Home"),
+            Self::End => f.write_str("End"),
+            Self::PageUp => f.write_str("PageUp"),
+            Self::PageDown => f.write_str("PageDown"),
+            Self::Insert => f.write_str("Insert"),
+            Self::Delete => f.write_str("Delete"),
+            Self::F(n) => write!(f, "F({n})"),
+        }
+    }
 }
 
 /// Modifier keys held during a key press.

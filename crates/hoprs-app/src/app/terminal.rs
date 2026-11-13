@@ -26,6 +26,7 @@
 //!
 //! Terminal bytes are never logged.
 
+use crate::terminal::Redacted;
 use std::time::Duration;
 
 use alacritty_terminal::index::Side as GridSide;
@@ -190,7 +191,7 @@ pub enum TerminalMsg {
     Copy,
     Paste,
     /// The clipboard's text, for a paste.
-    Pasted(Option<String>),
+    Pasted(Redacted<Option<String>>),
     /// A write to the shell ended (its result does not matter: a dead shell says so
     /// through its output).
     InputSent(ShellId),
@@ -298,7 +299,11 @@ impl TerminalTab {
             return Vec::new();
         }
         self.writing = true;
-        vec![Effect::ShellInput { tab, shell, data }]
+        vec![Effect::ShellInput {
+            tab,
+            shell,
+            data: data.into(),
+        }]
     }
 
     /// Feeds bytes to the model and answers what it asks.
@@ -326,7 +331,7 @@ impl TerminalTab {
         if text.is_empty() {
             Vec::new()
         } else {
-            vec![Effect::WriteClipboard(text)]
+            vec![Effect::WriteClipboard(text.into())]
         }
     }
 
@@ -648,7 +653,7 @@ impl App {
                 }
             }
             TerminalMsg::Pasted(text) => {
-                let bytes = encode_paste(&text.unwrap_or_default(), terminal.model.mode());
+                let bytes = encode_paste(&text.0.unwrap_or_default(), terminal.model.mode());
                 terminal.model.scroll_to_bottom();
                 return terminal.send(tab, bytes);
             }

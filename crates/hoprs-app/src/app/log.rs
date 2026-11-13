@@ -278,7 +278,7 @@ impl App {
                 log.refilter();
                 return log.follow_effect();
             }
-            LogMsg::CopyShown => return vec![Effect::WriteClipboard(log.shown_text())],
+            LogMsg::CopyShown => return vec![Effect::WriteClipboard(log.shown_text().into())],
             LogMsg::Clear => {
                 log.rows.clear();
                 log.shown.clear();

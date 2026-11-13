@@ -22,6 +22,47 @@ use alacritty_terminal::vte::ansi::{
     self, Color, CursorShape as AnsiCursorShape, NamedColor, Processor, Timeout,
 };
 
+/// Terminal content (a shell's output, what the user types or pastes): its `Debug` shows
+/// only its size, so a password typed at a prompt or a pasted token never reaches a log
+/// line or a panic message.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Redacted<T>(pub T);
+
+impl<T> From<T> for Redacted<T> {
+    fn from(value: T) -> Self {
+        Self(value)
+    }
+}
+
+impl<T> std::ops::Deref for Redacted<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Redacted<Vec<u8>> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<{} bytes>", self.0.len())
+    }
+}
+
+impl std::fmt::Debug for Redacted<String> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<{} bytes>", self.0.len())
+    }
+}
+
+impl std::fmt::Debug for Redacted<Option<String>> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            Some(text) => write!(f, "Some(<{} bytes>)", text.len()),
+            None => f.write_str("None"),
+        }
+    }
+}
+
 /// An sRGB colour, 8 bits per channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Rgb {
