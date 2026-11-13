@@ -163,6 +163,8 @@ pub const NOTHING_FAILED: &str = "No failures";
 pub const NOTHING_DONE: &str = "Nothing finished yet";
 /// Removes done, skipped, cancelled and failed rows (the engine's `clear_finished`).
 pub const CLEAR_FINISHED: &str = "Clear finished and failed";
+/// [`CLEAR_FINISHED`] in a narrow window.
+pub const CLEAR_FINISHED_SHORT: &str = "Clear finished";
 pub const UPLOAD_ARROW: &str = "↑";
 pub const DOWNLOAD_ARROW: &str = "↓";
 pub const WAITING_FOR_WORKER: &str = "Waiting for a worker";

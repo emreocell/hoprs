@@ -18,7 +18,9 @@ use crate::ui::virtual_list::ROW_HEIGHT;
 
 /// The toolbar under the path bar: the actions, each with its key, and on the right the
 /// operation in flight.
-pub fn toolbar<'a>(tab: &'a Tab, side: Side) -> Element<'a, Message> {
+/// `compact` (a narrow pane, [`crate::ui::fit::compact_toolbar`]): no key hints, tighter
+/// padding, and while an operation runs only its progress (the actions are all dim then).
+pub fn toolbar<'a>(tab: &'a Tab, side: Side, compact: bool) -> Element<'a, Message> {
     let p = palette();
     let pane = tab.pane(side);
     let msg = move |msg: PaneMsg| Message::Pane {
@@ -30,8 +32,13 @@ pub fn toolbar<'a>(tab: &'a Tab, side: Side) -> Element<'a, Message> {
     let some = can && !pane.selected_entries().is_empty();
     let chmod = can && !pane.permission_targets().is_empty();
     let action = |label: &'a str, key: Option<&'a str>, enabled: bool, pane_msg: PaneMsg| {
-        let mut content = row![text(label).size(theme::TEXT_XS)].spacing(theme::SPACE_2XS);
-        if let Some(key) = key {
+        let mut content = row![
+            text(label)
+                .size(theme::TEXT_XS)
+                .wrapping(text::Wrapping::None)
+        ]
+        .spacing(theme::SPACE_2XS);
+        if let Some(key) = key.filter(|_| !compact) {
             content = content.push(
                 text(key)
                     .font(theme::MONO)
@@ -39,8 +46,13 @@ pub fn toolbar<'a>(tab: &'a Tab, side: Side) -> Element<'a, Message> {
                     .color(p.rule_2),
             );
         }
+        let pad_x = if compact {
+            theme::SPACE_2XS
+        } else {
+            theme::SPACE_XS
+        };
         button(content.align_y(Alignment::Center))
-            .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
+            .padding(Padding::from([theme::SPACE_3XS, pad_x]))
             .style(theme::button_text)
             .on_press_maybe(enabled.then(|| msg(pane_msg)))
     };
@@ -48,39 +60,42 @@ pub fn toolbar<'a>(tab: &'a Tab, side: Side) -> Element<'a, Message> {
         Side::Local => strings::UPLOAD,
         Side::Remote => strings::DOWNLOAD,
     };
-    let mut bar = row![
-        action(
-            transfer,
-            Some(strings::KEY_TRANSFER),
-            tab.can_transfer(side),
-            PaneMsg::Transfer
-        ),
-        action(
-            strings::NEW_FOLDER,
-            Some(strings::KEY_NEW_FOLDER),
-            can,
-            PaneMsg::NewFolder
-        ),
-        action(
-            strings::RENAME,
-            Some(strings::KEY_RENAME),
-            some,
-            PaneMsg::Rename
-        ),
-        action(
-            strings::DELETE,
-            Some(strings::KEY_DELETE),
-            some,
-            PaneMsg::Delete
-        ),
-    ];
-    if side == Side::Remote {
-        bar = bar.push(action(
-            strings::PERMISSIONS,
-            None,
-            chmod,
-            PaneMsg::Permissions,
-        ));
+    let mut bar = row![];
+    // A narrow pane while an operation runs: only its progress (every action is dim).
+    if !(compact && pane.busy.is_some()) {
+        bar = bar
+            .push(action(
+                transfer,
+                Some(strings::KEY_TRANSFER),
+                tab.can_transfer(side),
+                PaneMsg::Transfer,
+            ))
+            .push(action(
+                strings::NEW_FOLDER,
+                Some(strings::KEY_NEW_FOLDER),
+                can,
+                PaneMsg::NewFolder,
+            ))
+            .push(action(
+                strings::RENAME,
+                Some(strings::KEY_RENAME),
+                some,
+                PaneMsg::Rename,
+            ))
+            .push(action(
+                strings::DELETE,
+                Some(strings::KEY_DELETE),
+                some,
+                PaneMsg::Delete,
+            ));
+        if side == Side::Remote {
+            bar = bar.push(action(
+                strings::PERMISSIONS,
+                None,
+                chmod,
+                PaneMsg::Permissions,
+            ));
+        }
     }
     bar = bar.push(space().width(Length::Fill));
     if let Some(busy) = &pane.busy {
@@ -100,7 +115,11 @@ pub fn toolbar<'a>(tab: &'a Tab, side: Side) -> Element<'a, Message> {
     bar.spacing(theme::SPACE_3XS)
         .align_y(Alignment::Center)
         .height(ROW_HEIGHT)
-        .padding(Padding::ZERO.left(theme::SPACE_XS).right(theme::SPACE_MD))
+        .padding(Padding::ZERO.left(theme::SPACE_XS).right(if compact {
+            theme::SPACE_XS
+        } else {
+            theme::SPACE_MD
+        }))
         .into()
 }
 

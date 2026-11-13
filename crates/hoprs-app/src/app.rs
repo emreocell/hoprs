@@ -143,6 +143,9 @@ pub struct App {
     /// Advances while something runs without a known end (import, backup): drives the
     /// indeterminate progress bar.
     pub busy_phase: u32,
+    /// The window's width, as the last resize reported it: what fits in the file panes,
+    /// toolbars and queue head ([`crate::ui::fit`]).
+    pub window_width: f32,
     /// The last tab or listing id handed out.
     next_id: u64,
 }
@@ -317,6 +320,8 @@ pub enum Message {
         path: PathBuf,
         exists: bool,
     },
+    /// The window was resized to this width.
+    WindowResized(f32),
 }
 
 /// The profile change a form asked for, carried back with its result.
@@ -355,6 +360,11 @@ pub enum Effect {
         request_id: RequestId,
         session: Option<SessionId>,
         path: RemotePath,
+    },
+    /// Scrolls the tab strip to `x` (relative, 0 = start, 1 = end) so the active tab
+    /// shows ([`tab_strip_offset`]).
+    ScrollTabs {
+        x: f32,
     },
     /// Scrolls a pane's list to `offset_y` (a new folder, the keyboard cursor, a tab
     /// shown again).
@@ -480,6 +490,23 @@ pub enum Effect {
     },
 }
 
+/// The window's width before the first resize event (`main`'s initial size).
+pub const INITIAL_WINDOW_WIDTH: f32 = 1280.0;
+
+/// Where the tab strip scrolls (relative, 0 to 1) to show tab `index` of `count`.
+///
+/// `index / (count - 1)`: with tabs of equal width `w`, a viewport `v >= w` wide and
+/// `count * w` of tabs, the offset `index * (count * w - v) / (count - 1)` keeps the whole
+/// tab in view (its left edge is at or right of the offset, its right edge at or left of
+/// offset + `v`). Tabs of different widths land close to that.
+pub fn tab_strip_offset(index: usize, count: usize) -> f32 {
+    if count <= 1 {
+        0.0
+    } else {
+        (index.min(count - 1) as f32) / ((count - 1) as f32)
+    }
+}
+
 impl App {
     pub fn new() -> Self {
         Self {
@@ -512,6 +539,7 @@ impl App {
             settings_dirty: false,
             backup: settings::Backup::default(),
             busy_phase: 0,
+            window_width: INITIAL_WINDOW_WIDTH,
             next_id: 0,
         }
     }
@@ -559,7 +587,17 @@ impl App {
     /// Applies `msg`; returns the effects to run. Never blocks.
     pub fn update(&mut self, msg: Message) -> Vec<Effect> {
         let shown = self.shown_tab();
+        let active = self.active_tab;
         let mut effects = self.apply(msg);
+        // Another tab became active (selected, opened or moved by a close): bring it into
+        // view in the tab strip, which may be scrolled sideways.
+        if self.active_tab != active
+            && let Some(index) = self.active_tab
+        {
+            effects.push(Effect::ScrollTabs {
+                x: tab_strip_offset(index, self.tabs.len()),
+            });
+        }
         // Typed backup passwords never outlive the settings page, however it was left.
         if !matches!(self.form, Some(Form::Settings)) {
             self.backup.forget_passwords();
@@ -593,6 +631,7 @@ impl App {
         }
         match msg {
             Message::ToggleQueue => self.queue_open = !self.queue_open,
+            Message::WindowResized(width) => self.window_width = width,
             Message::FilterSites(filter) => self.site_filter = filter,
             Message::ReloadProfiles => {
                 self.load = Load::Loading;

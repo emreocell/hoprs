@@ -15,6 +15,7 @@ use hoprs_transfer::{Direction, ResolveAction};
 use crate::app::queue::{QueueRow, RowStatus};
 use crate::app::{App, Message, QueueMsg, QueueTab, RowAction};
 use crate::ui::file_actions::error_bar;
+use crate::ui::fit;
 use crate::ui::layout::{QUEUE_HEAD_HEIGHT, QUEUE_MAX_HEIGHT, UNDERLINE};
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
@@ -63,13 +64,23 @@ pub fn view(app: &App) -> Element<'_, Message> {
         strings::QUEUE_FAILED,
         strings::QUEUE_DONE,
     ];
-    let mut head = row![text(strings::TRANSFERS).font(theme::INTER_SEMIBOLD)]
-        .spacing(theme::SPACE_LG)
-        .align_y(Alignment::Center);
+    // A narrow window: short labels, no worker count or session policy, tighter gaps.
+    let compact = fit::compact_queue(app.window_width);
+    let mut head = row![
+        text(strings::TRANSFERS)
+            .font(theme::INTER_SEMIBOLD)
+            .wrapping(text::Wrapping::None)
+    ]
+    .spacing(if compact {
+        theme::SPACE_MD
+    } else {
+        theme::SPACE_LG
+    })
+    .align_y(Alignment::Center);
     for ((tab, label), count) in QueueTab::ALL.into_iter().zip(labels).zip(counts) {
         let active = queue.tab == tab;
         head = head.push(with_underline(
-            button(text(strings::queue_tab(label, count)))
+            button(text(strings::queue_tab(label, count)).wrapping(text::Wrapping::None))
                 .padding(0)
                 .style(theme::queue_tab(active))
                 .on_press(Message::Queue(QueueMsg::SelectTab(tab)))
@@ -85,7 +96,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let head = head
         .push(space::horizontal())
         // An answer "to all" became the engine's policy for this run: say so.
-        .push(queue.session_policy().map(|policy| {
+        .push(queue.session_policy().filter(|_| !compact).map(|policy| {
             text(strings::session_policy(policy))
                 .size(theme::TEXT_XS)
                 .color(p.muted)
@@ -93,25 +104,43 @@ pub fn view(app: &App) -> Element<'_, Message> {
         }))
         .push(
             row![
-                text(strings::speed(queue.total_speed())).font(theme::INTER_SEMIBOLD),
-                text(strings::total_workers(queue.workers)).color(p.muted),
+                text(strings::speed(queue.total_speed()))
+                    .font(theme::INTER_SEMIBOLD)
+                    .wrapping(text::Wrapping::None),
             ]
+            .push((!compact).then(|| {
+                text(strings::total_workers(queue.workers))
+                    .color(p.muted)
+                    .wrapping(text::Wrapping::None)
+            }))
             .align_y(Alignment::Center),
         )
         .push(
             row![
-                button(text(strings::CLEAR_FINISHED).size(theme::TEXT_XS))
-                    .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
-                    .style(theme::button_text)
-                    .on_press_maybe(
-                        queue
-                            .has_finished()
-                            .then_some(Message::Queue(QueueMsg::ClearFinished)),
-                    ),
-                button(text(toggle).size(theme::TEXT_XS))
-                    .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
-                    .on_press(Message::ToggleQueue)
-                    .style(theme::button_text),
+                button(
+                    text(if compact {
+                        strings::CLEAR_FINISHED_SHORT
+                    } else {
+                        strings::CLEAR_FINISHED
+                    })
+                    .size(theme::TEXT_XS)
+                    .wrapping(text::Wrapping::None)
+                )
+                .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
+                .style(theme::button_text)
+                .on_press_maybe(
+                    queue
+                        .has_finished()
+                        .then_some(Message::Queue(QueueMsg::ClearFinished)),
+                ),
+                button(
+                    text(toggle)
+                        .size(theme::TEXT_XS)
+                        .wrapping(text::Wrapping::None)
+                )
+                .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
+                .on_press(Message::ToggleQueue)
+                .style(theme::button_text),
             ]
             .spacing(theme::SPACE_2XS)
             .align_y(Alignment::Center),

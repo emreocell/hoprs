@@ -22,7 +22,7 @@ use crate::backend::{Backend, BackendApi, BackendConfig, LazyKeyringStore};
 
 /// Smallest window that still fits the sidebar and two file panes.
 const MIN_WINDOW: iced::Size = iced::Size::new(960.0, 640.0);
-const INITIAL_WINDOW: iced::Size = iced::Size::new(1280.0, 800.0);
+const INITIAL_WINDOW: iced::Size = iced::Size::new(app::INITIAL_WINDOW_WIDTH, 800.0);
 /// A frame of the indeterminate progress bar.
 const BUSY_FRAME: std::time::Duration = std::time::Duration::from_millis(50);
 
@@ -132,6 +132,7 @@ fn subscription(state: &Hoprs) -> iced::Subscription<Message> {
             effects::prompt_feed(feed.0.as_ref())
         }),
         iced::window::close_requests().map(Message::CloseRequested),
+        iced::window::resize_events().map(|(_, size)| Message::WindowResized(size.width)),
     ];
     // The indeterminate progress bar moves only while an import or a backup runs.
     let busy = state

@@ -45,12 +45,17 @@ async fn loaded(fake: &FakeBackend) -> App {
     app
 }
 
-/// `effects` without the file panes' listings and scrolls (Task 6), for the tests about
-/// connections and profiles.
+/// `effects` without the file panes' listings and scrolls (Task 6) and the tab strip's
+/// scroll, for the tests about connections and profiles.
 fn without_panes(effects: Vec<Effect>) -> Vec<Effect> {
     effects
         .into_iter()
-        .filter(|e| !matches!(e, Effect::List { .. } | Effect::ScrollPane { .. }))
+        .filter(|e| {
+            !matches!(
+                e,
+                Effect::List { .. } | Effect::ScrollPane { .. } | Effect::ScrollTabs { .. }
+            )
+        })
         .collect()
 }
 
@@ -1245,6 +1250,70 @@ async fn switching_tabs_restores_scroll_offsets() {
     )));
     // Selecting the tab already shown changes nothing.
     assert!(app.update(Message::SelectTab(1)).is_empty());
+}
+
+/// Activating a tab (selected, or opened by a workspace) scrolls the tab strip to it;
+/// selecting the tab already active does not.
+#[tokio::test]
+async fn activating_a_tab_scrolls_the_strip_to_it() {
+    let a = site("a", "h", "u", Protocol::Ssh);
+    let b = site("b", "h", "u", Protocol::Ftp);
+    let c = site("c", "h", "u", Protocol::Ftp);
+    let ws = workspace("w", &[&a.id, &b.id, &c.id]);
+    let fake = Arc::new(
+        FakeBackend::new()
+            .with_site(a.clone())
+            .with_site(b.clone())
+            .with_site(c.clone())
+            .with_workspace(ws.clone()),
+    );
+    let mut app = loaded(&fake).await;
+    let effects = app.update(Message::OpenWorkspace(ws.id.clone()));
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::ScrollTabs { x } if *x == 0.0)),
+        "{effects:?}"
+    );
+    let effects = app.update(Message::SelectTab(2));
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::ScrollTabs { x } if *x == 1.0)),
+        "{effects:?}"
+    );
+    let effects = app.update(Message::SelectTab(1));
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::ScrollTabs { x } if *x == 0.5)),
+        "{effects:?}"
+    );
+    assert!(
+        !app.update(Message::SelectTab(1))
+            .iter()
+            .any(|e| matches!(e, Effect::ScrollTabs { .. }))
+    );
+}
+
+#[test]
+fn tab_strip_offset_spreads_tabs_from_start_to_end() {
+    assert_eq!(super::tab_strip_offset(0, 0), 0.0);
+    assert_eq!(super::tab_strip_offset(0, 1), 0.0);
+    assert_eq!(super::tab_strip_offset(0, 5), 0.0);
+    assert_eq!(super::tab_strip_offset(2, 5), 0.5);
+    assert_eq!(super::tab_strip_offset(4, 5), 1.0);
+    // An index past the end is clamped.
+    assert_eq!(super::tab_strip_offset(9, 5), 1.0);
+}
+
+/// The window's width, from its resize events, drives what fits (`ui::fit`).
+#[test]
+fn window_resize_is_remembered() {
+    let mut app = App::new();
+    assert_eq!(app.window_width, super::INITIAL_WINDOW_WIDTH);
+    assert!(app.update(Message::WindowResized(960.0)).is_empty());
+    assert_eq!(app.window_width, 960.0);
 }
 
 mod dialogs;

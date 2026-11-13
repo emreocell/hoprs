@@ -867,8 +867,10 @@ async fn reloaded_profiles_reconcile_tabs() {
         workspaces: Vec::new(),
         unreadable: Vec::new(),
     })));
+    // The active tab may have moved (its strip scrolls to it); otherwise only closes.
     let mut closed: Vec<SessionId> = effects
         .iter()
+        .filter(|e| !matches!(e, Effect::ScrollTabs { .. }))
         .map(|e| match e {
             Effect::CloseSession(s) => *s,
             other => panic!("only closes expected, got {other:?}"),

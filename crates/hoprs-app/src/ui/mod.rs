@@ -3,6 +3,7 @@
 pub mod dialogs;
 pub mod file_actions;
 pub mod files;
+pub mod fit;
 pub mod format;
 pub mod import;
 pub mod layout;

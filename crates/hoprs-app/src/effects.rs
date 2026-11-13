@@ -20,7 +20,7 @@ use crate::backend::{
 };
 use crate::settings::Settings;
 use crate::ui::site_form::PasswordChange;
-use crate::ui::{dialogs, files, strings};
+use crate::ui::{dialogs, files, strings, tabs};
 
 /// Runs one effect against the backend.
 pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> {
@@ -74,6 +74,13 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
             session,
             path,
         } => Task::future(list(backend, tab, side, request_id, session, path)),
+        Effect::ScrollTabs { x } => iced::widget::operation::snap_to(
+            tabs::strip_id(),
+            iced::widget::operation::RelativeOffset {
+                x: Some(x),
+                y: None,
+            },
+        ),
         Effect::ScrollPane {
             tab,
             side,

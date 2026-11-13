@@ -14,16 +14,13 @@ use crate::app::actions::{EditKind, PaneAction};
 use crate::app::files::{Pane, PaneStatus, Row, SortKey};
 use crate::app::{App, FailureAction, FileKey, Message, Mods, PaneMsg, Tab, TabId, TabState};
 use crate::backend::Side;
+use crate::ui::fit::{self, Columns, MODIFIED_WIDTH, PERMISSIONS_WIDTH, SIZE_WIDTH};
 use crate::ui::theme::{self, palette};
 use crate::ui::virtual_list::{self, ROW_HEIGHT};
 use crate::ui::{file_actions, format, strings};
 
 /// The path bar (mockup `.path`: 38 px).
 const PATH_HEIGHT: f32 = 38.0;
-/// Fixed columns; the name takes the rest.
-const SIZE_WIDTH: f32 = 88.0;
-const MODIFIED_WIDTH: f32 = 116.0;
-const PERMISSIONS_WIDTH: f32 = 110.0;
 /// Rows of the loading skeleton.
 const SKELETON_ROWS: usize = 8;
 
@@ -232,13 +229,15 @@ fn pane<'a>(
         Side::Remote => None,
     };
     let focused = tab.focus == side;
+    let width = fit::pane_width(app.window_width);
+    let cols = fit::columns(width, side);
     let body: Element<'a, Message> = match tab.pane_status(side) {
-        PaneStatus::Loading => skeleton(side),
-        PaneStatus::Full => list(tab.id, side, pane, this_year, focused),
+        PaneStatus::Loading => skeleton(cols),
+        PaneStatus::Full => list(tab.id, side, pane, this_year, focused, cols),
         PaneStatus::Empty => column![
             // `..` stays reachable from an empty folder.
             pane.has_up()
-                .then(|| file_row(tab.id, side, pane, 0, this_year, focused)),
+                .then(|| file_row(tab.id, side, pane, 0, this_year, focused, cols)),
             centered(text(strings::EMPTY_FOLDER).color(palette().muted).into()),
         ]
         .into(),
@@ -253,13 +252,13 @@ fn pane<'a>(
             .style(theme::pane_focus(focused)),
         path_bar(place, pane, home, msg),
         hrule(),
-        file_actions::toolbar(tab, side),
+        file_actions::toolbar(tab, side, fit::compact_toolbar(width, side)),
         hrule(),
     ];
     for bar in file_actions::bars(tab.id, side, pane) {
         content = content.push(bar).push(hrule());
     }
-    content = content.push(header(side, pane, msg)).push(hrule());
+    content = content.push(header(pane, cols, msg)).push(hrule());
     if let Some(row) = file_actions::new_folder_row(tab.id, side, pane) {
         content = content.push(row);
     }
@@ -366,7 +365,11 @@ fn is_within(path: &RemotePath, home: &RemotePath) -> bool {
 }
 
 /// Name, Size, Modified and, on the remote side, Permissions; a click sorts.
-fn header<'a>(side: Side, pane: &Pane, msg: impl Fn(PaneMsg) -> Message) -> Element<'a, Message> {
+fn header<'a>(
+    pane: &Pane,
+    cols: Columns,
+    msg: impl Fn(PaneMsg) -> Message,
+) -> Element<'a, Message> {
     let p = palette();
     let sortable = |label: &'static str, key: SortKey, width: Length, right: bool| {
         let arrow = (pane.sort.key == key).then_some(if pane.sort.descending {
@@ -398,14 +401,16 @@ fn header<'a>(side: Side, pane: &Pane, msg: impl Fn(PaneMsg) -> Message) -> Elem
             Length::Fixed(SIZE_WIDTH),
             true
         ),
-        sortable(
+    ];
+    if cols.modified {
+        cells = cells.push(sortable(
             strings::COL_MODIFIED,
             SortKey::Modified,
             Length::Fixed(MODIFIED_WIDTH),
-            false
-        ),
-    ];
-    if side == Side::Remote {
+            false,
+        ));
+    }
+    if cols.permissions {
         cells = cells.push(
             container(
                 text(strings::COL_PERMISSIONS)
@@ -426,6 +431,7 @@ fn list<'a>(
     pane: &'a Pane,
     this_year: i32,
     focused: bool,
+    cols: Columns,
 ) -> Element<'a, Message> {
     virtual_list::view(
         scroll_id(tab, side),
@@ -439,7 +445,7 @@ fn list<'a>(
                 viewport_h: viewport.bounds().height,
             },
         },
-        move |i| file_row(tab, side, pane, i, this_year, focused),
+        move |i| file_row(tab, side, pane, i, this_year, focused, cols),
     )
 }
 
@@ -452,6 +458,7 @@ fn file_row<'a>(
     index: usize,
     this_year: i32,
     focused: bool,
+    cols: Columns,
 ) -> Element<'a, Message> {
     let p = palette();
     let msg = move |msg: PaneMsg| Message::Pane { tab, side, msg };
@@ -544,9 +551,15 @@ fn file_row<'a>(
     let mut cells = row![
         name_cell,
         cell(size_text.into(), Length::Fixed(SIZE_WIDTH), true),
-        cell(data(modified).into(), Length::Fixed(MODIFIED_WIDTH), false),
     ];
-    if side == Side::Remote {
+    if cols.modified {
+        cells = cells.push(cell(
+            data(modified).into(),
+            Length::Fixed(MODIFIED_WIDTH),
+            false,
+        ));
+    }
+    if cols.permissions {
         cells = cells.push(cell(
             data(permissions)
                 .font(theme::MONO)
@@ -573,7 +586,7 @@ fn file_row<'a>(
 }
 
 /// Eight grey rows where the entries will be.
-fn skeleton<'a>(side: Side) -> Element<'a, Message> {
+fn skeleton<'a>(cols: Columns) -> Element<'a, Message> {
     const NAME_WIDTHS: [f32; SKELETON_ROWS] = [136.0, 96.0, 168.0, 120.0, 88.0, 152.0, 112.0, 72.0];
     let bar = |width: f32| {
         container(space())
@@ -597,9 +610,11 @@ fn skeleton<'a>(side: Side) -> Element<'a, Message> {
         let mut cells = row![
             cell(Length::Fill, name_width, false),
             cell(Length::Fixed(SIZE_WIDTH), 40.0, true),
-            cell(Length::Fixed(MODIFIED_WIDTH), 80.0, false),
         ];
-        if side == Side::Remote {
+        if cols.modified {
+            cells = cells.push(cell(Length::Fixed(MODIFIED_WIDTH), 80.0, false));
+        }
+        if cols.permissions {
             cells = cells.push(cell(Length::Fixed(PERMISSIONS_WIDTH), 80.0, false));
         }
         cells.height(ROW_HEIGHT).into()

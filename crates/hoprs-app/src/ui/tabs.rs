@@ -4,13 +4,18 @@
 //! touchpad), as the mockup's `overflow-x: auto` strip does.
 
 use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::widget::{button, column, container, row, scrollable, space, text};
+use iced::widget::{Id, button, column, container, row, scrollable, space, text};
 use iced::{Alignment, Element, Length, Padding};
 
 use crate::app::{App, Message, Tab};
 use crate::ui::layout::UNDERLINE;
 use crate::ui::theme::{self, palette};
 use crate::ui::{sidebar, strings};
+
+/// The id of the tab strip's scrollable ([`crate::app::Effect::ScrollTabs`]).
+pub fn strip_id() -> Id {
+    Id::new("tab-strip")
+}
 
 /// The tab strip, or the "No open sessions" placeholder.
 pub fn view(app: &App) -> Element<'_, Message> {
@@ -39,6 +44,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .scroller_width(theme::SPACE_3XS);
     container(
         scrollable(strip)
+            .id(strip_id())
             .direction(Direction::Horizontal(bar))
             .height(Length::Fill)
             .style(theme::scrollbar),
