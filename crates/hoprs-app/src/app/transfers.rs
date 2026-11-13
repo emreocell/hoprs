@@ -4,14 +4,14 @@
 
 use std::path::Path;
 
-use hoprs_core::{Error, ErrorKind, RemotePath};
+use hoprs_core::{Error, ErrorKind, RemotePath, SiteId};
 use hoprs_transfer::{Direction, Event, TransferId, TransferSpec};
 
 use super::files::{RequestId, local_path};
 use super::queue::QueueMsg;
 use super::{App, Effect};
 use crate::app::TabId;
-use crate::backend::{Side, TransferSnapshot};
+use crate::backend::{ControlOp, Side, TransferSnapshot};
 use crate::ui::strings;
 
 /// The other pane.
@@ -158,6 +158,20 @@ impl App {
             QueueMsg::Scrolled { offset_y } => self.queue.offset_y = offset_y,
         }
         Vec::new()
+    }
+
+    /// The site was deleted: its unfinished transfers can never run again, so they are
+    /// cancelled through the usual control path (each result comes back as
+    /// [`Message::ControlDone`](super::Message::ControlDone)).
+    pub(super) fn cancel_site_transfers(&self, site: &SiteId) -> Vec<Effect> {
+        self.queue
+            .unfinished_of(site)
+            .into_iter()
+            .map(|id| Effect::Control {
+                id,
+                op: ControlOp::Cancel,
+            })
+            .collect()
     }
 
     /// Asks for a new snapshot; events wait for it (see [`super::queue`]).

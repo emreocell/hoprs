@@ -971,7 +971,8 @@ impl App {
     /// Whatever form is open now, a success reloads the profiles and fixes up the tabs:
     /// - a saved site's session that is not connected is closed, so a retry starts over
     ///   with the new settings instead of retrying the old connection;
-    /// - a deleted site's tabs and session go away.
+    /// - a deleted site's tabs and session go away, and its unfinished transfers are
+    ///   cancelled.
     ///
     /// The form itself is closed (success) or shows the error (failure) only if it is the
     /// one that asked: same target, still waiting for this result.
@@ -1001,7 +1002,10 @@ impl App {
         let mut effects = vec![self.load_profiles()];
         match op {
             ProfileOp::SaveSite(site) => effects.extend(self.drop_stale_session(&site)),
-            ProfileOp::DeleteSite(site) => effects.extend(self.close_site_tabs(&site)),
+            ProfileOp::DeleteSite(site) => {
+                effects.extend(self.close_site_tabs(&site));
+                effects.extend(self.cancel_site_transfers(&site));
+            }
             ProfileOp::SaveWorkspace(_) | ProfileOp::DeleteWorkspace(_) => {}
         }
         effects

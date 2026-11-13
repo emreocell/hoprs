@@ -1269,3 +1269,61 @@ async fn unavailable_queue_is_shown_in_the_panel() {
     app.update(Message::QueueStatus(fine.queue_error()));
     assert_eq!(app.queue.error, None);
 }
+
+/// A deleted site's transfers can never run again: its unfinished items are cancelled
+/// through the usual control path (a folder takes its pending children with it), its
+/// finished ones and other sites' are left alone.
+#[tokio::test]
+async fn deleting_a_site_cancels_its_transfers() {
+    let s = srv_site();
+    let t = site("t", "k", "u", Protocol::Ssh);
+    let fake = Arc::new(FakeBackend::new().with_site(s.clone()).with_site(t.clone()));
+    let mut app = loaded(&fake).await;
+    let mut folder = item(5, &s.id, TransferState::Queued);
+    folder.is_dir = Some(true);
+    let mut child = item(6, &s.id, TransferState::Queued);
+    child.parent = Some(TransferId(5));
+    let mut done_folder = item(7, &s.id, TransferState::Done);
+    done_folder.is_dir = Some(true);
+    let mut orphan = item(8, &s.id, TransferState::Paused);
+    orphan.parent = Some(TransferId(7));
+    synced(
+        &mut app,
+        1,
+        vec![
+            item(1, &s.id, TransferState::Queued),
+            item(2, &s.id, TransferState::Paused),
+            item(3, &s.id, TransferState::Done),
+            item(4, &t.id, TransferState::Active),
+            folder,
+            child,
+            done_folder,
+            orphan,
+            item(9, &s.id, conflict()),
+            item(10, &s.id, TransferState::Active),
+        ],
+    );
+
+    // A failed delete cancels nothing.
+    let effects = app.update(Message::FormDone {
+        op: ProfileOp::DeleteSite(s.id.clone()),
+        result: Err(Error::new(ErrorKind::Io, "disk full")),
+    });
+    assert!(effects.is_empty(), "{effects:?}");
+
+    let effects = app.update(Message::FormDone {
+        op: ProfileOp::DeleteSite(s.id.clone()),
+        result: Ok(()),
+    });
+    let cancelled: Vec<i64> = effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Control {
+                id,
+                op: ControlOp::Cancel,
+            } => Some(id.0),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cancelled, [1, 2, 5, 8, 9, 10], "{effects:?}");
+}

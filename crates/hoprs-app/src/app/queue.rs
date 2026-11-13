@@ -240,6 +240,22 @@ impl Queue {
         self.rows.len()
     }
 
+    /// The site's unfinished items, leaving out those under an unfinished folder of the
+    /// queue (cancelling the folder takes its pending children with it), by id.
+    pub fn unfinished_of(&self, site: &SiteId) -> Vec<TransferId> {
+        let unfinished = |id: &TransferId| {
+            self.rows
+                .get(id)
+                .is_some_and(|row| !row.item.state.is_terminal())
+        };
+        self.rows
+            .values()
+            .filter(|row| &row.item.spec.site == site && !row.item.state.is_terminal())
+            .filter(|row| !row.item.parent.as_ref().is_some_and(unfinished))
+            .map(|row| row.item.id)
+            .collect()
+    }
+
     /// The sum of the active rows' speeds, in bytes per second.
     pub fn total_speed(&self) -> u64 {
         self.rows
