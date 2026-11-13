@@ -7,6 +7,7 @@ mod app;
 mod backend;
 mod effects;
 mod settings;
+mod terminal;
 mod ui;
 
 use std::borrow::Cow;
