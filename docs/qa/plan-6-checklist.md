@@ -95,3 +95,38 @@ throwaway driver (not committed) sent the app's own messages and took iced `wind
 | No match | `zzz`: "No matches" in muted text under the field | Pass |
 | Top bar button | "Go to anything `Ctrl K`" is now an outlined button (`button_outline`) | NEEDS HUMAN: click it, hover |
 | Real keyboard | Ctrl+K from the file panes and the sidebar filter; Ctrl+Shift+K in a focused terminal (plain Ctrl+K reaches the shell: `echo abc` then Ctrl+A, Ctrl+K kills the line); Esc; click outside closes | NEEDS HUMAN (covered by unit tests through messages) |
+
+## Task 11: final pass (2026-11-13)
+
+Setup: release build under XWayland (2560×1600 @2x, captures scaled to 1280×800), isolated `HOME`/`XDG_*`
+(`known_hosts` seeded with `ssh-keyscan`, nothing in the real keyring), Docker sshd (`127.0.0.1:2222`, alice, key)
+saved as `shop-web` (Open as: both) in a workspace `Shop` whose saved tabs are Terminal + Files, plus four
+unconnected sites. `vim.tiny`, `htop`, `less` and `tmux` were installed into the running test container for the
+pass (the container was recreated afterwards). A throwaway driver (not committed) sent the app's own messages
+(terminal keys as `TerminalMsg::Key`) and took iced `window::screenshot` captures, waiting 2.5 s before each.
+
+Spec §11 scenarios, one row each (earlier rows above are referenced, not repeated):
+
+| Check | Result |
+| --- | --- |
+| Workspace with a saved terminal tab | "Open workspace" on `Shop`: a terminal tab (`shop-web ssh`, prompt ready) then the files tab (`shop-web sftp` at `/home/alice/edit-demo`); one `connecting` → `connected` pair in the log, so both tabs ride one connection | OK |
+| Files and terminal on one session | Same run: status bar "Connected alice@127.0.0.1:2222 ed25519 key"; the terminal ran vim/htop/tmux while the files tab listed; switching tabs kept both. Closing one tab keeps the other: covered by `closing_one_tab_keeps_the_session_for_the_other` | OK |
+| `vim` | `vim.tiny /tmp/qa.txt`, `i`, typed text, Esc, `:wq`: full-screen editor, `~` column, `-- INSERT --` and `1,15 All` in the last row; `:wq` returned to the prompt | OK |
+| `htop` | Coloured CPU/memory meters, the green header bar across the width, the cyan selected row, the F-key bar at the bottom; `q` back to the prompt | OK |
+| `less` | `seq 1 300 \| less`: lines 1–35 and the `:` prompt on the last row; `q` back. Wheel in `less` | OK. Wheel NEEDS HUMAN (Task 4 row "Wheel") |
+| `tmux` | `LANG=C.UTF-8 tmux -u`, Ctrl+B `%`: two panes split by the vertical rule, green status line, the new pane focused; `exit` twice returned to the shell | OK |
+| 256 colours and truecolor | Inside tmux: 24-bit orange and 256-colour green (also Task 4's gradient bar) | OK |
+| CJK and emoji | `中文` two cells each; `🙂` drawn from the system fallback font, two cells. (Without a UTF-8 locale on the server tmux prints `_` for them: server side, not the app) | OK |
+| Resize | Task 4 (grid and `stty size` follow, 100 ms debounce) | OK. Drag-resize NEEDS HUMAN (Task 4 row) |
+| Search | Task 4 | OK |
+| Copy and paste | Task 4 (via messages) | NEEDS HUMAN with a real mouse and keyboard (Task 4 row "Copy and paste") |
+| 50 MB of output | Task 4 (`head -c … \| base64` and 50 MB `cat`, UI kept ticking, shell stayed open) | OK |
+| Network drop and reconnect | Covered by `connection_lost_banner_then_new_shell` and the Task 5 Docker idle tests (`--ignored`) | NEEDS HUMAN visually: with a terminal and a files tab of `shop-web` open, `docker compose -f docker/compose.yml restart sshd`; the terminal shows "Connection lost" with Reconnect, the files tab reconnects on its next action (open a folder) without pressing Reconnect; click Reconnect: "— reconnected —" and a working prompt |
+| Remote edit with a conflict | Task 8 rows "Three saves in a row", "Conflict choice" | OK. Real GUI editor NEEDS HUMAN (Task 8 row) |
+| Close with a pending edit | Task 8 rows "Close the last tab", "Close the window" | OK. "Upload and quit" with the network cut NEEDS HUMAN (Task 8 row) |
+| Palette | Problem: with an empty query a busy files tab filled the 12 rows with its own actions and tabs, so Settings, "Open workspace…" and the sites needed typing; and every message re-ranked the rows. Fixed in `efc7fc5`: at most 5 own actions, 3 other tabs (not the active one), then Open workspace…, Settings, 4 sites, the rest; rows ranked only for the view, ↑/↓ and a run. Recaptured: files tab (sub/ selected) New folder F7, Rename F2, Delete Del, Download selection Ctrl ↵, New terminal tab, `shop-web · terminal`, Open workspace…, Settings, `shop-web`, `nas`, `blog`, `mail`; terminal tab Paste, Find in scrollback, New terminal tab, New files tab, Close tab, `shop-web · files`, then the same go-to rows | Fixed (`efc7fc5`). Real keyboard NEEDS HUMAN (Task 9 row) |
+| Log | Task 6 rows; recaptured under the queue: three INFO lines (winit scale factor, `connecting`, `connected` with `site`, `protocol`, `endpoint`, `since_last_request_secs`), no iced/wgpu noise | OK |
+| Remote toolbar at 1280 px | Problem: since `Edit F4` the remote toolbar dropped its key hints at the default 1280 px window (Task 8 row). The mockup has no pane toolbar; its key caps (`Ctrl K`) show keys are meant to be visible, and shortened labels would be jargon, so the labels stay and the flat text buttons lose 4 px of side padding each. Recaptured: at 1280 and 1240 px both toolbars show every label and hint ("Download Ctrl ↵  Edit F4  New folder F7  Rename F2  Delete Del  Permissions…"), compact below ~1240 px | Fixed (`56e9426`). At 960 px the compact remote toolbar still clips "Permissions…" (follow-up) |
+| Toast and notices | Kept notice (`paper_2` bar, mono path, outlined Dismiss) and toast "Uploaded `notes.txt`" (`dialog_box`: 1 px `rule_2`, 4 px corners, no shadow) recaptured together with the log panel; the only white fill in the edit flows is the main action of the close question | OK |
+| Idle session, 10 minutes, the author's real server | Not reachable from here | NEEDS HUMAN: run the release build with the default filter (no `RUST_LOG`), open an FTP site from the real server, leave it idle 10+ minutes, then open a folder. It must work without a click. Read the INFO lines in the Log panel (status bar → Log) or the terminal: each `connection state changed` line names the state, the `reason` and `since_last_request_secs`, so any drop says why |
+| Performance job | `perf.yml` not dispatched yet (the controller dispatches it after the push). Local `scripts/perf.sh` at `10e0947` (`docs/perf/README.md`): open 93 ms (< 500), idle 34.4 MB (< 80), 100k rows p95 0.68 ms (< 16), SFTP 1 GiB at 50 ms RTT 1.00 × `scp` (≥ 0.9), 10k × 4 KiB at 10 ms RTT SFTP 1.98 × `lftp` and FTP 1.001 × `lftp` (≤ 1.0, known gaps), progress ≤ 31 events in 3 s | OK locally, two known gaps recorded in the follow-ups. CI run pending |
