@@ -23,6 +23,10 @@ pub enum ConnectionState {
     Disconnected(Error),
 }
 
+/// The `detail` of the error a transport reports when its keepalive went unanswered (the
+/// connection log warns about it).
+pub const KEEPALIVE_UNANSWERED: &str = "no reply to the keepalive";
+
 /// Exponential backoff for reconnection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReconnectPolicy {

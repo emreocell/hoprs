@@ -1,26 +1,31 @@
 //! The backend the effects run against: the vault, the transfer engine, the session
-//! manager and the prompt broker, behind [`BackendApi`].
+//! manager (with the sessions' terminal shells), the remote edits and the prompt broker,
+//! behind [`BackendApi`].
 
 pub mod broker;
+pub mod edit;
 #[cfg(test)]
 pub mod fake;
 pub mod mapping;
 pub mod ops;
 pub mod sessions;
+pub mod shells;
 pub mod vault;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
+use futures_util::stream::BoxStream;
 use hoprs_core::{
     ConnectionState, Error, RemoteEntry, RemotePath, Result, SavedTab, Site, SiteId, Workspace,
     WorkspaceId,
 };
 use hoprs_import::{ImportOptions, ImportReport};
 use hoprs_remote::RemoteFs;
-pub use hoprs_ssh::AuthMethod;
 pub use hoprs_ssh::known_hosts::KnownHostEntry;
+pub use hoprs_ssh::{AuthMethod, ShellOutput};
 use hoprs_transfer::{
     ConflictPolicy, EngineConfig, Event, QueueStore, Resolution, TransferEngine, TransferId,
     TransferItem, TransferSpec,
@@ -30,10 +35,15 @@ use secrecy::SecretString;
 use tokio::sync::{broadcast, mpsc, watch};
 
 pub use broker::{BrokerEvent, PromptAnswer, PromptBroker, PromptId};
+pub use edit::{
+    EditChoice, EditEvent, EditId, EditManager, EditSession, EditState, EditSummary, KeptEdit,
+    UploadMode,
+};
 pub use ops::DeleteTarget;
 pub use sessions::{
     ConnectError, ConnectResult, Connected, SessionConfig, SessionId, SessionManager,
 };
+pub use shells::ShellId;
 pub use vault::{LazyKeyringStore, ProfileSnapshot, VaultHandle};
 
 use crate::settings::{self, Settings, SettingsLoad};
@@ -121,6 +131,60 @@ pub trait BackendApi: Send + Sync {
     /// The window is closing: shuts the transfer engine down (its running items keep their
     /// stored state, so the next start reopens them paused), then closes every session.
     async fn shutdown(&self);
+
+    // Terminal shells, for the terminal tabs.
+    /// Opens a terminal (PTY + shell, `cols` x `rows`) on an SSH session; see
+    /// [`shells`]. Not connected: `Network`, "Not connected". Past the connection's channel
+    /// budget: `Protocol`, "Too many channels on this connection (limit N)". An FTP session
+    /// has no terminal (`Protocol`).
+    async fn open_shell(&self, session: SessionId, cols: u16, rows: u16) -> Result<ShellId>;
+    /// Sends keyboard input to the shell. Ended or unknown: `Network`, "Shell closed".
+    async fn shell_input(&self, shell: ShellId, data: Vec<u8>) -> Result<()>;
+    /// The terminal is now `cols` x `rows`.
+    async fn shell_resize(&self, shell: ShellId, cols: u16, rows: u16) -> Result<()>;
+    /// Closes the shell without waiting for the server (its output then yields `Closed`)
+    /// and forgets it. Unknown ids are ignored.
+    fn close_shell(&self, shell: ShellId);
+    /// The shell's output (`Data`..., maybe `Exit`, then `Closed`), handed out once, for
+    /// the tab's subscription; `None` afterwards and for unknown shells.
+    fn shell_output(&self, shell: ShellId) -> Option<BoxStream<'static, ShellOutput>>;
+
+    // Remote editing (see [`edit`]).
+    /// Downloads the remote file `remote` of `session` to the private edit directory and
+    /// opens it with `editor` (the settings' command: split with shell quoting rules, run
+    /// without a shell, the path as its last argument). Every save goes back up after
+    /// [`edit::DEBOUNCE`] of quiet, unless the server's copy changed meanwhile
+    /// ([`EditEvent::RemoteChanged`]); a save while the session is down is held and goes up
+    /// on its next `Connected`. A file already being edited opens again (same id).
+    async fn start_edit(
+        &self,
+        session: SessionId,
+        remote: RemotePath,
+        editor: String,
+    ) -> Result<EditId>;
+    /// The user's answer to [`EditEvent::RemoteChanged`] (see [`EditChoice`]).
+    async fn resolve_edit(&self, id: EditId, choice: EditChoice) -> Result<()>;
+    /// The session's edits holding something not on the server yet.
+    async fn edits_pending(&self, session: SessionId) -> Vec<EditSummary>;
+    /// Ends the session's edits and deletes their local files, unless some hold unsent
+    /// changes and `discard` is false: then nothing changes and those are returned.
+    async fn finish_edits(&self, session: SessionId, discard: bool) -> Result<Vec<EditSummary>>;
+    /// "Retry" on a failed upload: tries the edit again now (with the stamp check).
+    async fn retry_edit(&self, id: EditId) -> Result<()>;
+    /// "Upload pending changes": sends the session's unsent edits, waiting at most
+    /// `within` for the session to be back; returns what is still unsent (conflicts are
+    /// never overwritten here).
+    async fn flush_edits(&self, session: SessionId, within: Duration) -> Vec<EditSummary>;
+    /// "Keep local copies": saves each unsent edit as a recovered copy and ends the
+    /// session's edits, deleting nothing (see [`EditManager::keep`]).
+    async fn keep_edits(&self, session: SessionId) -> Result<Vec<KeptEdit>>;
+    /// A new receiver of the edits' events.
+    fn subscribe_edits(&self) -> broadcast::Receiver<EditEvent>;
+    /// Where "keep" saves the recovered copies (the close questions say so).
+    fn recovered_dir(&self) -> PathBuf;
+    /// Saves every unsent edit as a recovered copy now, locally only (a forced exit, the
+    /// start of a shutdown); see [`EditManager::preserve_unsent`].
+    async fn preserve_edits(&self) -> Vec<KeptEdit>;
 
     /// Lists `path` on the local disk, or on the remote side of `session` (an error
     /// without one).
@@ -218,6 +282,8 @@ pub trait BackendApi: Send + Sync {
     async fn set_policy(&self, policy: ConflictPolicy);
     /// Transfer workers per site for the connections made from now on (`1..=16`).
     fn set_workers(&self, workers: usize);
+    /// Keepalive (seconds, `10..=300`) of the SSH and FTP connections made from now on.
+    fn set_keepalive(&self, secs: u64);
 }
 
 /// A remote listing asked without a session.
@@ -245,6 +311,11 @@ pub struct BackendConfig {
     pub sessions: SessionConfig,
     /// Argon2id costs of the backups this backend writes.
     pub backup_params: ExportParams,
+    /// The local copies of remote files being edited (see [`edit::default_edit_dir`]).
+    pub edit_dir: PathBuf,
+    /// The user's versions saved when a remote edit takes the server's (see
+    /// [`edit::default_recovered_dir`]).
+    pub recovered_dir: PathBuf,
 }
 
 impl BackendConfig {
@@ -256,6 +327,8 @@ impl BackendConfig {
             queue_path: dirs::data_dir().map(|dir| dir.join("hoprs").join("queue.db")),
             sessions: SessionConfig::default(),
             backup_params: ExportParams::default(),
+            edit_dir: edit::default_edit_dir(),
+            recovered_dir: edit::default_recovered_dir(),
         })
     }
 }
@@ -273,6 +346,7 @@ pub struct Backend {
     vault: VaultHandle,
     engine: TransferEngine,
     sessions: SessionManager,
+    edits: EditManager,
     broker: PromptBroker,
 }
 
@@ -287,7 +361,7 @@ impl Backend {
     /// [`BackendApi::queue_error`] reports it.
     ///
     /// `settings.toml` (beside the profiles, also read here) gives the engine its conflict
-    /// policy and the sessions their workers; an unusable file means the defaults (it is
+    /// policy and the sessions their workers and keepalive; an unusable file means the defaults (it is
     /// logged, kept as is, and [`BackendApi::settings`] reports it).
     pub fn open(mut config: BackendConfig, secrets: Arc<dyn SecretStore>) -> Result<Backend> {
         let vault = VaultHandle::new(Vault::open(&config.profile_dir, secrets)?);
@@ -304,6 +378,7 @@ impl Backend {
             },
         );
         config.sessions.workers = loaded.settings.workers_per_site;
+        config.sessions.keepalive = std::time::Duration::from_secs(loaded.settings.keepalive_secs);
         let broker = PromptBroker::new(vault.clone());
         let sessions = SessionManager::new(
             engine.clone(),
@@ -312,6 +387,7 @@ impl Backend {
             config.sessions,
         );
         Ok(Backend {
+            edits: EditManager::new(config.edit_dir, config.recovered_dir),
             profile_dir: config.profile_dir,
             settings_path,
             settings: loaded,
@@ -437,8 +513,100 @@ impl BackendApi for Backend {
     /// engine keeps each running item's stored state, which the next start recovers as
     /// paused.
     async fn shutdown(&self) {
+        // Local and fast first: whatever is unsent is safe before any slow step.
+        self.edits.preserve_unsent().await;
         self.engine.clone().shutdown().await;
         self.sessions.close_all().await;
+        // The close flow settled the edits it knew of; anything unsent since is kept as a
+        // recovered copy, never deleted.
+        self.edits.end_all().await;
+    }
+
+    async fn open_shell(&self, session: SessionId, cols: u16, rows: u16) -> Result<ShellId> {
+        self.sessions.open_shell(session, cols, rows).await
+    }
+
+    async fn shell_input(&self, shell: ShellId, data: Vec<u8>) -> Result<()> {
+        self.sessions.shell_input(shell, data).await
+    }
+
+    async fn shell_resize(&self, shell: ShellId, cols: u16, rows: u16) -> Result<()> {
+        self.sessions.shells().resize(shell, cols, rows).await
+    }
+
+    fn close_shell(&self, shell: ShellId) {
+        self.sessions.shells().close(shell);
+    }
+
+    fn shell_output(&self, shell: ShellId) -> Option<BoxStream<'static, ShellOutput>> {
+        self.sessions.shells().output(shell)
+    }
+
+    /// SFTP replaces the file by a temporary one renamed over it; FTP writes in place
+    /// (see [`edit`]).
+    async fn start_edit(
+        &self,
+        session: SessionId,
+        remote: RemotePath,
+        editor: String,
+    ) -> Result<EditId> {
+        let fs = self.sessions.remote(session)?;
+        let state = self
+            .sessions
+            .state(session)
+            .ok_or_else(|| Error::new(hoprs_core::ErrorKind::NotFound, "Session closed"))?;
+        let mode = match self.sessions.protocol(session) {
+            Some(hoprs_core::Protocol::Ssh) => UploadMode::TempRename,
+            _ => UploadMode::InPlace,
+        };
+        let site = self
+            .sessions
+            .site(session)
+            .ok_or_else(|| Error::new(hoprs_core::ErrorKind::NotFound, "Session closed"))?;
+        let target = EditSession {
+            session,
+            site: site.to_string(),
+            fs,
+            state,
+            mode,
+        };
+        self.edits.start(target, remote, &editor).await
+    }
+
+    async fn resolve_edit(&self, id: EditId, choice: EditChoice) -> Result<()> {
+        self.edits.resolve(id, choice).await
+    }
+
+    async fn edits_pending(&self, session: SessionId) -> Vec<EditSummary> {
+        self.edits.pending(session).await
+    }
+
+    async fn finish_edits(&self, session: SessionId, discard: bool) -> Result<Vec<EditSummary>> {
+        self.edits.finish(session, discard).await
+    }
+
+    async fn retry_edit(&self, id: EditId) -> Result<()> {
+        self.edits.retry(id).await
+    }
+
+    async fn flush_edits(&self, session: SessionId, within: Duration) -> Vec<EditSummary> {
+        self.edits.flush(session, within).await
+    }
+
+    async fn keep_edits(&self, session: SessionId) -> Result<Vec<KeptEdit>> {
+        self.edits.keep(session).await
+    }
+
+    fn subscribe_edits(&self) -> broadcast::Receiver<EditEvent> {
+        self.edits.subscribe()
+    }
+
+    fn recovered_dir(&self) -> PathBuf {
+        self.edits.recovered_dir().to_owned()
+    }
+
+    async fn preserve_edits(&self) -> Vec<KeptEdit> {
+        self.edits.preserve_unsent().await
     }
 
     async fn list(
@@ -609,6 +777,13 @@ impl BackendApi for Backend {
     fn set_workers(&self, workers: usize) {
         self.sessions.set_workers(settings::clamp_workers(workers));
     }
+
+    fn set_keepalive(&self, secs: u64) {
+        self.sessions
+            .set_keepalive(std::time::Duration::from_secs(settings::clamp_keepalive(
+                secs,
+            )));
+    }
 }
 
 #[cfg(test)]
@@ -638,6 +813,8 @@ mod tests {
             queue_path: Some(dir.join("data").join("queue.db")),
             sessions: SessionConfig::default(),
             backup_params: CHEAP_BACKUP,
+            edit_dir: dir.join("edit"),
+            recovered_dir: dir.join("recovered"),
         };
         Backend::open(config, Arc::new(MemoryStore::new())).unwrap()
     }
@@ -886,8 +1063,11 @@ mod tests {
             sessions: SessionConfig {
                 known_hosts: Some(known_hosts.clone()),
                 workers: 2,
+                ..SessionConfig::default()
             },
             backup_params: CHEAP_BACKUP,
+            edit_dir: dir.path().join("edit"),
+            recovered_dir: dir.path().join("recovered"),
         };
         let backend = Backend::open(config, Arc::new(MemoryStore::new())).unwrap();
         let key = "AAAAC3NzaC1lZDI1NTE5AAAAIGrhflDkrs18RwIFvHFCsoXLdUL+0cVr81616Tzk8aBj";
@@ -1045,6 +1225,8 @@ mod tests {
             queue_path: Some(queue.clone()),
             sessions: SessionConfig::default(),
             backup_params: CHEAP_BACKUP,
+            edit_dir: dir.path().join("edit"),
+            recovered_dir: dir.path().join("recovered"),
         };
         let backend = Backend::open(config, Arc::new(MemoryStore::new())).unwrap();
         assert!(backend.engine.snapshot().await.is_empty());
@@ -1198,7 +1380,11 @@ mod tests {
         let profiles = dir.path().join("profiles");
         std::fs::create_dir_all(&profiles).unwrap();
         let file = profiles.join(settings::FILE_NAME);
-        std::fs::write(&file, "workers_per_site = 3\ndefault_policy = \"skip\"\n").unwrap();
+        std::fs::write(
+            &file,
+            "workers_per_site = 3\ndefault_policy = \"skip\"\nkeepalive_secs = 60\n",
+        )
+        .unwrap();
         let backend = open(dir.path());
         let loaded = backend.settings();
         assert_eq!(loaded.error, None);
@@ -1207,10 +1393,16 @@ mod tests {
             Settings {
                 workers_per_site: 3,
                 default_policy: ConflictPolicy::Skip,
+                keepalive_secs: 60,
+                ..Settings::default()
             }
         );
         assert_eq!(backend.transfer_snapshot().await.workers, 3);
         assert_eq!(backend.sessions.workers(), 3);
+        assert_eq!(
+            backend.sessions.keepalive(),
+            std::time::Duration::from_secs(60)
+        );
 
         // The saved policy is the engine's from the start: an existing file is skipped,
         // never asked about.
@@ -1259,14 +1451,26 @@ mod tests {
         // Workers change for the next connections, clamped.
         backend.set_workers(40);
         assert_eq!(backend.sessions.workers(), 16);
+        // The keepalive: clamped to 10..=300 s.
+        backend.set_keepalive(2);
+        assert_eq!(
+            backend.sessions.keepalive(),
+            std::time::Duration::from_secs(10)
+        );
+        backend.set_keepalive(45);
+        assert_eq!(
+            backend.sessions.keepalive(),
+            std::time::Duration::from_secs(45)
+        );
         backend.set_workers(0);
         assert_eq!(backend.transfer_snapshot().await.workers, 1);
 
         let saved = Settings {
             workers_per_site: 9,
             default_policy: ConflictPolicy::Resume,
+            ..Settings::default()
         };
-        backend.save_settings(saved).await.unwrap();
+        backend.save_settings(saved.clone()).await.unwrap();
         assert_eq!(settings::load(&file).settings, saved);
         drop(backend);
 
@@ -1281,5 +1485,156 @@ mod tests {
             std::fs::read_to_string(&file).unwrap(),
             "workers_per_site = ["
         );
+    }
+
+    /// Plan 6 Task 7, end to end against the Docker servers (sshd 127.0.0.1:2222 alice /
+    /// alice-pass; vsftpd 127.0.0.1:2121 frank / frank-pass): the real backend, the real
+    /// file watcher and a real editor process (`true`). A save goes up (SFTP by a
+    /// temporary file renamed over the original, keeping its permissions; FTP in place), a
+    /// change made by someone else holds the next save until "Overwrite", and finishing
+    /// removes the local copy.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+    async fn edit_roundtrip_sftp_and_ftp() {
+        use crate::backend::broker::PromptKind;
+        use tokio::io::AsyncWriteExt;
+
+        async fn put(fs: &dyn RemoteFs, path: &RemotePath, data: &[u8]) {
+            let mut writer = fs.open_write(path, 0).await.unwrap();
+            writer.write_all(data).await.unwrap();
+            writer.shutdown().await.unwrap();
+        }
+
+        async fn get(fs: &dyn RemoteFs, path: &RemotePath) -> Vec<u8> {
+            use tokio::io::AsyncReadExt;
+            let mut data = Vec::new();
+            let mut reader = fs.open_read(path, 0).await.unwrap();
+            reader.read_to_end(&mut data).await.unwrap();
+            data
+        }
+
+        async fn next(events: &mut broadcast::Receiver<EditEvent>) -> EditEvent {
+            tokio::time::timeout(std::time::Duration::from_secs(20), events.recv())
+                .await
+                .expect("an edit event in time")
+                .unwrap()
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = BackendConfig {
+            profile_dir: dir.path().join("profiles"),
+            queue_path: None,
+            sessions: SessionConfig {
+                known_hosts: Some(dir.path().join("known_hosts")),
+                ..SessionConfig::default()
+            },
+            backup_params: CHEAP_BACKUP,
+            edit_dir: dir.path().join("edit"),
+            recovered_dir: dir.path().join("recovered"),
+        };
+        let backend = Arc::new(Backend::open(config, Arc::new(MemoryStore::new())).unwrap());
+        let mut prompts = backend.prompt_events().unwrap();
+        let answering = tokio::spawn({
+            let backend = backend.clone();
+            async move {
+                while let Some(event) = prompts.recv().await {
+                    if let BrokerEvent::Request(r) = event {
+                        let answer = match r.kind {
+                            PromptKind::HostKey { .. } | PromptKind::Certificate { .. } => {
+                                PromptAnswer::Decision(true)
+                            }
+                            _ => PromptAnswer::Cancel,
+                        };
+                        backend.answer_prompt(r.id, answer).await;
+                    }
+                }
+            }
+        });
+
+        let mut ssh = Site::new("docker ssh", "127.0.0.1", "alice", Protocol::Ssh);
+        ssh.port = hoprs_ssh::testing::SSH_PORT;
+        ssh.ssh.use_agent = false;
+        let mut ftp = Site::new("docker ftp", "127.0.0.1", "frank", Protocol::Ftp);
+        ftp.port = hoprs_remote::testing::FTP_PORT;
+        let unique = std::process::id();
+        for (site, password, home) in [
+            (ssh, "alice-pass", "/home/alice"),
+            (ftp, "frank-pass", "/home/frank"),
+        ] {
+            let ssh = site.protocol == Protocol::Ssh;
+            backend.save_site(site.clone()).await.unwrap();
+            backend
+                .set_password(site.id.clone(), Some(password.to_owned().into()))
+                .await
+                .unwrap();
+            let session = backend.connect(site.id.clone()).await.unwrap().session;
+            let fs = backend.fs(Some(session), Side::Remote).unwrap();
+            let home = RemotePath::new(home).unwrap();
+            let path = home.join(&format!("hoprs-edit-{unique}.txt"));
+            put(fs.as_ref(), &path, b"version 1\n").await;
+            if ssh {
+                fs.chmod(&path, 0o640).await.unwrap();
+            }
+            let mut events = backend.subscribe_edits();
+
+            let id = backend
+                .start_edit(session, path.clone(), "true".into())
+                .await
+                .unwrap();
+            let local = backend.edits.local_path(id).unwrap();
+            assert_eq!(std::fs::read(&local).unwrap(), b"version 1\n");
+
+            // A save goes up.
+            std::fs::write(&local, b"edited locally\n").unwrap();
+            let event = next(&mut events).await;
+            assert!(
+                matches!(event, EditEvent::Uploaded { id: got, .. } if got == id),
+                "{event:?}"
+            );
+            assert_eq!(get(fs.as_ref(), &path).await, b"edited locally\n");
+            let names: Vec<String> = fs
+                .list(&home)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|e| e.name)
+                .collect();
+            assert!(
+                !names.iter().any(|n| n.contains(".hoprs-upload")),
+                "{names:?}"
+            );
+            if ssh {
+                assert_eq!(fs.stat(&path).await.unwrap().mode.unwrap() & 0o777, 0o640);
+            }
+
+            // Someone else changes it: the next save is held.
+            put(fs.as_ref(), &path, b"changed by someone else\n").await;
+            std::fs::write(&local, b"mine\n").unwrap();
+            assert_eq!(next(&mut events).await, EditEvent::RemoteChanged { id });
+            assert_eq!(get(fs.as_ref(), &path).await, b"changed by someone else\n");
+
+            backend
+                .resolve_edit(id, EditChoice::Overwrite)
+                .await
+                .unwrap();
+            assert!(matches!(
+                next(&mut events).await,
+                EditEvent::Uploaded { .. }
+            ));
+            assert_eq!(get(fs.as_ref(), &path).await, b"mine\n");
+
+            assert!(
+                backend
+                    .finish_edits(session, false)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(next(&mut events).await, EditEvent::Closed { id });
+            assert!(!local.exists());
+            fs.remove_file(&path).await.unwrap();
+            backend.close(session).await;
+        }
+        answering.abort();
     }
 }

@@ -166,7 +166,7 @@ async fn transfer_tab() -> (Arc<FakeBackend>, App, Site, TabId) {
     local.add_file("/home/me/b.txt", b"b", SystemTime::UNIX_EPOCH);
     local.add_dir("/home/me/dir");
     let app = connected_tab(fake, &a).await;
-    assert!(app.tabs[0].can_act(Side::Remote) && app.tabs[0].can_act(Side::Local));
+    assert!(app.can_act(0, Side::Remote) && app.can_act(0, Side::Local));
     let tab = app.tabs[0].id;
     (fake.clone(), app, a, tab)
 }
@@ -179,7 +179,7 @@ fn srv_site() -> Site {
 
 /// The row of the entry called `name` in the first tab's pane.
 fn row_of(app: &App, side: Side, name: &str) -> usize {
-    let pane = app.tabs[0].pane(side);
+    let pane = app.tabs[0].pane(side).unwrap();
     usize::from(pane.has_up())
         + pane
             .entries
@@ -195,7 +195,7 @@ async fn enqueue_selection_to_other_pane() {
     let (fake, mut app, a, tab) = transfer_tab().await;
 
     // Nothing selected: the button does nothing.
-    assert!(!app.tabs[0].can_transfer(Side::Local));
+    assert!(!app.tabs[0].can_transfer(app.tab_conn(0), Side::Local));
     assert!(
         app.update(pane_msg(tab, Side::Local, PaneMsg::Transfer))
             .is_empty()
@@ -211,7 +211,7 @@ async fn enqueue_selection_to_other_pane() {
     }));
     app.update(pane_msg(tab, Side::Local, PaneMsg::Click(dir_row)));
     app.update(Message::Modifiers(Mods::default()));
-    assert!(app.tabs[0].can_transfer(Side::Local));
+    assert!(app.tabs[0].can_transfer(app.tab_conn(0), Side::Local));
     let effects = app.update(pane_msg(tab, Side::Local, PaneMsg::Transfer));
     let specs = enqueued(&effects);
     assert_eq!(
@@ -256,9 +256,9 @@ async fn enqueue_selection_to_other_pane() {
     );
 
     // A tab whose remote side is not connected sends nothing.
-    app.tabs[0].state = TabState::Connecting;
+    app.conns.get_mut(&app.tabs[0].site).unwrap().state = TabState::Connecting;
     app.update(pane_msg(tab, Side::Local, PaneMsg::Click(a_row)));
-    assert!(!app.tabs[0].can_transfer(Side::Local));
+    assert!(!app.tabs[0].can_transfer(app.tab_conn(0), Side::Local));
     assert!(
         app.update(pane_msg(tab, Side::Local, PaneMsg::Transfer))
             .is_empty()
@@ -1132,6 +1132,8 @@ async fn upload_through_the_queue_end_to_end() {
             ..SessionConfig::default()
         },
         backup_params: hoprs_vault::ExportParams::default(),
+        edit_dir: dir.path().join("edit"),
+        recovered_dir: dir.path().join("recovered"),
     };
     let backend = Backend::open(config, Arc::new(hoprs_vault::MemoryStore::new())).unwrap();
     let backend: Arc<dyn BackendApi> = Arc::new(backend);
@@ -1326,4 +1328,80 @@ async fn deleting_a_site_cancels_its_transfers() {
         })
         .collect();
     assert_eq!(cancelled, [1, 2, 5, 8, 9, 10], "{effects:?}");
+}
+
+/// Review Focus 3: a transfer started on a session lost for a network reason is queued at
+/// once (the engine holds it until the site is back) and the session reconnects.
+#[tokio::test]
+async fn transfer_on_dropped_session_reconnects() {
+    let (fake, mut app, _a, tab) = transfer_tab().await;
+    let session = app.tab_conn(0).session().unwrap();
+    let lost = Error::new(ErrorKind::Network, "Connection lost");
+    fake.drop_connection(session, lost.clone());
+    app.update(Message::SessionState {
+        session,
+        state: hoprs_core::ConnectionState::Disconnected(lost),
+        auth: None,
+    });
+    let a_row = row_of(&app, Side::Local, "a.txt");
+    app.update(pane_msg(tab, Side::Local, PaneMsg::Click(a_row)));
+    let effects = app.update(pane_msg(tab, Side::Local, PaneMsg::Transfer));
+    assert_eq!(enqueued(&effects).len(), 1, "{effects:?}");
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Reconnect { session: s } if *s == session)),
+        "{effects:?}"
+    );
+    assert!(app.tab_conn(0).reconnecting);
+}
+
+/// Task 5 fix round 1: a file operation held for a reconnection is dropped if its tab
+/// closed meanwhile (never run behind the user's back).
+#[tokio::test]
+async fn held_file_op_of_a_closed_tab_is_dropped() {
+    // An SSH site with a terminal and a files tab: the terminal keeps the site's
+    // connection when the files tab closes.
+    let mut a = site("a", "h", "u", Protocol::Ssh);
+    a.ssh.open_as = hoprs_core::OpenAs::Both;
+    a.remote_dir = Some("/srv".into());
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    fake.remote_fs(&a.id).add_dir("/srv/sub");
+    fake.local_fs().add_dir("/home/me/dir");
+    let mut app = connected_tab(&fake, &a).await;
+    let index = app.tabs.iter().position(|t| t.is_files()).unwrap();
+    assert_eq!(app.tabs.len(), 2);
+    let tab = app.tabs[index].id;
+    assert!(app.can_act(index, Side::Remote));
+    let session = app.tab_conn(index).session().unwrap();
+    let lost = Error::new(ErrorKind::Network, "Connection lost");
+    fake.drop_connection(session, lost.clone());
+    app.update(Message::SessionState {
+        session,
+        state: hoprs_core::ConnectionState::Disconnected(lost),
+        auth: None,
+    });
+    app.update(pane_msg(tab, Side::Remote, PaneMsg::NewFolder));
+    let effects = app.update(pane_msg(tab, Side::Remote, PaneMsg::EditCommit));
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Reconnect { session: s } if *s == session)),
+        "{effects:?}"
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::FileOp { .. })),
+        "held: {effects:?}"
+    );
+
+    app.update(Message::CloseTab(tab));
+    assert_eq!(app.tabs.len(), 1, "the terminal stays");
+    let effects = app.update(Message::Reconnected {
+        session,
+        result: Ok(()),
+    });
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::FileOp { .. })),
+        "{effects:?}"
+    );
 }

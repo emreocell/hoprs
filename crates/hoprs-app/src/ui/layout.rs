@@ -2,14 +2,15 @@
 //! 256 px sidebar on the left and, on the right, the center, the
 //! collapsible transfer queue and the status bar.
 
-use iced::widget::{column, container, row, rule, text};
+use iced::widget::{button, column, container, row, rule, text};
 use iced::{Alignment, Element, Length, Padding};
 
-use crate::app::{App, Form, Message};
+use crate::app::{App, Form, Message, PaletteMsg};
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
 use crate::ui::{
-    dialogs, files, import, queue, settings, sidebar, site_form, status, tabs, workspace_form,
+    dialogs, edits, files, import, log, palette as command_palette, queue, settings, sidebar,
+    site_form, status, tabs, terminal, workspace_form,
 };
 
 pub const SIDEBAR_WIDTH: f32 = sidebar::WIDTH;
@@ -18,11 +19,22 @@ pub const TOP_BAR_HEIGHT: f32 = 40.0;
 pub const QUEUE_HEAD_HEIGHT: f32 = 36.0;
 pub const QUEUE_MAX_HEIGHT: f32 = 210.0;
 pub const STATUS_HEIGHT: f32 = 26.0;
+/// The log panel's lines (six rows); its head is as tall as the queue's.
+pub const LOG_BODY_HEIGHT: f32 = 180.0;
 /// The accent line under an active tab.
 pub const UNDERLINE: f32 = 2.0;
 
 pub fn view(app: &App) -> Element<'_, Message> {
-    let right = column![center(app), queue::view(app), status::view(app)].width(Length::Fill);
+    let mut right = column![];
+    if let Some(notice) = edits::kept_notice(app) {
+        right = right.push(notice).push(hrule());
+    }
+    let right = right
+        .push(edits::with_toast(app, center(app)))
+        .push(queue::view(app))
+        .push(log::view(app))
+        .push(status::view(app))
+        .width(Length::Fill);
     let body = row![sidebar::view(app), vrule(), right].height(Length::Fill);
 
     let base = container(column![top_bar(app), hrule(), body])
@@ -30,7 +42,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .height(Length::Fill)
         .style(theme::paper)
         .into();
-    dialogs::overlay(app, base)
+    // Never both: a security dialog closes the palette, which does not open under one.
+    dialogs::overlay(app, command_palette::overlay(app, base))
 }
 
 fn hrule<'a>() -> Element<'a, Message> {
@@ -67,22 +80,26 @@ fn top_bar(app: &App) -> Element<'_, Message> {
 
     let tabs = tabs::view(app);
 
-    // A slot for the Ctrl+K palette (Plan 6).
+    // The Ctrl+K palette's button.
     let palette_slot = container(
-        container(
-            row![
-                text(strings::GO_TO_ANYTHING),
-                container(text(strings::GO_TO_ANYTHING_KEY).size(theme::TEXT_XS))
-                    .padding(Padding::ZERO.left(theme::SPACE_2XS).right(theme::SPACE_2XS))
-                    .style(theme::kbd),
-            ]
-            .spacing(theme::SPACE_SM)
+        button(
+            container(
+                row![
+                    text(strings::GO_TO_ANYTHING),
+                    container(text(strings::GO_TO_ANYTHING_KEY).size(theme::TEXT_XS))
+                        .padding(Padding::ZERO.left(theme::SPACE_2XS).right(theme::SPACE_2XS))
+                        .style(theme::kbd),
+                ]
+                .spacing(theme::SPACE_SM)
+                .align_y(Alignment::Center),
+            )
+            .height(Length::Fill)
             .align_y(Alignment::Center),
         )
         .height(Length::Fill)
         .padding(Padding::ZERO.left(theme::SPACE_SM).right(theme::SPACE_SM))
-        .align_y(Alignment::Center)
-        .style(theme::outline_box),
+        .style(theme::button_outline)
+        .on_press(Message::Palette(PaletteMsg::Open)),
     )
     .height(Length::Fill)
     .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_SM]));
@@ -95,14 +112,20 @@ fn top_bar(app: &App) -> Element<'_, Message> {
 /// The center: the open form, else the active tab, else the empty state.
 fn center(app: &App) -> Element<'_, Message> {
     match &app.form {
-        Some(Form::Site(form)) => return site_form::view(form),
+        Some(Form::Site(form)) => {
+            return site_form::view(form, app.site_delete_note(form.site_id()));
+        }
         Some(Form::Workspace(form)) => return workspace_form::view(form, &app.sites),
         Some(Form::Import) => return import::view(app),
         Some(Form::Settings) => return settings::view(app),
+        Some(Form::QuitEdits) => return edits::quit_view(app),
         None => {}
     }
     if let Some(tab) = app.active_tab.and_then(|i| app.tabs.get(i)) {
-        return files::view(app, tab);
+        return match tab.terminal() {
+            Some(term) => terminal::view(app, tab, term),
+            None => files::view(app, tab),
+        };
     }
     container(
         column![

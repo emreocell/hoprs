@@ -11,6 +11,30 @@ pub const NO_SESSIONS: &str = "No open sessions";
 pub const GO_TO_ANYTHING: &str = "Go to anything";
 pub const GO_TO_ANYTHING_KEY: &str = "Ctrl K";
 
+// The Ctrl+K palette.
+pub const PALETTE_PLACEHOLDER: &str = "Go to a tab, site or workspace, or run an action";
+pub const PALETTE_WORKSPACES_PLACEHOLDER: &str = "Open workspace";
+pub const PALETTE_NO_RESULTS: &str = "No matches";
+pub const PALETTE_GROUP_ACTION: &str = "Action";
+pub const PALETTE_GROUP_TAB: &str = "Tab";
+pub const PALETTE_GROUP_SITE: &str = "Site";
+pub const PALETTE_GROUP_WORKSPACE: &str = "Workspace";
+pub const PALETTE_KIND_TERMINAL: &str = "terminal";
+pub const PALETTE_KIND_FILES: &str = "files";
+pub const PALETTE_TOGGLE_QUEUE: &str = "Toggle queue";
+pub const PALETTE_TOGGLE_LOG: &str = "Toggle log";
+pub const PALETTE_CLOSE_TAB: &str = "Close tab";
+pub const PALETTE_OPEN_WORKSPACE: &str = "Open workspace…";
+pub const PALETTE_EDIT: &str = "Edit in editor";
+pub const PALETTE_UPLOAD: &str = "Upload selection";
+pub const PALETTE_DOWNLOAD: &str = "Download selection";
+pub const PALETTE_COPY: &str = "Copy";
+pub const PALETTE_PASTE: &str = "Paste";
+pub const PALETTE_FIND: &str = "Find in scrollback";
+pub const PALETTE_KEY_COPY: &str = "Ctrl Shift C";
+pub const PALETTE_KEY_PASTE: &str = "Ctrl Shift V";
+pub const PALETTE_KEY_FIND: &str = "Ctrl Shift F";
+
 // Sidebar.
 pub const FILTER_SITES: &str = "Filter sites";
 pub const WORKSPACES: &str = "Workspaces";
@@ -82,7 +106,6 @@ pub const OPEN_AS: &str = "Open as";
 pub const OPEN_AS_TERMINAL: &str = "Terminal";
 pub const OPEN_AS_FILES: &str = "Files";
 pub const OPEN_AS_BOTH: &str = "Terminal and files";
-pub const TERMINAL_LATER: &str = "Terminal tabs arrive in a later version";
 pub const FTP_OPTIONS: &str = "FTP";
 pub const FTP_MODE: &str = "Transfer mode";
 pub const FTP_PASSIVE: &str = "Passive";
@@ -119,6 +142,34 @@ pub const EDIT_SITE: &str = "Edit site";
 
 // Tabs.
 pub const CLOSE_TAB: &str = "×";
+/// The tab strip's actions on a connected SSH tab: another tab on its session.
+pub const NEW_TERMINAL_TAB: &str = "New terminal tab";
+pub const NEW_FILES_TAB: &str = "New files tab";
+/// A terminal tab until the terminal itself lands (Plan 6 Task 4).
+/// The terminal tab (Plan 6 Task 4).
+pub const TERMINAL_OVERFLOWED: &str = "Output was too fast and the shell was closed";
+pub const TERMINAL_REOPEN: &str = "Reopen";
+pub const TERMINAL_RESTART: &str = "Restart shell";
+pub const TERMINAL_SHELL_CLOSED: &str = "Shell closed";
+pub const TERMINAL_OPEN_FAILED: &str = "Can't open a shell";
+pub const TERMINAL_RETRY: &str = "Retry";
+pub const TERMINAL_WAITING_FOR_CONNECTION: &str = "Waiting for the connection";
+pub const TERMINAL_INPUT_DROPPED: &str =
+    "Some input was dropped: the shell was not taking it fast enough";
+/// Written into the scrollback when a new shell starts after a reconnect.
+pub const TERMINAL_RECONNECTED: &str = "— reconnected —";
+pub const TERMINAL_SEARCH_PLACEHOLDER: &str = "Search scrollback";
+pub const TERMINAL_SEARCH_NEXT: &str = "Next";
+pub const TERMINAL_SEARCH_PREVIOUS: &str = "Previous";
+pub const TERMINAL_SEARCH_CLOSE: &str = "Close";
+pub const TERMINAL_SEARCH_NO_MATCH: &str = "No match";
+/// "Shell exited (code N)", or without a code when the server sent none.
+pub fn shell_exited(code: Option<u32>) -> String {
+    match code {
+        Some(code) => format!("Shell exited (code {code})"),
+        None => "Shell exited".to_owned(),
+    }
+}
 
 // File panes.
 pub const LOCAL: &str = "Local";
@@ -165,6 +216,26 @@ pub const NOTHING_DONE: &str = "Nothing finished yet";
 pub const CLEAR_FINISHED: &str = "Clear finished and failed";
 /// [`CLEAR_FINISHED`] in a narrow window.
 pub const CLEAR_FINISHED_SHORT: &str = "Clear finished";
+// Technical log panel.
+pub const LOG: &str = "Log";
+pub const LOG_ERROR: &str = "Error";
+pub const LOG_WARN: &str = "Warn";
+pub const LOG_INFO: &str = "Info";
+pub const LOG_DEBUG: &str = "Debug";
+pub const FILTER_LOG: &str = "Filter log";
+/// Copies the lines the filters show (all of them without a filter).
+pub const COPY_SHOWN: &str = "Copy shown";
+pub const CLEAR: &str = "Clear";
+pub const CLEAR_HINT: &str = "Empties this panel only; new lines keep coming.";
+pub const LOG_LEVEL_HINT: &str = "Shows lines at least this severe. Only info and above are recorded unless hoprs starts with RUST_LOG (for example RUST_LOG=debug).";
+pub const NO_LOG_LINES: &str = "Nothing logged yet";
+pub const NO_LOG_MATCHES: &str = "No lines match";
+
+/// The log panel's count: "1 line", "120 lines".
+pub fn log_lines(n: usize) -> String {
+    count(n, "line", "lines")
+}
+
 pub const UPLOAD_ARROW: &str = "↑";
 pub const DOWNLOAD_ARROW: &str = "↓";
 pub const WAITING_FOR_WORKER: &str = "Waiting for a worker";
@@ -322,9 +393,13 @@ pub fn workspace_status(connected: usize, total: usize, name: &str) -> String {
 pub const NEW_FOLDER: &str = "New folder";
 pub const RENAME: &str = "Rename";
 pub const PERMISSIONS: &str = "Permissions…";
+/// Short toolbar labels for the narrowest panes (`ui::fit::Toolbar::Narrow`).
+pub const NEW_FOLDER_SHORT: &str = "Folder";
+pub const PERMISSIONS_SHORT: &str = "Perms…";
 pub const KEY_NEW_FOLDER: &str = "F7";
 pub const KEY_RENAME: &str = "F2";
 pub const KEY_DELETE: &str = "Del";
+pub const KEY_EDIT: &str = "F4";
 pub const UPLOAD: &str = "Upload";
 pub const DOWNLOAD: &str = "Download";
 pub const KEY_TRANSFER: &str = "Ctrl ↵";
@@ -536,8 +611,21 @@ pub const SETTINGS_WORKERS_HINT: &str =
 pub const SETTINGS_POLICY: &str = "When a file already exists";
 pub const SETTINGS_POLICY_HINT: &str =
     "Applies to the next transfers. Ask shows the choice in the queue.";
+pub const SETTINGS_KEEPALIVE: &str = "Keepalive";
+pub const SETTINGS_KEEPALIVE_HINT: &str = "How often an idle connection is checked, so servers and routers keep it open. Applies to the next connections.";
+
+/// A keepalive interval: "30 s".
+pub fn seconds(secs: u64) -> String {
+    format!("{secs} s")
+}
 pub const SETTINGS_UNREADABLE: &str = "settings.toml can't be read, so the defaults apply. Changes last until hoprs closes and are not saved, to keep the file as it is: fix or delete it to save settings.";
 pub const SETTINGS_SAVE_FAILED: &str = "Can't save settings.toml";
+pub const SETTINGS_TERMINAL: &str = "Terminal";
+pub const SETTINGS_FONT_SIZE: &str = "Font size";
+pub const SETTINGS_SCROLLBACK: &str = "Scrollback lines";
+pub const SETTINGS_SCROLLBACK_HINT: &str = "Applies to terminals opened from now on.";
+pub const SETTINGS_THEME: &str = "Theme";
+pub const THEME_HOPRS_DARK: &str = "hoprs dark";
 pub const POLICY_ASK: &str = "Ask";
 pub const POLICY_OVERWRITE: &str = "Overwrite";
 pub const POLICY_SKIP: &str = "Skip";
@@ -613,5 +701,94 @@ fn count(n: usize, one: &str, many: &str) -> String {
         format!("1 {one}")
     } else {
         format!("{n} {many}")
+    }
+}
+
+// Remote editing.
+/// The Edit action (remote pane).
+pub const EDIT_FILE: &str = "Edit";
+pub const EDIT_NO_FOLDERS: &str = "Folders can't be edited";
+pub const EDIT_NO_LINKS: &str = "Links can't be edited";
+pub const EDIT_TOO_LARGE: &str = "Files over 50 MB can't be edited";
+pub const WAITING_FOR_CONNECTION: &str = "Waiting for connection…";
+pub const REMOTE_MAY_BE_TRUNCATED: &str = "The server's copy may be incomplete until then.";
+pub const CHANGED_ON_SERVER: &str = "Changed on the server since you opened it";
+pub const KEEP_REMOTE: &str = "Keep remote";
+pub const SAVE_A_COPY: &str = "Save a copy";
+pub const RELOAD_IN_EDITOR: &str = "Now the server's version: reload it in your editor.";
+pub const UPLOAD_AND_CLOSE: &str = "Upload pending changes and close";
+pub const CLOSE_KEEP_COPIES: &str = "Close and keep local copies";
+pub const UPLOAD_AND_QUIT: &str = "Upload and quit";
+pub const QUIT_KEEP_COPIES: &str = "Quit and keep local copies";
+pub const CHECKING_EDITS: &str = "Checking the remote edits…";
+pub const STOP_KEEP_COPIES: &str = "Stop and keep local copies";
+/// While "Upload" runs (an upload under way has no bound but its protocol's timeouts).
+pub const UPLOADING_EDITS: &str = "Uploading… (Stop to keep local copies instead)";
+/// The kept notice, before a remote path: "Server copy of".
+pub const SERVER_COPY_OF: &str = "Server copy of";
+/// …after it.
+pub const MAY_BE_INCOMPLETE: &str = "may be incomplete";
+/// The kept notice after a close that did not ask (the site moved, "Close and
+/// reconnect"): the editor's file is no longer linked to the server.
+pub const KEPT_SAVES_STOPPED: &str = "The session closed: further saves in the editor won't be uploaded. Your changes are in the recovered copy; open the file again to go on editing.";
+pub const EDIT_ONE_FILE: &str = "Select one file to edit";
+pub const UPLOADED: &str = "Uploaded";
+pub const EDITING: &str = "Editing";
+pub const OPENING: &str = "Opening";
+pub const CLOSE_WORKSPACE_EDITS_TITLE: &str =
+    "Some remote edits of this workspace are not uploaded";
+pub const KEEPING_COPIES: &str = "Saving the local copies…";
+pub const CLOSE_EDITS_TITLE: &str = "Some remote edits are not uploaded";
+pub const QUIT_EDITS_TITLE: &str = "Some remote edits are not uploaded";
+pub const QUIT_EDITS_HINT: &str = "The window stays open until you choose. Nothing is deleted.";
+pub const EDIT_UNSENT: &str = "not uploaded";
+pub const EDIT_CONFLICT: &str = "changed on the server";
+pub const EDITOR_COMMAND: &str = "Editor";
+pub const EDITOR_COMMAND_HINT: &str = "The command remote files open with; the file's path is added last. For example: xdg-open, gedit, code --wait.";
+pub const EDITOR_COMMAND_EMPTY: &str = "Type a command";
+pub const SETTINGS_EDITING: &str = "Remote editing";
+
+/// "Upload failed: Permission denied".
+pub fn upload_failed(reason: &str) -> String {
+    format!("Upload failed: {reason}")
+}
+
+/// "Your version was saved to <path>".
+pub fn your_version_at(path: &str) -> String {
+    format!("Your version was saved to {path}")
+}
+
+/// Where "keep" puts the copies: "Unsent changes are copied to <dir>".
+pub fn copies_go_to(dir: &str) -> String {
+    format!("Unsent changes are copied to {dir}")
+}
+
+/// "2 files could not be uploaded".
+pub fn not_uploaded(n: usize) -> String {
+    if n == 1 {
+        "1 file could not be uploaded".to_owned()
+    } else {
+        format!("{n} files could not be uploaded")
+    }
+}
+
+/// The persistent notice after a close kept unsent edits: "Kept 2 unsent edits as
+/// recovered copies in" (the folder follows, in mono).
+pub fn kept_notice(n: usize) -> String {
+    if n == 1 {
+        "Kept 1 unsent edit as a recovered copy in".to_owned()
+    } else {
+        format!("Kept {n} unsent edits as recovered copies in")
+    }
+}
+
+/// The delete confirmation of a site with files open for editing.
+pub fn delete_site_edits(n: usize) -> String {
+    if n == 1 {
+        "1 file of this site is open for editing: its unsent changes will be kept as a recovered copy, never deleted.".to_owned()
+    } else {
+        format!(
+            "{n} files of this site are open for editing: their unsent changes will be kept as recovered copies, never deleted."
+        )
     }
 }

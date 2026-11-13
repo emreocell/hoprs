@@ -24,7 +24,7 @@ fn files_tab(local: Option<&str>, remote: Option<&str>) -> SavedTab {
 
 /// The session of the site's tab, once connected.
 fn session_of(app: &App, site: &SiteId) -> SessionId {
-    app.tabs[app.tab_of(site).unwrap()]
+    app.tab_conn(app.tab_of(site).unwrap())
         .session()
         .expect("the tab is connected")
 }
@@ -205,7 +205,7 @@ async fn reconnect_banner_on_disconnected() {
     ));
     app.update(first);
     assert_eq!(
-        app.tabs[0].lost_connection(),
+        app.tab_conn(0).lost_connection(),
         None,
         "no banner while connected"
     );
@@ -216,25 +216,25 @@ async fn reconnect_banner_on_disconnected() {
     fake.drop_connection(session, lost.clone());
     let dropped = next(&mut feed).await.unwrap();
     app.update(dropped);
-    assert_eq!(app.tabs[0].lost_connection(), Some(&lost));
+    assert_eq!(app.tab_conn(0).lost_connection(), Some(&lost));
 
     // Reconnect goes through the backend's reconnect (one at a time).
     let effects = app.update(Message::ReconnectSession(tab));
-    let [Effect::Reconnect { tab: t, session: s }] = &effects[..] else {
+    let [Effect::Reconnect { session: s }] = &effects[..] else {
         panic!("{effects:?}");
     };
-    assert_eq!((*t, *s), (tab, session));
-    assert!(app.tabs[0].reconnecting);
+    assert_eq!(*s, session);
+    assert!(app.tab_conn(0).reconnecting);
     assert!(app.update(Message::ReconnectSession(tab)).is_empty());
-    let done = effects::reconnect(backend.clone(), tab, session).await;
+    let done = effects::reconnect(backend.clone(), session).await;
     assert!(fake.calls().contains(&Call::Reconnect(session)));
     let effects = app.update(done);
-    assert!(!app.tabs[0].reconnecting);
-    assert_eq!(app.tabs[0].lost_connection(), None);
+    assert!(!app.tab_conn(0).reconnecting);
+    assert_eq!(app.tab_conn(0).lost_connection(), None);
     // The remote folder is listed again.
     assert_eq!(
         listed_path(&effects, tab, Side::Remote),
-        Some(app.tabs[0].remote.path.clone())
+        Some(app.tabs[0].remote().path.clone())
     );
     let up = next(&mut feed).await.unwrap();
     assert!(matches!(
@@ -251,10 +251,10 @@ async fn reconnect_banner_on_disconnected() {
     fake.fail_next_connect(&a.id, refused.clone());
     app.update(next(&mut feed).await.unwrap());
     app.update(Message::ReconnectSession(tab));
-    let failed = effects::reconnect(backend.clone(), tab, session).await;
+    let failed = effects::reconnect(backend.clone(), session).await;
     app.update(failed);
-    assert_eq!(app.tabs[0].lost_connection(), Some(&refused));
-    assert!(!app.tabs[0].reconnecting);
+    assert_eq!(app.tab_conn(0).lost_connection(), Some(&refused));
+    assert!(!app.tab_conn(0).reconnecting);
 
     // Closing the tab ends the watch: the app stops asking for it, and the backend's
     // stream ends with the session.
@@ -268,10 +268,9 @@ async fn reconnect_banner_on_disconnected() {
             Some(other) => panic!("{other:?}"),
         }
     }
-    // A reconnect result for a tab that is gone is dropped.
+    // A reconnect result for a session no tab has any more is dropped.
     assert!(
         app.update(Message::Reconnected {
-            tab,
             session,
             result: Ok(())
         })
@@ -333,7 +332,7 @@ async fn closing_workspace_saves_tabs() {
     // The workspace's tabs are gone; the other site's tab stays.
     assert_eq!(app.open_workspace, None);
     assert_eq!(app.tabs.len(), 1);
-    assert_eq!(app.tabs[0].session(), Some(other_session));
+    assert_eq!(app.tab_conn(0).session(), Some(other_session));
     assert_eq!(status::line(&app).workspace, None);
 
     // The save goes to the vault; the profiles are read again after it.
@@ -370,7 +369,8 @@ async fn opening_workspace_restores_dirs() {
     ws.sites[0].tabs = vec![files_tab(Some("/home/me/shop"), Some("/var/www/shop"))];
     // Only a remote folder saved: the local side uses the site's.
     ws.sites[1].tabs = vec![files_tab(None, Some("/pub"))];
-    // A terminal tab names no folder for the files tab.
+    // A saved terminal tab restores as a terminal tab (Plan 6), which takes no folder
+    // from it.
     ws.sites[2].tabs = vec![SavedTab {
         kind: TabKind::Terminal,
         remote_dir: Some("/ignored".into()),
@@ -389,17 +389,21 @@ async fn opening_workspace_restores_dirs() {
     app.home = Some(path("/home/me"));
 
     let effects = app.update(Message::OpenWorkspace(ws.id.clone()));
-    let tab = |app: &App, site: &SiteId| app.tabs[app.tab_of(site).unwrap()].clone();
-    let (ta, tb, tc) = (tab(&app, &a.id), tab(&app, &b.id), tab(&app, &c.id));
-    assert_eq!(ta.local.path, path("/home/me/shop"));
-    assert_eq!(ta.remote.path, path("/var/www/shop"));
-    assert_eq!(tb.local.path, path("/b-local"));
-    assert_eq!(tb.remote.path, path("/pub"));
-    assert_eq!(tc.local.path, path("/home/me"));
-    assert_eq!(tc.remote.path, RemotePath::root());
+    let tab = |app: &App, site: &SiteId| app.tab_of(site).unwrap();
+    let (ia, ib, ic) = (tab(&app, &a.id), tab(&app, &b.id), tab(&app, &c.id));
+    let (ta, tb, tc) = (&app.tabs[ia], &app.tabs[ib], &app.tabs[ic]);
+    assert_eq!(ta.local().path, path("/home/me/shop"));
+    assert_eq!(ta.remote().path, path("/var/www/shop"));
+    assert_eq!(tb.local().path, path("/b-local"));
+    assert_eq!(tb.remote().path, path("/pub"));
+    assert_eq!(tc.kind(), TabKind::Terminal);
+    // A terminal tab has no panes (and lists nothing).
+    assert!(tc.files().is_none());
+    assert_eq!(listed_path(&effects, tc.id, Side::Local), None);
+    let ta = ta.id;
     // The local listings start at the restored folders.
     assert_eq!(
-        listed_path(&effects, ta.id, Side::Local),
+        listed_path(&effects, ta, Side::Local),
         Some(path("/home/me/shop"))
     );
     // Once connected, the remote side lists its restored folder.
@@ -408,7 +412,7 @@ async fn opening_workspace_restores_dirs() {
     let messages: Vec<Message> = effects::connect_sites(backend, sites).collect().await;
     let effects: Vec<Effect> = messages.into_iter().flat_map(|m| app.update(m)).collect();
     assert_eq!(
-        listed_path(&effects, ta.id, Side::Remote),
+        listed_path(&effects, ta, Side::Remote),
         Some(path("/var/www/shop"))
     );
 
@@ -424,7 +428,10 @@ async fn opening_workspace_restores_dirs() {
         .collect();
     assert_eq!(saves, vec![ws.id.clone()]);
     assert_eq!(app.open_workspace, Some(other.id.clone()));
-    assert_eq!(tab(&app, &a.id).local.path, path("/home/me/shop"));
+    assert_eq!(
+        app.tabs[tab(&app, &a.id)].local().path,
+        path("/home/me/shop")
+    );
 }
 
 /// Review Focus 5: closing the window saves the open workspace's tabs, shuts the engine
@@ -722,7 +729,7 @@ async fn close_request_cancels_dialogs_and_ignores_input() {
     }
     assert!(app.form.is_none());
     assert_eq!(app.tabs.len(), 1);
-    assert_ne!(app.tabs[0].local.path, path("/elsewhere"));
+    assert_ne!(app.tabs[0].local().path, path("/elsewhere"));
 
     // Results still land.
     state(
@@ -731,7 +738,7 @@ async fn close_request_cancels_dialogs_and_ignores_input() {
         ConnectionState::Reconnecting { attempt: 1 },
     );
     assert!(matches!(
-        app.tabs[0].conn,
+        app.tab_conn(0).conn,
         Some(ConnectionState::Reconnecting { attempt: 1 })
     ));
     assert!(matches!(
@@ -764,14 +771,14 @@ async fn restored_folder_gone_falls_back_and_failed_sides_keep_the_saved_folder(
     let (request, at) = list_effect(&effects, tab, Side::Local);
     assert_eq!(at, path("/gone"));
     let note = strings::saved_folder_gone("/gone/deep");
-    assert_eq!(app.tabs[0].local.note.as_deref(), Some(note.as_str()));
+    assert_eq!(app.tabs[0].local().note.as_deref(), Some(note.as_str()));
     let effects = listed(&mut app, tab, Side::Local, request, Err(gone()));
     let (request, at) = list_effect(&effects, tab, Side::Local);
     assert_eq!(at, path("/home/me"));
     listed(&mut app, tab, Side::Local, request, Ok(Vec::new()));
-    assert_eq!(app.tabs[0].local.listing, files::Listing::Loaded);
-    assert_eq!(app.tabs[0].local.note.as_deref(), Some(note.as_str()));
-    assert_eq!(app.tabs[0].local.restore, None);
+    assert_eq!(app.tabs[0].local().listing, files::Listing::Loaded);
+    assert_eq!(app.tabs[0].local().note.as_deref(), Some(note.as_str()));
+    assert_eq!(app.tabs[0].local().restore, None);
 
     // Remote: /srv/old is gone, /srv is there.
     let session_effects = app.update(Message::SiteConnected {
@@ -784,14 +791,14 @@ async fn restored_folder_gone_falls_back_and_failed_sides_keep_the_saved_folder(
     let (request, at) = list_effect(&effects, tab, Side::Remote);
     assert_eq!(at, path("/srv"));
     listed(&mut app, tab, Side::Remote, request, Ok(Vec::new()));
-    assert!(app.tabs[0].remote.note.is_some());
+    assert!(app.tabs[0].remote().note.is_some());
     // Dismiss clears the note.
     app.update(Message::Pane {
         tab,
         side: Side::Remote,
         msg: PaneMsg::DismissError,
     });
-    assert_eq!(app.tabs[0].remote.note, None);
+    assert_eq!(app.tabs[0].remote().note, None);
 
     // A later failure (not a restore) is shown as usual and never saved.
     let effects = app.update(Message::Pane {
@@ -802,7 +809,7 @@ async fn restored_folder_gone_falls_back_and_failed_sides_keep_the_saved_folder(
     let (request, _) = list_effect(&effects, tab, Side::Local);
     let denied = Error::new(ErrorKind::Permission, "Permission denied");
     listed(&mut app, tab, Side::Local, request, Err(denied.clone()));
-    assert_eq!(app.tabs[0].local.listing, files::Listing::Failed(denied));
+    assert_eq!(app.tabs[0].local().listing, files::Listing::Failed(denied));
     let effects = without_panes(app.update(Message::CloseWorkspace(ws.id.clone())));
     let Some(Effect::SaveTabs { tabs, .. }) = effects.first() else {
         panic!("{effects:?}");
@@ -846,8 +853,8 @@ async fn same_session_connect_keeps_the_feed_state() {
             keyring_unavailable: false,
         }),
     });
-    assert_eq!(app.tabs[0].auth, Some(AuthMethod::Password));
-    assert_eq!(app.tabs[0].conn, Some(ConnectionState::Connected));
+    assert_eq!(app.tab_conn(0).auth, Some(AuthMethod::Password));
+    assert_eq!(app.tab_conn(0).conn, Some(ConnectionState::Connected));
     // A new session starts over.
     app.update(Message::SiteConnected {
         site: a.id.clone(),
@@ -856,6 +863,226 @@ async fn same_session_connect_keeps_the_feed_state() {
             keyring_unavailable: false,
         }),
     });
-    assert_eq!(app.tabs[0].auth, None);
-    assert_eq!(app.tabs[0].conn, None);
+    assert_eq!(app.tab_conn(0).auth, None);
+    assert_eq!(app.tab_conn(0).conn, None);
+}
+
+/// The remote listings among `effects`, for the tab's remote pane.
+fn remote_lists(effects: &[Effect], tab: TabId) -> Vec<RemotePath> {
+    effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::List {
+                tab: t,
+                side: Side::Remote,
+                path,
+                ..
+            } if *t == tab => Some(path.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn reconnects(effects: &[Effect]) -> Vec<SessionId> {
+    effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Reconnect { session } => Some(*session),
+            _ => None,
+        })
+        .collect()
+}
+
+fn navigate(app: &mut App, tab: TabId, to: &str) -> Vec<Effect> {
+    app.update(Message::Pane {
+        tab,
+        side: Side::Remote,
+        msg: PaneMsg::Navigate(path(to)),
+    })
+}
+
+/// Review Focus 3: a session lost for a network reason (the transport gave up while the
+/// user was away) comes back by itself when the user acts on its tab. The action waits for
+/// the reconnection ("Reconnecting…" in the banner instead of the error), then runs once;
+/// a reconnection that fails fails the action with its reason, never replays it later.
+#[tokio::test]
+async fn action_on_dropped_session_reconnects_and_retries() {
+    let a = site("a", "a.example", "u", Protocol::Ftp);
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    let mut app = loaded(&fake).await;
+    let sites = connect_effect(app.update(Message::ConnectSite(a.id.clone())));
+    drive(&mut app, &fake, sites).await;
+    let session = session_of(&app, &a.id);
+    let tab = app.tabs[0].id;
+    let lost = Error::new(ErrorKind::Network, "Connection lost")
+        .with_detail("no reply to the keepalive NOOP");
+    state(
+        &mut app,
+        session,
+        ConnectionState::Disconnected(lost.clone()),
+    );
+    assert_eq!(
+        crate::ui::files::banner(app.tab_conn(0)),
+        Some(crate::ui::files::Banner::Lost(&lost))
+    );
+
+    // Going to another folder reconnects first; the listing waits.
+    let effects = navigate(&mut app, tab, "/srv");
+    assert_eq!(reconnects(&effects), vec![session], "{effects:?}");
+    assert!(remote_lists(&effects, tab).is_empty(), "{effects:?}");
+    assert!(app.tab_conn(0).reconnecting);
+    assert_eq!(
+        crate::ui::files::banner(app.tab_conn(0)),
+        Some(crate::ui::files::Banner::Reconnecting),
+        "\"Reconnecting…\" instead of the error"
+    );
+    assert_eq!(app.tabs[0].remote().listing, Listing::Loading);
+    // Another action meanwhile: no second reconnection; the latest folder wins.
+    let effects = navigate(&mut app, tab, "/srv/www");
+    assert!(reconnects(&effects).is_empty(), "{effects:?}");
+    assert!(remote_lists(&effects, tab).is_empty(), "{effects:?}");
+    // The transport reports its attempts: still waiting.
+    let effects = state(
+        &mut app,
+        session,
+        ConnectionState::Reconnecting { attempt: 1 },
+    );
+    assert!(remote_lists(&effects, tab).is_empty(), "{effects:?}");
+
+    // Back: the action runs, once, for the latest folder.
+    let effects = state(&mut app, session, ConnectionState::Connected);
+    assert_eq!(remote_lists(&effects, tab), vec![path("/srv/www")]);
+    let effects = app.update(Message::Reconnected {
+        session,
+        result: Ok(()),
+    });
+    assert!(
+        remote_lists(&effects, tab).is_empty(),
+        "never replayed twice: {effects:?}"
+    );
+    assert!(!app.tab_conn(0).reconnecting);
+    assert_eq!(crate::ui::files::banner(app.tab_conn(0)), None);
+
+    // Lost again; this time the reconnection fails: the action fails with its reason.
+    state(
+        &mut app,
+        session,
+        ConnectionState::Disconnected(lost.clone()),
+    );
+    let effects = navigate(&mut app, tab, "/tmp");
+    assert_eq!(reconnects(&effects), vec![session]);
+    let refused = Error::new(ErrorKind::Network, "Connection refused");
+    let effects = app.update(Message::Reconnected {
+        session,
+        result: Err(refused.clone()),
+    });
+    assert!(remote_lists(&effects, tab).is_empty(), "{effects:?}");
+    assert_eq!(
+        app.tabs[0].remote().listing,
+        Listing::Failed(refused.clone())
+    );
+    assert_eq!(app.tab_conn(0).lost_connection(), Some(&refused));
+    // Back some other way: the failed listing is retried once, as any failed listing is
+    // when its session comes back; the held action is not replayed on top of it.
+    let effects = state(&mut app, session, ConnectionState::Connected);
+    assert_eq!(remote_lists(&effects, tab), vec![path("/tmp")]);
+    assert!(reconnects(&effects).is_empty());
+}
+
+/// A session refused for good (host key, authentication, certificate) never reconnects by
+/// itself: an action fails as before and the banner keeps the reason and its fix.
+#[tokio::test]
+async fn host_key_or_auth_failure_does_not_auto_reconnect() {
+    for refused in [
+        Error::new(ErrorKind::Auth, "Authentication failed"),
+        hoprs_ssh::testing::changed_host_key_error("a.example", 3),
+        Error::new(ErrorKind::Tls, "Certificate not trusted"),
+    ] {
+        let a = site("a", "a.example", "u", Protocol::Ssh);
+        let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+        let mut app = loaded(&fake).await;
+        let sites = connect_effect(app.update(Message::ConnectSite(a.id.clone())));
+        drive(&mut app, &fake, sites).await;
+        let session = session_of(&app, &a.id);
+        let tab = app.tabs[0].id;
+        let effects = state(
+            &mut app,
+            session,
+            ConnectionState::Disconnected(refused.clone()),
+        );
+        assert!(reconnects(&effects).is_empty(), "{refused:?}: {effects:?}");
+
+        let effects = navigate(&mut app, tab, "/srv");
+        assert!(reconnects(&effects).is_empty(), "{refused:?}: {effects:?}");
+        assert_eq!(
+            remote_lists(&effects, tab),
+            vec![path("/srv")],
+            "{refused:?}"
+        );
+        assert!(!app.tab_conn(0).reconnecting);
+        assert_eq!(app.tab_conn(0).lost_connection(), Some(&refused));
+        assert_ne!(
+            crate::ui::files::banner(app.tab_conn(0)),
+            Some(crate::ui::files::Banner::Reconnecting)
+        );
+    }
+}
+
+/// Task 5 fix round 1: while the transport reconnects by itself (its own round after a
+/// drop, or the session manager's quiet extra round), an action waits instead of failing
+/// "Not connected", and runs once when the session is back, with no reconnect of the
+/// app's own. If that round gives up, the app reconnects for the waiting action.
+#[tokio::test]
+async fn action_during_transport_reconnect_waits_and_runs_once() {
+    let a = site("a", "a.example", "u", Protocol::Ftp);
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    let mut app = loaded(&fake).await;
+    let sites = connect_effect(app.update(Message::ConnectSite(a.id.clone())));
+    drive(&mut app, &fake, sites).await;
+    let session = session_of(&app, &a.id);
+    let tab = app.tabs[0].id;
+
+    state(
+        &mut app,
+        session,
+        ConnectionState::Reconnecting { attempt: 1 },
+    );
+    let effects = navigate(&mut app, tab, "/srv");
+    assert!(reconnects(&effects).is_empty(), "{effects:?}");
+    assert!(remote_lists(&effects, tab).is_empty(), "{effects:?}");
+    assert!(!app.tab_conn(0).reconnecting);
+    assert_eq!(app.tabs[0].remote().listing, Listing::Loading);
+    let effects = state(
+        &mut app,
+        session,
+        ConnectionState::Reconnecting { attempt: 2 },
+    );
+    assert!(remote_lists(&effects, tab).is_empty(), "{effects:?}");
+    let effects = state(&mut app, session, ConnectionState::Connected);
+    assert_eq!(remote_lists(&effects, tab), vec![path("/srv")]);
+    assert!(reconnects(&effects).is_empty());
+    assert!(app.held.is_empty());
+
+    // The round gives up while an action waits: the app reconnects for it, then the
+    // action runs once.
+    state(
+        &mut app,
+        session,
+        ConnectionState::Reconnecting { attempt: 1 },
+    );
+    navigate(&mut app, tab, "/tmp");
+    let lost = Error::new(ErrorKind::Network, "Connection timed out");
+    let effects = state(&mut app, session, ConnectionState::Disconnected(lost));
+    assert_eq!(reconnects(&effects), vec![session], "{effects:?}");
+    assert!(remote_lists(&effects, tab).is_empty(), "{effects:?}");
+    let effects = app.update(Message::Reconnected {
+        session,
+        result: Ok(()),
+    });
+    assert_eq!(remote_lists(&effects, tab), vec![path("/tmp")]);
+    assert!(
+        app.replayed.is_empty(),
+        "no stale replay ids: {:?}",
+        app.replayed
+    );
 }

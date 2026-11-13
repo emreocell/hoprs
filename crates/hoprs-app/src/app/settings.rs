@@ -1,8 +1,8 @@
 //! The settings page (center, no modal): workers per site, the default conflict policy,
-//! and the encrypted backup (export and restore).
+//! the keepalive, the terminal, and the encrypted backup (export and restore).
 //!
-//! A change applies at once (the policy to the engine, the workers to the next
-//! connections) and is saved to `settings.toml`, unless that file was unreadable at start:
+//! A change applies at once (the policy to the engine, the workers and the keepalive to
+//! the next connections) and is saved to `settings.toml`, unless that file was unreadable at start:
 //! then nothing is saved over it.
 //!
 //! Backup passwords live in the page only while typed: they leave it inside the effect
@@ -16,7 +16,10 @@ use hoprs_vault::{BackupImportReport, ExportReport, ImportMode};
 use secrecy::SecretString;
 
 use super::{App, Effect, Form, PickTarget};
-use crate::settings::{SettingsLoad, clamp_workers};
+use crate::settings::{
+    SettingsLoad, TerminalTheme, clamp_font_size, clamp_keepalive, clamp_scrollback, clamp_workers,
+    valid_editor,
+};
 use crate::ui::site_form::Password;
 use crate::ui::strings;
 
@@ -24,6 +27,15 @@ use crate::ui::strings;
 pub enum SettingsMsg {
     Workers(usize),
     Policy(ConflictPolicy),
+    /// The terminal's font size (clamped to `10..=24`); applies at once.
+    TerminalFontSize(u16),
+    /// Scrollback lines (clamped to `1 000..=100 000`), for the terminals opened next.
+    TerminalScrollback(usize),
+    TerminalTheme(TerminalTheme),
+    /// Seconds between keepalives (clamped to `10..=300`), for the next connections.
+    Keepalive(u64),
+    /// The editor command as typed: applied (and saved) when not empty.
+    EditorCommand(String),
     Backup(BackupMsg),
     Close,
 }
@@ -181,13 +193,66 @@ impl App {
                 effects.extend(self.save_settings_effect());
                 effects
             }
+            SettingsMsg::TerminalFontSize(size) => {
+                let size = clamp_font_size(size);
+                if size == self.settings.terminal_font_size {
+                    return Vec::new();
+                }
+                self.settings.terminal_font_size = size;
+                self.save_settings_effect().into_iter().collect()
+            }
+            SettingsMsg::TerminalScrollback(lines) => {
+                let lines = clamp_scrollback(lines);
+                if lines == self.settings.terminal_scrollback {
+                    return Vec::new();
+                }
+                self.settings.terminal_scrollback = lines;
+                self.save_settings_effect().into_iter().collect()
+            }
+            SettingsMsg::TerminalTheme(theme) => {
+                if theme == self.settings.terminal_theme {
+                    return Vec::new();
+                }
+                self.settings.terminal_theme = theme;
+                for tab in &mut self.tabs {
+                    if let Some(terminal) = tab.terminal_mut() {
+                        terminal.model.set_theme(theme.colors());
+                    }
+                }
+                self.save_settings_effect().into_iter().collect()
+            }
+            SettingsMsg::Keepalive(secs) => {
+                let secs = clamp_keepalive(secs);
+                if secs == self.settings.keepalive_secs {
+                    return Vec::new();
+                }
+                self.settings.keepalive_secs = secs;
+                let mut effects = vec![Effect::SetKeepalive(secs)];
+                effects.extend(self.save_settings_effect());
+                effects
+            }
+            SettingsMsg::EditorCommand(command) => {
+                // Blank is not a command: it stays as typed (with the hint), and the
+                // command in force is the last valid one.
+                if !valid_editor(&command) {
+                    self.editor_input = Some(command);
+                    return Vec::new();
+                }
+                self.editor_input = None;
+                if command == self.settings.editor_command {
+                    return Vec::new();
+                }
+                self.settings.editor_command = command;
+                self.save_settings_effect().into_iter().collect()
+            }
             SettingsMsg::Backup(msg) => self.backup_msg(msg),
             SettingsMsg::Close => {
                 if matches!(self.form, Some(Form::Settings)) {
                     self.form = None;
                 }
-                // Typed passwords don't outlive the page.
+                // Typed passwords don't outlive the page, nor does a blank editor field.
                 self.backup.forget_passwords();
+                self.editor_input = None;
                 Vec::new()
             }
         }
@@ -205,7 +270,7 @@ impl App {
             return None;
         }
         self.settings_saving = true;
-        Some(Effect::SaveSettings(self.settings))
+        Some(Effect::SaveSettings(self.settings.clone()))
     }
 
     pub(super) fn settings_saved(&mut self, result: Result<(), Error>) -> Vec<Effect> {

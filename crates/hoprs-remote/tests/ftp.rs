@@ -8,9 +8,10 @@ use hoprs_core::{
     ConnectionState, EntryKind, Error, ErrorKind, ReconnectPolicy, RemoteEntry, RemotePath,
 };
 use hoprs_remote::testing::{
-    FTPS_IMPLICIT_PORT, FtpSession, OtherCertificate, StoppedFtpSessions, TestControl, ftp_config,
+    FTPS_IMPLICIT_PORT, FtpSession, KeepaliveSettings, OtherCertificate, StoppedFtpSessions,
+    TestControl, control_tcp_keepalive, data_tcp_keepalive, ftp_config, ftp_idle_config,
     ftp_listings, ftp_peak_transfer_connections, ftps_fixture, kill_ftp_sessions,
-    open_test_control, pooled_quote, server_fingerprint, session_command,
+    open_test_control, pooled_quote, pooled_tcp_keepalive, server_fingerprint, session_command,
     session_disconnect_inside_command, session_fail, session_quote,
 };
 use hoprs_remote::{
@@ -969,6 +970,13 @@ async fn fake_server() -> u16 {
 /// [`fake_server`]; with `hang_noop` it never answers `NOOP` either. Also returns the number
 /// of client connections currently open.
 async fn fake_server_with(hang_noop: bool) -> (u16, Arc<AtomicUsize>) {
+    let (port, live, _) = fake_server_counting(hang_noop).await;
+    (port, live)
+}
+
+/// [`fake_server_with`], also counting the `NOOP`s it received (on every connection).
+/// `SLOW` is answered after 1 s.
+async fn fake_server_counting(hang_noop: bool) -> (u16, Arc<AtomicUsize>, Arc<AtomicUsize>) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -987,10 +995,13 @@ async fn fake_server_with(hang_noop: bool) -> (u16, Arc<AtomicUsize>) {
     );
     let live = Arc::new(AtomicUsize::new(0));
     let open = live.clone();
+    let noops = Arc::new(AtomicUsize::new(0));
+    let noops_seen = noops.clone();
     tokio::spawn(async move {
         while let Ok((sock, _)) = listener.accept().await {
             let pasv = pasv.clone();
             let live = live.clone();
+            let noops = noops.clone();
             live.fetch_add(1, Ordering::SeqCst);
             tokio::spawn(async move {
                 let (read, mut write) = sock.into_split();
@@ -998,6 +1009,9 @@ async fn fake_server_with(hang_noop: bool) -> (u16, Arc<AtomicUsize>) {
                     let mut lines = BufReader::new(read).lines();
                     while let Ok(Some(line)) = lines.next_line().await {
                         let verb = line.split(' ').next().unwrap_or("").to_ascii_uppercase();
+                        if verb == "NOOP" {
+                            noops.fetch_add(1, Ordering::SeqCst);
+                        }
                         let reply: &[u8] = match verb.as_str() {
                             "USER" => b"331 Password please.\r\n",
                             "PASS" => b"230 Logged in.\r\n",
@@ -1008,6 +1022,10 @@ async fn fake_server_with(hang_noop: bool) -> (u16, Arc<AtomicUsize>) {
                             "PASV" => pasv.as_bytes(),
                             "DATA425" => b"425 Can't open data connection.\r\n",
                             "HANG" => continue,
+                            "SLOW" => {
+                                tokio::time::sleep(Duration::from_secs(1)).await;
+                                b"200 Slow ok.\r\n"
+                            }
                             _ => b"502 Not implemented.\r\n",
                         };
                         if write.write_all(reply).await.is_err() {
@@ -1019,7 +1037,7 @@ async fn fake_server_with(hang_noop: bool) -> (u16, Arc<AtomicUsize>) {
             });
         }
     });
-    (port, open)
+    (port, open, noops_seen)
 }
 
 /// A session on [`fake_server`] with the given command timeout and no keepalive in sight.
@@ -1197,6 +1215,167 @@ async fn refused_data_connection_keeps_session() {
     );
     assert_eq!(Connection::generation(&fs), 1);
     fs.disconnect().await;
+}
+
+/// A probe asked for while a command holds the control connection is not dropped (the Plan 3
+/// follow-up "A probe can be dropped while the control connection is busy"): the keepalive
+/// waits for the command to finish, then sends its `NOOP`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ftp_keepalive_waits_for_busy_control() {
+    let (port, _live, noops) = fake_server_counting(false).await;
+    let mut cfg = session_config();
+    cfg.port = port;
+    cfg.keepalive_interval = Duration::from_secs(60);
+    let (s, _p) = session_with(cfg).await;
+    let conn = s.checkout().await.unwrap();
+    let slow = tokio::spawn({
+        let s = s.clone();
+        async move { session_command(&s, "SLOW").await }
+    });
+    // SLOW now holds the control connection for 1 s.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!slow.is_finished());
+    // A loss seen on a transfer connection asks for a probe of the control connection.
+    conn.report(&Error::new(ErrorKind::Network, "Connection lost"));
+    drop(conn);
+    assert_eq!(noops.load(Ordering::SeqCst), 0, "no NOOP while busy");
+    assert_eq!(slow.await.unwrap().unwrap(), "Slow ok.");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while noops.load(Ordering::SeqCst) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the probe was dropped: no NOOP after the busy command"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(noops.load(Ordering::SeqCst), 1);
+    assert_eq!(*s.state().borrow(), ConnectionState::Connected);
+    assert_eq!(s.generation(), 1);
+    s.disconnect().await;
+}
+
+/// The control connection, the pooled transfer connections and the passive data connections
+/// all have TCP keepalive (60 s idle, 10 s interval, 3 probes): routers and NATs see traffic
+/// on an idle session, and a peer that vanished becomes a socket error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tcp_keepalive_is_set_on_sockets() {
+    let mut cfg = session_config();
+    cfg.port = fake_server().await;
+    cfg.keepalive_interval = Duration::from_secs(60);
+    let (s, _p) = session_with(cfg).await;
+    let expected = KeepaliveSettings::expected();
+    assert_eq!(control_tcp_keepalive(&s).await, Some(expected), "control");
+    let mut conn = s.checkout().await.unwrap();
+    assert_eq!(pooled_tcp_keepalive(&mut conn).await, expected, "pooled");
+    let data = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    assert_eq!(
+        data_tcp_keepalive(data.local_addr().unwrap()).await,
+        expected,
+        "data"
+    );
+    drop(conn);
+    s.disconnect().await;
+}
+
+/// The author's report (Plan 6, Task 5): vsftpd's `ftp-idle` service closes a session after
+/// 20 s without a command ("421 Timeout."), and the pooled transfer connections time out
+/// the same way. After 25 s idle:
+/// - `slow` (the default 30 s keepalive, longer than the server's timeout) has lost its
+///   control connection before the keepalive noticed: its next listing and download still
+///   work, with no visible error (the session reconnects quietly, never `Disconnected`);
+/// - `fast` (10 s keepalive): vsftpd counts `NOOP` as activity, so the control connection
+///   survives (same generation), and only the expired pooled connection is replaced.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn ftp_survives_server_idle_timeout() {
+    let prompter = || Arc::new(ScriptedFtpPrompter::new()) as Arc<dyn FtpPrompter>;
+    let slow = FtpFs::connect(ftp_idle_config(), prompter()).await.unwrap();
+    let mut fast_cfg = ftp_idle_config();
+    fast_cfg.keepalive_interval = Duration::from_secs(10);
+    let fast = FtpFs::connect(fast_cfg, prompter()).await.unwrap();
+
+    let home = path("/home/frank");
+    let name = format!("idle-{}.bin", unique());
+    let file = path(&format!("/home/frank/{name}"));
+    let _cleanup = Cleanup {
+        service: "ftp-idle",
+        path: file.as_str().to_owned(),
+    };
+    let bytes = data(64 * 1024, 7);
+    upload(&slow, &file, 0, &bytes).await;
+    // One download each, so a transfer connection waits in each pool.
+    assert_eq!(download(&slow, &file, 0).await, bytes);
+    assert_eq!(download(&fast, &file, 0).await, bytes);
+    let slow_seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let slow_states = tokio::spawn({
+        let mut rx = Connection::state(&slow);
+        let seen = slow_seen.clone();
+        async move {
+            rx.mark_unchanged();
+            while rx.changed().await.is_ok() {
+                let state = rx.borrow_and_update().clone();
+                seen.lock().unwrap().push(state);
+            }
+        }
+    });
+    let mut fast_states = Connection::state(&fast);
+    fast_states.mark_unchanged();
+
+    tokio::time::sleep(Duration::from_secs(25)).await;
+
+    let listed = slow
+        .list(&home)
+        .await
+        .expect("slow: list after the idle time");
+    assert!(listed.iter().any(|e| e.name == name));
+    assert_eq!(download(&slow, &file, 0).await, bytes);
+    slow_states.abort();
+    let seen = slow_seen.lock().unwrap().clone();
+    assert!(
+        !seen
+            .iter()
+            .any(|s| matches!(s, ConnectionState::Disconnected(_))),
+        "slow: {seen:?}"
+    );
+    assert_eq!(
+        *Connection::state(&slow).borrow(),
+        ConnectionState::Connected
+    );
+
+    let listed = fast
+        .list(&home)
+        .await
+        .expect("fast: list after the idle time");
+    assert!(listed.iter().any(|e| e.name == name));
+    assert_eq!(download(&fast, &file, 0).await, bytes);
+    assert!(
+        !fast_states.has_changed().unwrap(),
+        "fast: state changed while idle: {:?}",
+        *fast_states.borrow()
+    );
+    assert_eq!(
+        Connection::generation(&fast),
+        1,
+        "NOOP keeps vsftpd's session"
+    );
+    slow.disconnect().await;
+    fast.disconnect().await;
+}
+
+/// Two commands at once after the server closed the idle control connection (`ftp-idle`,
+/// 20 s): the first one's idle check finds it gone and reconnects; the second, queued behind
+/// it, waits for that reconnection instead of failing "Not connected". Both succeed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn concurrent_commands_after_idle_drop_both_succeed() {
+    let (s, _p) = session_with(ftp_idle_config()).await;
+    tokio::time::sleep(Duration::from_secs(25)).await;
+    let (a, b) = tokio::join!(session_quote(&s, "PWD"), session_quote(&s, "PWD"));
+    assert_eq!(a.expect("first command").0, 257);
+    assert_eq!(b.expect("second command").0, 257);
+    assert_eq!(s.generation(), 2, "one reconnection");
+    s.disconnect().await;
 }
 
 /// `disconnect` does not wait for a keepalive `NOOP` the server never answers, and closes

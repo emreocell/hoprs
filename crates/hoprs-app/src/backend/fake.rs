@@ -39,18 +39,33 @@
 //! by the vault's [`merged_pin`](super::vault::merged_pin) rule), and
 //! `set_password` records the password and sets `has_password`, like the vault.
 //!
+//! Shells are scripted: input echoes back as output, [`FakeBackend::push_shell_output`]
+//! adds output, [`FakeBackend::end_shell`] ends a shell from the server's side, and
+//! [`FakeBackend::fail_next_open_shell`] refuses the next open. They follow the real
+//! lifecycle (see [`super::shells`]): opening needs a connected session; closing the session
+//! closes its shells; a dropped connection ends them and a reconnect does not reopen them.
+//! Resizes are kept per shell ([`FakeBackend::shell_sizes`]); opens and shell closes are
+//! recorded in [`FakeBackend::calls`].
+//!
+//! Remote edits run on the real [`EditManager`](super::EditManager) over the site's `MemFs`
+//! and the session's state watch, in a temporary directory, without a file watcher and
+//! without an editor: [`FakeBackend::edits_launched`] records what would have opened, and
+//! [`FakeBackend::save_edit`] stands for the editor's save (the debounce then runs as in the
+//! real backend). Starting an edit needs a connected session.
+//!
 //! The FileZilla import, the delete of its file, the backup export and restore and the
 //! settings calls are recorded in order ([`FakeBackend::backup_calls`]) and succeed with
 //! empty reports.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use futures_util::stream::FuturesUnordered;
+use futures_util::stream::{BoxStream, FuturesUnordered};
 use hoprs_core::{
     ConnectionState, Error, ErrorKind, RemoteEntry, RemotePath, Result, Site, SiteId, Workspace,
     WorkspaceId,
@@ -63,9 +78,12 @@ use secrecy::{ExposeSecret, SecretString};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use super::broker::{PromptKind, PromptRequest};
+use super::edit::{EditManager, EditSession, Launcher, UploadMode};
+use super::shells::{ShellControl, Shells, shell_closed};
 use super::{
     AuthMethod, BackendApi, BrokerEvent, ConnectError, ConnectResult, Connected, ControlOp,
-    DeleteTarget, KnownHostEntry, ProfileSnapshot, PromptAnswer, PromptId, SessionId, Side,
+    DeleteTarget, EditChoice, EditEvent, EditId, EditSummary, KeptEdit, KnownHostEntry,
+    ProfileSnapshot, PromptAnswer, PromptId, SessionId, ShellId, ShellOutput, Side,
     TransferSnapshot, WorkspaceTabs,
 };
 use crate::settings::{Settings, SettingsLoad};
@@ -92,6 +110,7 @@ pub enum BackupCall {
     SaveSettings(Settings),
     SetPolicy(ConflictPolicy),
     SetWorkers(usize),
+    SetKeepalive(u64),
 }
 
 /// A recorded backend call, in [`FakeBackend::calls`].
@@ -101,6 +120,69 @@ pub enum Call {
     Reconnect(SessionId),
     Shutdown,
     Close(SessionId),
+    OpenShell(SessionId),
+    CloseShell(ShellId),
+    FlushEdits(SessionId),
+    KeepEdits(SessionId),
+}
+
+/// A scripted shell (see the module docs).
+struct FakeShell {
+    session: SessionId,
+    output: mpsc::UnboundedSender<ShellOutput>,
+    ended: AtomicBool,
+    /// The opening size, then each resize.
+    sizes: Mutex<Vec<(u16, u16)>>,
+}
+
+impl FakeShell {
+    /// Ends the shell: `Closed`, once.
+    fn end(&self) {
+        if !self.ended.swap(true, Ordering::SeqCst) {
+            let _ = self.output.send(ShellOutput::Closed);
+        }
+    }
+
+    fn check_open(&self) -> Result<()> {
+        if self.ended.load(Ordering::SeqCst) {
+            Err(shell_closed())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[async_trait]
+impl ShellControl for FakeShell {
+    async fn input(&self, data: Vec<u8>) -> Result<()> {
+        self.check_open()?;
+        let _ = self.output.send(ShellOutput::Data(data));
+        Ok(())
+    }
+
+    async fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        self.check_open()?;
+        self.sizes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((cols, rows));
+        Ok(())
+    }
+
+    fn close(&self) {
+        self.end();
+    }
+}
+
+/// The output of a fake shell: everything sent, ending after `Closed`.
+fn fake_output(rx: mpsc::UnboundedReceiver<ShellOutput>) -> BoxStream<'static, ShellOutput> {
+    futures_util::stream::unfold(Some(rx), |rx| async move {
+        let mut rx = rx?;
+        let item = rx.recv().await?;
+        let rest = (item != ShellOutput::Closed).then_some(rx);
+        Some((item, rest))
+    })
+    .boxed()
 }
 
 /// See the module docs.
@@ -112,6 +194,11 @@ pub struct FakeBackend {
     receiver: Mutex<Option<mpsc::UnboundedReceiver<BrokerEvent>>>,
     /// Engine events the test sends with [`FakeBackend::send_transfer_event`].
     transfer_events: broadcast::Sender<Event>,
+    shells: Shells,
+    /// The edits and their directory, made on first use.
+    edits: OnceLock<(tempfile::TempDir, EditManager)>,
+    /// `(editor command, local path)` of every editor the edits opened.
+    launched: Arc<Mutex<Vec<(String, PathBuf)>>>,
 }
 
 #[derive(Default)]
@@ -166,6 +253,10 @@ struct State {
     settings: SettingsLoad,
     /// What `queue_error` returns.
     queue_error: Option<Error>,
+    /// The scripted shells, by id (also in `FakeBackend::shells` while open).
+    fake_shells: HashMap<ShellId, Arc<FakeShell>>,
+    /// The next `open_shell` calls fail with these.
+    open_shell_failures: VecDeque<Error>,
 }
 
 impl Default for FakeBackend {
@@ -184,7 +275,53 @@ impl FakeBackend {
             events,
             receiver: Mutex::new(Some(receiver)),
             transfer_events: broadcast::channel(16).0,
+            shells: Shells::default(),
+            edits: OnceLock::new(),
+            launched: Arc::default(),
         }
+    }
+
+    /// The edits (see the module docs).
+    fn edits(&self) -> &EditManager {
+        let (_, edits) = self.edits.get_or_init(|| {
+            let dir = tempfile::tempdir().expect("a temporary edit directory");
+            let launched = self.launched.clone();
+            let launcher: Launcher = Arc::new(move |command: &str, path: &std::path::Path| {
+                launched
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push((command.to_owned(), path.to_owned()));
+                Ok(())
+            });
+            let edits = EditManager::with_options(
+                dir.path().join("edit"),
+                dir.path().join("recovered"),
+                false,
+                launcher,
+            );
+            (dir, edits)
+        });
+        edits
+    }
+
+    /// `(editor command, local path)` of every editor the edits opened, in order.
+    pub fn edits_launched(&self) -> Vec<(String, PathBuf)> {
+        self.launched
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The local copy of a live edit.
+    pub fn edit_local(&self, id: EditId) -> Option<PathBuf> {
+        self.edits().local_path(id)
+    }
+
+    /// The editor saves `data` into the edit's local file (and the watcher reports it).
+    pub fn save_edit(&self, session: SessionId, id: EditId, data: &[u8]) {
+        let path = self.edits().local_path(id).expect("a live edit");
+        std::fs::write(&path, data).expect("the local copy is writable");
+        self.edits().file_event(session, path);
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
@@ -361,10 +498,57 @@ impl FakeBackend {
         self.state().calls.clone()
     }
 
-    /// The session's connection is lost for good: `Disconnected` with `error`.
+    /// The shell writes `data`, as if the server sent it.
+    pub fn push_shell_output(&self, shell: ShellId, data: &[u8]) {
+        if let Some(fake) = self.state().fake_shells.get(&shell) {
+            let _ = fake.output.send(ShellOutput::Data(data.to_vec()));
+        }
+    }
+
+    /// The shell's output yields `event` (an `Exit`, or the pump's `Overflowed`), as the
+    /// real pump would before `Closed`.
+    pub fn push_shell_event(&self, shell: ShellId, event: ShellOutput) {
+        if let Some(fake) = self.state().fake_shells.get(&shell) {
+            let _ = fake.output.send(event);
+        }
+    }
+
+    /// The server ends the shell: its output yields `Closed`, input then fails.
+    pub fn end_shell(&self, shell: ShellId) {
+        if let Some(fake) = self.state().fake_shells.get(&shell) {
+            fake.end();
+        }
+    }
+
+    /// The next `open_shell` fails with `error`.
+    pub fn fail_next_open_shell(&self, error: Error) {
+        self.state().open_shell_failures.push_back(error);
+    }
+
+    /// The shell's opening size, then each resize.
+    pub fn shell_sizes(&self, shell: ShellId) -> Vec<(u16, u16)> {
+        self.state()
+            .fake_shells
+            .get(&shell)
+            .map(|fake| {
+                fake.sizes
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The session's connection is lost for good: `Disconnected` with `error`. Its shells
+    /// end.
     pub fn drop_connection(&self, session: SessionId, error: Error) {
         let mut state = self.state();
         state.connected.remove(&session);
+        for fake in state.fake_shells.values() {
+            if fake.session == session {
+                fake.end();
+            }
+        }
         if let Some(watch) = state.watches.get(&session) {
             watch.send_replace(ConnectionState::Disconnected(error));
         }
@@ -689,6 +873,8 @@ impl BackendApi for FakeBackend {
     async fn close(&self, session: SessionId) {
         let mut state = self.state();
         if state.sessions.remove(&session).is_some() {
+            self.shells.close_session(session);
+            state.fake_shells.retain(|_, fake| fake.session != session);
             state.connected.remove(&session);
             state.keyring_unavailable.remove(&session);
             state.pending_secrets.remove(&session);
@@ -716,6 +902,10 @@ impl BackendApi for FakeBackend {
             state.calls.push(Call::Shutdown);
             (state.hang_shutdown, state.panic_shutdown)
         };
+        // As the real backend: the unsent edits are kept first, locally.
+        if let Some((_, edits)) = self.edits.get() {
+            edits.preserve_unsent().await;
+        }
         assert!(!panic, "the fake's shutdown panics, as asked");
         if hang {
             std::future::pending::<()>().await;
@@ -725,6 +915,52 @@ impl BackendApi for FakeBackend {
         for session in sessions {
             self.close(session).await;
         }
+        if let Some((_, edits)) = self.edits.get() {
+            edits.end_all().await;
+        }
+    }
+
+    async fn open_shell(&self, session: SessionId, cols: u16, rows: u16) -> Result<ShellId> {
+        let mut state = self.state();
+        state.calls.push(Call::OpenShell(session));
+        if let Some(error) = state.open_shell_failures.pop_front() {
+            return Err(error);
+        }
+        if !state.sessions.contains_key(&session) {
+            return Err(Self::not_found("Session closed"));
+        }
+        if !state.connected.contains(&session) {
+            return Err(Error::new(ErrorKind::Network, "Not connected"));
+        }
+        let (output, rx) = mpsc::unbounded_channel();
+        let fake = Arc::new(FakeShell {
+            session,
+            output,
+            ended: AtomicBool::new(false),
+            sizes: Mutex::new(vec![(cols, rows)]),
+        });
+        let id = self.shells.insert(session, fake.clone(), fake_output(rx));
+        state.fake_shells.insert(id, fake);
+        Ok(id)
+    }
+
+    async fn shell_input(&self, shell: ShellId, data: Vec<u8>) -> Result<()> {
+        self.shells.input(shell, data).await
+    }
+
+    async fn shell_resize(&self, shell: ShellId, cols: u16, rows: u16) -> Result<()> {
+        self.shells.resize(shell, cols, rows).await
+    }
+
+    fn close_shell(&self, shell: ShellId) {
+        let mut state = self.state();
+        state.calls.push(Call::CloseShell(shell));
+        state.fake_shells.remove(&shell);
+        self.shells.close(shell);
+    }
+
+    fn shell_output(&self, shell: ShellId) -> Option<BoxStream<'static, ShellOutput>> {
+        self.shells.output(shell)
     }
 
     async fn list(
@@ -932,6 +1168,80 @@ impl BackendApi for FakeBackend {
     fn set_workers(&self, workers: usize) {
         self.record(BackupCall::SetWorkers(workers));
     }
+
+    fn set_keepalive(&self, secs: u64) {
+        self.record(BackupCall::SetKeepalive(secs));
+    }
+
+    async fn start_edit(
+        &self,
+        session: SessionId,
+        remote: RemotePath,
+        editor: String,
+    ) -> Result<EditId> {
+        let target = {
+            let state = self.state();
+            if !state.connected.contains(&session) {
+                return Err(Error::new(ErrorKind::Network, "Not connected"));
+            }
+            let site = state
+                .sessions
+                .get(&session)
+                .ok_or_else(|| Self::not_found("Unknown session"))?;
+            let fs: Arc<dyn RemoteFs> = Arc::new(state.remotes[site].clone());
+            let watch = state.watches[&session].subscribe();
+            EditSession {
+                session,
+                site: site.to_string(),
+                fs,
+                state: watch,
+                mode: UploadMode::TempRename,
+            }
+        };
+        self.edits().start(target, remote, &editor).await
+    }
+
+    async fn resolve_edit(&self, id: EditId, choice: EditChoice) -> Result<()> {
+        self.edits().resolve(id, choice).await
+    }
+
+    async fn edits_pending(&self, session: SessionId) -> Vec<EditSummary> {
+        self.edits().pending(session).await
+    }
+
+    async fn finish_edits(&self, session: SessionId, discard: bool) -> Result<Vec<EditSummary>> {
+        self.edits().finish(session, discard).await
+    }
+
+    async fn retry_edit(&self, id: EditId) -> Result<()> {
+        self.edits().retry(id).await
+    }
+
+    async fn flush_edits(
+        &self,
+        session: SessionId,
+        within: std::time::Duration,
+    ) -> Vec<EditSummary> {
+        self.state().calls.push(Call::FlushEdits(session));
+        self.edits().flush(session, within).await
+    }
+
+    async fn keep_edits(&self, session: SessionId) -> Result<Vec<KeptEdit>> {
+        self.state().calls.push(Call::KeepEdits(session));
+        self.edits().keep(session).await
+    }
+
+    fn subscribe_edits(&self) -> broadcast::Receiver<EditEvent> {
+        self.edits().subscribe()
+    }
+
+    fn recovered_dir(&self) -> PathBuf {
+        self.edits().recovered_dir().to_owned()
+    }
+
+    async fn preserve_edits(&self) -> Vec<KeptEdit> {
+        self.edits().preserve_unsent().await
+    }
 }
 
 #[cfg(test)]
@@ -942,6 +1252,60 @@ mod tests {
     use hoprs_transfer::Direction;
 
     use super::*;
+
+    /// Edits run on the real edit manager: a save while the connection is down is held,
+    /// and goes up once the session reconnects.
+    #[tokio::test(start_paused = true)]
+    async fn fake_backend_edits_wait_for_reconnect() {
+        let site = Site::new("s", "h", "u", Protocol::Ssh);
+        let fake = FakeBackend::new().with_site(site.clone());
+        let session = fake.connect(site.id.clone()).await.unwrap().session;
+        let remote = fake.remote_fs(&site.id);
+        remote.add_file("/f.txt", b"one", SystemTime::UNIX_EPOCH);
+        let mut events = fake.subscribe_edits();
+
+        // Not a connected session: no edit.
+        let err = fake
+            .start_edit(
+                SessionId(99),
+                RemotePath::new("/f.txt").unwrap(),
+                "ed".into(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Network);
+
+        let id = fake
+            .start_edit(session, RemotePath::new("/f.txt").unwrap(), "ed -s".into())
+            .await
+            .unwrap();
+        let launched = fake.edits_launched();
+        assert_eq!(launched.len(), 1);
+        assert_eq!(launched[0].0, "ed -s");
+        assert_eq!(std::fs::read(&launched[0].1).unwrap(), b"one");
+
+        fake.drop_connection(session, Error::new(ErrorKind::Network, "lost"));
+        fake.save_edit(session, id, b"two");
+        tokio::time::advance(super::super::edit::DEBOUNCE).await;
+        assert_eq!(
+            events.recv().await.unwrap(),
+            EditEvent::Pending {
+                id,
+                remote_may_be_truncated: false
+            }
+        );
+        assert_eq!(fake.edits_pending(session).await.len(), 1);
+        assert_eq!(remote.read_file("/f.txt").unwrap(), b"one");
+
+        fake.reconnect(session).await.unwrap();
+        assert!(matches!(
+            events.recv().await.unwrap(),
+            EditEvent::Uploaded { id: got, .. } if got == id
+        ));
+        assert_eq!(remote.read_file("/f.txt").unwrap(), b"two");
+        assert!(fake.finish_edits(session, false).await.unwrap().is_empty());
+        assert_eq!(events.recv().await.unwrap(), EditEvent::Closed { id });
+    }
 
     #[tokio::test]
     async fn fake_backend_connects_lists_and_records() {
@@ -1109,5 +1473,97 @@ mod tests {
         let other = Site::new("o", "h", "u", Protocol::Ftp);
         let fake = fake.with_site(other.clone());
         assert!(!fake.connect(other.id).await.unwrap().keyring_unavailable);
+    }
+
+    async fn next(output: &mut BoxStream<'static, ShellOutput>) -> Option<ShellOutput> {
+        tokio::time::timeout(std::time::Duration::from_secs(1), output.next())
+            .await
+            .expect("the shell output stalled")
+    }
+
+    /// Shells belong to their session (Review Focus 5): closing the session closes them
+    /// and leaves the other sessions' shells alone; a dropped connection ends its shells
+    /// and reconnecting does not reopen them.
+    #[tokio::test]
+    async fn shells_close_with_their_session() {
+        let a = Site::new("a", "h", "u", Protocol::Ssh);
+        let b = Site::new("b", "h", "u", Protocol::Ssh);
+        let fake = FakeBackend::new().with_site(a.clone()).with_site(b.clone());
+        let sa = fake.connect(a.id.clone()).await.unwrap().session;
+        let sb = fake.connect(b.id.clone()).await.unwrap().session;
+
+        let a1 = fake.open_shell(sa, 80, 24).await.unwrap();
+        let a2 = fake.open_shell(sa, 120, 40).await.unwrap();
+        let b1 = fake.open_shell(sb, 80, 24).await.unwrap();
+        assert!(a1 != a2 && a2 != b1 && a1 != b1);
+        let mut out_a1 = fake.shell_output(a1).expect("the output stream");
+        assert!(fake.shell_output(a1).is_none(), "handed out once");
+        let mut out_a2 = fake.shell_output(a2).unwrap();
+        let mut out_b1 = fake.shell_output(b1).unwrap();
+
+        // Scripted shells: input echoes back, the test adds output.
+        fake.shell_input(a1, b"ls\n".to_vec()).await.unwrap();
+        assert_eq!(
+            next(&mut out_a1).await,
+            Some(ShellOutput::Data(b"ls\n".to_vec()))
+        );
+        fake.push_shell_output(a1, b"$ ");
+        assert_eq!(
+            next(&mut out_a1).await,
+            Some(ShellOutput::Data(b"$ ".to_vec()))
+        );
+        fake.shell_resize(a2, 100, 30).await.unwrap();
+        assert_eq!(fake.shell_sizes(a2), vec![(120, 40), (100, 30)]);
+
+        // Closing session a closes both of its shells, and only those.
+        fake.close(sa).await;
+        for out in [&mut out_a1, &mut out_a2] {
+            assert_eq!(next(out).await, Some(ShellOutput::Closed));
+            assert_eq!(next(out).await, None);
+        }
+        let e = fake.shell_input(a1, b"x".to_vec()).await.unwrap_err();
+        assert_eq!(e.message, "Shell closed");
+        assert!(fake.shell_resize(a2, 80, 24).await.is_err());
+        assert!(
+            fake.open_shell(sa, 80, 24).await.is_err(),
+            "the session is gone"
+        );
+        fake.shell_input(b1, b"pwd\n".to_vec()).await.unwrap();
+        assert_eq!(
+            next(&mut out_b1).await,
+            Some(ShellOutput::Data(b"pwd\n".to_vec()))
+        );
+
+        // A dropped connection ends the shell; reconnecting the session does not reopen it.
+        fake.drop_connection(sb, Error::new(ErrorKind::Network, "Connection lost"));
+        assert_eq!(next(&mut out_b1).await, Some(ShellOutput::Closed));
+        assert_eq!(next(&mut out_b1).await, None);
+        assert!(fake.open_shell(sb, 80, 24).await.is_err(), "not connected");
+        fake.reconnect(sb).await.unwrap();
+        assert!(fake.shell_input(b1, b"x".to_vec()).await.is_err());
+        let b2 = fake.open_shell(sb, 80, 24).await.unwrap();
+        assert_ne!(b2, b1, "a new shell, opened by the tab");
+        let mut out_b2 = fake.shell_output(b2).unwrap();
+
+        // The server ends a shell on command; an open can be refused on command.
+        fake.end_shell(b2);
+        assert_eq!(next(&mut out_b2).await, Some(ShellOutput::Closed));
+        assert_eq!(next(&mut out_b2).await, None);
+        let limit = Error::new(
+            ErrorKind::Protocol,
+            "Too many channels on this connection (limit 10)",
+        );
+        fake.fail_next_open_shell(limit.clone());
+        assert_eq!(fake.open_shell(sb, 80, 24).await.unwrap_err(), limit);
+
+        // `close_shell` ends one shell; the tab's own close is recorded.
+        let b3 = fake.open_shell(sb, 80, 24).await.unwrap();
+        let mut out_b3 = fake.shell_output(b3).unwrap();
+        fake.close_shell(b3);
+        assert_eq!(next(&mut out_b3).await, Some(ShellOutput::Closed));
+        assert_eq!(next(&mut out_b3).await, None);
+        assert!(fake.shell_output(b3).is_none());
+        assert!(fake.calls().contains(&Call::CloseShell(b3)));
+        fake.close_shell(b3);
     }
 }

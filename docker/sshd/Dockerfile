@@ -2,7 +2,7 @@
 FROM debian:bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends openssh-server netcat-openbsd procps \
+    && apt-get install -y --no-install-recommends openssh-server netcat-openbsd procps iproute2 \
     && rm -rf /var/lib/apt/lists/* \
     && rm -f /etc/ssh/ssh_host_* \
     && mkdir -p /run/sshd /etc/ssh/keys /fixtures \

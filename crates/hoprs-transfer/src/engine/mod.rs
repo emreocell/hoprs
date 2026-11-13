@@ -86,6 +86,10 @@ pub enum EventKind {
         id: TransferId,
         state: TransferState,
     },
+    /// Byte counts, at most one event per `EngineConfig::progress_interval`
+    /// for the whole engine. A run's final count (rate 0) comes before the
+    /// state change that ends it when no `Progress` went out in the last
+    /// interval, otherwise with the next one, after that state change.
     Progress(Vec<ProgressUpdate>),
     SitePaused {
         site: SiteId,

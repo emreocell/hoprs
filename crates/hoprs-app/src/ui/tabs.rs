@@ -1,10 +1,14 @@
-//! The session tabs in the top bar: one per open site, its name, the protocol tag in mono
-//! and a × that closes it (and its session). The active tab sits on `paper_3` over the
-//! 2 px white underline. Tabs past the window's width scroll sideways (Shift+wheel or a
-//! touchpad), as the mockup's `overflow-x: auto` strip does.
+//! The session tabs in the top bar: a site's terminal and files tabs, each with the site's
+//! name, its protocol tag in mono (`ssh` for an SSH terminal, `sftp` for its files) and a
+//! × that closes it (the last tab of a site also closes its session). On a connected SSH
+//! tab, "New terminal tab" and "New files tab" add one on the same session. The active
+//! tab sits on `paper_3` over the 2 px white underline. Tabs past the window's width
+//! scroll sideways (Shift+wheel or a touchpad), as the mockup's `overflow-x: auto` strip
+//! does.
 
+use hoprs_core::{Protocol, Site, TabKind};
 use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::widget::{Id, button, column, container, row, scrollable, space, text};
+use iced::widget::{Id, button, column, container, row, scrollable, space, text, tooltip};
 use iced::{Alignment, Element, Length, Padding};
 
 use crate::app::{App, Message, Tab};
@@ -42,23 +46,54 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let bar = Scrollbar::new()
         .width(theme::SPACE_3XS)
         .scroller_width(theme::SPACE_3XS);
-    container(
-        scrollable(strip)
-            .id(strip_id())
-            .direction(Direction::Horizontal(bar))
-            .height(Length::Fill)
-            .style(theme::scrollbar),
+    let strip = scrollable(strip)
+        .id(strip_id())
+        .direction(Direction::Horizontal(bar))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(theme::scrollbar);
+    container(row![strip, session_actions(app)].align_y(Alignment::Center))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding(Padding::ZERO.top(theme::SPACE_2XS).left(theme::SPACE_XS))
+        .into()
+}
+
+/// The protocol tag of one tab: an SSH site's terminal is `ssh`, its files `sftp`; an FTP
+/// site's tab has the site's tag.
+pub fn tab_tag(site: &Site, kind: TabKind) -> &'static str {
+    match (site.protocol, kind) {
+        (Protocol::Ssh, TabKind::Terminal) => "ssh",
+        (Protocol::Ssh, TabKind::Files) => "sftp",
+        _ => sidebar::protocol_tag(site),
+    }
+}
+
+/// "New terminal tab" and "New files tab", for the active tab when it can have more.
+fn session_actions(app: &App) -> Option<Element<'_, Message>> {
+    let index = app.active_tab.filter(|&i| app.can_open_session_tab(i))?;
+    let tab = app.tabs[index].id;
+    let action = |label, kind| {
+        button(text(label).size(theme::TEXT_XS))
+            .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
+            .style(theme::button_text)
+            .on_press(Message::NewTab { tab, kind })
+    };
+    Some(
+        row![
+            action(strings::NEW_TERMINAL_TAB, TabKind::Terminal),
+            action(strings::NEW_FILES_TAB, TabKind::Files),
+        ]
+        .spacing(theme::SPACE_3XS)
+        .padding(Padding::ZERO.left(theme::SPACE_XS).right(theme::SPACE_XS))
+        .into(),
     )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .padding(Padding::ZERO.top(theme::SPACE_2XS).left(theme::SPACE_XS))
-    .into()
 }
 
 fn session_tab<'a>(app: &'a App, index: usize, tab: &'a Tab) -> Element<'a, Message> {
     let active = app.active_tab == Some(index);
     let (name, tag) = match app.site(&tab.site) {
-        Some(site) => (site.name.as_str(), sidebar::protocol_tag(site)),
+        Some(site) => (site.name.as_str(), tab_tag(site, tab.kind())),
         None => (strings::SITE_MISSING, ""),
     };
     let p = palette();
@@ -93,6 +128,23 @@ fn session_tab<'a>(app: &'a App, index: usize, tab: &'a Tab) -> Element<'a, Mess
     .padding(Padding::ZERO.left(theme::SPACE_MD).right(theme::SPACE_XS))
     .style(theme::tab(active))
     .on_press(Message::SelectTab(index));
+    // A terminal's remote title (OSC 0/2) is a hint over the tab, never its name.
+    let button: Element<'a, Message> = match tab.terminal().and_then(|t| t.title.as_deref()) {
+        Some(title) => tooltip(
+            button,
+            container(
+                text(title)
+                    .font(theme::MONO)
+                    .size(theme::TEXT_MONO)
+                    .wrapping(text::Wrapping::None),
+            )
+            .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
+            .style(theme::dialog_box),
+            tooltip::Position::Bottom,
+        )
+        .into(),
+        None => button.into(),
+    };
     let underline = container(space()).width(Length::Fill).height(UNDERLINE);
     let underline = if active {
         underline.style(theme::underline)
@@ -100,4 +152,18 @@ fn session_tab<'a>(app: &'a App, index: usize, tab: &'a Tab) -> Element<'a, Mess
         underline
     };
     column![button, underline].width(Length::Shrink).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tags_name_the_tab_kind() {
+        let ssh = Site::new("s", "h", "u", Protocol::Ssh);
+        assert_eq!(tab_tag(&ssh, TabKind::Terminal), "ssh");
+        assert_eq!(tab_tag(&ssh, TabKind::Files), "sftp");
+        let ftp = Site::new("f", "h", "u", Protocol::FtpsExplicit);
+        assert_eq!(tab_tag(&ftp, TabKind::Files), "ftps");
+    }
 }

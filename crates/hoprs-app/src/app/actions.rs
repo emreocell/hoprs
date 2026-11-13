@@ -9,7 +9,8 @@
 
 use hoprs_core::{EntryKind, Error, RemoteEntry, RemotePath};
 
-use super::files::{Pane, PaneStatus, RequestId, Row, Selection, Tab, TabId};
+use super::files::{Pane, PaneStatus, RequestId, Row, Selection};
+use super::tabs::{SiteConn, Tab, TabId};
 use super::{App, Effect};
 use crate::backend::{DeleteTarget, Side};
 use crate::ui::strings;
@@ -241,30 +242,37 @@ impl Pane {
 }
 
 impl Tab {
-    /// Whether a pane can start an action now: its folder is listed (and, remote, it has
-    /// a session) and no other operation runs in it.
-    pub fn can_act(&self, side: Side) -> bool {
-        matches!(self.pane_status(side), PaneStatus::Full | PaneStatus::Empty)
-            && self.pane(side).busy.is_none()
-            && (side == Side::Local || self.session().is_some())
+    /// Whether a pane can start an action now, given its site's connection `conn`: its
+    /// folder is listed (and, remote, it has a session) and no other operation runs in it.
+    pub fn can_act(&self, conn: &SiteConn, side: Side) -> bool {
+        matches!(
+            self.pane_status(conn, side),
+            PaneStatus::Full | PaneStatus::Empty
+        ) && self.pane(side).is_some_and(|pane| pane.busy.is_none())
+            && (side == Side::Local || conn.session().is_some())
     }
 
     /// Whether Upload (local) / Download (remote) can send the selection of `side` to
     /// the other pane: both panes listed, connected, and something selected.
-    pub fn can_transfer(&self, side: Side) -> bool {
-        self.can_act(Side::Local)
-            && self.can_act(Side::Remote)
-            && !self.pane(side).selected_entries().is_empty()
+    pub fn can_transfer(&self, conn: &SiteConn, side: Side) -> bool {
+        self.can_act(conn, Side::Local)
+            && self.can_act(conn, Side::Remote)
+            && self
+                .pane(side)
+                .is_some_and(|pane| !pane.selected_entries().is_empty())
     }
 }
 
 impl App {
-    fn can_act(&self, index: usize, side: Side) -> bool {
-        self.tabs[index].can_act(side)
+    pub(super) fn can_act(&self, index: usize, side: Side) -> bool {
+        self.tabs[index].can_act(self.tab_conn(index), side)
     }
 
     fn selected_entries(&self, index: usize, side: Side) -> Vec<&RemoteEntry> {
-        self.tabs[index].pane(side).selected_entries()
+        self.tabs[index]
+            .pane(side)
+            .map(|pane| pane.selected_entries())
+            .unwrap_or_default()
     }
 
     /// F7 / "New folder": the inline name row, its name preselected.
@@ -274,7 +282,9 @@ impl App {
         }
         let tab = &mut self.tabs[index];
         let tab_id = tab.id;
-        let pane = tab.pane_mut(side);
+        let Some(pane) = tab.pane_mut(side) else {
+            return Vec::new();
+        };
         let value = new_folder_name(&pane.entries);
         let select_end = preselect(&value, true);
         pane.action = Some(PaneAction::Edit(Edit {
@@ -294,7 +304,9 @@ impl App {
         if !self.can_act(index, side) {
             return Vec::new();
         }
-        let pane = self.tabs[index].pane(side);
+        let Some(pane) = self.tabs[index].pane(side) else {
+            return Vec::new();
+        };
         let cursor = pane
             .selection
             .cursor
@@ -311,7 +323,9 @@ impl App {
         let select_end = preselect(&name, is_dir);
         let tab = &mut self.tabs[index];
         let tab_id = tab.id;
-        let pane = tab.pane_mut(side);
+        let Some(pane) = tab.pane_mut(side) else {
+            return Vec::new();
+        };
         pane.action = Some(PaneAction::Edit(Edit {
             kind: EditKind::Rename { from: name.clone() },
             value: name.clone(),
@@ -352,8 +366,10 @@ impl App {
             .into_iter()
             .cloned()
             .collect();
-        if !targets.is_empty() {
-            self.tabs[index].pane_mut(side).action = Some(PaneAction::ConfirmDelete(targets));
+        if !targets.is_empty()
+            && let Some(pane) = self.tabs[index].pane_mut(side)
+        {
+            pane.action = Some(PaneAction::ConfirmDelete(targets));
         }
         Vec::new()
     }
@@ -363,7 +379,9 @@ impl App {
         if side != Side::Remote || !self.can_act(index, side) {
             return Vec::new();
         }
-        let selected = self.tabs[index].pane(side).permission_targets();
+        let Some(selected) = self.tabs[index].pane(side).map(|p| p.permission_targets()) else {
+            return Vec::new();
+        };
         let Some(first) = selected.first() else {
             return Vec::new();
         };
@@ -380,13 +398,17 @@ impl App {
         let names = selected.iter().map(|e| e.name.clone()).collect();
         let mut dialog = Permissions::new(names, mode);
         dialog.mixed = mixed;
-        self.tabs[index].pane_mut(side).action = Some(PaneAction::Permissions(dialog));
+        if let Some(pane) = self.tabs[index].pane_mut(side) {
+            pane.action = Some(PaneAction::Permissions(dialog));
+        }
         Vec::new()
     }
 
     /// Enter in the inline editor: checks the name, then creates or renames.
     pub(super) fn commit_edit(&mut self, index: usize, side: Side) -> Vec<Effect> {
-        let pane = self.tabs[index].pane_mut(side);
+        let Some(pane) = self.tabs[index].pane_mut(side) else {
+            return Vec::new();
+        };
         let Some(PaneAction::Edit(edit)) = &mut pane.action else {
             return Vec::new();
         };
@@ -418,7 +440,9 @@ impl App {
 
     /// "Delete" in the confirmation.
     pub(super) fn confirm_delete(&mut self, index: usize, side: Side) -> Vec<Effect> {
-        let pane = self.tabs[index].pane_mut(side);
+        let Some(pane) = self.tabs[index].pane_mut(side) else {
+            return Vec::new();
+        };
         let Some(PaneAction::ConfirmDelete(entries)) = pane.action.take() else {
             return Vec::new();
         };
@@ -434,7 +458,9 @@ impl App {
 
     /// "Apply" in the permissions dialog.
     pub(super) fn apply_permissions(&mut self, index: usize, side: Side) -> Vec<Effect> {
-        let pane = self.tabs[index].pane_mut(side);
+        let Some(pane) = self.tabs[index].pane_mut(side) else {
+            return Vec::new();
+        };
         let Some(PaneAction::Permissions(dialog)) = &pane.action else {
             return Vec::new();
         };
@@ -450,9 +476,12 @@ impl App {
     /// Starts `action` in the pane: marks it busy and hands the operation to the effects.
     fn start_op(&mut self, index: usize, side: Side, action: FileAction) -> Vec<Effect> {
         let op = RequestId(self.next_id());
+        let session = self.tab_session(index);
         let tab = &mut self.tabs[index];
-        let (tab_id, session) = (tab.id, tab.session());
-        let pane = tab.pane_mut(side);
+        let tab_id = tab.id;
+        let Some(pane) = tab.pane_mut(side) else {
+            return Vec::new();
+        };
         pane.action_error = None;
         pane.busy = Some(Busy {
             op,
@@ -482,7 +511,7 @@ impl App {
     ) -> Vec<Effect> {
         if let Some(busy) = self
             .tab_index(tab)
-            .and_then(|i| self.tabs[i].pane_mut(side).busy.as_mut())
+            .and_then(|i| self.tabs[i].pane_mut(side)?.busy.as_mut())
             .filter(|busy| busy.op == op)
         {
             busy.done = busy.done.max(done);
@@ -503,7 +532,9 @@ impl App {
         let Some(index) = self.tab_index(tab) else {
             return Vec::new();
         };
-        let pane = self.tabs[index].pane_mut(side);
+        let Some(pane) = self.tabs[index].pane_mut(side) else {
+            return Vec::new();
+        };
         let Some(busy) = pane.busy.take_if(|busy| busy.op == op) else {
             return Vec::new();
         };
@@ -525,7 +556,9 @@ impl App {
 
     /// Escape, Cancel or Keep: closes the editor, confirmation or dialog.
     pub(super) fn cancel_action(&mut self, index: usize, side: Side) {
-        self.tabs[index].pane_mut(side).action = None;
+        if let Some(pane) = self.tabs[index].pane_mut(side) {
+            pane.action = None;
+        }
     }
 
     /// After a listing: selects the entry an action just created or renamed, and returns
@@ -533,7 +566,9 @@ impl App {
     pub(super) fn select_new_entry(&mut self, index: usize, side: Side) -> Vec<Effect> {
         let tab = &mut self.tabs[index];
         let tab_id = tab.id;
-        let pane = tab.pane_mut(side);
+        let Some(pane) = tab.pane_mut(side) else {
+            return Vec::new();
+        };
         let Some(name) = pane.select_after.take() else {
             return Vec::new();
         };

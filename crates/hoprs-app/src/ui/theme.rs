@@ -728,4 +728,21 @@ mod tests {
         assert!(p.error.r > p.error.g + 0.3 && p.error.r > p.error.b + 0.3);
         assert_eq!(p, *palette());
     }
+
+    #[test]
+    fn terminal_theme_derives_from_palette() {
+        use crate::terminal::{Rgb, TermTheme};
+        let rgb = |c: Color| {
+            let [r, g, b, _] = c.into_rgba8();
+            Rgb::new(r, g, b)
+        };
+        let (p, t) = (palette(), TermTheme::default());
+        assert_eq!(t.bg, rgb(p.paper));
+        assert_eq!(t.fg, rgb(p.ink));
+        assert_eq!(t.cursor, rgb(p.ink));
+        assert_eq!(t.selection, rgb(p.accent_wash));
+        // Bright white is the text colour, white the secondary ink.
+        assert_eq!(t.ansi[15], rgb(p.ink));
+        assert_eq!(t.ansi[7], rgb(p.ink_2));
+    }
 }

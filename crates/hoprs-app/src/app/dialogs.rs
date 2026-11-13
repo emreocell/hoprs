@@ -28,7 +28,7 @@ use hoprs_core::{Error, SiteId};
 use hoprs_ssh::HostKeyChange;
 use secrecy::SecretString;
 
-use super::{App, Effect, FileKey, Message, Tab, TabId, TabState};
+use super::{App, Effect, FileKey, Message, SiteConn, Tab, TabId, TabState};
 use crate::backend::broker::{PromptKind, PromptRequest};
 use crate::backend::{BrokerEvent, KnownHostEntry, PromptAnswer, SessionId};
 
@@ -170,12 +170,12 @@ pub enum FailureAction {
     CloseAndReconnect,
 }
 
-impl Tab {
-    /// The host key changed: why this tab failed, if so.
+impl SiteConn {
+    /// The host key changed: why this connection failed, if so.
     ///
     /// A first connect fails with it (`known_hosts` has another key). A session that
     /// already connected pins its key, so a reconnect that meets another one leaves the
-    /// tab connected with its feed reporting `Disconnected` with the change.
+    /// site connected with its feed reporting `Disconnected` with the change.
     pub fn host_key_change(&self) -> Option<HostKeyChange> {
         match (&self.state, &self.conn) {
             (TabState::Failed(failure), _) => hoprs_ssh::host_key_change(&failure.error),
@@ -323,46 +323,15 @@ impl App {
         }
     }
 
-    /// While a dialog is open, the window behind it takes no input: the messages its
-    /// widgets and keys send are dropped (results of work in flight still land). The
-    /// mouse is stopped by the backdrop; this covers what the keyboard could still reach.
-    pub(super) fn blocked_by_dialog(&self, msg: &Message) -> bool {
-        if !self.dialogs.is_open() {
-            return false;
+    /// While a dialog or the palette is open, the window behind it takes no input: the
+    /// messages its widgets and keys send are dropped (results of work in flight still
+    /// land). The mouse is stopped by the backdrop; this covers what the keyboard could
+    /// still reach. Under a dialog, the palette does not open either.
+    pub(super) fn blocked_by_overlay(&self, msg: &Message) -> bool {
+        if self.dialogs.is_open() {
+            return matches!(msg, Message::Palette(_)) || behind_overlay(msg);
         }
-        match msg {
-            // Scroll offsets the lists report (also after a programmatic scroll).
-            Message::Pane {
-                msg: super::PaneMsg::Scrolled { .. },
-                ..
-            }
-            | Message::Queue(super::QueueMsg::Scrolled { .. }) => false,
-            Message::ToggleQueue
-            | Message::FilterSites(_)
-            | Message::ToggleWorkspace(_)
-            | Message::OpenWorkspace(_)
-            | Message::ConnectSite(_)
-            | Message::SelectTab(_)
-            | Message::NewSite
-            | Message::EditSite(_)
-            | Message::NewWorkspace
-            | Message::EditWorkspace(_)
-            | Message::SiteForm(_)
-            | Message::WorkspaceForm(_)
-            | Message::OpenProfileFolder
-            | Message::CloseTab(_)
-            | Message::Pane { .. }
-            | Message::Key { .. }
-            | Message::Queue(_)
-            | Message::FileDropped(_)
-            | Message::KnownHosts { .. }
-            | Message::RestartSession(_)
-            | Message::OpenImport
-            | Message::Import(_)
-            | Message::OpenSettings
-            | Message::Settings(_) => true,
-            _ => false,
-        }
+        self.palette.is_some() && behind_overlay(msg)
     }
 
     /// A session's connect finished: a secret answered with "save" was stored if it
@@ -385,7 +354,7 @@ impl App {
         if self.site(&tab.site).is_none() {
             return actions;
         }
-        actions.push(match tab.host_key_change() {
+        actions.push(match self.conn(&tab.site).host_key_change() {
             Some(HostKeyChange { line: Some(_) }) => FailureAction::RemoveOldEntry,
             Some(HostKeyChange { line: None }) => FailureAction::CloseAndReconnect,
             None => FailureAction::Reconnect,
@@ -394,43 +363,45 @@ impl App {
         actions
     }
 
-    /// The tab's connection failed or was lost: remember the site's `host:port` as it is
-    /// now, the endpoint "Remove the old entry…" works on even if the site is edited
-    /// later.
-    pub(super) fn note_failed_endpoint(&mut self, index: usize) {
-        let endpoint = self
-            .site(&self.tabs[index].site)
-            .map(|s| (s.host.clone(), s.port));
-        self.tabs[index].failed_endpoint = endpoint;
+    /// The site's connection failed or was lost: it remembers the site's `host:port` as
+    /// it is now, the endpoint "Remove the old entry…" works on even if the site is
+    /// edited later.
+    pub(super) fn note_failed_endpoint(&mut self, site: &SiteId) {
+        let endpoint = self.site(site).map(|s| (s.host.clone(), s.port));
+        self.conn_mut(site).failed_endpoint = endpoint;
     }
 
-    /// The `host:port` the tab failed with, if its host key changed in `known_hosts`.
-    fn changed_endpoint(&self, index: usize) -> Option<(String, u16)> {
-        let tab = &self.tabs[index];
-        tab.host_key_change()?.line?;
-        tab.failed_endpoint.clone()
+    /// The `host:port` the site failed with, if its host key changed in `known_hosts`.
+    fn changed_endpoint(&self, site: &SiteId) -> Option<(String, u16)> {
+        let conn = self.conn(site);
+        conn.host_key_change()?.line?;
+        conn.failed_endpoint.clone()
     }
 
-    /// Closes the tab's failed or lost session and connects the site with a new one (the
-    /// effect closes first, then connects: a reused session would keep its old state).
+    /// "Close and reconnect" (or a removed `known_hosts` entry) on a tab: closes the
+    /// failed or lost session of its site and connects the site with a new one, for all
+    /// its tabs.
     pub(super) fn restart_session(&mut self, tab: TabId) -> Vec<Effect> {
-        let Some(index) = self.tab_index(tab) else {
+        match self.tab_index(tab) {
+            Some(index) => self.restart_site(self.tabs[index].site.clone()),
+            None => Vec::new(),
+        }
+    }
+
+    /// Closes the site's failed or lost session and connects it with a new one (the
+    /// effect closes first, then connects: a reused session would keep its old state).
+    fn restart_site(&mut self, site: SiteId) -> Vec<Effect> {
+        if self.tab_of(&site).is_none() {
             return Vec::new();
-        };
-        let lost = self.tabs[index].lost_connection().is_some();
-        let tab = &mut self.tabs[index];
-        let close = match &tab.state {
+        }
+        let conn = self.conn_mut(&site);
+        let lost = conn.lost_connection().is_some();
+        let close = match &conn.state {
             TabState::Failed(failure) => failure.session,
             TabState::Connected(connected) if lost => Some(connected.session),
             TabState::Connected(_) | TabState::Connecting => return Vec::new(),
         };
-        let site = tab.site.clone();
-        tab.state = TabState::Connecting;
-        tab.conn = None;
-        tab.auth = None;
-        tab.reconnecting = false;
-        tab.known_hosts = KnownHostsFix::Idle;
-        tab.failed_endpoint = None;
+        *conn = SiteConn::connecting();
         if let Some(session) = close {
             self.forget_session(session);
         }
@@ -442,14 +413,14 @@ impl App {
         self.dialogs.saving.remove(&session);
     }
 
-    /// The tab of `site` closed while it connected (the app doesn't know that connect's
-    /// session yet). Its dialogs, shown or waiting, are dropped unanswered, and the
-    /// sessions they and the secrets typed with "save" came from are closed: the broker
-    /// withdraws their dialogs and the session manager forgets the secrets before the
-    /// connect can store them. Not answered Cancel: a host key refusal would be shared
-    /// with other sessions waiting on the same `host:port`, while a withdrawal makes them
-    /// ask again. Until the connect's result lands, a new dialog of the site is dropped
-    /// the same way.
+    /// The last tab of `site` closed while it connected (the app doesn't know that
+    /// connect's session yet; a site's tabs all share it, so the site names it). Its
+    /// dialogs, shown or waiting, are dropped unanswered, and the sessions they and the
+    /// secrets typed with "save" came from are closed: the broker withdraws their dialogs
+    /// and the session manager forgets the secrets before the connect can store them.
+    /// Not answered Cancel: a host key refusal would be shared with other sessions
+    /// waiting on the same `host:port`, while a withdrawal makes them ask again. Until
+    /// the connect's result lands, a new dialog of the site is dropped the same way.
     pub(super) fn abandon_site_prompts(&mut self, site: &SiteId) -> Vec<Effect> {
         self.dialogs.abandoned.insert(site.clone());
         let mut sessions = BTreeSet::new();
@@ -485,25 +456,27 @@ impl App {
         self.dialogs.abandoned.remove(site);
     }
 
-    /// "Remove the old entry…" and its confirmation, in the tab.
+    /// "Remove the old entry…" and its confirmation, from any tab of the site (the flow
+    /// is the site's: its results land even if that tab closed meanwhile).
     pub(super) fn known_hosts_msg(&mut self, tab: TabId, msg: KnownHostsMsg) -> Vec<Effect> {
         let Some(index) = self.tab_index(tab) else {
             return Vec::new();
         };
-        let Some((host, port)) = self.changed_endpoint(index) else {
+        let site = self.tabs[index].site.clone();
+        let Some((host, port)) = self.changed_endpoint(&site) else {
             return Vec::new();
         };
-        let fix = &mut self.tabs[index].known_hosts;
+        let fix = &mut self.conn_mut(&site).known_hosts;
         match (msg, &*fix) {
             (KnownHostsMsg::Start, KnownHostsFix::Idle | KnownHostsFix::Failed(_)) => {
                 *fix = KnownHostsFix::Checking;
-                vec![Effect::KnownHostEntries { tab, host, port }]
+                vec![Effect::KnownHostEntries { site, host, port }]
             }
             (KnownHostsMsg::Confirm, KnownHostsFix::Confirm(entries)) => {
                 let expected = entries.clone();
                 *fix = KnownHostsFix::Removing;
                 vec![Effect::RemoveKnownHost {
-                    tab,
+                    site,
                     host,
                     port,
                     expected,
@@ -519,38 +492,37 @@ impl App {
 
     pub(super) fn known_host_entries(
         &mut self,
-        tab: TabId,
+        site: SiteId,
         result: Result<Vec<KnownHostEntry>, Error>,
     ) -> Vec<Effect> {
-        if let Some(index) = self.tab_index(tab) {
-            let fix = &mut self.tabs[index].known_hosts;
-            if *fix == KnownHostsFix::Checking {
-                *fix = match result {
-                    Ok(entries) => KnownHostsFix::Confirm(entries),
-                    Err(error) => KnownHostsFix::Failed(error),
-                };
-            }
+        if let Some(conn) = self.conns.get_mut(&site)
+            && conn.known_hosts == KnownHostsFix::Checking
+        {
+            conn.known_hosts = match result {
+                Ok(entries) => KnownHostsFix::Confirm(entries),
+                Err(error) => KnownHostsFix::Failed(error),
+            };
         }
         Vec::new()
     }
 
-    /// Removed: the tab connects again, and that connect asks about the new key.
+    /// Removed: the site connects again, and that connect asks about the new key.
     pub(super) fn known_host_removed(
         &mut self,
-        tab: TabId,
+        site: SiteId,
         result: Result<usize, Error>,
     ) -> Vec<Effect> {
-        let Some(index) = self.tab_index(tab) else {
+        let Some(conn) = self.conns.get_mut(&site) else {
             return Vec::new();
         };
-        if self.tabs[index].known_hosts != KnownHostsFix::Removing {
+        if conn.known_hosts != KnownHostsFix::Removing {
             return Vec::new();
         }
         match result {
             // A new session checks `known_hosts` again (the failed one is closed).
-            Ok(_) => self.restart_session(tab),
+            Ok(_) => self.restart_site(site),
             Err(error) => {
-                self.tabs[index].known_hosts = KnownHostsFix::Failed(error);
+                conn.known_hosts = KnownHostsFix::Failed(error);
                 Vec::new()
             }
         }
@@ -577,5 +549,54 @@ fn answer_of(dialog: &mut Dialog) -> PromptAnswer {
                 .unwrap_or_default(),
             save: dialog.save,
         },
+    }
+}
+
+/// Whether `msg` is input from the window behind a dialog or the palette.
+fn behind_overlay(msg: &Message) -> bool {
+    match msg {
+        Message::Edit(msg) => msg.is_user(),
+        // Scroll offsets the lists report (also after a programmatic scroll).
+        Message::Pane {
+            msg: super::PaneMsg::Scrolled { .. },
+            ..
+        }
+        | Message::Queue(super::QueueMsg::Scrolled { .. }) => false,
+        Message::ToggleQueue
+        | Message::FilterSites(_)
+        | Message::ToggleWorkspace(_)
+        | Message::OpenWorkspace(_)
+        | Message::ConnectSite(_)
+        | Message::SelectTab(_)
+        | Message::NewSite
+        | Message::EditSite(_)
+        | Message::NewWorkspace
+        | Message::EditWorkspace(_)
+        | Message::SiteForm(_)
+        | Message::WorkspaceForm(_)
+        | Message::OpenProfileFolder
+        | Message::CloseTab(_)
+        | Message::NewTab { .. }
+        | Message::Pane { .. }
+        | Message::Key { .. }
+        | Message::Queue(_)
+        | Message::FileDropped(_)
+        | Message::KnownHosts { .. }
+        | Message::RestartSession(_)
+        | Message::OpenImport
+        | Message::Import(_)
+        | Message::OpenSettings
+        | Message::Settings(_) => true,
+        // The terminal's keyboard, mouse and search: never under a dialog or the palette
+        // (its timers and replies still land).
+        Message::Terminal { msg, .. } => !matches!(
+            msg,
+            super::TerminalMsg::ResizeDue(_)
+                | super::TerminalMsg::SearchDue(_)
+                | super::TerminalMsg::InputSent(_)
+                | super::TerminalMsg::Pasted(_)
+                | super::TerminalMsg::Resized { .. }
+        ),
+        _ => false,
     }
 }

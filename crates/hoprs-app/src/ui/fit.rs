@@ -1,5 +1,5 @@
 //! What fits at a given window width, down to the 960 px minimum: which file table
-//! columns show, and whether the pane toolbars and the queue head use their compact form.
+//! columns show, which form the pane toolbars use, and whether the queue head is compact.
 //! Pure functions of the window width the app last saw ([`crate::app::App::window_width`]).
 
 use crate::backend::Side;
@@ -13,10 +13,16 @@ pub const PERMISSIONS_WIDTH: f32 = 110.0;
 /// (Permissions first, then Modified).
 pub const NAME_MIN: f32 = 120.0;
 
-/// Below these pane widths the toolbar drops its key hints and tightens its padding
-/// (the full remote toolbar needs ~500 px, the local one ~385 px).
-const TOOLBAR_FULL_REMOTE: f32 = 500.0;
-const TOOLBAR_FULL_LOCAL: f32 = 390.0;
+/// From these pane widths the toolbar is [`Toolbar::Full`], labels and key hints (the
+/// remote toolbar, with Edit, needs ~490 px; the local one ~345 px): both panes of the
+/// default 1280 px window, the remote one down to a ~1240 px window. Narrower panes get
+/// [`Toolbar::Compact`] (no hints) down to [`TOOLBAR_NARROW`], then [`Toolbar::Narrow`].
+const TOOLBAR_FULL_REMOTE: f32 = 492.0;
+const TOOLBAR_FULL_LOCAL: f32 = 360.0;
+/// Below this pane width (either side) the toolbar also uses short labels ("Folder",
+/// "Perms…"): without them the six remote actions need ~385 px, more than the 352 px
+/// panes of the 960 px minimum window.
+const TOOLBAR_NARROW: f32 = 400.0;
 /// Below this center width the queue head uses short labels.
 const QUEUE_HEAD_FULL: f32 = 900.0;
 
@@ -50,11 +56,41 @@ pub fn columns(pane: f32, side: Side) -> Columns {
     }
 }
 
-/// Whether a pane `pane` px wide shows the toolbar without key hints.
-pub fn compact_toolbar(pane: f32, side: Side) -> bool {
-    pane < match side {
+/// How a pane's toolbar reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Toolbar {
+    /// Labels and key hints.
+    Full,
+    /// Labels only.
+    Compact,
+    /// Short labels only (the narrowest panes).
+    Narrow,
+}
+
+impl Toolbar {
+    /// Whether the key hints show.
+    pub fn hints(self) -> bool {
+        self == Self::Full
+    }
+
+    /// Whether the short labels replace the long ones.
+    pub fn short_labels(self) -> bool {
+        self == Self::Narrow
+    }
+}
+
+/// The toolbar form for a pane `pane` px wide.
+pub fn toolbar(pane: f32, side: Side) -> Toolbar {
+    let full = match side {
         Side::Local => TOOLBAR_FULL_LOCAL,
         Side::Remote => TOOLBAR_FULL_REMOTE,
+    };
+    if pane >= full {
+        Toolbar::Full
+    } else if pane >= TOOLBAR_NARROW {
+        Toolbar::Compact
+    } else {
+        Toolbar::Narrow
     }
 }
 
@@ -164,10 +200,19 @@ mod tests {
 
     #[test]
     fn toolbars_and_queue_head_go_compact_when_narrow() {
-        assert!(!compact_toolbar(pane_width(1280.0), Side::Remote));
-        assert!(!compact_toolbar(pane_width(1280.0), Side::Local));
-        assert!(compact_toolbar(pane_width(960.0), Side::Remote));
-        assert!(compact_toolbar(pane_width(960.0), Side::Local));
+        // The remote toolbar has Edit too (Plan 6 Task 8); both keep their key hints at
+        // the default 1280 px window (Plan 6 Task 11), the remote one down to ~1240 px.
+        assert_eq!(toolbar(pane_width(1280.0), Side::Remote), Toolbar::Full);
+        assert_eq!(toolbar(pane_width(1240.0), Side::Remote), Toolbar::Full);
+        assert_eq!(toolbar(pane_width(1200.0), Side::Remote), Toolbar::Compact);
+        assert_eq!(toolbar(pane_width(1280.0), Side::Local), Toolbar::Full);
+        assert_eq!(toolbar(pane_width(1120.0), Side::Remote), Toolbar::Compact);
+        // At the 960 px minimum (352 px panes) both toolbars use the short labels, so
+        // all six remote actions fit unclipped ("Permissions…" was cut there).
+        assert_eq!(toolbar(pane_width(960.0), Side::Remote), Toolbar::Narrow);
+        assert_eq!(toolbar(pane_width(960.0), Side::Local), Toolbar::Narrow);
+        assert!(!Toolbar::Narrow.hints() && !Toolbar::Compact.hints() && Toolbar::Full.hints());
+        assert!(Toolbar::Narrow.short_labels() && !Toolbar::Compact.short_labels());
         assert!(!compact_queue(1280.0));
         assert!(compact_queue(960.0));
         assert_eq!(center_width(100.0), 0.0);

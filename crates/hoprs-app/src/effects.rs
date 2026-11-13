@@ -1,6 +1,7 @@
 //! Turns each [`Effect`] into an [`iced::Task`]: the only place that calls
 //! the backend.
 
+use crate::terminal::Redacted;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,9 +15,14 @@ use hoprs_import::ImportOptions;
 use hoprs_vault::ImportMode;
 use secrecy::SecretString;
 
-use crate::app::{Effect, FileAction, Message, PickTarget, ProfileOp, RequestId, TabId};
+use crate::app::edit::{EditsFor, FLUSH_LIMIT, Settle, Settled};
+use crate::app::terminal::ShellSignal;
+use crate::app::{
+    EditMsg, Effect, FileAction, Message, PickTarget, ProfileOp, RequestId, TabId, TerminalMsg,
+};
 use crate::backend::{
-    BackendApi, KnownHostEntry, PromptAnswer, PromptId, SessionId, Side, WorkspaceTabs,
+    BackendApi, KeptEdit, KnownHostEntry, PromptAnswer, PromptId, SessionId, ShellId, ShellOutput,
+    Side, WorkspaceTabs,
 };
 use crate::settings::Settings;
 use crate::ui::site_form::PasswordChange;
@@ -59,9 +65,8 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
             )
         }
         Effect::ConnectSites(sites) => Task::run(connect_sites(backend, sites), |m| m),
-        Effect::CloseSession(session) => {
-            Task::future(async move { backend.close(session).await }).discard()
-        }
+        Effect::CloseSession(session) => Task::future(close_session(backend, session))
+            .and_then(|(kept, kept_in)| Task::done(Message::Edit(EditMsg::Kept { kept, kept_in }))),
         Effect::OpenProfileFolder => Task::perform(
             open_folder(backend.profile_dir()),
             Message::ProfileFolderOpened,
@@ -139,27 +144,30 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
         Effect::Unfocus => {
             iced::advanced::widget::operate(iced::advanced::widget::operation::focusable::unfocus())
         }
-        Effect::KnownHostEntries { tab, host, port } => {
-            Task::future(known_host_entries(backend, tab, host, port))
+        Effect::KnownHostEntries { site, host, port } => {
+            Task::future(known_host_entries(backend, site, host, port))
         }
         Effect::RemoveKnownHost {
-            tab,
+            site,
             host,
             port,
             expected,
-        } => Task::future(remove_known_host(backend, tab, host, port, expected)),
+        } => Task::future(remove_known_host(backend, site, host, port, expected)),
         Effect::RestartSite { close, site } => Task::run(restart_site(backend, close, site), |m| m),
-        Effect::Reconnect { tab, session } => Task::future(reconnect(backend, tab, session)),
+        Effect::Reconnect { session } => Task::future(reconnect(backend, session)),
         Effect::SaveTabs { workspace, tabs } => Task::future(save_tabs(backend, workspace, tabs)),
         Effect::Shutdown { save, window } => {
             Task::perform(shutdown(backend, save, SHUTDOWN_LIMIT), move |_| {
                 Message::ShutdownDone(window)
             })
         }
-        Effect::ExitWindow(window) => {
-            exit_watchdog();
-            iced::window::close(window)
-        }
+        // A forced exit (or the end of the shutdown) keeps every unsent edit first,
+        // locally, within a short bound.
+        Effect::ExitWindow(window) => Task::future(preserve_before_exit(backend, PRESERVE_LIMIT))
+            .then(move |_| {
+                exit_watchdog();
+                iced::window::close(window)
+            }),
         Effect::LoadSettings => Task::done(Message::SettingsLoaded(backend.settings())),
         Effect::LoadQueueStatus => Task::done(Message::QueueStatus(backend.queue_error())),
         Effect::SaveSettings(settings) => Task::future(save_settings(backend, settings)),
@@ -168,6 +176,10 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
         }
         Effect::SetWorkers(workers) => {
             backend.set_workers(workers);
+            Task::none()
+        }
+        Effect::SetKeepalive(secs) => {
+            backend.set_keepalive(secs);
             Task::none()
         }
         Effect::CheckExportTarget(path) => Task::future(async move {
@@ -195,7 +207,258 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
             password,
             mode,
         } => Task::future(restore_backup(backend, path, password, mode)),
+        Effect::OpenShell {
+            tab,
+            request,
+            session,
+            cols,
+            rows,
+        } => Task::future(async move {
+            let result = backend.open_shell(session, cols, rows).await;
+            Message::ShellOpened {
+                tab,
+                request,
+                result,
+            }
+        }),
+        Effect::ShellInput { tab, shell, data } => Task::future(async move {
+            // A failure needs no message: a dead shell says so through its output. The
+            // bytes are never logged.
+            let _ = backend.shell_input(shell, data.0).await;
+            Message::Terminal {
+                tab,
+                msg: TerminalMsg::InputSent(shell),
+            }
+        }),
+        Effect::ShellResize { shell, cols, rows } => Task::future(async move {
+            if let Err(error) = backend.shell_resize(shell, cols, rows).await {
+                tracing::debug!(%error, "terminal resize not delivered");
+            }
+        })
+        .discard(),
+        Effect::CloseShell(shell) => {
+            backend.close_shell(shell);
+            Task::none()
+        }
+        Effect::WriteClipboard(text) => iced::clipboard::write(text.0),
+        Effect::ReadClipboard(tab) => iced::clipboard::read().map(move |text| Message::Terminal {
+            tab,
+            msg: TerminalMsg::Pasted(text.into()),
+        }),
+        Effect::Later { after, message } => Task::future(later(after, *message)),
+        Effect::FocusTerminalSearch(tab) => {
+            iced::widget::operation::focus(crate::ui::terminal::search_id(tab))
+        }
+        Effect::FocusPalette => iced::widget::operation::focus(crate::ui::palette::input_id()),
+        Effect::StartEdit {
+            tab,
+            session,
+            remote,
+            editor,
+        } => Task::future(async move {
+            let result = backend.start_edit(session, remote.clone(), editor).await;
+            Message::Edit(EditMsg::Started {
+                tab,
+                session,
+                remote,
+                result,
+            })
+        }),
+        Effect::ResolveEdit { id, choice } => Task::future(async move {
+            let result = backend.resolve_edit(id, choice).await;
+            Message::Edit(EditMsg::Done { id, result })
+        }),
+        Effect::RetryEdit(id) => Task::future(async move {
+            let result = backend.retry_edit(id).await;
+            Message::Edit(EditMsg::Done { id, result })
+        }),
+        Effect::CheckEdits { purpose, sessions } => {
+            Task::future(check_edits(backend, purpose, sessions))
+        }
+        Effect::SettleEdits {
+            purpose,
+            sessions,
+            how,
+        } => Task::future(settle_edits(backend, purpose, sessions, how, FLUSH_LIMIT)),
+        Effect::ScrollLogToEnd => iced::widget::operation::snap_to(
+            crate::ui::log::scroll_id(),
+            iced::widget::operation::RelativeOffset {
+                x: None,
+                y: Some(1.0),
+            },
+        ),
     }
+}
+
+/// `message`, `after` from now (the debounces; tokio's clock, so tests can pause it).
+pub async fn later(after: Duration, message: Message) -> Message {
+    tokio::time::sleep(after).await;
+    message
+}
+
+/// The longest a terminal frame lasts: output is delivered at most this often.
+pub const FRAME: Duration = Duration::from_millis(16);
+/// The most output one batch holds. With [`MAX_IN_FLIGHT`] batches waiting at most,
+/// memory stays bounded and a shell can deliver up to about 125 MiB/s. Measured in
+/// release: feeding 2 MiB of `cat` output takes 23–32 ms (80- to 250-column text, with
+/// and without colours); 4 MiB took 46–54 ms, too close to a UI hitch.
+pub const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024;
+/// Batches of one shell that may wait for `update` at once. While they all wait, the feed
+/// pulls nothing more: the shell's pump holds the output, and past its own limit closes
+/// the shell and says so (`Overflowed`), instead of the app queueing without bound.
+pub const MAX_IN_FLIGHT: usize = 2;
+
+/// One batch's place among the [`MAX_IN_FLIGHT`] of its shell; the place frees when the
+/// last clone is dropped, i.e. once `update` has handled the [`Message::TerminalOutput`]
+/// carrying it. `Default` holds no place.
+#[derive(Clone, Debug, Default)]
+pub struct Credit {
+    /// Held only to be dropped.
+    _permit: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+}
+
+/// What [`batch_output`] yields.
+#[derive(Debug)]
+pub enum Batched {
+    /// Every byte gathered for one frame, with its credit.
+    Data(Redacted<Vec<u8>>, Credit),
+    Signal(ShellSignal),
+}
+
+/// A shell's output as the terminal tab takes it: [`batch_output`] over the stream the
+/// backend hands out once, as [`Message::TerminalOutput`] (data) and
+/// [`Message::ShellEvent`] (the rest). An output already taken, or one that ends without
+/// `Closed`, ends with `Closed`.
+pub fn shell_feed(
+    backend: &dyn BackendApi,
+    tab: TabId,
+    shell: ShellId,
+) -> impl Stream<Item = Message> + Send + use<> {
+    let output = backend
+        .shell_output(shell)
+        .unwrap_or_else(|| stream::empty().boxed());
+    let credits = Arc::new(tokio::sync::Semaphore::new(MAX_IN_FLIGHT));
+    let mut closed = false;
+    batch_output(output, FRAME, credits)
+        .chain(stream::once(std::future::ready(Batched::Signal(
+            ShellSignal::Closed,
+        ))))
+        .filter_map(move |item| {
+            // Exactly one `Closed`, last.
+            let item = (!closed).then_some(item);
+            closed |= matches!(item, Some(Batched::Signal(ShellSignal::Closed)));
+            std::future::ready(item)
+        })
+        .map(move |item| match item {
+            Batched::Data(bytes, credit) => Message::TerminalOutput {
+                tab,
+                shell,
+                bytes,
+                credit,
+            },
+            Batched::Signal(event) => Message::ShellEvent { tab, shell, event },
+        })
+}
+
+/// Joins a shell's `Data` into at most one item per `frame` (Review Focus 1):
+/// - a burst after a quiet moment goes out at once, with whatever else is already
+///   waiting; output that keeps coming is held until a frame after the previous item,
+///   then goes out as one;
+/// - an item holds at most [`MAX_FRAME_BYTES`] (past it the stream stops pulling until
+///   the frame ends);
+/// - each data item takes one of `credits` before the stream pulls its first byte, and
+///   gives it back when its [`Credit`] is dropped: while the consumer has not handled
+///   them, nothing more is pulled (the producer's own bound applies);
+/// - `Exit`, `Overflowed` and `Closed` keep their order: data received before one of them
+///   goes out first, at the end of its frame, and the event right after it. An event with
+///   no data before it goes out at once.
+pub fn batch_output<S>(
+    output: S,
+    frame: Duration,
+    credits: Arc<tokio::sync::Semaphore>,
+) -> impl Stream<Item = Batched> + Send
+where
+    S: Stream<Item = ShellOutput> + Send + Unpin + 'static,
+{
+    struct Batcher<S> {
+        output: S,
+        credits: Arc<tokio::sync::Semaphore>,
+        /// When the last item went out.
+        last: Option<tokio::time::Instant>,
+        /// An event that ended a batch, to send after it.
+        held: Option<ShellSignal>,
+        ended: bool,
+    }
+
+    fn signal(output: ShellOutput) -> Option<ShellSignal> {
+        match output {
+            ShellOutput::Data(_) => None,
+            ShellOutput::Exit(code) => Some(ShellSignal::Exit(code)),
+            ShellOutput::Overflowed => Some(ShellSignal::Overflowed),
+            ShellOutput::Closed => Some(ShellSignal::Closed),
+        }
+    }
+
+    let state = Batcher {
+        output,
+        credits,
+        last: None,
+        held: None,
+        ended: false,
+    };
+    stream::unfold(state, move |mut st| async move {
+        if let Some(event) = st.held.take() {
+            return Some((Batched::Signal(event), st));
+        }
+        if st.ended {
+            return None;
+        }
+        // Backpressure: no credit, no pulling.
+        let permit = st.credits.clone().acquire_owned().await.ok();
+        let mut batch = match st.output.next().await? {
+            ShellOutput::Data(bytes) => bytes,
+            event => return signal(event).map(|s| (Batched::Signal(s), st)),
+        };
+        let now = tokio::time::Instant::now();
+        let due = st.last.map_or(now, |last| (last + frame).max(now));
+        let wait = tokio::time::sleep_until(due);
+        tokio::pin!(wait);
+        loop {
+            if batch.len() >= MAX_FRAME_BYTES {
+                wait.as_mut().await;
+                break;
+            }
+            tokio::select! {
+                // What is already waiting joins the batch before the frame closes.
+                biased;
+                item = st.output.next() => match item {
+                    Some(ShellOutput::Data(bytes)) => batch.extend_from_slice(&bytes),
+                    // The data keeps its frame; the event follows it.
+                    Some(event) => {
+                        st.held = signal(event);
+                        wait.as_mut().await;
+                        break;
+                    }
+                    None => {
+                        st.ended = true;
+                        wait.as_mut().await;
+                        break;
+                    }
+                },
+                () = &mut wait => break,
+            }
+        }
+        st.last = Some(tokio::time::Instant::now());
+        Some((
+            Batched::Data(
+                batch.into(),
+                Credit {
+                    _permit: permit.map(Arc::new),
+                },
+            ),
+            st,
+        ))
+    })
 }
 
 /// "Import from FileZilla": the backend reads, parses and applies the file on the
@@ -370,13 +633,9 @@ pub async fn save_tabs(
 
 /// The banner's Reconnect: the backend's reconnect of the session (`reconnect_now`, then
 /// the wait that also settles the secrets typed with "save").
-pub async fn reconnect(backend: Arc<dyn BackendApi>, tab: TabId, session: SessionId) -> Message {
+pub async fn reconnect(backend: Arc<dyn BackendApi>, session: SessionId) -> Message {
     let result = backend.reconnect(session).await;
-    Message::Reconnected {
-        tab,
-        session,
-        result,
-    }
+    Message::Reconnected { session, result }
 }
 
 /// One session's feed for its subscription: the state now, then each change, as
@@ -405,6 +664,135 @@ pub fn session_feed(
     })
 }
 
+/// Ends a session's remote edits, then closes it: all sent, their files go (an upload
+/// under way is waited for, never cut by the close); unsent ones (a close that did not
+/// ask, e.g. the site was deleted) are kept as recovered copies, nothing deleted. Returns
+/// the copies kept and their root (none: no message).
+pub async fn close_session(
+    backend: Arc<dyn BackendApi>,
+    session: SessionId,
+) -> Option<(Vec<KeptEdit>, PathBuf)> {
+    let kept = match backend.finish_edits(session, false).await {
+        Ok(unsent) if unsent.is_empty() => None,
+        Ok(_) => match backend.keep_edits(session).await {
+            Ok(kept) => Some((kept, backend.recovered_dir())),
+            Err(error) => {
+                tracing::warn!(session = session.0, %error, "cannot keep the unsent remote edits; their files stay");
+                None
+            }
+        },
+        Err(error) => {
+            tracing::warn!(session = session.0, %error, "cannot end the remote edits; their files stay");
+            None
+        }
+    };
+    backend.close(session).await;
+    kept
+}
+
+/// How long a forced exit waits for the unsent edits to be kept.
+pub const PRESERVE_LIMIT: Duration = Duration::from_secs(2);
+
+/// Before the window closes for good: every unsent edit is saved as a recovered copy,
+/// locally (at most `limit`; the edits a finished shutdown ended are already safe).
+pub async fn preserve_before_exit(backend: Arc<dyn BackendApi>, limit: Duration) -> Vec<KeptEdit> {
+    match tokio::time::timeout(limit, backend.preserve_edits()).await {
+        Ok(kept) => {
+            if !kept.is_empty() {
+                tracing::info!(count = kept.len(), dir = %backend.recovered_dir().display(), "unsent remote edits kept before exit");
+            }
+            kept
+        }
+        Err(_) => {
+            tracing::warn!(
+                ?limit,
+                "keeping the unsent remote edits took too long; exiting"
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// Which edits of `sessions` are unsent, for a close question.
+pub async fn check_edits(
+    backend: Arc<dyn BackendApi>,
+    purpose: EditsFor,
+    sessions: Vec<SessionId>,
+) -> Message {
+    let mut unsent = Vec::new();
+    for session in sessions {
+        unsent.extend(backend.edits_pending(session).await);
+    }
+    Message::Edit(EditMsg::Checked {
+        purpose,
+        unsent,
+        kept_in: backend.recovered_dir(),
+    })
+}
+
+/// A close question's answer: "Upload" sends every session's unsent edits (all at once,
+/// within `limit`), then ends the sessions with nothing left unsent (their files go);
+/// "Keep" saves the unsent edits as recovered copies and ends them, deleting nothing.
+pub async fn settle_edits(
+    backend: Arc<dyn BackendApi>,
+    purpose: EditsFor,
+    sessions: Vec<SessionId>,
+    how: Settle,
+    limit: Duration,
+) -> Message {
+    let result = async {
+        let mut settled = Settled::default();
+        match how {
+            Settle::Upload => {
+                let flushes = sessions
+                    .iter()
+                    .map(|session| backend.flush_edits(*session, limit));
+                let left = futures_util::future::join_all(flushes).await;
+                for (session, left) in sessions.iter().zip(left) {
+                    if left.is_empty() {
+                        // A save made since the flush is reported, not deleted.
+                        settled
+                            .unsent
+                            .extend(backend.finish_edits(*session, false).await?);
+                    } else {
+                        settled.unsent.extend(left);
+                    }
+                }
+            }
+            Settle::Keep => {
+                for session in &sessions {
+                    settled.kept.extend(backend.keep_edits(*session).await?);
+                }
+            }
+        }
+        settled.kept_in = backend.recovered_dir();
+        Ok(settled)
+    }
+    .await;
+    Message::Edit(EditMsg::Settled {
+        purpose,
+        how,
+        result,
+    })
+}
+
+/// The edits' events for their subscription. A receiver that lagged lost events: the
+/// strip may be stale until the next event of each edit (logged).
+pub fn edit_feed(backend: &dyn BackendApi) -> impl Stream<Item = Message> + Send + use<> {
+    let events = backend.subscribe_edits();
+    stream::unfold(events, |mut events| async move {
+        loop {
+            match events.recv().await {
+                Ok(event) => return Some((Message::Edit(EditMsg::Event(event)), events)),
+                Err(broadcast::error::RecvError::Lagged(lost)) => {
+                    tracing::warn!(lost, "the remote edit notices lagged behind");
+                }
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    })
+}
+
 /// Delivers a dialog's answer (the effect's secret goes straight to the backend).
 pub async fn answer_prompt(backend: Arc<dyn BackendApi>, id: PromptId, answer: PromptAnswer) {
     backend.answer_prompt(id, answer).await;
@@ -413,40 +801,46 @@ pub async fn answer_prompt(backend: Arc<dyn BackendApi>, id: PromptId, answer: P
 /// Reads the `known_hosts` lines "Remove the old entry" would delete.
 pub async fn known_host_entries(
     backend: Arc<dyn BackendApi>,
-    tab: TabId,
+    site: SiteId,
     host: String,
     port: u16,
 ) -> Message {
     let result = backend.known_host_entries(host, port).await;
-    Message::KnownHostEntries { tab, result }
+    Message::KnownHostEntries { site, result }
 }
 
 /// Removes the `known_hosts` lines of `host:port`, if still the ones confirmed.
 pub async fn remove_known_host(
     backend: Arc<dyn BackendApi>,
-    tab: TabId,
+    site: SiteId,
     host: String,
     port: u16,
     expected: Vec<KnownHostEntry>,
 ) -> Message {
     let result = backend.remove_known_host(host, port, expected).await;
-    Message::KnownHostRemoved { tab, result }
+    Message::KnownHostRemoved { site, result }
 }
 
-/// Closes `close` first, then connects `site`: the connect never finds (and reuses) the
-/// old session.
+/// Closes `close` first (as [`close_session`]: its unsent edits kept, said by
+/// [`EditMsg::Kept`]), then connects `site`: the connect never finds (and reuses) the old
+/// session.
 pub fn restart_site(
     backend: Arc<dyn BackendApi>,
     close: Option<SessionId>,
     site: SiteId,
 ) -> impl Stream<Item = Message> + Send + 'static {
     let closer = backend.clone();
+    // Closed as any session is: its remote edits settle first, unsent ones kept and said.
     stream::once(async move {
-        if let Some(session) = close {
-            closer.close(session).await;
-        }
+        let kept = match close {
+            Some(session) => close_session(closer, session).await,
+            None => None,
+        };
+        stream::iter(kept.map(|(kept, kept_in)| Message::Edit(EditMsg::Kept { kept, kept_in })))
     })
-    .flat_map(move |()| connect_sites(backend.clone(), vec![site.clone()]))
+    .flatten()
+    // Lazy: the connect starts only once the close is done.
+    .chain(connect_sites(backend, vec![site]))
 }
 
 /// The broker's dialogs for the UI's subscription: each request or withdrawal as

@@ -12,7 +12,11 @@ hoprs-remote = { path = "../hoprs-remote" }
 hoprs-transfer = { path = "../hoprs-transfer" }
 hoprs-import = { path = "../hoprs-import" }
 iced = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
+# iced's own crates (already in its tree, same versions), for `bench`: a user interface
+# laid out and drawn without a window.
+iced_runtime = "0.14"
+iced_tiny_skia = "0.14"
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time", "io-util"] }
 tokio-util = { workspace = true }
 futures-util = { workspace = true }
 async-trait = { workspace = true }
@@ -24,11 +28,30 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
+# Terminal emulation core (grid, parser, selection, search).
+alacritty_terminal = { version = "0.26", default-features = false }
 # Native file dialogs. Linux: the XDG desktop portal over libdbus (loaded at run time),
 # falling back to zenity; no GTK, no extra D-Bus stack.
 rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
+# Remote editing: watches the local copies (inotify on Linux).
+notify = "8.2"
+# Splits the editor command with shell quoting rules, without running a shell. Already in
+# the dependency tree (no new download), dependency-free, MIT OR Apache-2.0.
+shlex = "2.0"
+
+[lib]
+bench = false
+
+[[bench]]
+name = "ui"
+harness = false
+
+[[bench]]
+name = "startup"
+harness = false
 
 [dev-dependencies]
+criterion = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "macros", "time", "test-util"] }
 hoprs-remote = { path = "../hoprs-remote", features = ["testing"] }

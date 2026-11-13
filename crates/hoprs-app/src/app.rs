@@ -1,11 +1,12 @@
 //! The application state and its pure update: no I/O here, only state
 //! changes and the [`Effect`]s for `effects::run` to perform.
 
-use std::collections::HashSet;
+use crate::terminal::Redacted;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use hoprs_core::{
-    ConnectionState, Error, RemoteEntry, RemotePath, SavedTab, Site, SiteId, Workspace, WorkspaceId,
+    ConnectionState, Error, RemoteEntry, RemotePath, Site, SiteId, TabKind, Workspace, WorkspaceId,
 };
 use hoprs_import::ImportReport;
 use hoprs_transfer::{ConflictPolicy, Event, TransferId, TransferSpec};
@@ -13,8 +14,8 @@ use hoprs_vault::{BackupImportReport, ExportReport, ImportMode, UnreadableEntry}
 use secrecy::SecretString;
 
 use crate::backend::{
-    AuthMethod, BrokerEvent, ConnectError, ConnectResult, Connected, ControlOp, KnownHostEntry,
-    ProfileSnapshot, PromptAnswer, PromptId, SessionId, Side, TransferSnapshot, WorkspaceTabs,
+    AuthMethod, BrokerEvent, ConnectResult, ControlOp, KnownHostEntry, ProfileSnapshot,
+    PromptAnswer, PromptId, SessionId, ShellId, Side, TransferSnapshot, WorkspaceTabs,
 };
 use crate::settings::{Settings, SettingsLoad};
 use crate::ui::sidebar;
@@ -41,6 +42,9 @@ pub enum Form {
     Import,
     /// The settings page ([`App::settings`], [`App::backup`]).
     Settings,
+    /// The question about unsent remote edits before the window or a workspace closes
+    /// ([`App::center_ask`]).
+    QuitEdits,
 }
 
 /// What a system file dialog is for.
@@ -56,26 +60,29 @@ pub enum PickTarget {
 
 pub mod actions;
 pub mod dialogs;
+pub mod edit;
 pub mod files;
 pub mod import;
 pub mod lifecycle;
+pub mod log;
+pub mod palette;
 pub mod queue;
+pub mod reconnect;
 pub mod settings;
+pub mod tabs;
+pub mod terminal;
 pub mod transfers;
 
 pub use actions::FileAction;
 pub use dialogs::{Dialog, DialogMsg, Dialogs, FailureAction, KnownHostsFix, KnownHostsMsg, Typed};
-pub use files::{FileKey, Mods, PaneMsg, RequestId, Tab, TabId};
+pub use edit::EditMsg;
+pub use files::{FileKey, Mods, PaneMsg, RequestId};
 pub use lifecycle::ConnStatus;
+pub use log::{LogLevel, LogMsg};
+pub use palette::PaletteMsg;
 pub use queue::{Queue, QueueMsg, QueueTab, RowAction};
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum TabState {
-    Connecting,
-    Connected(Connected),
-    /// This site failed alone: the error shows in its tab.
-    Failed(ConnectError),
-}
+pub use tabs::{SiteConn, Tab, TabId, TabState};
+pub use terminal::TerminalMsg;
 
 /// A workspace's entry as the sidebar lists it.
 #[derive(Debug, PartialEq)]
@@ -91,6 +98,10 @@ pub enum WorkspaceRow<'a> {
 pub struct App {
     /// Whether the transfer queue is expanded.
     pub queue_open: bool,
+    /// The technical log panel.
+    pub log: log::LogPanel,
+    /// The Ctrl+K palette, while it is open ([`palette`]).
+    pub palette: Option<palette::Palette>,
     /// The sidebar's site filter, as typed.
     pub site_filter: String,
     pub load: Load,
@@ -102,8 +113,11 @@ pub struct App {
     /// Workspaces expanded in the sidebar.
     pub expanded: HashSet<WorkspaceId>,
     pub form: Option<Form>,
-    /// One tab per site, created by "Open workspace" or a click on a site.
+    /// The session tabs, in strip order: a site's tabs (terminal or files) share its
+    /// session ([`tabs`]).
     pub tabs: Vec<Tab>,
+    /// The connection of each site with tabs, shared by those tabs ([`tabs`]).
+    pub conns: HashMap<SiteId, SiteConn>,
     pub active_tab: Option<usize>,
     /// A sidebar action failed (opening the profile folder).
     pub sidebar_error: Option<Error>,
@@ -146,6 +160,29 @@ pub struct App {
     /// The window's width, as the last resize reported it: what fits in the file panes,
     /// toolbars and queue head ([`crate::ui::fit`]).
     pub window_width: f32,
+    /// The remote files being edited, in the order they started ([`edit`]).
+    pub edits: Vec<edit::RemoteEdit>,
+    /// Edits whose download and editor are on their way.
+    pub edit_opening: Vec<edit::Opening>,
+    /// The notice at the bottom right (an upload, kept copies).
+    pub toast: Option<edit::Toast>,
+    /// Last tabs of a session whose close waits for the answer about its edits.
+    pub close_asks: HashMap<TabId, edit::CloseAsk>,
+    /// The window's (or a workspace's) close waits for the answer about unsent edits.
+    pub center_ask: Option<edit::CenterAsk>,
+    /// A site or workspace form a close question stepped in front of (back after it).
+    pub parked_forms: Vec<Form>,
+    /// The window asked to close while a workspace question was busy: asked after it.
+    pub queued_quit: Option<iced::window::Id>,
+    /// Unsent edits kept as recovered copies by a close, until dismissed.
+    pub kept_notice: Option<edit::KeptNotice>,
+    /// The editor command as typed on the settings page, while it is not valid.
+    pub editor_input: Option<String>,
+    /// Actions waiting for their site's lost session to reconnect ([`reconnect`]).
+    held: HashMap<SiteId, Vec<Effect>>,
+    /// Listings sent again after a reconnection, which the reconnect's result does not
+    /// repeat ([`reconnect`]).
+    replayed: HashSet<files::RequestId>,
     /// The last tab or listing id handed out.
     next_id: u64,
     /// The last profile read asked for, and the one whose result was applied last.
@@ -157,6 +194,10 @@ pub struct App {
 pub enum Message {
     /// Collapse or expand the transfer queue.
     ToggleQueue,
+    /// Something in the technical log panel, or its poll.
+    Log(LogMsg),
+    /// The Ctrl+K palette: open, typed into, run or closed ([`palette`]).
+    Palette(PaletteMsg),
     /// The sidebar filter changed.
     FilterSites(String),
     ReloadProfiles,
@@ -167,7 +208,7 @@ pub enum Message {
     },
     ToggleWorkspace(WorkspaceId),
     OpenWorkspace(WorkspaceId),
-    /// A site was clicked: open (or retry) its tab.
+    /// A site was clicked: open (or retry) its tabs, as its "Open as" says.
     ConnectSite(SiteId),
     /// One site's connect finished (each site of a batch on its own).
     SiteConnected {
@@ -189,8 +230,14 @@ pub enum Message {
     },
     OpenProfileFolder,
     ProfileFolderOpened(Result<(), Error>),
-    /// The × of a tab: closes it and its session.
+    /// The × of a tab: closes it, and its session if no other tab uses it.
     CloseTab(TabId),
+    /// "New terminal tab" / "New files tab" on a connected SSH tab: another tab of
+    /// `kind` on the same session.
+    NewTab {
+        tab: TabId,
+        kind: TabKind,
+    },
     /// Something in one pane of a file tab.
     Pane {
         tab: TabId,
@@ -268,14 +315,14 @@ pub enum Message {
         tab: TabId,
         msg: KnownHostsMsg,
     },
-    /// The `known_hosts` lines that removing would delete.
+    /// The `known_hosts` lines that removing would delete (the site's fix).
     KnownHostEntries {
-        tab: TabId,
+        site: SiteId,
         result: Result<Vec<KnownHostEntry>, Error>,
     },
-    /// The old `known_hosts` entries were removed (how many).
+    /// The old `known_hosts` entries were removed (how many; the site's fix).
     KnownHostRemoved {
-        tab: TabId,
+        site: SiteId,
         result: Result<usize, Error>,
     },
     /// "Close and reconnect": the tab's failed session is closed and a new one started.
@@ -288,9 +335,8 @@ pub enum Message {
     },
     /// "Reconnect" on a tab whose connection was lost.
     ReconnectSession(TabId),
-    /// The backend's reconnect of `session` finished.
+    /// The backend's reconnect of `session` finished (for every tab still on it).
     Reconnected {
-        tab: TabId,
         session: SessionId,
         result: Result<(), Error>,
     },
@@ -331,6 +377,41 @@ pub enum Message {
     },
     /// The window was resized to this width.
     WindowResized(f32),
+    /// Something in a terminal tab: its widget, keyboard, search bar or timers.
+    Terminal {
+        tab: TabId,
+        msg: TerminalMsg,
+    },
+    /// A terminal widget's size in cells changed (the shell follows after
+    /// [`terminal::RESIZE_DEBOUNCE`]).
+    TerminalResized {
+        tab: TabId,
+        cols: u16,
+        rows: u16,
+    },
+    /// One frame's worth of a shell's output (every byte since the last one). Its
+    /// `credit` lets the feed pull more once this message is handled (and dropped).
+    TerminalOutput {
+        tab: TabId,
+        shell: ShellId,
+        bytes: Redacted<Vec<u8>>,
+        credit: crate::effects::Credit,
+    },
+    /// The end of a shell's output: its exit status, an overflow, then `Closed`.
+    ShellEvent {
+        tab: TabId,
+        shell: ShellId,
+        event: terminal::ShellSignal,
+    },
+    /// The shell [`Effect::OpenShell`] asked for under `request` opened (or not).
+    ShellOpened {
+        tab: TabId,
+        request: RequestId,
+        result: Result<ShellId, Error>,
+    },
+    /// Remote editing: the strip's choices, the close questions, the backend's events
+    /// and results ([`edit`]).
+    Edit(EditMsg),
 }
 
 /// The profile change a form asked for, carried back with its result.
@@ -428,14 +509,14 @@ pub enum Effect {
     /// Reads the `known_hosts` lines for `host:port`; back as
     /// [`Message::KnownHostEntries`].
     KnownHostEntries {
-        tab: TabId,
+        site: SiteId,
         host: String,
         port: u16,
     },
     /// Removes the `known_hosts` lines for `host:port` if they are still `expected` (what
     /// the user confirmed); back as [`Message::KnownHostRemoved`].
     RemoveKnownHost {
-        tab: TabId,
+        site: SiteId,
         host: String,
         port: u16,
         expected: Vec<KnownHostEntry>,
@@ -446,10 +527,9 @@ pub enum Effect {
         close: Option<SessionId>,
         site: SiteId,
     },
-    /// Retries a lost session through the backend's reconnect; back as
-    /// [`Message::Reconnected`].
+    /// Retries a lost session (shared by all its tabs) through the backend's reconnect;
+    /// back as [`Message::Reconnected`].
     Reconnect {
-        tab: TabId,
         session: SessionId,
     },
     /// Saves a workspace's tabs and folders; back as [`Message::TabsSaved`].
@@ -475,6 +555,8 @@ pub enum Effect {
     SetPolicy(ConflictPolicy),
     /// Workers per site for the next connections.
     SetWorkers(usize),
+    /// Keepalive (seconds) of the next SSH and FTP connections.
+    SetKeepalive(u64),
     /// Checks whether the typed export file exists; back as
     /// [`Message::ExportTargetChecked`].
     CheckExportTarget(PathBuf),
@@ -500,6 +582,68 @@ pub enum Effect {
         password: SecretString,
         mode: ImportMode,
     },
+    /// Opens a terminal of `cols` x `rows` on `session`; back as [`Message::ShellOpened`].
+    OpenShell {
+        tab: TabId,
+        request: RequestId,
+        session: SessionId,
+        cols: u16,
+        rows: u16,
+    },
+    /// Writes to the shell; back as [`TerminalMsg::InputSent`] (one write in flight per
+    /// shell, so bytes keep their order).
+    ShellInput {
+        tab: TabId,
+        shell: ShellId,
+        data: Redacted<Vec<u8>>,
+    },
+    ShellResize {
+        shell: ShellId,
+        cols: u16,
+        rows: u16,
+    },
+    /// Closes the shell (and forgets it in the backend).
+    CloseShell(ShellId),
+    WriteClipboard(Redacted<String>),
+    /// Reads the clipboard for a paste; back as [`TerminalMsg::Pasted`].
+    ReadClipboard(TabId),
+    /// Sends `message` back after `after` (the debounces).
+    Later {
+        after: std::time::Duration,
+        message: Box<Message>,
+    },
+    /// Focuses the terminal tab's search field.
+    FocusTerminalSearch(TabId),
+    /// Focuses the palette's search field.
+    FocusPalette,
+    /// Scrolls the log panel to its newest line.
+    ScrollLogToEnd,
+    /// Downloads `remote` and opens it with `editor`; back as [`EditMsg::Started`].
+    StartEdit {
+        tab: TabId,
+        session: SessionId,
+        remote: RemotePath,
+        editor: String,
+    },
+    /// The user's choice on a conflict; back as [`EditMsg::Done`].
+    ResolveEdit {
+        id: crate::backend::EditId,
+        choice: crate::backend::EditChoice,
+    },
+    /// "Retry" on a failed upload; back as [`EditMsg::Done`].
+    RetryEdit(crate::backend::EditId),
+    /// Asks which edits of `sessions` are unsent; back as [`EditMsg::Checked`].
+    CheckEdits {
+        purpose: edit::EditsFor,
+        sessions: Vec<SessionId>,
+    },
+    /// Uploads or keeps the edits of `sessions` (see [`edit::Settle`]); back as
+    /// [`EditMsg::Settled`].
+    SettleEdits {
+        purpose: edit::EditsFor,
+        sessions: Vec<SessionId>,
+        how: edit::Settle,
+    },
 }
 
 /// The window's width before the first resize event (`main`'s initial size).
@@ -523,6 +667,8 @@ impl App {
     pub fn new() -> Self {
         Self {
             queue_open: true,
+            log: log::LogPanel::new(crate::logbuf::LogBuffer::new()),
+            palette: None,
             site_filter: String::new(),
             load: Load::Loading,
             sites: Vec::new(),
@@ -531,6 +677,7 @@ impl App {
             expanded: HashSet::new(),
             form: None,
             tabs: Vec::new(),
+            conns: HashMap::new(),
             active_tab: None,
             sidebar_error: None,
             home: dirs::home_dir().as_deref().and_then(files::local_path),
@@ -552,6 +699,17 @@ impl App {
             backup: settings::Backup::default(),
             busy_phase: 0,
             window_width: INITIAL_WINDOW_WIDTH,
+            edits: Vec::new(),
+            edit_opening: Vec::new(),
+            toast: None,
+            close_asks: HashMap::new(),
+            center_ask: None,
+            parked_forms: Vec::new(),
+            queued_quit: None,
+            kept_notice: None,
+            editor_input: None,
+            held: HashMap::new(),
+            replayed: HashSet::new(),
             next_id: 0,
             profiles_requested: RequestId(0),
             profiles_applied: RequestId(0),
@@ -630,15 +788,18 @@ impl App {
             .collect()
     }
 
-    pub fn tab_of(&self, site: &SiteId) -> Option<usize> {
-        self.tabs.iter().position(|t| &t.site == site)
-    }
-
     /// Applies `msg`; returns the effects to run. Never blocks.
     pub fn update(&mut self, msg: Message) -> Vec<Effect> {
+        // A palette row to run becomes the action's own message.
+        let msg = self.palette_command(msg);
         let shown = self.shown_tab();
         let active = self.active_tab;
+        let user = reconnect::is_user_action(&msg);
         let mut effects = self.apply(msg);
+        // An action on a site whose session was lost reconnects it first.
+        if user {
+            effects = self.hold_for_reconnection(effects);
+        }
         // Another tab became active (selected, opened or moved by a close): bring it into
         // view in the tab strip, which may be scrolled sideways.
         if self.active_tab != active
@@ -647,6 +808,10 @@ impl App {
             effects.push(Effect::ScrollTabs {
                 x: tab_strip_offset(index, self.tabs.len()),
             });
+        }
+        // A security dialog wins over the palette, and a closing window has none.
+        if self.palette.is_some() && (self.dialogs.is_open() || self.closing) {
+            self.palette = None;
         }
         // Typed backup passwords never outlive the settings page, however it was left.
         if !matches!(self.form, Some(Form::Settings)) {
@@ -676,11 +841,13 @@ impl App {
         {
             return effects;
         }
-        if self.blocked_by_dialog(&msg) {
+        if self.blocked_by_overlay(&msg) {
             return Vec::new();
         }
         match msg {
             Message::ToggleQueue => self.queue_open = !self.queue_open,
+            Message::Log(msg) => return self.log_msg(msg),
+            Message::Palette(msg) => return self.palette_msg(msg),
             Message::WindowResized(width) => self.window_width = width,
             Message::FilterSites(filter) => self.site_filter = filter,
             Message::ReloadProfiles => {
@@ -698,13 +865,19 @@ impl App {
             Message::OpenWorkspace(id) => return self.open_workspace_tabs(&id),
             Message::ConnectSite(site) => {
                 self.form = None;
-                return self.open_tabs(vec![(site, None)]);
+                return self.open_tabs(vec![(site, Vec::new())]);
             }
             Message::SiteConnected { site, result } => return self.site_connected(site, result),
             Message::SelectTab(index) => {
                 if index < self.tabs.len() {
                     self.active_tab = Some(index);
                     self.form = None;
+                    // A terminal shown again takes the keyboard (its search bar keeps it).
+                    if let Some(terminal) = self.tabs[index].terminal_mut()
+                        && terminal.search.is_none()
+                    {
+                        terminal.focused = true;
+                    }
                 }
             }
             Message::NewSite => self.form = Some(Form::Site(SiteForm::new_site())),
@@ -728,9 +901,14 @@ impl App {
             Message::ProfileFolderOpened(result) => self.sidebar_error = result.err(),
             Message::CloseTab(id) => {
                 if let Some(index) = self.tab_index(id) {
+                    // The last tab of a session with remote edits asks first.
+                    if let Some(effects) = self.ask_before_closing_tab(index) {
+                        return effects;
+                    }
                     return self.close_tab(index);
                 }
             }
+            Message::NewTab { tab, kind } => return self.new_session_tab(tab, kind),
             Message::Pane { tab, side, msg } => return self.pane_msg(tab, side, msg),
             Message::Listed {
                 tab,
@@ -773,11 +951,11 @@ impl App {
             Message::Prompt(event) => return self.prompt_event(event),
             Message::Dialog(msg) => return self.dialog_msg(msg),
             Message::KnownHosts { tab, msg } => return self.known_hosts_msg(tab, msg),
-            Message::KnownHostEntries { tab, result } => {
-                return self.known_host_entries(tab, result);
+            Message::KnownHostEntries { site, result } => {
+                return self.known_host_entries(site, result);
             }
-            Message::KnownHostRemoved { tab, result } => {
-                return self.known_host_removed(tab, result);
+            Message::KnownHostRemoved { site, result } => {
+                return self.known_host_removed(site, result);
             }
             Message::RestartSession(tab) => return self.restart_session(tab),
             Message::SessionState {
@@ -786,11 +964,7 @@ impl App {
                 auth,
             } => return self.session_state(session, state, auth),
             Message::ReconnectSession(tab) => return self.reconnect_session(tab),
-            Message::Reconnected {
-                tab,
-                session,
-                result,
-            } => return self.reconnected(tab, session, result),
+            Message::Reconnected { session, result } => return self.reconnected(session, result),
             Message::CloseWorkspace(id) => return self.close_workspace(&id),
             Message::TabsSaved(result) => return self.tabs_saved(result),
             Message::CloseRequested(window) => return self.close_requested(window),
@@ -812,125 +986,27 @@ impl App {
             Message::BackupRestored(result) => return self.backup_restored(result),
             Message::FilePicked { target, path } => self.file_picked(target, path),
             Message::BusyTick => self.busy_phase = self.busy_phase.wrapping_add(1),
+            Message::Terminal { tab, msg } => return self.terminal_msg(tab, msg),
+            Message::TerminalResized { tab, cols, rows } => {
+                return self.terminal_resized(tab, cols, rows);
+            }
+            // The credit drops at the end of this arm: the feed may pull the next batch.
+            Message::TerminalOutput {
+                tab, shell, bytes, ..
+            } => {
+                return self.terminal_output(tab, shell, &bytes);
+            }
+            Message::ShellEvent { tab, shell, event } => {
+                return self.shell_event(tab, shell, event);
+            }
+            Message::ShellOpened {
+                tab,
+                request,
+                result,
+            } => return self.shell_opened(tab, request, result),
+            Message::Edit(msg) => return self.edit_msg(msg),
         }
         Vec::new()
-    }
-
-    /// Open workspace: a tab per site that still exists (missing ones are skipped and
-    /// shown inline in the sidebar), all connected in one batch. New tabs start at the
-    /// folders the workspace saved. Another workspace open until now has its tabs saved
-    /// first (they stay open).
-    fn open_workspace_tabs(&mut self, id: &WorkspaceId) -> Vec<Effect> {
-        let Some(workspace) = self.workspace(id) else {
-            return Vec::new();
-        };
-        let sites: Vec<(SiteId, Option<SavedTab>)> = self
-            .workspace_sites(workspace)
-            .into_iter()
-            .zip(&workspace.sites)
-            .filter_map(|(row, entry)| match row {
-                WorkspaceRow::Site(site) => {
-                    Some((site.id.clone(), lifecycle::files_tab(&entry.tabs).cloned()))
-                }
-                WorkspaceRow::Missing(_) => None,
-            })
-            .collect();
-        let mut effects: Vec<Effect> = match self.open_workspace.replace(id.clone()) {
-            Some(previous) if &previous != id => {
-                self.save_tabs_effect(&previous).into_iter().collect()
-            }
-            _ => Vec::new(),
-        };
-        self.form = None;
-        effects.extend(self.open_tabs(sites));
-        effects
-    }
-
-    /// Makes sure each site has a tab, focuses the first, and connects the sites that are
-    /// neither connected nor already connecting (a failed tab is retried), as one batch.
-    /// A new tab also lists its local folder; it starts at the saved tab's folders, if
-    /// any.
-    fn open_tabs(&mut self, sites: Vec<(SiteId, Option<SavedTab>)>) -> Vec<Effect> {
-        let mut first = None;
-        let mut connect = Vec::new();
-        let mut listings = Vec::new();
-        for (site, restored) in sites {
-            self.readopt_site(&site);
-            let index = match self.tab_of(&site) {
-                Some(index) => {
-                    let tab = &mut self.tabs[index];
-                    if matches!(tab.state, TabState::Failed(_)) {
-                        tab.state = TabState::Connecting;
-                        connect.push(site);
-                    }
-                    index
-                }
-                None => {
-                    let (tab, listing) = self.new_tab(site.clone(), restored.as_ref());
-                    self.tabs.push(tab);
-                    listings.push(listing);
-                    connect.push(site);
-                    self.tabs.len() - 1
-                }
-            };
-            first.get_or_insert(index);
-        }
-        if first.is_some() {
-            self.active_tab = first;
-        }
-        let mut effects = Vec::new();
-        if !connect.is_empty() {
-            effects.push(Effect::ConnectSites(connect));
-        }
-        effects.extend(listings);
-        effects
-    }
-
-    /// One site's result lands in its own tab, whatever the other sites do.
-    fn site_connected(&mut self, site: SiteId, result: ConnectResult) -> Vec<Effect> {
-        let Some(index) = self.tab_of(&site) else {
-            self.readopt_site(&site);
-            // Its tab is gone: don't leave the session open behind the user's back.
-            let session = match result {
-                Ok(connected) => Some(connected.session),
-                Err(failure) => failure.session,
-            };
-            if let Some(session) = session {
-                self.forget_session(session);
-            }
-            return session.map(Effect::CloseSession).into_iter().collect();
-        };
-        let tab = &mut self.tabs[index];
-        tab.known_hosts = KnownHostsFix::Idle;
-        // A new session's feed tells its state and login from now on. The session already
-        // watched keeps what its feed said: the feed only reports changes from here.
-        let same = matches!(&result, Ok(c) if tab.session() == Some(c.session));
-        if !same {
-            tab.conn = None;
-            tab.auth = None;
-            tab.reconnecting = false;
-        }
-        match result {
-            Ok(connected) => {
-                self.queue.site_restored(&site);
-                let mut effects = self.settle_saving(connected.session, true);
-                self.tabs[index].state = TabState::Connected(connected);
-                // The remote pane lists its folder now that it can.
-                effects.extend(self.request_listing(index, Side::Remote));
-                effects
-            }
-            Err(failure) => {
-                let effects = match failure.session {
-                    Some(session) => self.settle_saving(session, false),
-                    None => Vec::new(),
-                };
-                // Where it failed, as the profile said then: "Remove the old entry…"
-                // works on that endpoint even if the site is edited meanwhile.
-                self.note_failed_endpoint(index);
-                self.tabs[index].state = TabState::Failed(failure);
-                effects
-            }
-        }
     }
 
     fn site_form(&mut self, msg: SiteFormMsg) -> Vec<Effect> {
@@ -977,23 +1053,47 @@ impl App {
     /// The form itself is closed (success) or shows the error (failure) only if it is the
     /// one that asked: same target, still waiting for this result.
     fn form_done(&mut self, op: ProfileOp, result: Result<(), Error>) -> Vec<Effect> {
-        let waiting = match (&mut self.form, &op) {
-            (Some(Form::Site(form)), ProfileOp::SaveSite(id) | ProfileOp::DeleteSite(id)) => {
-                form.busy && form.site_id() == id
+        fn waiting_for(form: &Form, op: &ProfileOp) -> bool {
+            match (form, op) {
+                (Form::Site(form), ProfileOp::SaveSite(id) | ProfileOp::DeleteSite(id)) => {
+                    form.busy && form.site_id() == id
+                }
+                (
+                    Form::Workspace(form),
+                    ProfileOp::SaveWorkspace(id) | ProfileOp::DeleteWorkspace(id),
+                ) => form.busy && form.workspace_id() == id,
+                _ => false,
             }
-            (
-                Some(Form::Workspace(form)),
-                ProfileOp::SaveWorkspace(id) | ProfileOp::DeleteWorkspace(id),
-            ) => form.busy && form.workspace_id() == id,
-            _ => false,
-        };
+        }
+        fn finished(form: &mut Form, error: &Error) {
+            match form {
+                Form::Site(form) => form.finished(Some(error.clone())),
+                Form::Workspace(form) => form.finished(Some(error.clone())),
+                Form::Import | Form::Settings | Form::QuitEdits => {}
+            }
+        }
         let error = result.err();
-        if waiting {
+        if self
+            .form
+            .as_ref()
+            .is_some_and(|form| waiting_for(form, &op))
+        {
             match (&error, &mut self.form) {
                 (None, _) => self.form = None,
-                (Some(error), Some(Form::Site(form))) => form.finished(Some(error.clone())),
-                (Some(error), Some(Form::Workspace(form))) => form.finished(Some(error.clone())),
-                (Some(_), None | Some(Form::Import | Form::Settings)) => {}
+                (Some(error), Some(form)) => finished(form, error),
+                (Some(_), None) => {}
+            }
+        } else if let Some(i) = self
+            .parked_forms
+            .iter()
+            .position(|form| waiting_for(form, &op))
+        {
+            // A form parked behind a close question still gets its result.
+            match &error {
+                None => {
+                    self.parked_forms.remove(i);
+                }
+                Some(error) => finished(&mut self.parked_forms[i], error),
             }
         }
         if error.is_some() {
@@ -1012,10 +1112,11 @@ impl App {
     }
 
     /// New profiles (after a form, an import or a restore). The tabs follow them:
-    /// - a site that is gone (deleted, or dropped by a "Replace" restore) loses its tab and
-    ///   session;
+    /// - a site that is gone (deleted, or dropped by a "Replace" restore) loses all its tabs
+    ///   and its session;
+    /// - a site that is no longer SSH loses its terminal tabs;
     /// - a site whose host or port changed loses its session: a connected one is closed and
-    ///   its tab shows why, with Reconnect starting a new session on the saved endpoint; a
+    ///   its tabs show why, with Reconnect starting a new session on the saved endpoint; a
     ///   failed one forgets it ([`drop_stale_session`](Self::drop_stale_session)). A
     ///   connect already in flight finishes on the old endpoint;
     /// - the open workspace is forgotten if it is gone.
@@ -1031,14 +1132,32 @@ impl App {
         }
 
         let mut effects = Vec::new();
-        let gone: Vec<SiteId> = self
-            .tabs
-            .iter()
-            .map(|tab| tab.site.clone())
-            .filter(|site| self.site(site).is_none())
-            .collect();
+        let mut gone: Vec<SiteId> = Vec::new();
+        for tab in &self.tabs {
+            if self.site(&tab.site).is_none() && !gone.contains(&tab.site) {
+                gone.push(tab.site.clone());
+            }
+        }
         for site in gone {
             effects.extend(self.close_site_tabs(&site));
+        }
+        // A site that is no longer SSH has no terminal: its terminal tabs close (the last
+        // tab of the site closes its session).
+        let no_terminal: Vec<TabId> = self
+            .tabs
+            .iter()
+            .filter(|tab| {
+                tab.kind() == TabKind::Terminal
+                    && self
+                        .site(&tab.site)
+                        .is_some_and(|site| site.protocol != hoprs_core::Protocol::Ssh)
+            })
+            .map(|tab| tab.id)
+            .collect();
+        for id in no_terminal {
+            if let Some(index) = self.tab_index(id) {
+                effects.extend(self.close_tab(index));
+            }
         }
         let moved: Vec<SiteId> = self
             .sites
@@ -1053,77 +1172,6 @@ impl App {
             effects.extend(self.drop_moved_session(&site));
         }
         effects
-    }
-
-    /// The site's host or port changed: its tab's session no longer matches the profile.
-    fn drop_moved_session(&mut self, site: &SiteId) -> Option<Effect> {
-        let index = self.tab_of(site)?;
-        let tab = &mut self.tabs[index];
-        match &tab.state {
-            TabState::Connected(connected) => {
-                let session = connected.session;
-                tab.state = TabState::Failed(ConnectError {
-                    session: None,
-                    error: Error::new(
-                        hoprs_core::ErrorKind::Conflict,
-                        crate::ui::strings::SITE_ENDPOINT_CHANGED,
-                    ),
-                    keyring_unavailable: false,
-                });
-                tab.conn = None;
-                tab.auth = None;
-                tab.reconnecting = false;
-                self.forget_session(session);
-                Some(Effect::CloseSession(session))
-            }
-            TabState::Failed(_) => self.drop_stale_session(site),
-            TabState::Connecting => None,
-        }
-    }
-
-    /// The site's settings changed: a failed tab forgets its session (closed here), so
-    /// the next connect builds a new one from the saved site. A connected session keeps
-    /// running; the new settings apply to its next connection.
-    fn drop_stale_session(&mut self, site: &SiteId) -> Option<Effect> {
-        let index = self.tab_of(site)?;
-        let tab = &mut self.tabs[index];
-        let TabState::Failed(failure) = &mut tab.state else {
-            return None;
-        };
-        let session = failure.session.take()?;
-        self.forget_session(session);
-        Some(Effect::CloseSession(session))
-    }
-
-    /// Removes the site's tab and closes its session, if any.
-    fn close_site_tabs(&mut self, site: &SiteId) -> Vec<Effect> {
-        match self.tab_of(site) {
-            Some(index) => self.close_tab(index),
-            None => Vec::new(),
-        }
-    }
-
-    /// Removes the tab at `index` and closes its session, if any. A listing still in
-    /// flight for it finds no tab and is dropped. A tab still connecting takes its site's
-    /// dialogs with it ([`abandon_site_prompts`](Self::abandon_site_prompts)).
-    fn close_tab(&mut self, index: usize) -> Vec<Effect> {
-        let tab = self.tabs.remove(index);
-        self.active_tab = match self.active_tab {
-            _ if self.tabs.is_empty() => None,
-            Some(active) if active > index => Some(active - 1),
-            Some(active) => Some(active.min(self.tabs.len() - 1)),
-            None => None,
-        };
-        let session = match tab.state {
-            TabState::Connected(connected) => Some(connected.session),
-            TabState::Failed(failure) => failure.session,
-            // The connect's session isn't known yet: its dialogs say which it is.
-            TabState::Connecting => return self.abandon_site_prompts(&tab.site),
-        };
-        if let Some(session) = session {
-            self.forget_session(session);
-        }
-        session.map(Effect::CloseSession).into_iter().collect()
     }
 }
 

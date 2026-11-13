@@ -347,7 +347,7 @@ fn msg(m: SiteFormMsg) -> Message {
     Message::SiteForm(m)
 }
 
-pub fn view(form: &SiteForm) -> Element<'_, Message> {
+pub fn view(form: &SiteForm, delete_note: Option<String>) -> Element<'_, Message> {
     let errors = form.errors.clone().unwrap_or_default();
     let title = if form.editing {
         strings::SITE_FORM_EDIT
@@ -458,7 +458,6 @@ pub fn view(form: &SiteForm) -> Element<'_, Message> {
                     .into(),
                     None,
                 ),
-                muted(strings::TERMINAL_LATER),
             ]
             .spacing(theme::SPACE_XS)
             .into(),
@@ -527,7 +526,7 @@ pub fn view(form: &SiteForm) -> Element<'_, Message> {
         options,
         folders,
         failure(form.failure.as_ref()),
-        actions(form),
+        actions(form, delete_note),
     ]
     .spacing(theme::SPACE_SM)
     .max_width(FORM_WIDTH);
@@ -541,13 +540,23 @@ pub fn view(form: &SiteForm) -> Element<'_, Message> {
     .into()
 }
 
-fn actions(form: &SiteForm) -> Element<'_, Message> {
+fn actions(form: &SiteForm, delete_note: Option<String>) -> Element<'_, Message> {
     if form.confirm_delete {
-        return confirm(
+        let confirm = confirm(
             strings::DELETE_SITE_CONFIRM,
             msg(SiteFormMsg::ConfirmDelete),
             msg(SiteFormMsg::CancelDelete),
         );
+        // Files of the site open for editing: what happens to their unsent changes.
+        return match delete_note {
+            Some(note) => column![
+                text(note).size(theme::TEXT_SM).color(palette().muted),
+                confirm
+            ]
+            .spacing(theme::SPACE_XS)
+            .into(),
+            None => confirm,
+        };
     }
     let save_label = if form.busy {
         strings::SAVING

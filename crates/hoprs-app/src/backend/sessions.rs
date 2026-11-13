@@ -18,24 +18,45 @@
 //! One session per site: `connect` on a site that already has one returns that session
 //! (retrying it if it is `Disconnected`). The engine keys endpoints by site, so two live
 //! sessions of one site would replace each other's endpoints.
+//!
+//! An SSH session also carries the terminal shells opened on it
+//! ([`open_shell`](SessionManager::open_shell), see [`super::shells`]): `close` closes them,
+//! and a reconnect does not reopen them.
+//!
+//! **Connection log and idle drops (Plan 6, Task 5).** Each session has a monitor task, the
+//! one place that logs its connection: every state change at `info` (site name, protocol,
+//! `host:port`, the new state, the reason as `ErrorKind` and message, and
+//! `since_last_request_secs`), an unanswered keepalive at `warn`. The transports log
+//! nothing. `since_last_request_secs` counts from the start of the last remote filesystem
+//! call (listing, file operation, the opening of a transfer's stream) or shell input: a long
+//! transfer still running counts from its start. When the transport gives up reconnecting
+//! (a whole round of attempts failed, while nobody used the site, say), the monitor starts
+//! **one** more round by itself, quietly (a network failure only, never host key,
+//! authentication or TLS, never after `close`, and only for a session that was connected
+//! before); the next such drop waits for the user (the app reconnects on their next action).
+//! The budget comes back once the session is connected again.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, StreamExt};
-use hoprs_core::{ConnectionState, Error, ErrorKind, Protocol, Result, Site, SiteId};
+use hoprs_core::{
+    ConnectionState, Error, ErrorKind, Protocol, ReconnectPolicy, Result, Site, SiteId,
+};
 use hoprs_remote::{Connection, FtpFs, LocalFs, RemoteFs, SftpConfig, SftpFs};
-use hoprs_ssh::SshSession;
+use hoprs_ssh::{PtyRequest, SshSession};
 use hoprs_transfer::{SiteEndpoints, TransferEngine, spawn_site_watcher};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use super::broker::{PromptBroker, SessionPrompter};
 use super::mapping::{SiteSecrets, ftp_config, ssh_config};
+use super::shells::{ShellId, Shells};
 use super::vault::VaultHandle;
 
 /// Identifies one open session. Monotonic: never reused within a run.
@@ -82,9 +103,17 @@ pub struct SessionConfig {
     /// Replaces `~/.ssh/known_hosts` (tests).
     pub known_hosts: Option<PathBuf>,
     /// Transfer workers per site; also the SFTP stream channels and FTP transfer
-    /// connections (both clamped to `1..=8`). The starting value: see
+    /// connections (both clamped to `1..=8`; the SFTP streams are also capped by the SSH
+    /// channel budget, which keeps room for terminals). The starting value: see
     /// [`SessionManager::set_workers`].
     pub workers: usize,
+    /// Keepalive of SSH and FTP sessions (Settings). The starting value: see
+    /// [`SessionManager::set_keepalive`].
+    pub keepalive: Duration,
+    /// Replaces the protocols' connect timeout (tests).
+    pub connect_timeout: Option<Duration>,
+    /// Replaces the protocols' reconnect policy (tests).
+    pub reconnect: Option<ReconnectPolicy>,
 }
 
 impl Default for SessionConfig {
@@ -92,6 +121,9 @@ impl Default for SessionConfig {
         Self {
             known_hosts: None,
             workers: 4,
+            keepalive: Duration::from_secs(30),
+            connect_timeout: None,
+            reconnect: None,
         }
     }
 }
@@ -101,14 +133,65 @@ impl Default for SessionConfig {
 enum Link {
     Ssh(SshSession),
     Ftp(FtpFs),
-    /// A test double that only reports state.
+    /// A test double that only reports state and counts `reconnect_now`.
     #[cfg(test)]
-    Fake(Arc<dyn Connection>),
+    Fake {
+        conn: Arc<dyn Connection>,
+        reconnects: Arc<AtomicUsize>,
+    },
+}
+
+/// What the connection log says a session is.
+#[derive(Clone, Debug)]
+struct SessionLabel {
+    name: String,
+    protocol: Protocol,
+    endpoint: String,
+    /// Reconnection attempts per round, for "attempt n of m".
+    attempts: u32,
+}
+
+/// When a session was last asked something (remote filesystem calls, shell input), and
+/// whether `close` closed it.
+#[derive(Debug)]
+struct Activity {
+    last_request: Mutex<Instant>,
+    closed: std::sync::atomic::AtomicBool,
+}
+
+impl Activity {
+    fn new() -> Self {
+        Self {
+            last_request: Mutex::new(Instant::now()),
+            closed: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn touch(&self) {
+        *lock(&self.last_request) = Instant::now();
+    }
+
+    fn since_last_request(&self) -> Duration {
+        lock(&self.last_request).elapsed()
+    }
+
+    /// `close` is closing the session: its end is the user's, not the network's.
+    fn mark_closed(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
 }
 
 struct Entry {
     site: SiteId,
     link: Link,
+    label: SessionLabel,
+    activity: Arc<Activity>,
+    /// Logs the connection's states and reconnects once after an idle drop.
+    monitor: Option<JoinHandle<()>>,
     prompter: SessionPrompter,
     /// The secrets were read while the keyring was unreachable.
     keyring_unavailable: bool,
@@ -130,6 +213,8 @@ struct Inner {
     config: SessionConfig,
     /// Transfer workers per site for the next connections (Settings).
     workers: AtomicUsize,
+    /// Keepalive for the next connections (Settings).
+    keepalive: Mutex<Duration>,
     local: Arc<dyn RemoteFs>,
     next_id: AtomicU64,
     sessions: Mutex<HashMap<SessionId, Entry>>,
@@ -137,6 +222,8 @@ struct Inner {
     site_locks: Mutex<HashMap<SiteId, Arc<tokio::sync::Mutex<()>>>>,
     /// Sites `close` paused in the engine; the next connect resumes them.
     paused_by_close: Mutex<HashSet<SiteId>>,
+    /// The terminal shells of the sessions. Locked after `sessions` when both are.
+    shells: Shells,
     /// Remotes of the test sessions made by `attach`, until they are ready.
     #[cfg(test)]
     test_remotes: Mutex<HashMap<SessionId, Arc<dyn RemoteFs>>>,
@@ -148,7 +235,7 @@ impl Link {
             Self::Ssh(session) => Arc::new(session.clone()),
             Self::Ftp(fs) => Arc::new(fs.clone()),
             #[cfg(test)]
-            Self::Fake(conn) => conn.clone(),
+            Self::Fake { conn, .. } => conn.clone(),
         }
     }
 
@@ -157,7 +244,7 @@ impl Link {
             Self::Ssh(session) => session.state(),
             Self::Ftp(fs) => Connection::state(fs),
             #[cfg(test)]
-            Self::Fake(conn) => conn.state(),
+            Self::Fake { conn, .. } => conn.state(),
         }
     }
 
@@ -166,7 +253,9 @@ impl Link {
             Self::Ssh(session) => session.reconnect_now().await,
             Self::Ftp(fs) => fs.reconnect_now().await,
             #[cfg(test)]
-            Self::Fake(_) => {}
+            Self::Fake { reconnects, .. } => {
+                reconnects.fetch_add(1, Ordering::SeqCst);
+            }
         }
     }
 
@@ -175,7 +264,7 @@ impl Link {
             Self::Ssh(session) => session.disconnect().await,
             Self::Ftp(fs) => fs.disconnect().await,
             #[cfg(test)]
-            Self::Fake(_) => {}
+            Self::Fake { .. } => {}
         }
     }
 }
@@ -201,12 +290,14 @@ impl SessionManager {
                 vault,
                 broker,
                 workers: AtomicUsize::new(config.workers),
+                keepalive: Mutex::new(config.keepalive),
                 config,
                 local: Arc::new(LocalFs::new("/")),
                 next_id: AtomicU64::new(1),
                 sessions: Mutex::new(HashMap::new()),
                 site_locks: Mutex::new(HashMap::new()),
                 paused_by_close: Mutex::new(HashSet::new()),
+                shells: Shells::default(),
                 #[cfg(test)]
                 test_remotes: Mutex::new(HashMap::new()),
             }),
@@ -222,6 +313,17 @@ impl SessionManager {
     /// the next connection of a site (a new session) uses this value.
     pub fn set_workers(&self, workers: usize) {
         self.inner.workers.store(workers, Ordering::Relaxed);
+    }
+
+    /// Keepalive of the sessions started from now on.
+    pub fn keepalive(&self) -> Duration {
+        *lock(&self.inner.keepalive)
+    }
+
+    /// Sets the keepalive of SSH and FTP sessions (Settings). Sessions already started keep
+    /// theirs; the next connection of a site (a new session) uses this value.
+    pub fn set_keepalive(&self, keepalive: Duration) {
+        *lock(&self.inner.keepalive) = keepalive;
     }
 
     /// Connects the saved site `site` (see the module docs). The app connects through
@@ -333,24 +435,38 @@ impl SessionManager {
             .broker
             .session(id, site.id.clone(), &site.host, site.port);
         let config = &self.inner.config;
+        let keepalive = self.keepalive();
+        let reconnect = config.reconnect.clone().unwrap_or_default();
         let link = match site.protocol {
             Protocol::Ssh => {
                 let mut ssh = ssh_config(site, secrets);
                 if let Some(known_hosts) = &config.known_hosts {
                     ssh.known_hosts = known_hosts.clone();
                 }
+                ssh.keepalive_interval = keepalive;
+                ssh.reconnect = reconnect.clone();
+                if let Some(timeout) = config.connect_timeout {
+                    ssh.connect_timeout = timeout;
+                }
                 Link::Ssh(SshSession::start(ssh, Arc::new(prompter.clone())))
             }
             Protocol::Ftp | Protocol::FtpsExplicit | Protocol::FtpsImplicit => {
                 let mut ftp = ftp_config(site, secrets);
                 ftp.transfer_connections = self.workers().clamp(1, 8);
+                ftp.keepalive_interval = keepalive;
+                ftp.reconnect = reconnect.clone();
+                if let Some(timeout) = config.connect_timeout {
+                    ftp.connect_timeout = timeout;
+                }
                 Link::Ftp(FtpFs::start(ftp, Arc::new(prompter.clone())))
             }
         };
+        let label = SessionLabel::of(site, reconnect.max_attempts);
         self.insert(
             id,
             site.id.clone(),
             link,
+            label,
             prompter,
             secrets.keyring_unavailable,
         );
@@ -362,12 +478,19 @@ impl SessionManager {
         id: SessionId,
         site: SiteId,
         link: Link,
+        label: SessionLabel,
         prompter: SessionPrompter,
         keyring_unavailable: bool,
     ) {
+        let activity = Arc::new(Activity::new());
+        // Subscribed before the entry exists: the monitor sees every state from the first.
+        let monitor = spawn_monitor(label.clone(), link.clone(), activity.clone());
         let entry = Entry {
             site,
             link,
+            label,
+            activity,
+            monitor: Some(monitor),
             prompter,
             keyring_unavailable,
             remote: None,
@@ -384,7 +507,7 @@ impl SessionManager {
     /// [`SessionPrompter::take_pending_secrets`]): `Connected` writes them to the keyring,
     /// a failure drops them.
     async fn ready(&self, id: SessionId) -> Result<()> {
-        let (link, site, built, prompter) = {
+        let (link, site, built, prompter, activity) = {
             let sessions = lock(&self.inner.sessions);
             let entry = sessions.get(&id).ok_or_else(closed)?;
             (
@@ -392,6 +515,7 @@ impl SessionManager {
                 entry.site.clone(),
                 entry.remote.is_some(),
                 entry.prompter.clone(),
+                entry.activity.clone(),
             )
         };
         let mut state = link.state();
@@ -435,8 +559,12 @@ impl SessionManager {
             }
             Link::Ftp(fs) => Arc::new(fs.clone()),
             #[cfg(test)]
-            Link::Fake(_) => self.test_remote(id)?,
+            Link::Fake { .. } => self.test_remote(id)?,
         };
+        let remote: Arc<dyn RemoteFs> = Arc::new(ActiveFs {
+            inner: remote,
+            activity,
+        });
         let engine = &self.inner.engine;
         let endpoints = SiteEndpoints {
             local: self.inner.local.clone(),
@@ -488,21 +616,42 @@ impl SessionManager {
 
     /// Retries a session whose connection is `Disconnected` (first connection included)
     /// and waits for it like `connect`.
+    ///
+    /// The request and its outcome are logged at `info` (the states in between by the
+    /// session's monitor).
     pub async fn reconnect(&self, id: SessionId) -> Result<()> {
-        let (site, link) = {
+        let (site, link, label) = {
             let sessions = lock(&self.inner.sessions);
             let entry = sessions.get(&id).ok_or_else(closed)?;
-            (entry.site.clone(), entry.link.clone())
+            (entry.site.clone(), entry.link.clone(), entry.label.clone())
         };
+        tracing::info!(
+            site = ?label.name,
+            protocol = %protocol_name(label.protocol),
+            endpoint = %label.endpoint,
+            "reconnect requested"
+        );
         let site_lock = self.site_lock(&site);
         let _turn = site_lock.lock().await;
         link.reconnect_now().await;
-        self.ready(id).await
+        let result = self.ready(id).await;
+        let outcome = match &result {
+            Ok(()) => "reconnected".to_owned(),
+            Err(error) => format!("failed: {}", reason_text(error)),
+        };
+        tracing::info!(
+            site = ?label.name,
+            protocol = %protocol_name(label.protocol),
+            endpoint = %label.endpoint,
+            outcome = ?outcome,
+            "reconnect finished"
+        );
+        result
     }
 
-    /// Closes a session: refuses its prompts, aborts its site watcher, pauses its site in
-    /// the engine (the next connect of the site resumes it), then disconnects and drops
-    /// the connection. Unknown ids are ignored.
+    /// Closes a session: closes its shells, refuses its prompts, aborts its site watcher,
+    /// pauses its site in the engine (the next connect of the site resumes it), then
+    /// disconnects and drops the connection. Unknown ids are ignored.
     ///
     /// It does not take the site's lock: a connect waiting on this session's prompts or
     /// first connection holds it, and closing is what ends that wait. A `ready` still
@@ -516,10 +665,19 @@ impl SessionManager {
             let replaced = sessions.values().any(|other| other.site == entry.site);
             (entry, replaced)
         };
+        // A shell `open_shell` registers is registered under the sessions lock while the
+        // session still exists, so none can appear after this.
+        self.inner.shells.close_session(id);
         entry.prompter.cancel();
         entry.prompter.discard_pending_secrets();
         if let Some(watcher) = &entry.watcher {
             watcher.abort();
+        }
+        // Closed by the user: nothing to log or reconnect any more (the flag covers a
+        // monitor that is running right now, the abort the rest).
+        entry.activity.mark_closed();
+        if let Some(monitor) = &entry.monitor {
+            monitor.abort();
         }
         if !replaced {
             lock(&self.inner.paused_by_close).insert(entry.site.clone());
@@ -527,6 +685,58 @@ impl SessionManager {
         }
         entry.link.disconnect().await;
         drop(entry);
+    }
+
+    /// Opens a terminal of `cols` x `rows` on the SSH session `id` (see
+    /// [`BackendApi::open_shell`](super::BackendApi::open_shell)).
+    pub async fn open_shell(&self, id: SessionId, cols: u16, rows: u16) -> Result<ShellId> {
+        let link = {
+            let sessions = lock(&self.inner.sessions);
+            sessions.get(&id).ok_or_else(closed)?.link.clone()
+        };
+        let Link::Ssh(session) = link else {
+            return Err(Error::new(
+                ErrorKind::Protocol,
+                "Terminals need an SSH site",
+            ));
+        };
+        let request = PtyRequest {
+            cols: cols.into(),
+            rows: rows.into(),
+            ..PtyRequest::default()
+        };
+        self.touch(id);
+        let (handle, output) = session.open_shell(request).await?.into_output();
+        let sessions = lock(&self.inner.sessions);
+        if !sessions.contains_key(&id) {
+            // Closed while the shell opened.
+            handle.close();
+            return Err(closed());
+        }
+        Ok(self
+            .inner
+            .shells
+            .insert(id, Arc::new(handle), output.boxed()))
+    }
+
+    /// The terminal shells of the sessions.
+    pub fn shells(&self) -> &Shells {
+        &self.inner.shells
+    }
+
+    /// Sends keyboard input to a shell; its session counts as used.
+    pub async fn shell_input(&self, shell: ShellId, data: Vec<u8>) -> Result<()> {
+        if let Some(session) = self.inner.shells.session_of(shell) {
+            self.touch(session);
+        }
+        self.inner.shells.input(shell, data).await
+    }
+
+    /// The session was just used (it is not idle).
+    fn touch(&self, id: SessionId) {
+        if let Some(entry) = lock(&self.inner.sessions).get(&id) {
+            entry.activity.touch();
+        }
     }
 
     /// Closes every session (the window is closing).
@@ -542,7 +752,7 @@ impl SessionManager {
             Link::Ssh(session) => session.auth_method(),
             Link::Ftp(_) => None,
             #[cfg(test)]
-            Link::Fake(_) => None,
+            Link::Fake { .. } => None,
         }
     }
 
@@ -554,6 +764,20 @@ impl SessionManager {
             .remote
             .clone()
             .ok_or_else(|| Error::new(ErrorKind::Network, "Not connected"))
+    }
+
+    /// The site of a session.
+    pub fn site(&self, id: SessionId) -> Option<SiteId> {
+        lock(&self.inner.sessions)
+            .get(&id)
+            .map(|entry| entry.site.clone())
+    }
+
+    /// The protocol of a session's site.
+    pub fn protocol(&self, id: SessionId) -> Option<Protocol> {
+        lock(&self.inner.sessions)
+            .get(&id)
+            .map(|entry| entry.label.protocol)
     }
 
     /// The `known_hosts` file SSH sessions check: the configured one, else
@@ -592,14 +816,46 @@ impl SessionManager {
         conn: Arc<dyn Connection>,
         remote: Arc<dyn RemoteFs>,
     ) -> Result<SessionId> {
+        let mut test_site = Site::new("test", "test", "u", Protocol::Ftp);
+        test_site.id = site;
+        test_site.port = 0;
+        self.attach_site(&test_site, conn, remote).await
+    }
+
+    /// [`attach`](Self::attach) for a given saved site (what the connection log names).
+    #[cfg(test)]
+    async fn attach_site(
+        &self,
+        site: &Site,
+        conn: Arc<dyn Connection>,
+        remote: Arc<dyn RemoteFs>,
+    ) -> Result<SessionId> {
         let id = SessionId(self.inner.next_id.fetch_add(1, Ordering::SeqCst));
-        let prompter = self.inner.broker.session(id, site.clone(), "test", 0);
-        self.insert(id, site.clone(), Link::Fake(conn), prompter, false);
+        let prompter = self
+            .inner
+            .broker
+            .session(id, site.id.clone(), &site.host, site.port);
+        let link = Link::Fake {
+            conn,
+            reconnects: Arc::new(AtomicUsize::new(0)),
+        };
+        let attempts = self.inner.config.reconnect.clone().unwrap_or_default();
+        let label = SessionLabel::of(site, attempts.max_attempts);
+        self.insert(id, site.id.clone(), link, label, prompter, false);
         lock(&self.inner.test_remotes).insert(id, remote);
-        let site_lock = self.site_lock(&site);
+        let site_lock = self.site_lock(&site.id);
         let _turn = site_lock.lock().await;
         self.ready(id).await?;
         Ok(id)
+    }
+
+    /// How many times a test session's `reconnect_now` was called.
+    #[cfg(test)]
+    fn fake_reconnects(&self, id: SessionId) -> usize {
+        match &lock(&self.inner.sessions).get(&id).map(|e| e.link.clone()) {
+            Some(Link::Fake { reconnects, .. }) => reconnects.load(Ordering::SeqCst),
+            _ => 0,
+        }
     }
 
     /// The prompter of a session (tests answer its prompts directly).
@@ -618,12 +874,231 @@ impl SessionManager {
     }
 }
 
+impl SessionLabel {
+    fn of(site: &Site, attempts: u32) -> Self {
+        let protocol = site.protocol;
+        Self {
+            name: site.name.clone(),
+            protocol,
+            endpoint: format!("{}:{}", site.host, site.port),
+            attempts,
+        }
+    }
+}
+
+/// A session's remote filesystem that records when it is used (see [`Activity`]).
+struct ActiveFs {
+    inner: Arc<dyn RemoteFs>,
+    activity: Arc<Activity>,
+}
+
+#[async_trait::async_trait]
+impl RemoteFs for ActiveFs {
+    async fn list(&self, path: &hoprs_core::RemotePath) -> Result<Vec<hoprs_core::RemoteEntry>> {
+        self.activity.touch();
+        self.inner.list(path).await
+    }
+
+    async fn stat(&self, path: &hoprs_core::RemotePath) -> Result<hoprs_core::RemoteEntry> {
+        self.activity.touch();
+        self.inner.stat(path).await
+    }
+
+    async fn size(&self, path: &hoprs_core::RemotePath) -> Result<u64> {
+        self.activity.touch();
+        self.inner.size(path).await
+    }
+
+    async fn open_read(
+        &self,
+        path: &hoprs_core::RemotePath,
+        offset: u64,
+    ) -> Result<hoprs_remote::BoxAsyncRead> {
+        self.activity.touch();
+        self.inner.open_read(path, offset).await
+    }
+
+    async fn open_write(
+        &self,
+        path: &hoprs_core::RemotePath,
+        offset: u64,
+    ) -> Result<hoprs_remote::BoxAsyncWrite> {
+        self.activity.touch();
+        self.inner.open_write(path, offset).await
+    }
+
+    async fn mkdir(&self, path: &hoprs_core::RemotePath) -> Result<()> {
+        self.activity.touch();
+        self.inner.mkdir(path).await
+    }
+
+    async fn rename(
+        &self,
+        from: &hoprs_core::RemotePath,
+        to: &hoprs_core::RemotePath,
+    ) -> Result<()> {
+        self.activity.touch();
+        self.inner.rename(from, to).await
+    }
+
+    async fn remove_file(&self, path: &hoprs_core::RemotePath) -> Result<()> {
+        self.activity.touch();
+        self.inner.remove_file(path).await
+    }
+
+    async fn remove_dir(&self, path: &hoprs_core::RemotePath) -> Result<()> {
+        self.activity.touch();
+        self.inner.remove_dir(path).await
+    }
+
+    async fn chmod(&self, path: &hoprs_core::RemotePath, mode: u32) -> Result<()> {
+        self.activity.touch();
+        self.inner.chmod(path, mode).await
+    }
+
+    async fn set_modified(
+        &self,
+        path: &hoprs_core::RemotePath,
+        mtime: std::time::SystemTime,
+    ) -> Result<()> {
+        self.activity.touch();
+        self.inner.set_modified(path, mtime).await
+    }
+}
+
+/// Starts the session's monitor (see the module docs): it logs every state change and
+/// starts one more reconnection round, quietly, when the transport gives up on a session
+/// that was connected (a network failure only).
+///
+/// It holds a clone of the session's link, which keeps the connection (and so its state
+/// channel) alive: it does not end by itself. `close` aborts it (and `close_all` closes
+/// every session when the window closes).
+fn spawn_monitor(label: SessionLabel, link: Link, activity: Arc<Activity>) -> JoinHandle<()> {
+    let mut state = link.state();
+    let conn = link.connection();
+    tokio::spawn(async move {
+        let mut current = state.borrow_and_update().clone();
+        log_transition(
+            &label,
+            &current,
+            conn.last_error(),
+            activity.since_last_request(),
+        );
+        // One quiet round per connection: spent by a retry, back once connected.
+        let mut retry_left = true;
+        while state.changed().await.is_ok() {
+            let next = state.borrow_and_update().clone();
+            if next == current {
+                continue;
+            }
+            let previous = std::mem::replace(&mut current, next);
+            let since = activity.since_last_request();
+            log_transition(&label, &current, conn.last_error(), since);
+            match &current {
+                ConnectionState::Connected => retry_left = true,
+                ConnectionState::Disconnected(error)
+                    if retry_left
+                        && conn.generation() > 0
+                        && gave_up_on_network(&previous, error, &activity) =>
+                {
+                    retry_left = false;
+                    tracing::info!(
+                        site = ?label.name,
+                        protocol = %protocol_name(label.protocol),
+                        endpoint = %label.endpoint,
+                        since_last_request_secs = since.as_secs(),
+                        "reconnection given up; trying one more round"
+                    );
+                    // Without the site's lock: `reconnect_now` only starts a round when the
+                    // session is `Disconnected` and is ignored while one runs, so racing
+                    // `SessionManager::reconnect` (which holds the lock for its own wait)
+                    // starts at most one round; neither waits on the other.
+                    link.reconnect_now().await;
+                }
+                _ => {}
+            }
+        }
+    })
+}
+
+/// Whether the transport gave up on the session for a network failure, worth one more
+/// round: it was reconnecting (a whole round failed), the error is a network one (not a
+/// host key, authentication or TLS refusal), and `close` is not closing it.
+fn gave_up_on_network(previous: &ConnectionState, error: &Error, activity: &Activity) -> bool {
+    matches!(previous, ConnectionState::Reconnecting { .. })
+        && error.kind == ErrorKind::Network
+        && !activity.is_closed()
+}
+
+/// The protocol as the connection log names it.
+fn protocol_name(protocol: Protocol) -> &'static str {
+    match protocol {
+        Protocol::Ssh => "ssh",
+        Protocol::Ftp => "ftp",
+        Protocol::FtpsExplicit => "ftps-explicit",
+        Protocol::FtpsImplicit => "ftps-implicit",
+    }
+}
+
+/// `kind: message (detail)`; never holds a secret (no error does).
+fn reason_text(error: &Error) -> String {
+    match &error.detail {
+        Some(detail) => format!("{}: {} ({detail})", error.kind.as_str(), error.message),
+        None => format!("{}: {}", error.kind.as_str(), error.message),
+    }
+}
+
+/// Logs one state change of a session (see the module docs). `last_error` is the
+/// transport's reason for a `Reconnecting` state; `Disconnected` carries its own.
+fn log_transition(
+    label: &SessionLabel,
+    state: &ConnectionState,
+    last_error: Option<Error>,
+    since_last_request: Duration,
+) {
+    let (name, reason) = match state {
+        ConnectionState::Connecting => ("connecting".to_owned(), None),
+        ConnectionState::Connected => ("connected".to_owned(), None),
+        ConnectionState::Reconnecting { attempt } => (
+            format!("reconnecting {attempt}/{}", label.attempts),
+            last_error,
+        ),
+        ConnectionState::WaitingForUser => ("waiting for the user".to_owned(), None),
+        ConnectionState::Disconnected(error) => ("disconnected".to_owned(), Some(error.clone())),
+    };
+    let since_last_request_secs = since_last_request.as_secs();
+    if matches!(state, ConnectionState::Reconnecting { attempt: 1 })
+        && let Some(error) = &reason
+        && error.detail.as_deref() == Some(hoprs_core::KEEPALIVE_UNANSWERED)
+    {
+        tracing::warn!(
+            site = ?label.name,
+            protocol = %protocol_name(label.protocol),
+            endpoint = %label.endpoint,
+            since_last_request_secs,
+            "keepalive not answered"
+        );
+    }
+    let reason = reason.as_ref().map_or_else(|| "-".to_owned(), reason_text);
+    tracing::info!(
+        site = ?label.name,
+        protocol = %protocol_name(label.protocol),
+        endpoint = %label.endpoint,
+        state = ?name,
+        reason = ?reason,
+        since_last_request_secs,
+        "connection state changed"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
+    use futures_util::stream::BoxStream;
     use hoprs_core::{EntryKind, RemotePath};
     use hoprs_remote::MemFs;
+    use hoprs_ssh::ShellOutput;
     use hoprs_transfer::{EngineConfig, QueueStore};
     use hoprs_vault::{MemoryStore, SecretKind, Vault};
     use secrecy::SecretString;
@@ -633,6 +1108,23 @@ mod tests {
 
     struct FakeConn {
         state: watch::Sender<ConnectionState>,
+        last_error: Mutex<Option<Error>>,
+    }
+
+    impl FakeConn {
+        fn new(state: watch::Sender<ConnectionState>) -> Self {
+            Self {
+                state,
+                last_error: Mutex::new(None),
+            }
+        }
+
+        /// The connection ends with `error`: the transport starts reconnecting.
+        fn lose(&self, error: Error) {
+            *self.last_error.lock().unwrap() = Some(error);
+            self.state
+                .send_replace(ConnectionState::Reconnecting { attempt: 1 });
+        }
     }
 
     impl Connection for FakeConn {
@@ -643,6 +1135,63 @@ mod tests {
         fn generation(&self) -> u64 {
             1
         }
+
+        fn last_error(&self) -> Option<Error> {
+            self.last_error.lock().unwrap().clone()
+        }
+    }
+
+    /// Log lines written while a [`capture_logs`] guard lives (this thread's tasks).
+    #[derive(Clone, Default)]
+    struct LogBuf(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuf {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl LogBuf {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    /// What [`capture_logs`] keeps alive.
+    struct LogCapture {
+        _default: tracing::subscriber::DefaultGuard,
+        _other: tracing::Dispatch,
+    }
+
+    /// Captures what the app logs at the default level (`info`) on this thread.
+    ///
+    /// With a single dispatcher registered, `tracing` caches a callsite's interest from
+    /// whichever thread hits it first: another test's thread (no subscriber) would make it
+    /// "never" for this one too. A second, silent dispatcher makes every callsite ask the
+    /// current thread's subscriber instead.
+    fn capture_logs() -> (LogBuf, LogCapture) {
+        let buf = LogBuf::default();
+        let writer = buf.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        let capture = LogCapture {
+            _default: tracing::subscriber::set_default(subscriber),
+            _other: tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()),
+        };
+        (buf, capture)
+    }
+
+    /// Lets the monitor tasks see the latest state.
+    async fn settle() {
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
     struct Fixture {
@@ -657,6 +1206,16 @@ mod tests {
     }
 
     fn fixture_with(store: Arc<dyn hoprs_vault::SecretStore>) -> Fixture {
+        fixture_config(
+            store,
+            SessionConfig {
+                workers: 2,
+                ..SessionConfig::default()
+            },
+        )
+    }
+
+    fn fixture_config(store: Arc<dyn hoprs_vault::SecretStore>, config: SessionConfig) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let vault = Vault::open(dir.path(), store).unwrap();
         let vault = VaultHandle::new(vault);
@@ -668,7 +1227,7 @@ mod tests {
         .unwrap();
         let config = SessionConfig {
             known_hosts: Some(dir.path().join("known_hosts")),
-            workers: 2,
+            ..config
         };
         let manager = SessionManager::new(engine, vault.clone(), broker.clone(), config);
         Fixture {
@@ -693,7 +1252,7 @@ mod tests {
     async fn close_aborts_watcher() {
         let f = fixture();
         let (state, _) = watch::channel(ConnectionState::Connected);
-        let conn = Arc::new(FakeConn { state });
+        let conn = Arc::new(FakeConn::new(state));
         let remote = MemFs::new();
         remote.add_dir("/srv");
         let site = SiteId::new();
@@ -729,6 +1288,30 @@ mod tests {
         f.manager.close(id).await;
     }
 
+    /// Only SSH sessions have terminals; a closed session has none.
+    #[tokio::test]
+    async fn open_shell_needs_an_ssh_session() {
+        let f = fixture();
+        let (state, _) = watch::channel(ConnectionState::Connected);
+        let id = f
+            .manager
+            .attach(
+                SiteId::new(),
+                Arc::new(FakeConn::new(state)),
+                Arc::new(MemFs::new()),
+            )
+            .await
+            .unwrap();
+        let e = f.manager.open_shell(id, 80, 24).await.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Protocol);
+        assert_eq!(e.message, "Terminals need an SSH site");
+        f.manager.close(id).await;
+        assert_eq!(
+            f.manager.open_shell(id, 80, 24).await.unwrap_err(),
+            closed()
+        );
+    }
+
     /// The window is closing: every session goes, its watch with it.
     #[tokio::test]
     async fn close_all_closes_every_session() {
@@ -737,7 +1320,7 @@ mod tests {
         let mut conns = Vec::new();
         for _ in 0..2 {
             let (state, _) = watch::channel(ConnectionState::Connected);
-            let conn = Arc::new(FakeConn { state });
+            let conn = Arc::new(FakeConn::new(state));
             let id = f
                 .manager
                 .attach(SiteId::new(), conn.clone(), Arc::new(MemFs::new()))
@@ -761,13 +1344,168 @@ mod tests {
         assert_eq!(f.manager.auth(SessionId(999)), None);
     }
 
+    /// Every connection state change is logged at `info` with the site, protocol,
+    /// `host:port`, the new state, the reason and the idle time; an unanswered keepalive
+    /// also at `warn`. Nothing else about the session (no secret) is in the lines.
+    #[tokio::test]
+    async fn connection_transitions_are_logged_at_info() {
+        let (logs, _guard) = capture_logs();
+        let f = fixture();
+        let (state, _) = watch::channel(ConnectionState::Connected);
+        let conn = Arc::new(FakeConn::new(state));
+        let mut site = Site::new("Shop files", "ftp.shop.example", "deploy", Protocol::Ftp);
+        site.port = 2121;
+        let remote = MemFs::new();
+        remote.add_dir("/srv");
+        let id = f
+            .manager
+            .attach_site(&site, conn.clone(), Arc::new(remote))
+            .await
+            .unwrap();
+        f.manager
+            .remote(id)
+            .unwrap()
+            .list(&RemotePath::root())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+
+        // Idle for a second, the server stops answering: the keepalive gives up.
+        conn.lose(
+            Error::new(ErrorKind::Network, "Connection lost")
+                .with_detail(hoprs_core::KEEPALIVE_UNANSWERED),
+        );
+        for _ in 0..200 {
+            if logs.text().contains("reconnecting 1/5") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            logs.text().contains("reconnecting 1/5"),
+            "the drop in the log: {}",
+            logs.text()
+        );
+        conn.state.send_replace(ConnectionState::Connected);
+        for _ in 0..200 {
+            if logs.text().matches("state=\"connected\"").count() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            logs.text().matches("state=\"connected\"").count(),
+            2,
+            "{}",
+            logs.text()
+        );
+
+        let text = logs.text();
+        let dropped = text
+            .lines()
+            .find(|l| l.contains("reconnecting 1/5"))
+            .unwrap();
+        for expected in [
+            "INFO",
+            "connection state changed",
+            "site=\"Shop files\"",
+            "protocol=ftp",
+            "endpoint=ftp.shop.example:2121",
+            "state=\"reconnecting 1/5\"",
+            "reason=\"network: Connection lost (no reply to the keepalive)\"",
+        ] {
+            assert!(dropped.contains(expected), "{expected:?} in {dropped}");
+        }
+        // About a second since the listing (a slow machine may round up).
+        let since: u64 = dropped
+            .split("since_last_request_secs=")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("no since_last_request_secs in {dropped}"));
+        assert!((1..=3).contains(&since), "{dropped}");
+        let warned = text
+            .lines()
+            .find(|l| l.contains("WARN"))
+            .expect("a warning for the keepalive");
+        assert!(warned.contains("keepalive not answered"), "{warned}");
+        assert!(warned.contains("site=\"Shop files\""), "{warned}");
+        let back = text
+            .lines()
+            .rfind(|l| l.contains("state=\"connected\""))
+            .unwrap();
+        assert!(back.contains("INFO"), "{back}");
+        assert!(back.contains("endpoint=ftp.shop.example:2121"), "{back}");
+        assert!(!text.contains("deploy"), "no user name: {text}");
+    }
+
+    /// The transport gives up while nobody uses the site: the manager starts one more round
+    /// by itself, quietly. Once only, until the session is connected again; never after a
+    /// refusal (authentication, host key, certificate).
+    #[tokio::test]
+    async fn idle_drop_reconnects_once_quietly() {
+        let f = fixture();
+        let (state, _) = watch::channel(ConnectionState::Connected);
+        let conn = Arc::new(FakeConn::new(state));
+        let id = f
+            .manager
+            .attach(SiteId::new(), conn.clone(), Arc::new(MemFs::new()))
+            .await
+            .unwrap();
+        let lost = Error::new(ErrorKind::Network, "Connection lost");
+        let give_up = |error: Error| {
+            let conn = conn.clone();
+            async move {
+                conn.lose(Error::new(ErrorKind::Network, "Connection lost"));
+                settle().await;
+                conn.state
+                    .send_replace(ConnectionState::Disconnected(error));
+                settle().await;
+            }
+        };
+        let back = || {
+            let conn = conn.clone();
+            async move {
+                conn.state.send_replace(ConnectionState::Connected);
+                settle().await;
+            }
+        };
+
+        give_up(lost.clone()).await;
+        assert_eq!(f.manager.fake_reconnects(id), 1, "one quiet round");
+        give_up(lost.clone()).await;
+        assert_eq!(
+            f.manager.fake_reconnects(id),
+            1,
+            "then it waits for the user"
+        );
+        back().await;
+        give_up(lost.clone()).await;
+        assert_eq!(
+            f.manager.fake_reconnects(id),
+            2,
+            "connected again: one more"
+        );
+
+        for refused in [
+            Error::new(ErrorKind::Auth, "Authentication failed"),
+            hoprs_ssh::testing::changed_host_key_error("test", 1),
+            Error::new(ErrorKind::Tls, "Certificate not trusted"),
+        ] {
+            back().await;
+            give_up(refused.clone()).await;
+            assert_eq!(f.manager.fake_reconnects(id), 2, "{refused:?}");
+        }
+        f.manager.close(id).await;
+    }
+
     #[tokio::test]
     async fn session_ids_are_monotonic() {
         let f = fixture();
         let mut ids = Vec::new();
         for _ in 0..3 {
             let (state, _) = watch::channel(ConnectionState::Connected);
-            let conn = Arc::new(FakeConn { state });
+            let conn = Arc::new(FakeConn::new(state));
             let id = f
                 .manager
                 .attach(SiteId::new(), conn, Arc::new(MemFs::new()))
@@ -777,7 +1515,7 @@ mod tests {
         }
         f.manager.close(ids[1]).await;
         let (state, _) = watch::channel(ConnectionState::Connected);
-        let conn = Arc::new(FakeConn { state });
+        let conn = Arc::new(FakeConn::new(state));
         let last = f
             .manager
             .attach(SiteId::new(), conn, Arc::new(MemFs::new()))
@@ -988,7 +1726,7 @@ mod tests {
             return; // A drive-letter path: LocalFs("/") cannot address it (Windows).
         };
         let (state, _) = watch::channel(ConnectionState::Connected);
-        let conn: Arc<dyn Connection> = Arc::new(FakeConn { state });
+        let conn: Arc<dyn Connection> = Arc::new(FakeConn::new(state));
         let id = f
             .manager
             .attach(site.clone(), conn.clone(), Arc::new(remote.clone()))
@@ -1054,7 +1792,7 @@ mod tests {
             let site = Site::new(outcome, "h", "u", Protocol::Ssh);
             f.vault.upsert_site(site.clone()).await.unwrap();
             let (state, _) = watch::channel(ConnectionState::Connecting);
-            let conn = Arc::new(FakeConn { state });
+            let conn = Arc::new(FakeConn::new(state));
             let attach = tokio::spawn({
                 let manager = f.manager.clone();
                 let site = site.id.clone();
@@ -1207,6 +1945,167 @@ mod tests {
         prompts.abort();
     }
 
+    /// Reads a shell's output until it contains `needle`.
+    async fn read_until(output: &mut BoxStream<'static, ShellOutput>, needle: &str) {
+        let mut text = String::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !text.contains(needle) {
+            let next = tokio::time::timeout_at(deadline, output.next())
+                .await
+                .unwrap_or_else(|_| panic!("timed out; output so far: {text:?}"));
+            match next {
+                Some(ShellOutput::Data(d)) => text.push_str(&String::from_utf8_lossy(&d)),
+                other => panic!("unexpected {other:?}; output so far: {text:?}"),
+            }
+        }
+    }
+
+    /// Skips output until `Closed`, which ends the stream.
+    async fn wait_closed(output: &mut BoxStream<'static, ShellOutput>) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let next = tokio::time::timeout_at(deadline, output.next())
+                .await
+                .expect("timed out waiting for Closed");
+            match next {
+                Some(ShellOutput::Closed) => break,
+                Some(_) => {}
+                None => panic!("output ended without Closed"),
+            }
+        }
+        assert!(output.next().await.is_none());
+    }
+
+    /// Terminals and files on one SSH session (Review Focus 5): closing a shell leaves
+    /// the files and the other shells alone; closing the session closes its shells.
+    #[tokio::test]
+    #[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+    async fn ssh_shells_close_with_their_session() {
+        let f = fixture();
+        let mut site = Site::new("docker ssh", "127.0.0.1", "alice", Protocol::Ssh);
+        site.port = hoprs_ssh::testing::SSH_PORT;
+        site.ssh.use_agent = false;
+        site.ssh.key_file = Some(hoprs_ssh::testing::fixture("id_ed25519"));
+        f.vault.upsert_site(site.clone()).await.unwrap();
+        let (prompts, _) = answer_prompts(&f.broker);
+        let id = f.manager.connect(site.id.clone()).await.unwrap().session;
+        let shells = f.manager.shells();
+
+        let one = f.manager.open_shell(id, 120, 40).await.unwrap();
+        let two = f.manager.open_shell(id, 80, 24).await.unwrap();
+        let mut out_one = shells.output(one).unwrap();
+        let mut out_two = shells.output(two).unwrap();
+        assert!(shells.output(one).is_none(), "handed out once");
+        shells
+            .input(one, b"printf 'size=<%s>\\n' \"$(stty size)\"\n".to_vec())
+            .await
+            .unwrap();
+        read_until(&mut out_one, "size=<40 120>").await;
+        shells.resize(one, 100, 30).await.unwrap();
+
+        // Closing one shell leaves the other and the files working.
+        shells.close(one);
+        wait_closed(&mut out_one).await;
+        assert!(shells.input(one, b"x".to_vec()).await.is_err());
+        shells
+            .input(two, b"echo two-$((1+1))\n".to_vec())
+            .await
+            .unwrap();
+        read_until(&mut out_two, "two-2").await;
+        let remote = f.manager.remote(id).unwrap();
+        assert!(remote.list(&RemotePath::root()).await.is_ok());
+
+        // Closing the session closes its remaining shell.
+        f.manager.close(id).await;
+        wait_closed(&mut out_two).await;
+        let e = shells.input(two, b"x".to_vec()).await.unwrap_err();
+        assert_eq!(e.message, "Shell closed");
+        prompts.abort();
+    }
+
+    /// Unpauses a compose service when dropped. Never panics.
+    struct Unpause(&'static str);
+
+    impl Drop for Unpause {
+        fn drop(&mut self) {
+            let service = self.0;
+            if std::panic::catch_unwind(|| hoprs_ssh::testing::docker(&["unpause", service]))
+                .is_err()
+            {
+                eprintln!("could not unpause {service}");
+            }
+        }
+    }
+
+    /// Review Focus 3: the server goes silent (`docker pause`: connections are accepted,
+    /// nothing answers), as when a NAT drops an idle connection. The keepalive notices, the
+    /// transport tries its round and gives up; once the server answers again the session
+    /// comes back by itself, with no click, and the next listing works.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+    async fn silent_drop_is_detected_and_recovered() {
+        let f = fixture_config(
+            Arc::new(MemoryStore::new()),
+            SessionConfig {
+                workers: 1,
+                keepalive: Duration::from_secs(2),
+                connect_timeout: Some(Duration::from_secs(3)),
+                reconnect: Some(ReconnectPolicy {
+                    max_attempts: 2,
+                    base_delay: Duration::from_millis(500),
+                    max_delay: Duration::from_secs(1),
+                }),
+                ..SessionConfig::default()
+            },
+        );
+        let mut site = Site::new("idle ftp", "127.0.0.1", "frank", Protocol::Ftp);
+        site.port = hoprs_remote::testing::FTP_IDLE_PORT;
+        f.vault.upsert_site(site.clone()).await.unwrap();
+        let id_for_secret = site.id.clone();
+        f.vault
+            .call(move |v| {
+                v.set_secret(
+                    &id_for_secret,
+                    SecretKind::Password,
+                    &SecretString::from("frank-pass"),
+                )
+            })
+            .await
+            .unwrap();
+        let id = f.manager.connect(site.id.clone()).await.unwrap().session;
+        let remote = f.manager.remote(id).unwrap();
+        let home = RemotePath::new("/home/frank").unwrap();
+        remote.list(&home).await.unwrap();
+        let mut state = f.manager.state(id).unwrap();
+
+        let unpause = Unpause("ftp-idle");
+        hoprs_ssh::testing::docker(&["pause", "ftp-idle"]);
+        let gave_up = tokio::time::timeout(
+            Duration::from_secs(30),
+            state.wait_for(|s| matches!(s, ConnectionState::Disconnected(_))),
+        )
+        .await
+        .expect("the drop is detected and the transport gives up")
+        .unwrap()
+        .clone();
+        let ConnectionState::Disconnected(error) = gave_up else {
+            unreachable!()
+        };
+        assert_eq!(error.kind, ErrorKind::Network, "{error:?}");
+        drop(unpause);
+
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            state.wait_for(|s| *s == ConnectionState::Connected),
+        )
+        .await
+        .expect("back without a click")
+        .unwrap();
+        let entries = remote.list(&home).await.expect("the next listing works");
+        assert!(!entries.is_empty());
+        f.manager.close(id).await;
+    }
+
     #[tokio::test]
     #[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
     async fn connect_ftps_site_end_to_end() {
@@ -1256,5 +2155,133 @@ mod tests {
         assert_eq!(f.manager.auth(id), None);
         f.manager.close(id).await;
         prompts.abort();
+    }
+
+    /// Plan 6 Task 6: connecting with stored secrets (a password and a key passphrase
+    /// read from the keyring; SSH, FTP and FTPS) through the real session manager and
+    /// its site mapping, then a reconnect: neither secret reaches the log, at trace, on
+    /// any thread. The connects fail fast (nothing listens on port 1), before any
+    /// dialog: typed answers are covered by the broker's
+    /// `prompt_answers_never_reach_the_log`.
+    #[test]
+    fn connect_secrets_never_reach_the_log() {
+        const STORED: &str = "stored-Sess-Pw40";
+        const PASSPHRASE: &str = "stored-Sess-Kp17";
+        let _lock = crate::subscriber_test_lock();
+        let (buffer, capture) = crate::capture_log(&crate::log_filter(Some("trace")));
+        capture.runtime().block_on(async {
+            let f = fixture();
+            let mut sites = Vec::new();
+            for (name, protocol) in [
+                ("ssh", Protocol::Ssh),
+                ("ftp", Protocol::Ftp),
+                ("ftps", Protocol::FtpsExplicit),
+            ] {
+                let mut site = Site::new(name, "127.0.0.1", "deploy", protocol);
+                site.port = 1;
+                site.ssh.use_agent = false;
+                f.vault.upsert_site(site.clone()).await.unwrap();
+                let id = site.id.clone();
+                f.vault
+                    .call(move |v| {
+                        v.set_secret(&id, SecretKind::Password, &SecretString::from(STORED))?;
+                        v.set_secret(
+                            &id,
+                            SecretKind::KeyPassphrase,
+                            &SecretString::from(PASSPHRASE),
+                        )
+                    })
+                    .await
+                    .unwrap();
+                sites.push(site.id.clone());
+            }
+            // Any dialog is answered with `pw` (none is expected).
+            let (answer, _) = answer_passwords(&f.broker);
+
+            let results = f.manager.connect_many(sites).await;
+            let mut sessions = Vec::new();
+            for (site, result) in results {
+                let err = result.expect_err("nothing listens on port 1");
+                sessions.push(err.session.unwrap_or_else(|| panic!("{site:?}: {err:?}")));
+            }
+            assert!(f.manager.reconnect(sessions[0]).await.is_err());
+            for id in sessions {
+                f.manager.close(id).await;
+            }
+            answer.abort();
+            crate::log_canaries().await;
+        });
+        drop(capture);
+        crate::assert_no_secrets(&buffer, &[STORED, PASSPHRASE]);
+        // Not vacuous: the reconnect was logged.
+        assert!(
+            buffer.text().contains("reconnect finished"),
+            "{}",
+            buffer.text()
+        );
+    }
+
+    /// Plan 6 Task 6: an upload that fails on the server (its error names the file)
+    /// never puts the file's content in the log, at trace, on any thread (the local
+    /// file is read on the blocking pool).
+    #[test]
+    fn failed_upload_never_logs_the_content() {
+        use hoprs_transfer::{Direction, TransferSpec, TransferState};
+
+        const CONTENT: &str = "content-Upload-Zp36";
+        let _lock = crate::subscriber_test_lock();
+        let (buffer, capture) = crate::capture_log(&crate::log_filter(Some("trace")));
+        let local = tempfile::tempdir().unwrap();
+        std::fs::write(local.path().join("notes.txt"), CONTENT).unwrap();
+        let Ok(local_path) = RemotePath::new(&format!(
+            "{}/notes.txt",
+            local.path().to_string_lossy().replace('\\', "/")
+        )) else {
+            return; // A drive-letter path: LocalFs("/") cannot address it (Windows).
+        };
+        let error = capture.runtime().block_on(async {
+            let f = fixture();
+            let site = SiteId::new();
+            let remote = MemFs::new();
+            remote.add_dir("/ro");
+            remote.deny_writes_under("/ro");
+            let (state, _) = watch::channel(ConnectionState::Connected);
+            let conn: Arc<dyn Connection> = Arc::new(FakeConn::new(state));
+            f.manager
+                .attach(site.clone(), conn, Arc::new(remote))
+                .await
+                .unwrap();
+            let engine = f.manager.inner.engine.clone();
+            let item = engine
+                .enqueue(TransferSpec {
+                    site,
+                    direction: Direction::Upload,
+                    local: local_path,
+                    remote: RemotePath::new("/ro/notes.txt").unwrap(),
+                })
+                .await
+                .unwrap();
+            let mut error = None;
+            for _ in 0..300 {
+                let state = engine
+                    .snapshot()
+                    .await
+                    .into_iter()
+                    .find(|i| i.id == item)
+                    .unwrap()
+                    .state;
+                if let TransferState::Failed(e) = state {
+                    error = Some(e);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            crate::log_canaries().await;
+            error.expect("the upload fails")
+        });
+        drop(capture);
+        assert!(error.to_string().contains("notes.txt"), "{error}");
+        assert!(!error.to_string().contains(CONTENT), "{error}");
+        crate::assert_no_secrets(&buffer, &[CONTENT]);
     }
 }

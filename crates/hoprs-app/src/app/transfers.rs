@@ -28,11 +28,15 @@ impl App {
     /// walks them). Empty unless both panes can act (the tab is connected and listed).
     pub(super) fn transfer_specs(&self, index: usize, from: Side) -> Vec<TransferSpec> {
         let tab = &self.tabs[index];
-        if !tab.can_transfer(from) {
+        if !tab.can_transfer(self.tab_conn(index), from) {
             return Vec::new();
         }
-        let source = tab.pane(from);
-        let target = &tab.pane(other(from)).path;
+        let Some(source) = tab.pane(from) else {
+            return Vec::new();
+        };
+        let Some(target) = tab.pane(other(from)).map(|pane| &pane.path) else {
+            return Vec::new();
+        };
         source
             .selected_entries()
             .into_iter()
@@ -108,12 +112,12 @@ impl App {
         let connected = self
             .shown_tab()
             .and_then(|id| self.tab_index(id))
-            .filter(|&i| self.tabs[i].session().is_some());
+            .filter(|&i| self.tabs[i].is_files() && self.tab_session(i).is_some());
         let Some(index) = connected else {
             self.queue_error(Error::new(ErrorKind::NotFound, strings::DROP_NEEDS_SITE));
             return Vec::new();
         };
-        if !self.tabs[index].can_act(Side::Remote) {
+        if !self.can_act(index, Side::Remote) {
             self.queue_error(Error::new(ErrorKind::Conflict, strings::DROP_PANE_BUSY));
             return Vec::new();
         }
@@ -130,7 +134,9 @@ impl App {
             return Vec::new();
         };
         let tab = &self.tabs[index];
-        let remote = tab.remote.path.join(&name);
+        let Some(remote) = tab.pane(Side::Remote).map(|pane| pane.path.join(&name)) else {
+            return Vec::new();
+        };
         vec![Effect::Enqueue(vec![TransferSpec {
             site: tab.site.clone(),
             direction: Direction::Upload,

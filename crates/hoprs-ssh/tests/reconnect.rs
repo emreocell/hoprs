@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use hoprs_core::{Error, ErrorKind};
 use hoprs_ssh::testing::{docker, kill_ssh_sessions, test_config};
-use hoprs_ssh::{Prompter, ReconnectPolicy, ScriptedPrompter, SessionState, SshSession};
+use hoprs_ssh::{
+    CountedChannel, Prompter, ReconnectPolicy, ScriptedPrompter, SessionState, SshSession,
+};
 use secrecy::SecretString;
 use tempfile::TempDir;
 use tokio::sync::watch;
@@ -145,7 +147,7 @@ fn assert_host_key_refused(states: &[SessionState], host_prompts: u32, prompts_b
     );
 }
 
-fn assert_not_connected(result: Result<russh::Channel<russh::client::Msg>, Error>) {
+fn assert_not_connected(result: Result<CountedChannel, Error>) {
     let Err(e) = result else {
         panic!("expected Not connected, got a channel");
     };
@@ -157,8 +159,9 @@ fn assert_not_connected(result: Result<russh::Channel<russh::client::Msg>, Error
 #[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
 async fn reconnects_after_kill() {
     let (s, _p, _dir) = connected().await;
-    let (_ch, tag) = s.open_channel_tagged().await.unwrap();
-    assert_eq!(tag, 1);
+    let old = s.open_channel().await.unwrap();
+    assert_eq!(old.generation(), 1);
+    assert_eq!(s.open_channels(), 1);
     let rec = record_until(s.state(), |st| *st == SessionState::Connected);
     kill_ssh_sessions();
     let states = recorded(rec).await;
@@ -170,9 +173,15 @@ async fn reconnects_after_kill() {
         ]
     );
     assert_eq!(s.generation(), 2);
+    // The dead connection's channel no longer counts against the budget, and dropping it
+    // does not free a slot of the new connection.
+    assert_eq!(s.open_channels(), 0);
 
-    let (mut ch, tag) = s.open_channel_tagged().await.unwrap();
-    assert_eq!(tag, 2);
+    let mut ch = s.open_channel().await.unwrap();
+    assert_eq!(ch.generation(), 2);
+    assert_eq!(s.open_channels(), 1);
+    drop(old);
+    assert_eq!(s.open_channels(), 1);
     ch.exec(true, "echo alive").await.unwrap();
     let mut out = Vec::new();
     while let Some(msg) = ch.wait().await {
@@ -648,5 +657,43 @@ async fn prompted_password_reused_on_reconnect() {
         "the prompted password must be reused"
     );
     s.open_channel().await.unwrap();
+    s.disconnect().await;
+}
+
+/// Host port of the `sshd-idle` service: `ClientAliveInterval 5`, `ClientAliveCountMax 1`.
+const SSH_IDLE_PORT: u16 = 2223;
+
+/// An idle session on a server that probes its clients every 5 s and drops one that misses
+/// a single answer (`sshd-idle`): the client answers the probes, so the session stays up
+/// (Plan 6, Task 5). The default keepalive (30 s) never fires meanwhile: the server's
+/// probes are the only traffic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn ssh_survives_client_alive_checks() {
+    let dir = TempDir::new().unwrap();
+    let mut cfg = test_config("bob", dir.path());
+    cfg.port = SSH_IDLE_PORT;
+    cfg.auth.password = Some(SecretString::from("bob-pass"));
+    let p = Arc::new(ScriptedPrompter::new().accept_host(true));
+    let s = SshSession::connect(cfg, p as Arc<dyn Prompter>)
+        .await
+        .unwrap();
+    let mut rx = s.state();
+    rx.mark_unchanged();
+
+    // Five server probes, each answered.
+    tokio::time::sleep(Duration::from_secs(27)).await;
+    assert!(
+        !rx.has_changed().unwrap(),
+        "state changed while idle: {:?}",
+        *rx.borrow()
+    );
+    assert_eq!(*rx.borrow(), SessionState::Connected);
+    assert_eq!(s.generation(), 1);
+    let channel = s
+        .open_channel()
+        .await
+        .expect("a channel after the idle time");
+    assert_eq!(channel.generation(), 1);
     s.disconnect().await;
 }

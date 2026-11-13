@@ -7,7 +7,9 @@
 //! the one whose tabs the window close saves. "Close tabs" on it saves its tabs, then
 //! closes every tab of its sites, also a tab opened from "All sites" for one of them.
 //!
-//! Closing the window: the app asks for one [`Effect::Shutdown`], which saves the open
+//! Closing the window: unsent remote edits are asked about first, before anything else
+//! happens (the window stays open meanwhile, see [`super::edit`]). Then the app asks
+//! for one [`Effect::Shutdown`], which saves the open
 //! workspace's tabs, shuts the transfer engine down (its running items keep their stored
 //! state and reopen paused on the next start), then closes the sessions, all within
 //! 5 s (the save gets 2 s of them). Only its [`Message::ShutdownDone`] closes the window,
@@ -15,10 +17,13 @@
 //! backend that hangs or panics is abandoned. Meanwhile the dialogs are answered Cancel
 //! and the user's input is ignored; a second close request closes at once.
 
-use hoprs_core::{ConnectionState, Error, ReconnectPolicy, SavedTab, TabKind, WorkspaceId};
+use hoprs_core::{
+    ConnectionState, Error, ErrorKind, ReconnectPolicy, SavedTab, TabKind, WorkspaceId,
+};
 
 use super::{App, Effect, Message, TabState};
-use crate::app::files::{Listing, TabId, local_fs_path};
+use crate::app::files::{Listing, Pane, local_fs_path};
+use crate::app::tabs::TabId;
 use crate::backend::{AuthMethod, BrokerEvent, PromptAnswer, SessionId, Side, WorkspaceTabs};
 
 /// What the status bar says about a tab's connection.
@@ -36,12 +41,7 @@ pub enum ConnStatus<'a> {
     Disconnected(&'a Error),
 }
 
-/// The files tab among a workspace site's saved tabs.
-pub fn files_tab(tabs: &[SavedTab]) -> Option<&SavedTab> {
-    tabs.iter().find(|t| t.kind == TabKind::Files)
-}
-
-impl super::Tab {
+impl super::SiteConn {
     /// The connection as the status bar shows it: the connect's outcome, then what the
     /// session's feed reports.
     pub fn conn_status(&self) -> ConnStatus<'_> {
@@ -71,33 +71,51 @@ impl super::Tab {
             _ => None,
         }
     }
+}
 
-    /// The tab as a workspace saves it: a files tab at its two folders.
-    /// A side whose listing failed keeps what `previous` saved for it: a folder that
-    /// could not be read is not worth restoring.
+impl super::Tab {
+    /// The tab as a workspace saves it: a terminal tab as such (a restored one opens a new
+    /// shell), a files tab at its two folders. A side whose listing failed keeps what
+    /// `previous` saved for it: a folder that could not be read is not worth restoring.
     fn saved(&self, previous: Option<&SavedTab>) -> SavedTab {
-        let failed = |side: Side| matches!(self.pane(side).listing, Listing::Failed(_));
+        let Some(files) = self.files() else {
+            return SavedTab {
+                kind: TabKind::Terminal,
+                remote_dir: None,
+                local_dir: None,
+            };
+        };
+        let failed = |pane: &Pane| matches!(pane.listing, Listing::Failed(_));
         SavedTab {
             kind: TabKind::Files,
-            remote_dir: if failed(Side::Remote) {
+            remote_dir: if failed(&files.remote) {
                 previous.and_then(|t| t.remote_dir.clone())
             } else {
-                Some(self.remote.path.as_str().to_owned())
+                Some(files.remote.path.as_str().to_owned())
             },
-            local_dir: if failed(Side::Local) {
+            local_dir: if failed(&files.local) {
                 previous.and_then(|t| t.local_dir.clone())
             } else {
-                Some(local_fs_path(&self.local.path))
+                Some(local_fs_path(&files.local.path))
             },
         }
     }
 }
 
 impl App {
-    /// The sessions whose state the app follows (one feed each): those of the connected
-    /// tabs. A tab that closes or fails drops out, which ends its feed.
+    /// The sessions whose state the app follows: those of the connected tabs, each once
+    /// (one feed per session, however many tabs share it). A session whose last tab
+    /// closes or fails drops out, which ends its feed.
     pub fn watched_sessions(&self) -> Vec<SessionId> {
-        self.tabs.iter().filter_map(|tab| tab.session()).collect()
+        let mut sessions: Vec<SessionId> = Vec::new();
+        for tab in &self.tabs {
+            if let Some(session) = self.conn(&tab.site).session()
+                && !sessions.contains(&session)
+            {
+                sessions.push(session);
+            }
+        }
+        sessions
     }
 
     /// How many of the workspace's sites have a connected tab, of all its sites.
@@ -108,125 +126,178 @@ impl App {
             .iter()
             .filter(|entry| {
                 self.tab_of(&entry.site)
-                    .is_some_and(|i| self.tabs[i].conn_status() == ConnStatus::Connected)
+                    .is_some_and(|_| self.conn(&entry.site).conn_status() == ConnStatus::Connected)
             })
             .count();
         Some((connected, workspace.sites.len()))
     }
 
-    /// A session's feed: its state and, once logged in, how. Only a connected tab takes
-    /// it (a failed one follows its connect's outcome). Back to `Connected` after a loss,
-    /// the site's transfers run again and a listing that failed meanwhile is retried.
+    /// A session's feed: its state and, once logged in, how, for its site's connection
+    /// (all its tabs). Only a connected site takes it (a failed one follows its connect's
+    /// outcome). Back to `Connected` after a loss, the site's transfers run again and a
+    /// listing that failed meanwhile is retried.
     pub(super) fn session_state(
         &mut self,
         session: SessionId,
         state: ConnectionState,
         auth: Option<AuthMethod>,
     ) -> Vec<Effect> {
-        let Some(index) = self.tabs.iter().position(|t| t.session() == Some(session)) else {
+        let Some(site) = self.site_of_session(session) else {
             return Vec::new();
         };
-        let tab = &mut self.tabs[index];
-        if auth.is_some() {
-            tab.auth = auth;
-        }
+        let conn = self.conn_mut(&site);
         let back = state == ConnectionState::Connected
-            && tab
+            && conn
                 .conn
                 .as_ref()
                 .is_some_and(|c| *c != ConnectionState::Connected);
-        let lost = matches!(state, ConnectionState::Disconnected(_));
-        tab.conn = Some(state);
-        if lost {
-            self.note_failed_endpoint(index);
-        }
-        if !back {
-            return Vec::new();
-        }
-        let tab = &mut self.tabs[index];
-        tab.reconnecting = false;
-        let retry = matches!(tab.remote.listing, Listing::Failed(_));
-        let site = tab.site.clone();
-        self.queue.site_restored(&site);
-        if retry {
-            self.request_listing(index, Side::Remote)
-        } else {
-            Vec::new()
-        }
-    }
-
-    /// "Reconnect" in the banner: the backend's reconnect (which also settles the secrets
-    /// typed with "Save in the system keyring"), one at a time.
-    pub(super) fn reconnect_session(&mut self, tab: TabId) -> Vec<Effect> {
-        let Some(index) = self.tab_index(tab) else {
-            return Vec::new();
-        };
-        let tab_ref = &mut self.tabs[index];
-        let Some(session) = tab_ref.session() else {
-            return Vec::new();
-        };
-        // A changed host key fails every reconnect of this session: the banner offers
-        // "Close and reconnect" instead.
-        if tab_ref.reconnecting
-            || tab_ref.lost_connection().is_none()
-            || tab_ref.host_key_change().is_some()
-        {
-            return Vec::new();
-        }
-        tab_ref.reconnecting = true;
-        vec![Effect::Reconnect { tab, session }]
-    }
-
-    /// The reconnect finished: connected, the remote folder is listed again; refused, the
-    /// banner shows the new reason. A result for a tab (or session) that is gone is
-    /// dropped.
-    pub(super) fn reconnected(
-        &mut self,
-        tab: TabId,
-        session: SessionId,
-        result: Result<(), Error>,
-    ) -> Vec<Effect> {
-        let Some(index) = self.tab_index(tab) else {
-            return Vec::new();
-        };
-        if self.tabs[index].session() != Some(session) {
-            return Vec::new();
-        }
-        let connected = result.is_ok();
-        let mut effects = self.settle_saving(session, connected);
-        let tab = &mut self.tabs[index];
-        tab.reconnecting = false;
-        match result {
-            Ok(()) => {
-                tab.conn = Some(ConnectionState::Connected);
-                let site = tab.site.clone();
-                self.queue.site_restored(&site);
-                effects.extend(self.request_listing(index, Side::Remote));
+        let refused = match &state {
+            ConnectionState::Disconnected(error) if error.kind != ErrorKind::Network => {
+                Some(error.clone())
             }
-            Err(error) => {
-                tab.conn = Some(ConnectionState::Disconnected(error));
-                self.note_failed_endpoint(index);
+            _ => None,
+        };
+        let lost = matches!(state, ConnectionState::Disconnected(_));
+        let down = state != ConnectionState::Connected;
+        if auth.is_some() {
+            conn.auth = auth;
+        }
+        conn.conn = Some(state);
+        if lost {
+            self.note_failed_endpoint(&site);
+        }
+        if down {
+            self.site_connection_down(&site);
+        }
+        // Refused for good: the actions waiting for a reconnection fail now. Given up for a
+        // network reason while they waited for the transport's own round: the app
+        // reconnects for them.
+        let mut effects = match &refused {
+            Some(error) => self.fail_held(&site, error),
+            None if lost => self.reconnect_for_held(&site).into_iter().collect(),
+            None => Vec::new(),
+        };
+        if !back {
+            return effects;
+        }
+        self.conn_mut(&site).reconnecting = false;
+        self.queue.site_restored(&site);
+        // The actions that waited for the connection run (once).
+        effects.extend(self.release_held(&site));
+        // The shells died with the old connection: the terminals open new ones.
+        effects.extend(self.open_site_shells(&site, true));
+        for index in self.tabs_of(&site) {
+            if self.tabs[index]
+                .pane(Side::Remote)
+                .is_some_and(|pane| matches!(pane.listing, Listing::Failed(_)))
+            {
+                effects.extend(self.request_listing(index, Side::Remote));
             }
         }
         effects
     }
 
-    /// The tabs of the workspace's sites as it saves them: each site with a tab gets its
-    /// files tab replaced by the current folders (other saved tabs of the site are kept).
-    /// Sites without a tab are not named, so they keep what they had. `None` when there is
-    /// nothing to save.
+    /// "Reconnect" in the banner of any tab of the session: the backend's reconnect
+    /// (which also settles the secrets typed with "Save in the system keyring"), one at
+    /// a time for the session.
+    pub(super) fn reconnect_session(&mut self, tab: TabId) -> Vec<Effect> {
+        let Some(index) = self.tab_index(tab) else {
+            return Vec::new();
+        };
+        let site = self.tabs[index].site.clone();
+        let conn = self.conn_mut(&site);
+        let Some(session) = conn.session() else {
+            return Vec::new();
+        };
+        // A changed host key fails every reconnect of this session: the banner offers
+        // "Close and reconnect" instead.
+        if conn.reconnecting || conn.lost_connection().is_none() || conn.host_key_change().is_some()
+        {
+            return Vec::new();
+        }
+        conn.reconnecting = true;
+        vec![Effect::Reconnect { session }]
+    }
+
+    /// The reconnect finished, for the site still on `session` (the tab that asked may be
+    /// gone, its siblings not): connected, the remote folders are listed again; refused,
+    /// the banners show the new reason. A result for a session no tab has any more is
+    /// dropped.
+    pub(super) fn reconnected(
+        &mut self,
+        session: SessionId,
+        result: Result<(), Error>,
+    ) -> Vec<Effect> {
+        let Some(site) = self.site_of_session(session) else {
+            return Vec::new();
+        };
+        let mut effects = self.settle_saving(session, result.is_ok());
+        let conn = self.conn_mut(&site);
+        // The feed may have said `Connected` first: the shells reopen once.
+        let back = conn
+            .conn
+            .as_ref()
+            .is_some_and(|c| *c != ConnectionState::Connected);
+        conn.reconnecting = false;
+        conn.conn = Some(match &result {
+            Ok(()) => ConnectionState::Connected,
+            Err(error) => ConnectionState::Disconnected(error.clone()),
+        });
+        match result {
+            Ok(()) => {
+                self.queue.site_restored(&site);
+                // The actions that waited for the connection run (once), and the other
+                // remote folders are listed again.
+                effects.extend(self.release_held(&site));
+                for index in self.tabs_of(&site) {
+                    let replayed = self.tabs[index]
+                        .pane(Side::Remote)
+                        .and_then(|pane| pane.request)
+                        .is_some_and(|request| self.replayed.remove(&request));
+                    if !replayed {
+                        effects.extend(self.request_listing(index, Side::Remote));
+                    }
+                }
+                if back {
+                    effects.extend(self.open_site_shells(&site, true));
+                }
+                self.forget_stale_replays();
+            }
+            Err(error) => {
+                self.note_failed_endpoint(&site);
+                effects.extend(self.fail_held(&site, &error));
+            }
+        }
+        effects
+    }
+
+    /// The tabs of the workspace's sites as it saves them: each site with tabs gets them
+    /// all, terminals included, in strip order (its n-th files tab falls back on the n-th
+    /// files tab it saved before, for a folder that failed to list). Sites without a tab
+    /// are not named, so they keep what they had. `None` when there is nothing to save.
     fn workspace_tabs(&self, id: &WorkspaceId) -> Option<WorkspaceTabs> {
         let workspace = self.workspace(id)?;
         let tabs: WorkspaceTabs = workspace
             .sites
             .iter()
             .filter_map(|entry| {
-                let tab = &self.tabs[self.tab_of(&entry.site)?];
-                let mut saved = entry.tabs.clone();
-                match saved.iter_mut().find(|t| t.kind == TabKind::Files) {
-                    Some(slot) => *slot = tab.saved(Some(slot)),
-                    None => saved.push(tab.saved(None)),
+                let open = self.tabs_of(&entry.site);
+                if open.is_empty() {
+                    return None;
                 }
+                let mut previous = entry.tabs.iter().filter(|t| t.kind == TabKind::Files);
+                let saved = open
+                    .into_iter()
+                    .map(|index| {
+                        let tab = &self.tabs[index];
+                        let before = if tab.is_files() {
+                            previous.next()
+                        } else {
+                            None
+                        };
+                        tab.saved(before)
+                    })
+                    .collect();
                 Some((entry.site.clone(), saved))
             })
             .collect();
@@ -241,9 +312,21 @@ impl App {
         })
     }
 
-    /// "Close workspace": saves its tabs, then closes them and their sessions. Tabs of
-    /// other sites stay.
+    /// "Close workspace": saves its tabs, then closes them all and their sessions. Tabs
+    /// of other sites stay.
     pub(super) fn close_workspace(&mut self, id: &WorkspaceId) -> Vec<Effect> {
+        if self.open_workspace.as_ref() != Some(id) {
+            return Vec::new();
+        }
+        // Unsent remote edits on its sites: the question first (see `edit`).
+        if let Some(effects) = self.ask_before_closing_workspace(id) {
+            return effects;
+        }
+        self.close_workspace_now(id)
+    }
+
+    /// "Close workspace" once its edits are settled.
+    pub(super) fn close_workspace_now(&mut self, id: &WorkspaceId) -> Vec<Effect> {
         if self.open_workspace.as_ref() != Some(id) {
             return Vec::new();
         }
@@ -254,9 +337,7 @@ impl App {
             .map(|w| w.sites.iter().map(|e| e.site.clone()).collect())
             .unwrap_or_default();
         for site in sites {
-            if let Some(index) = self.tab_of(&site) {
-                effects.extend(self.close_tab(index));
-            }
+            effects.extend(self.close_site_tabs(&site));
         }
         effects
     }
@@ -282,7 +363,20 @@ impl App {
             tracing::warn!("close requested again while shutting down; closing now");
             return vec![Effect::ExitWindow(window)];
         }
+        // Unsent remote edits: the question comes before the save (Review Focus 4).
+        if let Some(effects) = self.ask_before_quitting(window) {
+            return effects;
+        }
+        self.begin_close(window)
+    }
+
+    /// The close flow proper (see the module docs): from here on the window closes.
+    pub(super) fn begin_close(&mut self, window: iced::window::Id) -> Vec<Effect> {
         self.closing = true;
+        self.center_ask = None;
+        if matches!(self.form, Some(super::Form::QuitEdits)) {
+            self.form = None;
+        }
         let mut effects = self.cancel_all_prompts();
         let save = self
             .open_workspace
@@ -303,6 +397,7 @@ impl App {
                 id: request.id,
                 answer: PromptAnswer::Cancel,
             }]),
+            Message::Edit(msg) if msg.is_user() => Some(Vec::new()),
             Message::ToggleQueue
             | Message::FilterSites(_)
             | Message::ReloadProfiles
@@ -318,6 +413,7 @@ impl App {
             | Message::WorkspaceForm(_)
             | Message::OpenProfileFolder
             | Message::CloseTab(_)
+            | Message::NewTab { .. }
             | Message::Pane { .. }
             | Message::KeyPressed { .. }
             | Message::Key { .. }
@@ -335,7 +431,9 @@ impl App {
             | Message::OpenImport
             | Message::Import(_)
             | Message::OpenSettings
-            | Message::Settings(_) => Some(Vec::new()),
+            | Message::Settings(_)
+            | Message::Palette(_)
+            | Message::Terminal { .. } => Some(Vec::new()),
             _ => None,
         }
     }

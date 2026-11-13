@@ -32,10 +32,10 @@
 //! destination's size), so `retry` never skips or appends to a partial
 //! destination.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use hoprs_core::{Error, ErrorKind, RemoteEntry, Result, SiteId};
+use hoprs_core::{Error, ErrorKind, RemoteEntry, RemotePath, Result, SiteId};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -47,7 +47,7 @@ use super::{EngineConfig, Event, EventKind, SiteEndpoints};
 use crate::conflict::{Decision, decide};
 use crate::copy::CopyOutcome;
 use crate::model::{
-    ConflictInfo, ConflictPolicy, TransferId, TransferItem, TransferSpec, TransferState,
+    ConflictInfo, ConflictPolicy, Direction, TransferId, TransferItem, TransferSpec, TransferState,
 };
 use crate::progress::{ProgressTracker, ProgressUpdate};
 use crate::store::QueueStore;
@@ -205,6 +205,32 @@ pub(super) struct Actor {
     /// answer is only stored once the item is dispatched.
     pub(super) overrides: HashMap<TransferId, ConflictPolicy>,
     pub(super) tracker: ProgressTracker,
+    /// The shortest time between two `Progress` events (spec §9: 10 Hz at most).
+    pub(super) progress_interval: Duration,
+    /// When the last `Progress` went out.
+    pub(super) last_progress: Option<Instant>,
+    /// Final counts of copy runs that ended since the last `Progress`; they go out
+    /// with the next one.
+    pub(super) final_progress: Vec<ProgressUpdate>,
+    /// A `Progress` went out off the ticker: the next tick is one interval after it.
+    pub(super) progress_off_tick: bool,
+    /// Queued files under a folder this run created, never dispatched yet: their
+    /// destination is missing, so their first `prepare` skips the conflict check.
+    /// Leaving `Queued` (dispatch, pause, cancel) drops the mark: any later attempt
+    /// (resume, retry, after a restart) checks.
+    ///
+    /// Only while one item owns that new subtree: a folder is not marked when another
+    /// unfinished item's destination is the same path, above it or below it, and an item
+    /// of another tree that is enqueued or put back in the queue (retry, resume, answer)
+    /// there later drops the folder's marks (`drop_overlapping_fresh`). Accepted risk:
+    /// another client creating a file in the new folder before the child is dispatched is
+    /// not seen, and that file is overwritten.
+    pub(super) fresh_dst: HashSet<TransferId>,
+    /// The folders whose files are in `fresh_dst`, by folder: what `drop_overlapping_fresh`
+    /// looks through (a few folders, not every marked file).
+    pub(super) fresh_dirs: HashMap<TransferId, FreshDir>,
+    /// The top-level item of every item added in this run (`root_of`).
+    pub(super) roots: HashMap<TransferId, TransferId>,
     pub(super) worker_tx: mpsc::UnboundedSender<WorkerMsg>,
 }
 
@@ -229,9 +255,16 @@ pub(super) async fn run(
         running: HashMap::new(),
         overrides: HashMap::new(),
         tracker: ProgressTracker::new(),
+        progress_interval: config.progress_interval.max(Duration::from_millis(1)),
+        last_progress: None,
+        final_progress: Vec::new(),
+        progress_off_tick: false,
+        fresh_dst: HashSet::new(),
+        fresh_dirs: HashMap::new(),
+        roots: HashMap::new(),
         worker_tx,
     };
-    let mut ticker = tokio::time::interval(config.progress_interval.max(Duration::from_millis(1)));
+    let mut ticker = tokio::time::interval(actor.progress_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     let shutdown = loop {
@@ -244,6 +277,9 @@ pub(super) async fn run(
             },
             Some(msg) = worker_rx.recv() => actor.handle_worker(msg),
             _ = ticker.tick() => actor.tick(),
+        }
+        if std::mem::take(&mut actor.progress_off_tick) {
+            ticker.reset();
         }
     };
     actor.stop_workers(&mut worker_rx).await;
@@ -297,6 +333,7 @@ impl Actor {
                         return;
                     }
                 };
+                self.drop_overlapping_fresh(id, destination(&spec));
                 self.add_item(TransferItem {
                     id,
                     parent: None,
@@ -385,8 +422,51 @@ impl Actor {
         let _ = tokio::time::timeout(SHUTDOWN_GRACE, drain).await;
     }
 
+    /// The top-level item `id` belongs to: recorded when it was added, found through
+    /// the parents for a recovered item.
+    pub(super) fn root_of(&self, mut id: TransferId) -> TransferId {
+        if let Some(root) = self.roots.get(&id) {
+            return *root;
+        }
+        while let Some(parent) = self.items.get(&id).and_then(|item| item.parent) {
+            id = parent;
+        }
+        id
+    }
+
+    /// Whether an unfinished item of another tree than `root` writes to `dst`, above it
+    /// or below it.
+    pub(super) fn destination_shared(&self, root: TransferId, dst: &RemotePath) -> bool {
+        self.items.values().any(|item| {
+            !item.state.is_terminal()
+                && self.root_of(item.id) != root
+                && paths_overlap(destination(&item.spec), dst)
+        })
+    }
+
+    /// An item of the tree `root` is about to write to `dst`: the fresh folders of other
+    /// trees at that path, above it or below it, lose their marks (the folder has another
+    /// writer). Costs one look per fresh folder.
+    pub(super) fn drop_overlapping_fresh(&mut self, root: TransferId, dst: &RemotePath) {
+        let stale: Vec<TransferId> = self
+            .fresh_dirs
+            .iter()
+            .filter(|(_, dir)| dir.root != root && paths_overlap(&dir.dst, dst))
+            .map(|(id, _)| *id)
+            .collect();
+        for dir in stale {
+            if let Some(dir) = self.fresh_dirs.remove(&dir) {
+                for file in dir.files {
+                    self.fresh_dst.remove(&file);
+                }
+            }
+        }
+    }
+
     /// Tracks a newly persisted item and emits `Added`.
     pub(super) fn add_item(&mut self, item: TransferItem) {
+        let root = item.parent.map_or(item.id, |parent| self.root_of(parent));
+        self.roots.insert(item.id, root);
         if item.state == TransferState::Queued {
             self.queued
                 .entry(item.spec.site.clone())
@@ -402,6 +482,18 @@ impl Actor {
     /// An item that becomes terminal is reported to its parent directory.
     /// Returns whether `state` itself was applied.
     pub(super) fn transition(&mut self, id: TransferId, state: TransferState) -> bool {
+        // Put back in the queue (retry, resume, an answer, a network requeue): it may
+        // write into another tree's fresh folder.
+        if state == TransferState::Queued
+            && let Some(item) = self.items.get(&id)
+            && item.state != TransferState::Queued
+        {
+            let dst = destination(&item.spec).clone();
+            self.drop_overlapping_fresh(self.root_of(id), &dst);
+        }
+        if state.is_terminal() {
+            self.fresh_dirs.remove(&id);
+        }
         let (state, applied) = match self.store.set_state(id, &state) {
             Ok(()) => (state, true),
             Err(_) if matches!(state, TransferState::Failed(_)) => (state, false),
@@ -416,6 +508,9 @@ impl Actor {
         if let Some(item) = self.items.get_mut(&id) {
             let was_queued = item.state == TransferState::Queued;
             let is_queued = state == TransferState::Queued;
+            if !is_queued && state != TransferState::Active {
+                self.fresh_dst.remove(&id);
+            }
             if was_queued != is_queued {
                 let queue = self.queued.entry(item.spec.site.clone()).or_default();
                 if is_queued {
@@ -490,7 +585,10 @@ impl Actor {
                     },
                 );
                 let policy = policy_override.unwrap_or(self.policy);
-                worker::spawn_prepare(id, route, policy, cancel, self.worker_tx.clone());
+                let fresh_dst = self.fresh_dst.remove(&id);
+                // A count left from the previous run must not follow this run's own.
+                self.final_progress.retain(|u| u.id != id);
+                worker::spawn_prepare(id, route, policy, fresh_dst, cancel, self.worker_tx.clone());
             }
         }
     }
@@ -599,9 +697,9 @@ impl Actor {
             WorkerMsg::Prepared { id, route, result } => {
                 let intent = self.intent(id);
                 match (result.map(|p| *p), intent) {
-                    (Ok(Prepared::Dir { entries }), intent) => {
+                    (Ok(Prepared::Dir { entries, created }), intent) => {
                         self.free_slot(id);
-                        self.expand(id, entries, intent);
+                        self.expand(id, entries, created, intent);
                         self.dispatch();
                     }
                     // Stopped before copying anything: the prepare result is
@@ -651,8 +749,13 @@ impl Actor {
     }
 
     /// Ends the progress tracking of a copy run: records its final byte
-    /// count and emits it in a last `Progress` (rate 0, as the copy has
-    /// stopped), before the state change that ends the run.
+    /// count and sends it in a `Progress` (rate 0, as the copy has stopped).
+    ///
+    /// `Progress` goes out at most once per interval, all workers together
+    /// (spec §9): when the last one is at least an interval old, the final
+    /// count goes out now, before the state change that ends the run, and the
+    /// ticker restarts from it; otherwise it rides with the next tick, after
+    /// the state change.
     fn finish_progress(&mut self, id: TransferId, bytes: u64) {
         self.tracker.unregister(id);
         let Some(item) = self.items.get_mut(&id) else {
@@ -665,7 +768,16 @@ impl Actor {
             total: item.size,
             bytes_per_sec: 0,
         };
-        self.emit(EventKind::Progress(vec![update]));
+        self.final_progress.retain(|u| u.id != id);
+        self.final_progress.push(update);
+        let now = Instant::now();
+        let due = self
+            .last_progress
+            .is_none_or(|at| now.saturating_duration_since(at) >= self.progress_interval);
+        if due {
+            self.emit_progress(now);
+            self.progress_off_tick = true;
+        }
     }
 
     /// Removes finished top-level items and their descendants from the
@@ -781,24 +893,64 @@ impl Actor {
         }
     }
 
-    /// Emits the periodic `EventKind::Progress` (a copy's final count is
-    /// emitted by `finish_progress`). Byte counts are persisted best-effort
-    /// here; the final count is persisted (strictly) at completion.
+    /// Emits the periodic `EventKind::Progress`.
     fn tick(&mut self) {
-        let updates = self.tracker.sample(Instant::now());
+        self.emit_progress(Instant::now());
+    }
+
+    /// Emits one `EventKind::Progress`: the final counts of the copy runs
+    /// that ended since the last one (see `finish_progress`), then a sample
+    /// of the running ones; nothing when both are empty. Running counts are
+    /// persisted best-effort here; a final count is persisted (strictly) at
+    /// completion.
+    fn emit_progress(&mut self, now: Instant) {
+        let sampled = self.tracker.sample(now);
+        if !sampled.is_empty() {
+            let mut batch = Vec::with_capacity(sampled.len());
+            for u in &sampled {
+                if let Some(item) = self.items.get_mut(&u.id) {
+                    item.bytes_done = u.bytes_done;
+                }
+                batch.push((u.id, u.bytes_done));
+            }
+            let _ = self.store.set_bytes_done_many(&batch);
+        }
+        let mut updates = std::mem::take(&mut self.final_progress);
+        updates.extend(sampled);
         if updates.is_empty() {
             return;
         }
-        let mut batch = Vec::with_capacity(updates.len());
-        for u in &updates {
-            if let Some(item) = self.items.get_mut(&u.id) {
-                item.bytes_done = u.bytes_done;
-            }
-            batch.push((u.id, u.bytes_done));
-        }
-        let _ = self.store.set_bytes_done_many(&batch);
+        self.last_progress = Some(now);
         self.emit(EventKind::Progress(updates));
     }
+}
+
+/// A folder this run created whose files were marked fresh: its tree and destination.
+pub(super) struct FreshDir {
+    pub(super) root: TransferId,
+    pub(super) dst: RemotePath,
+    pub(super) files: Vec<TransferId>,
+}
+
+/// Where `spec` writes.
+pub(super) fn destination(spec: &TransferSpec) -> &RemotePath {
+    match spec.direction {
+        Direction::Upload => &spec.remote,
+        Direction::Download => &spec.local,
+    }
+}
+
+/// `a` and `b` are the same path, or one is below the other. Sites and sides are not
+/// compared: a false overlap only costs a conflict check.
+pub(super) fn paths_overlap(a: &RemotePath, b: &RemotePath) -> bool {
+    let below = |inner: &str, outer: &str| {
+        outer == "/"
+            || inner
+                .strip_prefix(outer)
+                .is_some_and(|rest| rest.starts_with('/'))
+    };
+    let (a, b) = (a.as_str(), b.as_str());
+    a == b || below(a, b) || below(b, a)
 }
 
 #[cfg(test)]

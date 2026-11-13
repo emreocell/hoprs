@@ -77,6 +77,13 @@ pub trait RemoteFs: Send + Sync {
     async fn remove_dir(&self, path: &RemotePath) -> Result<()>;
     async fn chmod(&self, path: &RemotePath, mode: u32) -> Result<()>;
 
+    /// The size of the file at `path`, for the engine's check after a copy. The
+    /// default reads it from [`stat`](Self::stat); a backend with a cheaper way
+    /// (FTP: `SIZE` alone) overrides it.
+    async fn size(&self, path: &RemotePath) -> Result<u64> {
+        Ok(self.stat(path).await?.size)
+    }
+
     /// Best-effort modification time update; backends that cannot do it keep
     /// the default no-op.
     async fn set_modified(&self, _path: &RemotePath, _mtime: SystemTime) -> Result<()> {

@@ -14,6 +14,18 @@ use crate::ftp::{FtpConfig, FtpPrompter, FtpSecurity};
 pub const FTP_PORT: u16 = 2121;
 /// Host port of the `ftps-implicit` service.
 pub const FTPS_IMPLICIT_PORT: u16 = 2990;
+/// Host port of the `ftp-idle` service: plain FTP, `idle_session_timeout=20`.
+pub const FTP_IDLE_PORT: u16 = 2122;
+
+/// Config for `frank` on the `ftp-idle` service, with the default keepalive (30 s, longer
+/// than the server's 20 s idle timeout) and connect timeout; command and data timeouts 10 s.
+pub fn ftp_idle_config() -> FtpConfig {
+    let mut cfg = FtpConfig::new("127.0.0.1", FTP_IDLE_PORT, "frank", FtpSecurity::Plain);
+    cfg.password = Some(SecretString::from("frank-pass"));
+    cfg.command_timeout = Duration::from_secs(10);
+    cfg.data_timeout = Duration::from_secs(10);
+    cfg
+}
 
 /// Config for `frank` on the test containers: the `ftps-implicit` service for
 /// [`FtpSecurity::ImplicitTls`], the `ftp` service otherwise. No extra roots, no pin.
@@ -220,4 +232,141 @@ pub fn ftp_listings(fs: &crate::FtpFs) -> u64 {
 /// The most transfer connections `fs` has had checked out at once.
 pub fn ftp_peak_transfer_connections(fs: &crate::FtpFs) -> usize {
     fs.session().peak_transfer_connections()
+}
+
+/// The TCP keepalive settings of the session's control connection socket; `None` when it
+/// has no control connection.
+pub async fn control_tcp_keepalive(session: &FtpSession) -> Option<KeepaliveSettings> {
+    session
+        .with_control(|c| {
+            Box::pin(async move {
+                Ok(hoprs_ssh::net::tcp_keepalive_of(&*c.stream.get_ref().await)
+                    .expect("read the socket options"))
+            })
+        })
+        .await
+        .ok()
+}
+
+/// The TCP keepalive settings of a pooled transfer connection's socket.
+pub async fn pooled_tcp_keepalive(conn: &mut PooledConn) -> KeepaliveSettings {
+    hoprs_ssh::net::tcp_keepalive_of(&*conn.stream().get_ref().await)
+        .expect("read the socket options")
+}
+
+/// The TCP keepalive settings of a passive data connection to `addr`, opened the way the
+/// sessions open them.
+pub async fn data_tcp_keepalive(addr: std::net::SocketAddr) -> KeepaliveSettings {
+    let socket = crate::ftp::session::connect_data(addr, Duration::from_secs(5))
+        .await
+        .expect("connect the data socket");
+    hoprs_ssh::net::tcp_keepalive_of(&socket).expect("read the socket options")
+}
+
+pub use hoprs_ssh::net::KeepaliveSettings;
+
+/// What [`fake_transfer_server`] holds: its port and the files uploaded to it.
+pub struct FakeTransferServer {
+    pub port: u16,
+    pub files: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+    /// Connections it closed right after a command (transfer connections dying idle).
+    pub closed: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// A minimal FTP server on 127.0.0.1 that stores uploads in memory (`PASV`, `STOR`, `SIZE`,
+/// `STAT` of a missing path, no `FEAT` extras). Every connection but the first (the
+/// session's control connection) is closed right after it answers a `STOR` or a `STAT`: a
+/// pooled transfer connection dies while idle, as when a server's idle timeout or a NAT
+/// drops it just after use. With the engine, a file's `stat` (`SIZE`, `STAT`), its upload
+/// and its size check (`SIZE`) then each meet a dead connection in the pool.
+pub async fn fake_transfer_server() -> FakeTransferServer {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let files: Arc<Mutex<std::collections::HashMap<String, Vec<u8>>>> = Arc::default();
+    let closed = Arc::new(AtomicUsize::new(0));
+    let server = FakeTransferServer {
+        port,
+        files: files.clone(),
+        closed: closed.clone(),
+    };
+    tokio::spawn(async move {
+        let mut accepted = 0usize;
+        while let Ok((sock, _)) = listener.accept().await {
+            accepted += 1;
+            let control = accepted == 1;
+            let files = files.clone();
+            let closed = closed.clone();
+            tokio::spawn(async move {
+                let (read, mut write) = sock.into_split();
+                if write.write_all(b"220 fake\r\n").await.is_err() {
+                    return;
+                }
+                let mut lines = BufReader::new(read).lines();
+                let mut data: Option<TcpListener> = None;
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let (verb, arg) = line.split_once(' ').unwrap_or((line.as_str(), ""));
+                    let verb = verb.to_ascii_uppercase();
+                    let mut close = false;
+                    let reply = match verb.as_str() {
+                        "USER" => "331 Password please.\r\n".to_owned(),
+                        "PASS" => "230 Logged in.\r\n".to_owned(),
+                        "TYPE" => "200 Binary.\r\n".to_owned(),
+                        "NOOP" => "200 NOOP ok.\r\n".to_owned(),
+                        "PWD" => "257 \"/\"\r\n".to_owned(),
+                        "PASV" => {
+                            let l = TcpListener::bind("127.0.0.1:0").await.expect("bind data");
+                            let p = l.local_addr().expect("addr").port();
+                            data = Some(l);
+                            format!(
+                                "227 Entering Passive Mode (127,0,0,1,{},{}).\r\n",
+                                p / 256,
+                                p % 256
+                            )
+                        }
+                        "STOR" => {
+                            let Some(l) = data.take() else {
+                                let _ = write.write_all(b"425 Use PASV first.\r\n").await;
+                                continue;
+                            };
+                            if write.write_all(b"150 Ok to send data.\r\n").await.is_err() {
+                                break;
+                            }
+                            let Ok((mut sock, _)) = l.accept().await else {
+                                break;
+                            };
+                            let mut bytes = Vec::new();
+                            if sock.read_to_end(&mut bytes).await.is_err() {
+                                break;
+                            }
+                            files.lock().unwrap().insert(arg.to_owned(), bytes);
+                            close = !control;
+                            "226 Transfer complete.\r\n".to_owned()
+                        }
+                        "SIZE" => match files.lock().unwrap().get(arg) {
+                            Some(bytes) => format!("213 {}\r\n", bytes.len()),
+                            None => "550 Could not get file size.\r\n".to_owned(),
+                        },
+                        "STAT" if !files.lock().unwrap().contains_key(arg) => {
+                            close = !control;
+                            "213-Status follows:\r\n213 End of status\r\n".to_owned()
+                        }
+                        _ => "502 Not implemented.\r\n".to_owned(),
+                    };
+                    if write.write_all(reply.as_bytes()).await.is_err() {
+                        break;
+                    }
+                    if close {
+                        closed.fetch_add(1, Ordering::SeqCst);
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    server
 }

@@ -1,0 +1,57 @@
+# Benchmark environment for the spec §9 network targets (test-only credentials): the
+# images of docker/compose.yml with latency added by netem inside each container (hence
+# NET_ADMIN, and bridge networking for the FTP server). Its own project name and ports,
+# so it runs beside the test environment. Usage, from the repo root:
+#   docker compose -f docker/compose.bench.yml up -d --build --wait
+# then `scripts/perf.sh` (see docs/perf/README.md). HOPRS_BENCH_RTT_MS sets the starting
+# latency; the bench harness sets it per scenario.
+name: hoprs-bench
+
+services:
+  sshd:
+    build:
+      context: .
+      dockerfile: sshd/Dockerfile
+    image: hoprs-test-sshd
+    cap_add: [NET_ADMIN]
+    environment:
+      NETEM_DELAY: ${HOPRS_BENCH_RTT_MS:-50}ms
+    ports:
+      - "127.0.0.1:2422:22"
+    volumes:
+      - bench-sshd-hostkeys:/etc/ssh/keys
+    # In memory: the server's disk is not what is measured.
+    tmpfs:
+      - /home/alice/bench:size=1536m,uid=1001,gid=1001,mode=755
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "22"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+
+  ftp:
+    build:
+      context: .
+      dockerfile: vsftpd/Dockerfile
+    image: hoprs-test-vsftpd
+    command: ["bench"]
+    # vsftpd's listener crashes as PID 1 when it reaps orphaned session processes.
+    init: true
+    cap_add: [NET_ADMIN]
+    environment:
+      NETEM_DELAY: ${HOPRS_BENCH_RTT_MS:-50}ms
+    ports:
+      - "127.0.0.1:2421:21"
+      - "127.0.0.1:33000-33019:33000-33019"
+    tmpfs:
+      - /home/frank/bench:size=256m,uid=1101,gid=1101,mode=755
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "21"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+
+volumes:
+  bench-sshd-hostkeys:

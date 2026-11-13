@@ -170,6 +170,12 @@ impl<F: RemoteFs> RemoteFs for FaultFs<F> {
         self.inner.stat(path).await
     }
 
+    /// Counts and fails as a `stat`.
+    async fn size(&self, path: &RemotePath) -> Result<u64> {
+        self.enter(Some(Op::Stat)).await?;
+        self.inner.size(path).await
+    }
+
     async fn open_read(&self, path: &RemotePath, offset: u64) -> Result<BoxAsyncRead> {
         lock(&self.state).read_offsets.push(offset);
         self.enter(Some(Op::OpenRead)).await?;

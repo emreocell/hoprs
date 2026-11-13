@@ -579,3 +579,67 @@ async fn destination_symlink_fails_item() {
     assert_eq!(link.kind, hoprs_core::EntryKind::Symlink);
     assert_eq!(remote.read_file("/srv/target").unwrap(), b"target");
 }
+
+/// Spec §9: progress reaches the UI at 10 Hz at most, aggregated over every worker. Four
+/// workers copy a folder of small files (each a few chunks, each chunk slowed down), so
+/// copies keep finishing all through the 3 s window; the engine sends at most one
+/// `Progress` per 100 ms interval: 31 in 3 s, counting both ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn progress_rate_at_most_10hz() {
+    const WINDOW: Duration = Duration::from_secs(3);
+    const FILES: usize = 600;
+    let local_mem = MemFs::new();
+    let file = data(64 * 1024);
+    local_mem.add_dir("/w/tree");
+    for i in 0..FILES {
+        local_mem.add_file(&format!("/w/tree/f{i:04}.bin"), &file, mtime());
+    }
+    let local = FaultFs::new(local_mem);
+    // 4 chunks of 16 KiB per file, 10 ms each: about 25 files done per second per worker.
+    local.set_stream_latency(Duration::from_millis(10));
+    let remote = MemFs::new();
+    remote.add_dir("/srv");
+    let config = EngineConfig {
+        buf_size: 16 * 1024,
+        ..EngineConfig::default()
+    };
+    let (engine, mut rx) = engine_with(Arc::new(local), Arc::new(remote), 4, config).await;
+
+    let root = engine
+        .enqueue(spec(Direction::Upload, "/w/tree", "/srv/tree"))
+        .await
+        .unwrap();
+    let start = Instant::now();
+    let mut progress = 0usize;
+    let mut finished = 0usize;
+    let mut root_done = false;
+    while let Ok(event) = tokio::time::timeout_at((start + WINDOW).into(), rx.recv()).await {
+        match event.expect("no lag, no close").kind {
+            EventKind::Progress(_) => progress += 1,
+            EventKind::StateChanged {
+                id,
+                state: TransferState::Done,
+            } => {
+                if id == root {
+                    root_done = true;
+                } else {
+                    finished += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        !root_done,
+        "the transfer must outlast the {WINDOW:?} window"
+    );
+    assert!(
+        finished >= 60,
+        "copies keep finishing during the window: {finished}"
+    );
+    assert!(
+        progress <= 31,
+        "{progress} Progress events in {WINDOW:?} ({finished} files finished)"
+    );
+    engine.shutdown().await;
+}

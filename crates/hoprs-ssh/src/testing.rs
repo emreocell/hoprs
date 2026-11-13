@@ -94,3 +94,44 @@ pub fn changed_host_key_error(host: &str, line: usize) -> hoprs_core::Error {
 pub fn pinned_key_changed_error(host: &str) -> hoprs_core::Error {
     crate::session::pinned_key_changed(host, "ssh-ed25519", "SHA256:other")
 }
+
+/// A shell whose server floods output (32 KiB chunks, as SSH packets carry, for ever) and ignores input, for
+/// tests of a slow consumer: the real output pump, without a server. Its output yields
+/// `Overflowed` then `Closed` once the consumer lets the pump's limit pile up.
+pub fn flooding_shell() -> crate::ShellChannel {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use russh::ChannelMsg;
+
+    use crate::shell::{ShellReader, ShellWriter};
+
+    struct Flood;
+
+    #[async_trait]
+    impl ShellReader for Flood {
+        async fn wait(&mut self) -> Option<ChannelMsg> {
+            tokio::task::yield_now().await;
+            Some(ChannelMsg::Data {
+                data: vec![b'y'; 32 * 1024].into(),
+            })
+        }
+    }
+
+    struct Ignore;
+
+    #[async_trait]
+    impl ShellWriter for Ignore {
+        async fn data(&self, _: Vec<u8>) -> std::result::Result<(), russh::Error> {
+            Ok(())
+        }
+        async fn window_change(&self, _: u32, _: u32) -> std::result::Result<(), russh::Error> {
+            Ok(())
+        }
+        async fn close(&self) -> std::result::Result<(), russh::Error> {
+            Ok(())
+        }
+    }
+
+    crate::ShellChannel::start(Box::new(Flood), Arc::new(Ignore), None)
+}

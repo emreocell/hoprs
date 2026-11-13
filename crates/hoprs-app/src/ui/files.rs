@@ -12,7 +12,9 @@ use iced::{Alignment, Element, Event, Length, Padding, Rectangle, window};
 
 use crate::app::actions::{EditKind, PaneAction};
 use crate::app::files::{Pane, PaneStatus, Row, SortKey};
-use crate::app::{App, FailureAction, FileKey, Message, Mods, PaneMsg, Tab, TabId, TabState};
+use crate::app::{
+    App, FailureAction, FileKey, Message, Mods, PaletteMsg, PaneMsg, SiteConn, Tab, TabId, TabState,
+};
 use crate::backend::Side;
 use crate::ui::fit::{self, Columns, MODIFIED_WIDTH, PERMISSIONS_WIDTH, SIZE_WIDTH};
 use crate::ui::theme::{self, palette};
@@ -90,6 +92,21 @@ pub fn key_message(event: Event, status: Status, _: window::Id) -> Option<Messag
         return None;
     };
     match event {
+        // Ctrl+K (or Ctrl+Shift+K): the palette, unless a widget took it (a focused
+        // terminal sends it to the shell; its Ctrl+Shift+K comes through the widget).
+        keyboard::Event::KeyPressed {
+            key,
+            physical_key,
+            modifiers,
+            ..
+        } if modifiers.command()
+            && !modifiers.alt()
+            && key
+                .to_latin(physical_key)
+                .is_some_and(|c| c.eq_ignore_ascii_case(&'k')) =>
+        {
+            (status != Status::Captured).then_some(Message::Palette(PaletteMsg::Open))
+        }
         keyboard::Event::ModifiersChanged(modifiers) => Some(Message::Modifiers(Mods {
             ctrl: modifiers.command(),
             shift: modifiers.shift(),
@@ -129,6 +146,7 @@ fn file_key(named: Named) -> Option<FileKey> {
         Named::F7 => FileKey::NewFolder,
         Named::F2 => FileKey::Rename,
         Named::Delete => FileKey::Delete,
+        Named::F4 => FileKey::Edit,
         Named::Escape => FileKey::Escape,
         _ => return None,
     })
@@ -167,10 +185,17 @@ pub fn view<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> {
         pane(app, tab, Side::Remote, site_name, this_year),
     ]
     .height(Length::Fill);
-    match lost_banner(app, tab) {
-        Some(banner) => column![banner, hrule(), panes].into(),
-        None => panes.into(),
+    let mut col = column![];
+    if let Some(ask) = crate::ui::edits::close_ask(app, tab) {
+        col = col.push(ask).push(hrule());
     }
+    if let Some(banner) = lost_banner(app, tab) {
+        col = col.push(banner).push(hrule());
+    }
+    if let Some(strip) = crate::ui::edits::strip(app, tab) {
+        col = col.push(strip).push(hrule());
+    }
+    col.push(panes).into()
 }
 
 /// What the bar across a connected tab says, if anything.
@@ -181,12 +206,18 @@ pub enum Banner<'a> {
     /// The session found another host key than the one it verified: the blocking
     /// explanation and its actions, never "Reconnect" (which would always fail).
     HostKeyChanged,
+    /// A reconnection the app asked for (a click on "Reconnect", or an action on a lost
+    /// session) is running: "Reconnecting…", no error.
+    Reconnecting,
 }
 
-/// The bar a tab shows above its panes.
-pub fn banner(tab: &Tab) -> Option<Banner<'_>> {
-    let error = tab.lost_connection()?;
-    Some(if tab.host_key_change().is_some() {
+/// The bar a site's tabs show above their content.
+pub fn banner(conn: &SiteConn) -> Option<Banner<'_>> {
+    if conn.reconnecting && conn.host_key_change().is_none() {
+        return Some(Banner::Reconnecting);
+    }
+    let error = conn.lost_connection()?;
+    Some(if conn.host_key_change().is_some() {
         Banner::HostKeyChanged
     } else {
         Banner::Lost(error)
@@ -197,9 +228,19 @@ pub fn banner(tab: &Tab) -> Option<Banner<'_>> {
 /// the reason and "Reconnect" (the session's own reconnect), no modal. A changed host key
 /// shows its blocking explanation there instead, with "Close and reconnect" (or "Remove
 /// the old entry…").
-fn lost_banner<'a>(app: &'a App, tab: &'a Tab) -> Option<Element<'a, Message>> {
-    let error = match banner(tab)? {
+pub(crate) fn lost_banner<'a>(app: &'a App, tab: &'a Tab) -> Option<Element<'a, Message>> {
+    let conn = app.conn(&tab.site);
+    let error = match banner(conn)? {
         Banner::Lost(error) => error,
+        Banner::Reconnecting => {
+            return Some(
+                container(text(strings::RECONNECTING_NOW).color(palette().muted))
+                    .width(Length::Fill)
+                    .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_MD]))
+                    .style(theme::pane_bar)
+                    .into(),
+            );
+        }
         Banner::HostKeyChanged => {
             return Some(
                 container(crate::ui::dialogs::host_key_changed_body(app, tab))
@@ -222,7 +263,7 @@ fn lost_banner<'a>(app: &'a App, tab: &'a Tab) -> Option<Element<'a, Message>> {
                 .color(p.muted),
         );
     }
-    let label = if tab.reconnecting {
+    let label = if conn.reconnecting {
         strings::RECONNECTING_NOW
     } else {
         strings::RECONNECT
@@ -230,7 +271,7 @@ fn lost_banner<'a>(app: &'a App, tab: &'a Tab) -> Option<Element<'a, Message>> {
     let reconnect = button(text(label))
         .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
         .style(theme::button_outline)
-        .on_press_maybe((!tab.reconnecting).then_some(Message::ReconnectSession(tab.id)));
+        .on_press_maybe((!conn.reconnecting).then_some(Message::ReconnectSession(tab.id)));
     Some(
         container(
             row![reason, space::horizontal(), reconnect]
@@ -251,7 +292,9 @@ fn pane<'a>(
     place: &'a str,
     this_year: i32,
 ) -> Element<'a, Message> {
-    let pane = tab.pane(side);
+    let Some(pane) = tab.pane(side) else {
+        return space().into();
+    };
     let msg = move |msg: PaneMsg| Message::Pane {
         tab: tab.id,
         side,
@@ -261,10 +304,11 @@ fn pane<'a>(
         Side::Local => app.home.as_ref(),
         Side::Remote => None,
     };
-    let focused = tab.focus == side;
+    let focused = tab.focus() == Some(side);
     let width = fit::pane_width(app.window_width);
     let cols = fit::columns(width, side);
-    let body: Element<'a, Message> = match tab.pane_status(side) {
+    let conn = app.conn(&tab.site);
+    let body: Element<'a, Message> = match tab.pane_status(conn, side) {
         PaneStatus::Loading => skeleton(cols),
         PaneStatus::Full => list(tab.id, side, pane, this_year, focused, cols),
         PaneStatus::Empty => column![
@@ -285,7 +329,7 @@ fn pane<'a>(
             .style(theme::pane_focus(focused)),
         path_bar(place, pane, home, msg),
         hrule(),
-        file_actions::toolbar(tab, side, fit::compact_toolbar(width, side)),
+        file_actions::toolbar(tab, conn, side, fit::toolbar(width, side)),
         hrule(),
     ];
     for bar in file_actions::bars(tab.id, side, pane) {
@@ -302,7 +346,7 @@ fn pane<'a>(
     // A drag from the other pane (or files from the system, on the remote side) would
     // drop here: a 1 px accent outline.
     let target = app.drop_target() == Some((tab.id, side))
-        || (app.os_drag && side == Side::Remote && tab.can_act(Side::Remote));
+        || (app.os_drag && side == Side::Remote && tab.can_act(conn, Side::Remote));
     let content = container(content)
         .width(Length::FillPortion(1))
         .height(Length::Fill)
@@ -680,12 +724,13 @@ fn failed(error: &Error, retry: Message) -> Element<'_, Message> {
 
 /// The remote side without a connection: "Not connected", why, and Reconnect (the
 /// sidebar's connect path, which retries the failed session) or Edit site.
-fn not_connected<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> {
-    if tab.host_key_change().is_some() {
+pub(crate) fn not_connected<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> {
+    let conn = app.conn(&tab.site);
+    if conn.host_key_change().is_some() {
         return crate::ui::dialogs::host_key_changed(app, tab);
     }
     let p = palette();
-    let failure = match &tab.state {
+    let failure = match &conn.state {
         TabState::Failed(failure) => Some(failure),
         TabState::Connecting | TabState::Connected(_) => None,
     };
@@ -802,6 +847,51 @@ mod tests {
             Some(FileKey::Escape)
         );
         assert_eq!(pressed(Named::F5, Status::Ignored), None);
+    }
+
+    /// Ctrl+K opens the palette unless a widget took it: a focused terminal captures every
+    /// key (Ctrl+K is the shell's there); a text field lets it through.
+    #[test]
+    fn ctrl_k_opens_the_palette_unless_captured() {
+        let id = window::Id::unique();
+        let press = |c: &str, modifiers| {
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: Key::Character(c.into()),
+                modified_key: Key::Character(c.into()),
+                physical_key: keyboard::key::Physical::Unidentified(
+                    keyboard::key::NativeCode::Unidentified,
+                ),
+                location: keyboard::Location::Standard,
+                modifiers,
+                text: None,
+                repeat: false,
+            })
+        };
+        let opens = |m: Option<Message>| matches!(m, Some(Message::Palette(PaletteMsg::Open)));
+        let ctrl = keyboard::Modifiers::CTRL;
+        let ctrl_shift = keyboard::Modifiers::CTRL | keyboard::Modifiers::SHIFT;
+        assert!(opens(key_message(press("k", ctrl), Status::Ignored, id)));
+        assert!(opens(key_message(
+            press("K", ctrl_shift),
+            Status::Ignored,
+            id
+        )));
+        assert_eq!(
+            key_message(press("k", ctrl), Status::Captured, id).map(|m| format!("{m:?}")),
+            None
+        );
+        // Without Ctrl (typing a k), or with Alt, nothing.
+        let alt = keyboard::Modifiers::CTRL | keyboard::Modifiers::ALT;
+        for (c, modifiers) in [
+            ("k", keyboard::Modifiers::default()),
+            ("k", alt),
+            ("j", ctrl),
+        ] {
+            assert!(
+                key_message(press(c, modifiers), Status::Ignored, id).is_none(),
+                "{c} {modifiers:?}"
+            );
+        }
     }
 
     #[test]

@@ -8,18 +8,12 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use hoprs_core::{
-    ConnectionState, EntryKind, Error, ErrorKind, RemoteEntry, RemotePath, SavedTab, SiteId,
-};
+use hoprs_core::{EntryKind, Error, ErrorKind, RemoteEntry, RemotePath};
 
 use super::actions::{Busy, PaneAction};
-use super::{App, Effect, TabState};
-use crate::backend::{AuthMethod, SessionId, Side};
+use super::{App, Effect, TabId};
+use crate::backend::Side;
 use crate::ui::virtual_list::ROW_HEIGHT;
-
-/// A tab's identity, stable while tabs open and close around it.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct TabId(pub u64);
 
 /// One listing request; only a pane's latest one is applied.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -323,6 +317,8 @@ pub enum PaneMsg {
     Rename,
     Delete,
     Permissions,
+    /// "Edit" (remote): opens the file in the editor ([`super::edit`]).
+    Edit,
     /// The inline name editor.
     EditChanged(String),
     EditCommit,
@@ -362,74 +358,12 @@ pub enum FileKey {
     Rename,
     /// Del.
     Delete,
+    /// F4: edit the remote file in the editor.
+    Edit,
     /// Closes the inline editor, confirmation or dialog (or the error bar).
     Escape,
     /// Ctrl+Enter: the selection to the other pane's folder.
     Transfer,
-}
-
-/// One file tab: a site, its connection and its two panes.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Tab {
-    pub id: TabId,
-    pub site: SiteId,
-    pub state: TabState,
-    pub local: Pane,
-    pub remote: Pane,
-    /// The pane the keyboard drives.
-    pub focus: Side,
-    /// "Remove the old entry…" after a changed host key.
-    pub known_hosts: super::KnownHostsFix,
-    /// The site's `host:port` when its connect failed (the endpoint "Remove the old
-    /// entry…" works on).
-    pub failed_endpoint: Option<(String, u16)>,
-    /// The connected session's state, as its feed last reported it (`None` until then).
-    pub conn: Option<ConnectionState>,
-    /// How the session logged in (SSH), as its feed last reported it.
-    pub auth: Option<AuthMethod>,
-    /// The banner's "Reconnect" is in flight.
-    pub reconnecting: bool,
-}
-
-impl Tab {
-    pub fn pane(&self, side: Side) -> &Pane {
-        match side {
-            Side::Local => &self.local,
-            Side::Remote => &self.remote,
-        }
-    }
-
-    pub fn pane_mut(&mut self, side: Side) -> &mut Pane {
-        match side {
-            Side::Local => &mut self.local,
-            Side::Remote => &mut self.remote,
-        }
-    }
-
-    /// The connected session, if any.
-    pub fn session(&self) -> Option<SessionId> {
-        match &self.state {
-            TabState::Connected(connected) => Some(connected.session),
-            TabState::Connecting | TabState::Failed(_) => None,
-        }
-    }
-
-    pub fn pane_status(&self, side: Side) -> PaneStatus<'_> {
-        if side == Side::Remote {
-            match self.state {
-                TabState::Connecting => return PaneStatus::Loading,
-                TabState::Failed(_) => return PaneStatus::NotConnected,
-                TabState::Connected(_) => {}
-            }
-        }
-        let pane = self.pane(side);
-        match &pane.listing {
-            Listing::Idle | Listing::Loading => PaneStatus::Loading,
-            Listing::Failed(error) => PaneStatus::Failed(error),
-            Listing::Loaded if pane.entries.is_empty() => PaneStatus::Empty,
-            Listing::Loaded => PaneStatus::Full,
-        }
-    }
 }
 
 /// `path` as a [`RemotePath`], if it is absolute and POSIX-shaped (the local side lists
@@ -445,88 +379,26 @@ pub fn local_fs_path(path: &RemotePath) -> std::path::PathBuf {
 }
 
 impl App {
-    pub fn tab_index(&self, id: TabId) -> Option<usize> {
-        self.tabs.iter().position(|t| t.id == id)
-    }
-
     pub(super) fn next_id(&mut self) -> u64 {
         self.next_id += 1;
         self.next_id
     }
 
-    /// A new tab for `site`, and the local listing to run. Its panes start at the folders
-    /// of `restored` (a workspace's saved tab), else at the site's (local: `local_dir`,
-    /// else home; remote: `remote_dir`, else `/`). A saved folder that is not a usable
-    /// absolute path falls back the same way.
-    pub(super) fn new_tab(&mut self, site: SiteId, restored: Option<&SavedTab>) -> (Tab, Effect) {
-        let saved = self.site(&site);
-        let remote_path = |dir: &str| RemotePath::new(dir).ok();
-        let local = restored
-            .and_then(|t| t.local_dir.as_deref())
-            .and_then(local_path)
-            .or_else(|| {
-                saved
-                    .and_then(|s| s.local_dir.as_deref())
-                    .and_then(local_path)
-            })
-            .or_else(|| self.home.clone())
-            .unwrap_or_else(RemotePath::root);
-        let remote = restored
-            .and_then(|t| t.remote_dir.as_deref())
-            .and_then(remote_path)
-            .or_else(|| {
-                saved
-                    .and_then(|s| s.remote_dir.as_deref())
-                    .and_then(remote_path)
-            })
-            .unwrap_or_else(RemotePath::root);
-        let id = TabId(self.next_id());
-        let request_id = RequestId(self.next_id());
-        let mut tab = Tab {
-            id,
-            site,
-            state: TabState::Connecting,
-            local: Pane::new(local.clone()),
-            remote: Pane::new(remote),
-            focus: Side::Local,
-            known_hosts: super::KnownHostsFix::Idle,
-            failed_endpoint: None,
-            conn: None,
-            auth: None,
-            reconnecting: false,
-        };
-        // A folder from the saved tab may be gone since: its first listing falls back.
-        let from_saved = |dir: Option<bool>| dir.unwrap_or(false).then_some(Restore::Saved);
-        tab.local.restore = from_saved(
-            restored
-                .and_then(|t| t.local_dir.as_deref())
-                .map(|d| local_path(d).as_ref() == Some(&tab.local.path)),
-        );
-        tab.remote.restore = from_saved(
-            restored
-                .and_then(|t| t.remote_dir.as_deref())
-                .map(|d| RemotePath::new(d).ok().as_ref() == Some(&tab.remote.path)),
-        );
-        tab.local.listing = Listing::Loading;
-        tab.local.request = Some(request_id);
-        let effect = Effect::List {
-            tab: id,
-            side: Side::Local,
-            request_id,
-            session: None,
-            path: local,
-        };
-        (tab, effect)
-    }
-
     /// Lists the pane's folder again, superseding any listing in flight. The remote side
     /// waits for its session. The list starts again from the top: the skeleton replaces
-    /// it meanwhile, so the scrollable that comes back is at 0 too.
+    /// it meanwhile, so the scrollable that comes back is at 0 too. A terminal tab lists
+    /// nothing.
     pub(super) fn request_listing(&mut self, index: usize, side: Side) -> Vec<Effect> {
+        if !self.tabs[index].is_files() {
+            return Vec::new();
+        }
         let request_id = RequestId(self.next_id());
+        let session = self.tab_session(index);
         let tab = &mut self.tabs[index];
-        let (tab_id, session) = (tab.id, tab.session());
-        let pane = tab.pane_mut(side);
+        let tab_id = tab.id;
+        let Some(pane) = tab.pane_mut(side) else {
+            return Vec::new();
+        };
         pane.offset_y = 0.0;
         let scroll = Effect::ScrollPane {
             tab: tab_id,
@@ -559,7 +431,9 @@ impl App {
     /// Goes to `path`: the old entries go, with any editor or dialog about them, and the
     /// list scrolls to the top.
     fn navigate(&mut self, index: usize, side: Side, path: RemotePath) -> Vec<Effect> {
-        let pane = self.tabs[index].pane_mut(side);
+        let Some(pane) = self.tabs[index].pane_mut(side) else {
+            return Vec::new();
+        };
         pane.path = path;
         pane.entries.clear();
         pane.selection = Selection::default();
@@ -574,7 +448,9 @@ impl App {
 
     /// Enters the folder of `row` (`..` goes up); files stay where they are.
     fn open_row(&mut self, index: usize, side: Side, row: usize) -> Vec<Effect> {
-        let pane = self.tabs[index].pane(side);
+        let Some(pane) = self.tabs[index].pane(side) else {
+            return Vec::new();
+        };
         let target = match pane.row(row) {
             Some(Row::Up) => pane.path.parent(),
             // A link may point at a folder: try it; a failure shows in the pane.
@@ -590,11 +466,13 @@ impl App {
     }
 
     pub(super) fn pane_msg(&mut self, tab: TabId, side: Side, msg: PaneMsg) -> Vec<Effect> {
-        let Some(index) = self.tab_index(tab) else {
+        let Some(index) = self.tab_index(tab).filter(|&i| self.tabs[i].is_files()) else {
             return Vec::new();
         };
         let mods = self.mods;
-        let pane = self.tabs[index].pane_mut(side);
+        let Some(pane) = self.tabs[index].pane_mut(side) else {
+            return Vec::new();
+        };
         match msg {
             PaneMsg::Focus => {}
             PaneMsg::Click(row) => {
@@ -605,11 +483,11 @@ impl App {
                 }
             }
             PaneMsg::Open(row) => {
-                self.tabs[index].focus = side;
+                self.tabs[index].set_focus(side);
                 return self.open_row(index, side, row);
             }
             PaneMsg::Navigate(path) => {
-                self.tabs[index].focus = side;
+                self.tabs[index].set_focus(side);
                 return self.navigate(index, side, path);
             }
             PaneMsg::Sort(key) => {
@@ -636,20 +514,24 @@ impl App {
             }
             PaneMsg::Retry => return self.request_listing(index, side),
             PaneMsg::NewFolder => {
-                self.tabs[index].focus = side;
+                self.tabs[index].set_focus(side);
                 return self.start_new_folder(index, side);
             }
             PaneMsg::Rename => {
-                self.tabs[index].focus = side;
+                self.tabs[index].set_focus(side);
                 return self.start_rename(index, side);
             }
             PaneMsg::Delete => {
-                self.tabs[index].focus = side;
+                self.tabs[index].set_focus(side);
                 return self.start_delete(index, side);
             }
             PaneMsg::Permissions => {
-                self.tabs[index].focus = side;
+                self.tabs[index].set_focus(side);
                 return self.start_permissions(index, side);
+            }
+            PaneMsg::Edit => {
+                self.tabs[index].set_focus(side);
+                return self.start_edit(index, side);
             }
             PaneMsg::EditChanged(value) => {
                 if let Some(PaneAction::Edit(edit)) = &mut pane.action {
@@ -679,7 +561,7 @@ impl App {
                 pane.note = None;
             }
             PaneMsg::Transfer => {
-                self.tabs[index].focus = side;
+                self.tabs[index].set_focus(side);
                 return self.transfer_selection(index, side);
             }
             PaneMsg::PointerIn | PaneMsg::PointerOut => {
@@ -687,7 +569,7 @@ impl App {
                 return Vec::new();
             }
         }
-        self.tabs[index].focus = side;
+        self.tabs[index].set_focus(side);
         Vec::new()
     }
 
@@ -702,7 +584,9 @@ impl App {
         let Some(index) = self.tab_index(tab) else {
             return Vec::new();
         };
-        let pane = self.tabs[index].pane_mut(side);
+        let Some(pane) = self.tabs[index].pane_mut(side) else {
+            return Vec::new();
+        };
         if pane.request != Some(request_id) {
             // Superseded (or never ours): the pane shows another folder now.
             return Vec::new();
@@ -745,7 +629,9 @@ impl App {
     /// to home (local) or `/`, with a note naming the saved folder. Past that, a failure
     /// shows as usual.
     fn restore_fallback(&mut self, index: usize, side: Side, restore: Restore) -> Vec<Effect> {
-        let path = self.tabs[index].pane(side).path.clone();
+        let Some(path) = self.tabs[index].pane(side).map(|pane| pane.path.clone()) else {
+            return Vec::new();
+        };
         let (saved, target, next) = match restore {
             Restore::Saved => match path.parent() {
                 Some(parent) => (path.clone(), parent, Some(Restore::Parent { saved: path })),
@@ -754,9 +640,10 @@ impl App {
             Restore::Parent { saved } => (saved, self.fallback_dir(side), None),
         };
         let effects = self.navigate(index, side, target);
-        let pane = self.tabs[index].pane_mut(side);
-        pane.restore = next;
-        pane.note = Some(crate::ui::strings::saved_folder_gone(saved.as_str()));
+        if let Some(pane) = self.tabs[index].pane_mut(side) {
+            pane.restore = next;
+            pane.note = Some(crate::ui::strings::saved_folder_gone(saved.as_str()));
+        }
         effects
     }
 
@@ -775,17 +662,29 @@ impl App {
         if self.dialogs.is_open() {
             return self.dialog_key(key, shift);
         }
+        // The palette has the keyboard: nothing reaches a pane or a form behind it.
+        if self.palette.is_some() {
+            return self.palette_key(key);
+        }
         if self.form.is_some() {
             return Vec::new();
         }
-        let Some(tab) = self.active_tab.and_then(|i| self.tabs.get(i)) else {
+        // Escape in a terminal tab closes its search bar.
+        if key == FileKey::Escape && self.terminal_escape() {
+            return Vec::new();
+        }
+        let Some(pane) = self
+            .active_tab
+            .and_then(|i| self.tabs.get(i))
+            .and_then(|t| t.pane(t.focus()?))
+        else {
             return Vec::new();
         };
         if key == FileKey::Escape {
             return self.file_key(key, shift);
         }
         let typing = matches!(
-            tab.pane(tab.focus).action,
+            pane.action,
             Some(PaneAction::Edit(_) | PaneAction::Permissions(_))
         );
         if typing && key != FileKey::Enter {
@@ -794,19 +693,30 @@ impl App {
         vec![Effect::KeyUnlessTyping { key, shift }]
     }
 
-    /// A key for the active tab's focused pane (ignored while a form is open).
+    /// A key for the active tab's focused pane (ignored while a form is open, or in a
+    /// terminal tab).
     pub(super) fn file_key(&mut self, key: FileKey, shift: bool) -> Vec<Effect> {
         if self.form.is_some() || self.dialogs.is_open() {
             return Vec::new();
         }
-        let Some(index) = self.active_tab.filter(|&i| i < self.tabs.len()) else {
+        let Some(index) = self
+            .active_tab
+            .filter(|&i| self.tabs.get(i).is_some_and(|t| t.is_files()))
+        else {
             return Vec::new();
         };
         let tab = &mut self.tabs[index];
-        let side = tab.focus;
+        let Some(files) = tab.files_mut() else {
+            return Vec::new();
+        };
+        let side = files.focus;
+        let pane = match side {
+            Side::Local => &mut files.local,
+            Side::Remote => &mut files.remote,
+        };
         // An editor or dialog is open: only Escape (cancel) and Enter (commit a name) act;
         // every other key belongs to it.
-        match (&tab.pane(side).action, key) {
+        match (&pane.action, key) {
             (Some(_), FileKey::Escape) => {
                 self.cancel_action(index, side);
                 return Vec::new();
@@ -814,27 +724,34 @@ impl App {
             (Some(PaneAction::Edit(_)), FileKey::Enter) => return self.commit_edit(index, side),
             (Some(_), _) => return Vec::new(),
             (None, FileKey::Escape) => {
-                tab.pane_mut(side).action_error = None;
+                pane.action_error = None;
                 return Vec::new();
             }
             (None, FileKey::NewFolder) => return self.start_new_folder(index, side),
             (None, FileKey::Rename) => return self.start_rename(index, side),
             (None, FileKey::Delete) => return self.start_delete(index, side),
+            (None, FileKey::Edit) => return self.start_edit(index, side),
             (None, FileKey::Transfer) => return self.transfer_selection(index, side),
             (None, _) => {}
         }
         if key == FileKey::SwitchPane {
-            tab.focus = match side {
+            files.focus = match side {
                 Side::Local => Side::Remote,
                 Side::Remote => Side::Local,
             };
             return Vec::new();
         }
-        if !matches!(tab.pane_status(side), PaneStatus::Full | PaneStatus::Empty) {
+        if !matches!(
+            self.pane_status(index, side),
+            PaneStatus::Full | PaneStatus::Empty
+        ) {
             return Vec::new();
         }
+        let tab = &mut self.tabs[index];
         let tab_id = tab.id;
-        let pane = tab.pane_mut(side);
+        let Some(pane) = tab.pane_mut(side) else {
+            return Vec::new();
+        };
         let count = pane.row_count();
         if count == 0 {
             return Vec::new();
@@ -861,6 +778,7 @@ impl App {
             | FileKey::NewFolder
             | FileKey::Rename
             | FileKey::Delete
+            | FileKey::Edit
             | FileKey::Transfer
             | FileKey::Escape => unreachable!("handled above"),
         };
@@ -881,19 +799,20 @@ impl App {
     /// The scroll offsets of the tab now in the center, so its lists show where their
     /// state says (the scrollable widgets are shared between tabs and forms).
     pub(super) fn sync_scroll(&self) -> Vec<Effect> {
-        let Some(tab) = self
+        let Some((tab, files)) = self
             .active_tab
             .and_then(|i| self.tabs.get(i))
             .filter(|_| self.form.is_none())
+            .and_then(|t| Some((t.id, t.files()?)))
         else {
             return Vec::new();
         };
-        [Side::Local, Side::Remote]
+        [(Side::Local, &files.local), (Side::Remote, &files.remote)]
             .into_iter()
-            .map(|side| Effect::ScrollPane {
-                tab: tab.id,
+            .map(|(side, pane)| Effect::ScrollPane {
+                tab,
                 side,
-                offset_y: tab.pane(side).offset_y,
+                offset_y: pane.offset_y,
             })
             .collect()
     }

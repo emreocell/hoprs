@@ -1,5 +1,5 @@
-//! The settings page in the center: transfers (workers per site, conflict policy) and
-//! the encrypted backup.
+//! The settings page in the center: transfers (workers per site, conflict policy,
+//! keepalive), the terminal (font size, scrollback, theme) and the encrypted backup.
 
 use std::fmt;
 
@@ -12,7 +12,7 @@ use iced::{Alignment, Element, Length, Padding};
 
 use crate::app::settings::{Backup, BackupMsg, BackupPanel, BackupState, SettingsMsg};
 use crate::app::{App, Message, PickTarget};
-use crate::settings::{WORKERS_MAX, WORKERS_MIN};
+use crate::settings::{FONT_SIZE_MAX, FONT_SIZE_MIN, TerminalTheme, WORKERS_MAX, WORKERS_MIN};
 use crate::ui::site_form::Password;
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
@@ -43,6 +43,41 @@ pub fn policy_label(policy: ConflictPolicy) -> &'static str {
         ConflictPolicy::Skip => strings::POLICY_SKIP,
         ConflictPolicy::OverwriteIfNewer => strings::POLICY_OVERWRITE_IF_NEWER,
         ConflictPolicy::Resume => strings::POLICY_RESUME,
+    }
+}
+
+/// Scrollback sizes the page offers (lines).
+const SCROLLBACK_CHOICES: [usize; 7] = [1_000, 2_000, 5_000, 10_000, 20_000, 50_000, 100_000];
+
+/// `pick_list` needs `Display`: a scrollback size, in lines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Lines(usize);
+
+impl fmt::Display for Lines {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Keepalive intervals the page offers (seconds).
+const KEEPALIVE_CHOICES: [u64; 7] = [10, 15, 30, 60, 120, 180, 300];
+
+/// `pick_list` needs `Display`: a keepalive interval.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Secs(u64);
+
+impl fmt::Display for Secs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&strings::seconds(self.0))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ThemeChoice(TerminalTheme);
+
+impl fmt::Display for ThemeChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0.label())
     }
 }
 
@@ -149,6 +184,20 @@ pub fn view(app: &App) -> Element<'_, Message> {
     .style(theme::pick_list)
     .menu_style(theme::menu);
 
+    // A value from the file that is not on the list is offered too.
+    let mut intervals: Vec<Secs> = KEEPALIVE_CHOICES.into_iter().map(Secs).collect();
+    if !KEEPALIVE_CHOICES.contains(&settings.keepalive_secs) {
+        intervals.push(Secs(settings.keepalive_secs));
+        intervals.sort();
+    }
+    let keepalive = pick_list(intervals, Some(Secs(settings.keepalive_secs)), |secs| {
+        msg(SettingsMsg::Keepalive(secs.0))
+    })
+    .text_size(theme::TEXT_SM)
+    .width(120)
+    .style(theme::pick_list)
+    .menu_style(theme::menu);
+
     let mut transfers = column![heading(strings::SETTINGS_TRANSFERS)].spacing(theme::SPACE_SM);
     if app.settings_load_error.is_some() {
         transfers = transfers.push(
@@ -165,7 +214,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .push(field(strings::SETTINGS_WORKERS, stepper.into(), None))
         .push(muted(strings::SETTINGS_WORKERS_HINT))
         .push(field(strings::SETTINGS_POLICY, policy.into(), None))
-        .push(muted(strings::SETTINGS_POLICY_HINT));
+        .push(muted(strings::SETTINGS_POLICY_HINT))
+        .push(field(strings::SETTINGS_KEEPALIVE, keepalive.into(), None))
+        .push(muted(strings::SETTINGS_KEEPALIVE_HINT));
     if let Some(error) = &app.settings_save_error {
         transfers = transfers.push(
             column![
@@ -175,6 +226,84 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 failure(Some(error)),
             ]
             .spacing(theme::SPACE_2XS),
+        );
+    }
+
+    let font_size = settings.terminal_font_size;
+    let font_stepper = row![
+        outlined(
+            strings::DECREASE,
+            (font_size > FONT_SIZE_MIN).then(|| msg(SettingsMsg::TerminalFontSize(font_size - 1)))
+        ),
+        container(
+            text(font_size.to_string())
+                .font(theme::MONO)
+                .size(theme::TEXT_MONO)
+        )
+        .width(36)
+        .align_x(Alignment::Center),
+        outlined(
+            strings::INCREASE,
+            (font_size < FONT_SIZE_MAX).then(|| msg(SettingsMsg::TerminalFontSize(font_size + 1)))
+        ),
+    ]
+    .spacing(theme::SPACE_XS)
+    .align_y(Alignment::Center);
+    let mut lines: Vec<Lines> = SCROLLBACK_CHOICES.iter().copied().map(Lines).collect();
+    if !SCROLLBACK_CHOICES.contains(&settings.terminal_scrollback) {
+        // A value typed into the file: shown as it is.
+        lines.push(Lines(settings.terminal_scrollback));
+        lines.sort();
+    }
+    let scrollback = pick_list(lines, Some(Lines(settings.terminal_scrollback)), |lines| {
+        msg(SettingsMsg::TerminalScrollback(lines.0))
+    })
+    .text_size(theme::TEXT_SM)
+    .width(240)
+    .style(theme::pick_list)
+    .menu_style(theme::menu);
+    let themes: Vec<ThemeChoice> = TerminalTheme::ALL.into_iter().map(ThemeChoice).collect();
+    let term_theme = pick_list(
+        themes,
+        Some(ThemeChoice(settings.terminal_theme)),
+        |choice| msg(SettingsMsg::TerminalTheme(choice.0)),
+    )
+    .text_size(theme::TEXT_SM)
+    .width(240)
+    .style(theme::pick_list)
+    .menu_style(theme::menu);
+    let terminal = column![
+        heading(strings::SETTINGS_TERMINAL),
+        field(strings::SETTINGS_FONT_SIZE, font_stepper.into(), None),
+        field(strings::SETTINGS_SCROLLBACK, scrollback.into(), None),
+        muted(strings::SETTINGS_SCROLLBACK_HINT),
+        field(strings::SETTINGS_THEME, term_theme.into(), None),
+    ]
+    .spacing(theme::SPACE_SM);
+
+    let editor_value = app
+        .editor_input
+        .as_deref()
+        .unwrap_or(&settings.editor_command);
+    let mut editing = column![
+        heading(strings::SETTINGS_EDITING),
+        field(
+            strings::EDITOR_COMMAND,
+            input(editor_value, false, |command| {
+                msg(SettingsMsg::EditorCommand(command))
+            })
+            .width(320)
+            .into(),
+            None
+        ),
+        muted(strings::EDITOR_COMMAND_HINT),
+    ]
+    .spacing(theme::SPACE_SM);
+    if app.editor_input.is_some() {
+        editing = editing.push(
+            text(strings::EDITOR_COMMAND_EMPTY)
+                .size(theme::TEXT_SM)
+                .color(palette().error),
         );
     }
 
@@ -189,6 +318,10 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .align_y(Alignment::Center),
         hrule(),
         transfers,
+        hrule(),
+        terminal,
+        hrule(),
+        editing,
         hrule(),
         backup_view(&app.backup, app.busy_phase),
     ]

@@ -4,31 +4,46 @@
 //! with "Dismiss") and the inline name editor. Nothing here is a modal.
 
 use hoprs_core::{EntryKind, Error};
-use iced::widget::{button, checkbox, column, container, row, space, text, text_input};
+use iced::widget::{button, checkbox, column, container, row, space, text, text_input, tooltip};
 use iced::{Alignment, Element, Length, Padding};
 
 use crate::app::actions::{BusyKind, Edit, EditKind, PERMISSION_BITS, PaneAction, Permissions};
 use crate::app::files::Pane;
-use crate::app::{Message, PaneMsg, Tab, TabId};
+use crate::app::{Message, PaneMsg, SiteConn, Tab, TabId};
 use crate::backend::Side;
 use crate::ui::files::edit_id;
+use crate::ui::fit::Toolbar;
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
 use crate::ui::virtual_list::ROW_HEIGHT;
 
 /// The toolbar under the path bar: the actions, each with its key, and on the right the
 /// operation in flight.
-/// `compact` (a narrow pane, [`crate::ui::fit::compact_toolbar`]): no key hints, tighter
-/// padding, and while an operation runs only its progress (the actions are all dim then).
-pub fn toolbar<'a>(tab: &'a Tab, side: Side, compact: bool) -> Element<'a, Message> {
+/// `form` ([`crate::ui::fit::toolbar`]): below Full no key hints, and while an operation
+/// runs only its progress (the actions are all dim then); Narrow also uses short labels.
+pub fn toolbar<'a>(
+    tab: &'a Tab,
+    conn: &SiteConn,
+    side: Side,
+    form: Toolbar,
+) -> Element<'a, Message> {
     let p = palette();
-    let pane = tab.pane(side);
+    let compact = !form.hints();
+    let short = form.short_labels();
+    let (new_folder, permissions) = if short {
+        (strings::NEW_FOLDER_SHORT, strings::PERMISSIONS_SHORT)
+    } else {
+        (strings::NEW_FOLDER, strings::PERMISSIONS)
+    };
+    let Some(pane) = tab.pane(side) else {
+        return space().into();
+    };
     let msg = move |msg: PaneMsg| Message::Pane {
         tab: tab.id,
         side,
         msg,
     };
-    let can = tab.can_act(side);
+    let can = tab.can_act(conn, side);
     let some = can && !pane.selected_entries().is_empty();
     let chmod = can && !pane.permission_targets().is_empty();
     let action = |label: &'a str, key: Option<&'a str>, enabled: bool, pane_msg: PaneMsg| {
@@ -46,13 +61,8 @@ pub fn toolbar<'a>(tab: &'a Tab, side: Side, compact: bool) -> Element<'a, Messa
                     .color(p.rule_2),
             );
         }
-        let pad_x = if compact {
-            theme::SPACE_2XS
-        } else {
-            theme::SPACE_XS
-        };
         button(content.align_y(Alignment::Center))
-            .padding(Padding::from([theme::SPACE_3XS, pad_x]))
+            .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_2XS]))
             .style(theme::button_text)
             .on_press_maybe(enabled.then(|| msg(pane_msg)))
     };
@@ -61,20 +71,30 @@ pub fn toolbar<'a>(tab: &'a Tab, side: Side, compact: bool) -> Element<'a, Messa
         Side::Remote => strings::DOWNLOAD,
     };
     let mut bar = row![];
+    // Edit (remote): the selected file, or why it can't be (the hint, on the right).
+    let edit = tab.edit_target(conn, side);
     // A narrow pane while an operation runs: only its progress (every action is dim).
     if !(compact && pane.busy.is_some()) {
+        bar = bar.push(action(
+            transfer,
+            Some(strings::KEY_TRANSFER),
+            tab.can_transfer(conn, side),
+            PaneMsg::Transfer,
+        ));
+        if side == Side::Remote {
+            bar = bar.push(edit_action(edit, compact, msg(PaneMsg::Edit)));
+        }
         bar = bar
-            .push(action(
-                transfer,
-                Some(strings::KEY_TRANSFER),
-                tab.can_transfer(side),
-                PaneMsg::Transfer,
-            ))
-            .push(action(
+            .push(full_label_tip(
+                action(
+                    new_folder,
+                    Some(strings::KEY_NEW_FOLDER),
+                    can,
+                    PaneMsg::NewFolder,
+                ),
+                short,
                 strings::NEW_FOLDER,
                 Some(strings::KEY_NEW_FOLDER),
-                can,
-                PaneMsg::NewFolder,
             ))
             .push(action(
                 strings::RENAME,
@@ -89,11 +109,11 @@ pub fn toolbar<'a>(tab: &'a Tab, side: Side, compact: bool) -> Element<'a, Messa
                 PaneMsg::Delete,
             ));
         if side == Side::Remote {
-            bar = bar.push(action(
+            bar = bar.push(full_label_tip(
+                action(permissions, None, chmod, PaneMsg::Permissions),
+                short,
                 strings::PERMISSIONS,
                 None,
-                chmod,
-                PaneMsg::Permissions,
             ));
         }
     }
@@ -115,12 +135,88 @@ pub fn toolbar<'a>(tab: &'a Tab, side: Side, compact: bool) -> Element<'a, Messa
     bar.spacing(theme::SPACE_3XS)
         .align_y(Alignment::Center)
         .height(ROW_HEIGHT)
-        .padding(Padding::ZERO.left(theme::SPACE_XS).right(if compact {
-            theme::SPACE_XS
-        } else {
-            theme::SPACE_MD
-        }))
+        .padding(Padding::ZERO.left(theme::SPACE_XS).right(theme::SPACE_XS))
         .into()
+}
+
+/// A short-labelled toolbar button (`short`, the Narrow form) with its full label and key
+/// as a tooltip, in the Edit hint's style; otherwise the button as it is.
+fn full_label_tip<'a>(
+    button: iced::widget::Button<'a, Message>,
+    short: bool,
+    label: &'a str,
+    key: Option<&'a str>,
+) -> Element<'a, Message> {
+    if !short {
+        return button.into();
+    }
+    let hint = row![text(label).size(theme::TEXT_XS)]
+        .push(key.map(|key| {
+            text(key)
+                .font(theme::MONO)
+                .size(theme::TEXT_TAG)
+                .color(palette().muted)
+        }))
+        .spacing(theme::SPACE_XS)
+        .align_y(Alignment::Center);
+    tooltip(
+        button,
+        container(hint)
+            .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
+            .style(theme::dialog_box),
+        tooltip::Position::Bottom,
+    )
+    .into()
+}
+
+/// "Edit F4" (remote). Off without a selection. On a folder, a link or a file over
+/// 50 MB it looks off too, but a click (like F4) still answers: the reason shows inline
+/// in the bar above the table; hovering shows it as well.
+fn edit_action<'a>(
+    edit: Option<Result<hoprs_core::RemotePath, &'static str>>,
+    compact: bool,
+    on_press: Message,
+) -> Element<'a, Message> {
+    let p = palette();
+    let mut content = row![
+        text(strings::EDIT_FILE)
+            .size(theme::TEXT_XS)
+            .wrapping(text::Wrapping::None)
+    ]
+    .spacing(theme::SPACE_2XS);
+    if !compact {
+        content = content.push(
+            text(strings::KEY_EDIT)
+                .font(theme::MONO)
+                .size(theme::TEXT_TAG)
+                .color(p.rule_2),
+        );
+    }
+    let refused = matches!(edit, Some(Err(_)));
+    let button = button(content.align_y(Alignment::Center))
+        .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_2XS]))
+        .style(move |t, status| {
+            theme::button_text(
+                t,
+                if refused {
+                    button::Status::Disabled
+                } else {
+                    status
+                },
+            )
+        })
+        .on_press_maybe(edit.is_some().then_some(on_press));
+    match edit {
+        Some(Err(reason)) => tooltip(
+            button,
+            container(text(reason).size(theme::TEXT_XS))
+                .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
+                .style(theme::dialog_box),
+            tooltip::Position::Bottom,
+        )
+        .into(),
+        _ => button.into(),
+    }
 }
 
 /// The bars above the table, top to bottom: the open confirmation or dialog (or the

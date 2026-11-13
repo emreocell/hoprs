@@ -12,28 +12,31 @@ Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI), open source (MIT OR Apa
 - Plan 3 (FTP + FTPS): `docs/superpowers/plans/2026-11-12-03-ftp-ftps.md`
 - Plan 4 (vault + FileZilla import): `docs/superpowers/plans/2026-11-12-04-vault-import.md`
 - Plan 5 (iced app shell): `docs/superpowers/plans/2026-11-12-05-app-shell.md`
-- Plan 5 visual/manual QA checklist: `docs/qa/plan-5-checklist.md`
+- Plan 6 (terminal, remote editing, palette, log, perf job): `docs/superpowers/plans/2026-11-13-06-terminal-polish.md`
+- QA checklists (manual runs, NEEDS HUMAN rows with steps): `docs/qa/plan-5-checklist.md`, `docs/qa/plan-6-checklist.md`
+- Performance targets, how they are measured, last numbers: `docs/perf/README.md` (`scripts/perf.sh`, `.github/workflows/perf.yml`)
 - Deferred follow-ups: `docs/superpowers/plans/2026-11-12-01-followups.md`
 
 ## Current status (2026-11-13)
 
-- Plans 1 (hoprs-core, hoprs-remote, hoprs-transfer), 2 (hoprs-ssh, `SftpFs`, Docker OpenSSH test env), 3 (FTP + FTPS: `FtpFs`, `FtpSession` pool/keepalive/reconnect, certificate pinning, protocol-neutral `Connection` + `spawn_site_watcher`, Docker vsftpd test env) and 4 (hoprs-vault: profiles TOML, keyring secrets, encrypted export/import; hoprs-import: FileZilla `sitemanager.xml`) merged to `main`.
-- Plan 5 (hoprs-app: iced shell, sidebar, site/workspace forms, file panes with a virtual list, transfer queue, security dialogs, reconnect/status, tab persistence and shutdown, FileZilla import, settings and backup) implemented on branch `plan-5-app-shell`; every task reviewed, QA checklist executed (`docs/qa/plan-5-checklist.md`, some rows NEEDS HUMAN), final whole-branch review pending.
-- Deferred follow-ups for later plans: `docs/superpowers/plans/2026-11-12-01-followups.md` (per plan; Plan 5 section: correctness, UX, perf, Windows, later).
-- **Next step:** merge Plan 5, then write Plan 6 (terminal tab, remote editing, Ctrl+K palette, technical log, spec §9 benchmarks in CI) from the real signatures.
-- Plan 6 is written only after Plan 5 is done, using the real signatures it produced.
+- Plans 1–5 merged to `main`: core + transfer engine, SSH/SFTP, FTP/FTPS, vault + FileZilla import, the iced app.
+- Plan 6 (terminal tabs over the site's SSH connection, remote editing with re-upload on save, Ctrl+K palette, technical log panel, idle-drop fixes, perf job) implemented on branch `plan-6-terminal-polish`; QA checklist run (`docs/qa/plan-6-checklist.md`, NEEDS HUMAN rows wait for the author).
+- Deferred follow-ups: `docs/superpowers/plans/2026-11-12-01-followups.md` (a "Plan 6" section lists what was left out, grouped).
+- **Next step:** merge Plan 6, then check the first `perf.yml` run on `main` (its `push: main` trigger starts it after the merge; `workflow_dispatch` cannot run a workflow that is not on the default branch yet, so it never ran on the branch), then prepare the v1 release: packaging, icon, `.desktop` file, version.
 - Docker integration tests: `docker compose -f docker/compose.yml up -d --build --wait`, then `cargo test --workspace --all-features -- --ignored --test-threads=1`.
 
 ## Decisions already made (do not re-litigate)
 
 - Target platform v1: **Linux (Ubuntu)**. Code stays portable; tests must also pass on Windows (use `tempfile`, never literal `/tmp`).
-- GUI: **iced**. Runtime: **tokio**. SSH/SFTP: `russh` + `russh-sftp`. FTP/FTPS: `suppaftp`. Terminal: `alacritty_terminal`.
+- GUI: **iced**. Runtime: **tokio**. SSH/SFTP: `russh` + `russh-sftp`. FTP/FTPS: `suppaftp`. Terminal: `alacritty_terminal`. File watching (remote editing): `notify`.
 - Sites have a protocol: `ssh` (opens terminal, files via SFTP, or both in tabs, over one connection) or `ftp` / `ftps-explicit` / `ftps-implicit` (files). FTP is first-class, not an afterthought.
 - **Workspace = a bundle of sites**; "Open workspace" connects all of them and restores tabs. A site can be in several workspaces.
 - Credentials: OS keyring (Secret Service) + encrypted export/import (Argon2id + XChaCha20-Poly1305). Profile TOML never holds secrets. ssh-agent preferred.
 - Import from FileZilla (`sitemanager.xml`) is in v1.
 - UI language: **English** (i18n-ready). Visual: mockup v2 — neutral near-black, **white accent**, Inter for UI, JetBrains Mono for data (file names, paths, permissions), 4px radius, 1px rules, no shadows, no modal cascades (errors inline).
 - Unencrypted FTP is allowed, labelled `ftp (unencrypted)`, no nagging.
+- Terminal: Ctrl+K goes to the shell; the palette opens with Ctrl+Shift+K there. Copy/paste are Ctrl+Shift+C/V. OSC 52 (server writing the clipboard) is off.
+- Remote-edit uploads go straight through `RemoteFs`, not the transfer queue. The perf job is separate and never a required PR check.
 
 ## Conventions
 

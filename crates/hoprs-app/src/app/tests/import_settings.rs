@@ -580,6 +580,7 @@ fn settings_saves_are_coalesced() {
             Settings {
                 workers_per_site: 6,
                 default_policy: ConflictPolicy::Skip,
+                ..Settings::default()
             }
         ),
         other => panic!("{other:?}"),
@@ -591,6 +592,29 @@ fn settings_saves_are_coalesced() {
     assert!(matches!(
         effects[..],
         [Effect::SetWorkers(7), Effect::SaveSettings(_)]
+    ));
+}
+
+/// The keepalive (Plan 6, Task 5): clamped to 10..=300 s, applied to the next
+/// connections, saved.
+#[test]
+fn keepalive_setting_applies_to_next_connections() {
+    let mut app = App::new();
+    app.update(Message::OpenSettings);
+    assert_eq!(app.settings.keepalive_secs, 30);
+    let effects = settings(&mut app, SettingsMsg::Keepalive(5));
+    match &effects[..] {
+        [Effect::SetKeepalive(10), Effect::SaveSettings(saved)] => {
+            assert_eq!(saved.keepalive_secs, 10);
+        }
+        other => panic!("{other:?}"),
+    }
+    app.update(Message::SettingsSaved(Ok(())));
+    assert!(settings(&mut app, SettingsMsg::Keepalive(10)).is_empty());
+    let effects = settings(&mut app, SettingsMsg::Keepalive(900));
+    assert!(matches!(
+        effects[..],
+        [Effect::SetKeepalive(300), Effect::SaveSettings(_)]
     ));
 }
 
@@ -695,6 +719,7 @@ fn settings_changes_apply_and_save() {
         settings: Settings {
             workers_per_site: 6,
             default_policy: ConflictPolicy::Skip,
+            ..Settings::default()
         },
         error: None,
     }));
@@ -801,8 +826,9 @@ async fn effects_reach_the_backend() {
     let saved = Settings {
         workers_per_site: 9,
         default_policy: ConflictPolicy::Overwrite,
+        ..Settings::default()
     };
-    let message = effects::save_settings(backend.clone(), saved).await;
+    let message = effects::save_settings(backend.clone(), saved.clone()).await;
     assert!(matches!(message, Message::SettingsSaved(Ok(()))));
     backend.set_policy(ConflictPolicy::Skip).await;
     backend.set_workers(3);
@@ -852,7 +878,7 @@ async fn reloaded_profiles_reconcile_tabs() {
     drive(&mut app, &fake, sites).await;
     let sites = connect_effect(app.update(Message::ConnectSite(c.id.clone())));
     drive(&mut app, &fake, sites).await;
-    let session = |app: &App, id: &SiteId| app.tabs[app.tab_of(id).unwrap()].session().unwrap();
+    let session = |app: &App, id: &SiteId| app.tab_conn(app.tab_of(id).unwrap()).session().unwrap();
     let (sa, sb, sc) = (
         session(&app, &a.id),
         session(&app, &b.id),
@@ -896,7 +922,7 @@ async fn reloaded_profiles_reconcile_tabs() {
         }
         other => panic!("{other:?}"),
     }
-    assert_eq!(app.tabs[app.tab_of(&b.id).unwrap()].session(), None);
+    assert_eq!(app.tab_conn(app.tab_of(&b.id).unwrap()).session(), None);
     assert_eq!(session(&app, &c.id), sc, "unchanged endpoint: kept");
     assert!(app.active_tab.is_some_and(|i| i < app.tabs.len()));
 

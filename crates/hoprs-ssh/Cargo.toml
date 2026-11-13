@@ -10,12 +10,14 @@ testing = []
 [dependencies]
 hoprs-core = { path = "../hoprs-core" }
 async-trait.workspace = true
+futures-util.workspace = true
 secrecy.workspace = true
 russh.workspace = true
 sha1 = "0.10"
 sha2.workspace = true
 base64.workspace = true
 hmac.workspace = true
+socket2.workspace = true
 tokio = { workspace = true, features = ["net", "time", "sync", "macros", "rt"] }
 zeroize.workspace = true
 
