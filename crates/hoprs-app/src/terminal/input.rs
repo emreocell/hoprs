@@ -11,8 +11,6 @@ use alacritty_terminal::term::TermMode;
 
 /// A key press, as the terminal tab sees it. The tab maps iced's keys onto
 /// this (Plan 6 Task 4).
-// used by the terminal tab (Plan 6 Task 4)
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Key {
     /// A character key, already shifted by the layout (`A`, `é`, `{`).
@@ -58,8 +56,6 @@ const ESC: u8 = 0x1b;
 ///
 /// Copy and paste shortcuts (Ctrl+Shift+C / V) are the tab's to intercept
 /// first: here Ctrl+Shift+C is plain Ctrl+C (`0x03`).
-// used by the terminal tab (Plan 6 Task 4)
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn encode_key(key: &Key, mods: Modifiers, mode: TermMode) -> Option<Vec<u8>> {
     let alt_prefixed = |bytes: &[u8]| {
         let mut out = Vec::with_capacity(bytes.len() + 1);
@@ -161,8 +157,6 @@ const PASTE_FORBIDDEN: [char; 3] = ['\x1b', '\x03', '\u{9b}'];
 /// and run as typed commands. An empty result sends nothing. Without
 /// bracketed paste, line breaks are sent as Enter (`\r`), as typing them
 /// would.
-// used by the terminal tab (Plan 6 Task 4)
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn encode_paste(text: &str, mode: TermMode) -> Vec<u8> {
     if mode.contains(TermMode::BRACKETED_PASTE) {
         let body: String = text

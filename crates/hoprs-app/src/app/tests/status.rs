@@ -234,7 +234,7 @@ async fn reconnect_banner_on_disconnected() {
     // The remote folder is listed again.
     assert_eq!(
         listed_path(&effects, tab, Side::Remote),
-        Some(app.tabs[0].remote.path.clone())
+        Some(app.tabs[0].remote().path.clone())
     );
     let up = next(&mut feed).await.unwrap();
     assert!(matches!(
@@ -389,19 +389,21 @@ async fn opening_workspace_restores_dirs() {
     app.home = Some(path("/home/me"));
 
     let effects = app.update(Message::OpenWorkspace(ws.id.clone()));
-    let tab = |app: &App, site: &SiteId| app.tabs[app.tab_of(site).unwrap()].clone();
-    let (ta, tb, tc) = (tab(&app, &a.id), tab(&app, &b.id), tab(&app, &c.id));
-    assert_eq!(ta.local.path, path("/home/me/shop"));
-    assert_eq!(ta.remote.path, path("/var/www/shop"));
-    assert_eq!(tb.local.path, path("/b-local"));
-    assert_eq!(tb.remote.path, path("/pub"));
-    assert_eq!(tc.kind, TabKind::Terminal);
-    assert_eq!(tc.local.path, path("/home/me"));
-    assert_eq!(tc.remote.path, RemotePath::root());
+    let tab = |app: &App, site: &SiteId| app.tab_of(site).unwrap();
+    let (ia, ib, ic) = (tab(&app, &a.id), tab(&app, &b.id), tab(&app, &c.id));
+    let (ta, tb, tc) = (&app.tabs[ia], &app.tabs[ib], &app.tabs[ic]);
+    assert_eq!(ta.local().path, path("/home/me/shop"));
+    assert_eq!(ta.remote().path, path("/var/www/shop"));
+    assert_eq!(tb.local().path, path("/b-local"));
+    assert_eq!(tb.remote().path, path("/pub"));
+    assert_eq!(tc.kind(), TabKind::Terminal);
+    // A terminal tab has no panes (and lists nothing).
+    assert!(tc.files().is_none());
     assert_eq!(listed_path(&effects, tc.id, Side::Local), None);
+    let ta = ta.id;
     // The local listings start at the restored folders.
     assert_eq!(
-        listed_path(&effects, ta.id, Side::Local),
+        listed_path(&effects, ta, Side::Local),
         Some(path("/home/me/shop"))
     );
     // Once connected, the remote side lists its restored folder.
@@ -410,7 +412,7 @@ async fn opening_workspace_restores_dirs() {
     let messages: Vec<Message> = effects::connect_sites(backend, sites).collect().await;
     let effects: Vec<Effect> = messages.into_iter().flat_map(|m| app.update(m)).collect();
     assert_eq!(
-        listed_path(&effects, ta.id, Side::Remote),
+        listed_path(&effects, ta, Side::Remote),
         Some(path("/var/www/shop"))
     );
 
@@ -426,7 +428,10 @@ async fn opening_workspace_restores_dirs() {
         .collect();
     assert_eq!(saves, vec![ws.id.clone()]);
     assert_eq!(app.open_workspace, Some(other.id.clone()));
-    assert_eq!(tab(&app, &a.id).local.path, path("/home/me/shop"));
+    assert_eq!(
+        app.tabs[tab(&app, &a.id)].local().path,
+        path("/home/me/shop")
+    );
 }
 
 /// Review Focus 5: closing the window saves the open workspace's tabs, shuts the engine
@@ -724,7 +729,7 @@ async fn close_request_cancels_dialogs_and_ignores_input() {
     }
     assert!(app.form.is_none());
     assert_eq!(app.tabs.len(), 1);
-    assert_ne!(app.tabs[0].local.path, path("/elsewhere"));
+    assert_ne!(app.tabs[0].local().path, path("/elsewhere"));
 
     // Results still land.
     state(
@@ -766,14 +771,14 @@ async fn restored_folder_gone_falls_back_and_failed_sides_keep_the_saved_folder(
     let (request, at) = list_effect(&effects, tab, Side::Local);
     assert_eq!(at, path("/gone"));
     let note = strings::saved_folder_gone("/gone/deep");
-    assert_eq!(app.tabs[0].local.note.as_deref(), Some(note.as_str()));
+    assert_eq!(app.tabs[0].local().note.as_deref(), Some(note.as_str()));
     let effects = listed(&mut app, tab, Side::Local, request, Err(gone()));
     let (request, at) = list_effect(&effects, tab, Side::Local);
     assert_eq!(at, path("/home/me"));
     listed(&mut app, tab, Side::Local, request, Ok(Vec::new()));
-    assert_eq!(app.tabs[0].local.listing, files::Listing::Loaded);
-    assert_eq!(app.tabs[0].local.note.as_deref(), Some(note.as_str()));
-    assert_eq!(app.tabs[0].local.restore, None);
+    assert_eq!(app.tabs[0].local().listing, files::Listing::Loaded);
+    assert_eq!(app.tabs[0].local().note.as_deref(), Some(note.as_str()));
+    assert_eq!(app.tabs[0].local().restore, None);
 
     // Remote: /srv/old is gone, /srv is there.
     let session_effects = app.update(Message::SiteConnected {
@@ -786,14 +791,14 @@ async fn restored_folder_gone_falls_back_and_failed_sides_keep_the_saved_folder(
     let (request, at) = list_effect(&effects, tab, Side::Remote);
     assert_eq!(at, path("/srv"));
     listed(&mut app, tab, Side::Remote, request, Ok(Vec::new()));
-    assert!(app.tabs[0].remote.note.is_some());
+    assert!(app.tabs[0].remote().note.is_some());
     // Dismiss clears the note.
     app.update(Message::Pane {
         tab,
         side: Side::Remote,
         msg: PaneMsg::DismissError,
     });
-    assert_eq!(app.tabs[0].remote.note, None);
+    assert_eq!(app.tabs[0].remote().note, None);
 
     // A later failure (not a restore) is shown as usual and never saved.
     let effects = app.update(Message::Pane {
@@ -804,7 +809,7 @@ async fn restored_folder_gone_falls_back_and_failed_sides_keep_the_saved_folder(
     let (request, _) = list_effect(&effects, tab, Side::Local);
     let denied = Error::new(ErrorKind::Permission, "Permission denied");
     listed(&mut app, tab, Side::Local, request, Err(denied.clone()));
-    assert_eq!(app.tabs[0].local.listing, files::Listing::Failed(denied));
+    assert_eq!(app.tabs[0].local().listing, files::Listing::Failed(denied));
     let effects = without_panes(app.update(Message::CloseWorkspace(ws.id.clone())));
     let Some(Effect::SaveTabs { tabs, .. }) = effects.first() else {
         panic!("{effects:?}");

@@ -580,6 +580,7 @@ fn settings_saves_are_coalesced() {
             Settings {
                 workers_per_site: 6,
                 default_policy: ConflictPolicy::Skip,
+                ..Settings::default()
             }
         ),
         other => panic!("{other:?}"),
@@ -695,6 +696,7 @@ fn settings_changes_apply_and_save() {
         settings: Settings {
             workers_per_site: 6,
             default_policy: ConflictPolicy::Skip,
+            ..Settings::default()
         },
         error: None,
     }));
@@ -801,6 +803,7 @@ async fn effects_reach_the_backend() {
     let saved = Settings {
         workers_per_site: 9,
         default_policy: ConflictPolicy::Overwrite,
+        ..Settings::default()
     };
     let message = effects::save_settings(backend.clone(), saved).await;
     assert!(matches!(message, Message::SettingsSaved(Ok(()))));

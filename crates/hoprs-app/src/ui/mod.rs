@@ -14,6 +14,7 @@ pub mod site_form;
 pub mod status;
 pub mod strings;
 pub mod tabs;
+pub mod terminal;
 pub mod theme;
 pub mod virtual_list;
 pub mod widgets;

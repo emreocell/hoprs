@@ -15,7 +15,7 @@ use std::time::Duration;
 use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Point};
+use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{self, Osc52, TermMode, point_to_viewport, viewport_to_point};
 use alacritty_terminal::vte::ansi::{
@@ -249,8 +249,6 @@ pub struct TerminalModel {
 
 impl TerminalModel {
     /// A `cols` x `rows` terminal keeping `scrollback` lines of history.
-    // used by the terminal tab (Plan 6 Task 4)
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(cols: u16, rows: u16, scrollback: usize) -> Self {
         let events = EventProxy::default();
         let config = term::Config {
@@ -269,30 +267,23 @@ impl TerminalModel {
         }
     }
 
-    // used by the terminal tab (Plan 6 Task 4)
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn theme(&self) -> &TermTheme {
         &self.theme
     }
 
-    // used by the terminal tab (Plan 6 Task 4)
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn set_theme(&mut self, theme: TermTheme) {
         self.theme = theme;
     }
 
     /// Whether OSC 52 copies reach the host as [`TermEvent::ClipboardStore`].
     /// Off by default: a remote program must not fill the clipboard unasked.
-    // used by the terminal tab (Plan 6 Task 4)
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn set_allow_clipboard_store(&mut self, allow: bool) {
         self.allow_clipboard_store = allow;
     }
 
     /// Parses `bytes` (any bytes: invalid UTF-8 and broken sequences are
     /// absorbed) and returns what the host must act on, in order.
-    // used by the terminal tab (Plan 6 Task 4)
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<TermEvent> {
         self.parser.advance(&mut self.term, bytes);
         self.events
@@ -323,8 +314,6 @@ impl TerminalModel {
     }
 
     /// Resizes the grid; the host also resizes the PTY. Zero is clamped.
-    // used by the terminal tab (Plan 6 Task 4)
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.term.resize(Size::new(cols, rows));
     }
@@ -338,22 +327,17 @@ impl TerminalModel {
     }
 
     /// Lines of scrollback currently held (at most the configured cap).
-    // used by the terminal tab (Plan 6 Task 4)
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn history_len(&self) -> usize {
         self.term.history_size()
     }
 
     /// How many lines the view is scrolled back into history.
-    // used by the terminal tab (Plan 6 Task 4)
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn display_offset(&self) -> usize {
         self.term.grid().display_offset()
     }
 
     /// The viewport's cells, row by row, colours resolved.
-    // used by the terminal tab (Plan 6 Task 4)
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn cells(&self) -> impl Iterator<Item = CellView> + '_ {
         let content = self.term.renderable_content();
         let offset = content.display_offset;
@@ -395,8 +379,6 @@ impl TerminalModel {
     }
 
     /// The cursor, in viewport coordinates.
-    // used by the terminal tab (Plan 6 Task 4)
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn cursor(&self) -> CursorView {
         let content = self.term.renderable_content();
         let cursor = content.cursor;
@@ -419,30 +401,33 @@ impl TerminalModel {
     }
 
     /// Scrolls the view: positive goes back into history. Clamped.
-    // used by the terminal tab (Plan 6 Task 4)
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn scroll(&mut self, delta_lines: i32) {
         self.term.scroll_display(Scroll::Delta(delta_lines));
     }
 
-    // used by the terminal tab (Plan 6 Task 4)
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn scroll_to_bottom(&mut self) {
         self.term.scroll_display(Scroll::Bottom);
     }
 
+    /// Scrolls the view just enough for grid line `line` (negative: scrollback) to show.
+    pub fn scroll_to_show(&mut self, line: Line) {
+        let top = -i32::try_from(self.display_offset()).unwrap_or(i32::MAX);
+        let bottom = top + i32::try_from(self.screen_lines()).unwrap_or(1) - 1;
+        if line.0 < top {
+            self.scroll(top - line.0);
+        } else if line.0 > bottom {
+            self.scroll(bottom - line.0);
+        }
+    }
+
     /// The modes the remote program set: application cursor keys
     /// (`APP_CURSOR`), bracketed paste (`BRACKETED_PASTE`), mouse, etc.
-    // used by the terminal tab (Plan 6 Task 4)
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn mode(&self) -> TermMode {
         *self.term.mode()
     }
 
     /// The grid point under viewport cell (`row`, `col`), for selection and
     /// search origins. Negative lines are scrollback.
-    // used by the terminal tab (Plan 6 Task 4)
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn viewport_to_point(&self, row: usize, col: usize) -> Point {
         let row = row.min(self.screen_lines() - 1);
         let col = col.min(self.columns() - 1);
@@ -450,8 +435,6 @@ impl TerminalModel {
     }
 
     /// The first and last cells of the whole grid, scrollback included.
-    // used by the terminal tab (Plan 6 Task 4)
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn grid_bounds(&self) -> (Point, Point) {
         (
             Point::new(self.term.topmost_line(), Column(0)),

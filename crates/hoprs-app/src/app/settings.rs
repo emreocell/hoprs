@@ -16,7 +16,9 @@ use hoprs_vault::{BackupImportReport, ExportReport, ImportMode};
 use secrecy::SecretString;
 
 use super::{App, Effect, Form, PickTarget};
-use crate::settings::{SettingsLoad, clamp_workers};
+use crate::settings::{
+    SettingsLoad, TerminalTheme, clamp_font_size, clamp_scrollback, clamp_workers,
+};
 use crate::ui::site_form::Password;
 use crate::ui::strings;
 
@@ -24,6 +26,11 @@ use crate::ui::strings;
 pub enum SettingsMsg {
     Workers(usize),
     Policy(ConflictPolicy),
+    /// The terminal's font size (clamped to `10..=24`); applies at once.
+    TerminalFontSize(u16),
+    /// Scrollback lines (clamped to `1 000..=100 000`), for the terminals opened next.
+    TerminalScrollback(usize),
+    TerminalTheme(TerminalTheme),
     Backup(BackupMsg),
     Close,
 }
@@ -180,6 +187,34 @@ impl App {
                 let mut effects = vec![Effect::SetPolicy(policy)];
                 effects.extend(self.save_settings_effect());
                 effects
+            }
+            SettingsMsg::TerminalFontSize(size) => {
+                let size = clamp_font_size(size);
+                if size == self.settings.terminal_font_size {
+                    return Vec::new();
+                }
+                self.settings.terminal_font_size = size;
+                self.save_settings_effect().into_iter().collect()
+            }
+            SettingsMsg::TerminalScrollback(lines) => {
+                let lines = clamp_scrollback(lines);
+                if lines == self.settings.terminal_scrollback {
+                    return Vec::new();
+                }
+                self.settings.terminal_scrollback = lines;
+                self.save_settings_effect().into_iter().collect()
+            }
+            SettingsMsg::TerminalTheme(theme) => {
+                if theme == self.settings.terminal_theme {
+                    return Vec::new();
+                }
+                self.settings.terminal_theme = theme;
+                for tab in &mut self.tabs {
+                    if let Some(terminal) = tab.terminal_mut() {
+                        terminal.model.set_theme(theme.colors());
+                    }
+                }
+                self.save_settings_effect().into_iter().collect()
             }
             SettingsMsg::Backup(msg) => self.backup_msg(msg),
             SettingsMsg::Close => {

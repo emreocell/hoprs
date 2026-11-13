@@ -31,8 +31,12 @@ impl App {
         if !tab.can_transfer(self.tab_conn(index), from) {
             return Vec::new();
         }
-        let source = tab.pane(from);
-        let target = &tab.pane(other(from)).path;
+        let Some(source) = tab.pane(from) else {
+            return Vec::new();
+        };
+        let Some(target) = tab.pane(other(from)).map(|pane| &pane.path) else {
+            return Vec::new();
+        };
         source
             .selected_entries()
             .into_iter()
@@ -130,7 +134,9 @@ impl App {
             return Vec::new();
         };
         let tab = &self.tabs[index];
-        let remote = tab.remote.path.join(&name);
+        let Some(remote) = tab.pane(Side::Remote).map(|pane| pane.path.join(&name)) else {
+            return Vec::new();
+        };
         vec![Effect::Enqueue(vec![TransferSpec {
             site: tab.site.clone(),
             direction: Direction::Upload,

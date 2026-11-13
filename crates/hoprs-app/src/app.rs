@@ -14,7 +14,7 @@ use secrecy::SecretString;
 
 use crate::backend::{
     AuthMethod, BrokerEvent, ConnectResult, ControlOp, KnownHostEntry, ProfileSnapshot,
-    PromptAnswer, PromptId, SessionId, Side, TransferSnapshot, WorkspaceTabs,
+    PromptAnswer, PromptId, SessionId, ShellId, ShellOutput, Side, TransferSnapshot, WorkspaceTabs,
 };
 use crate::settings::{Settings, SettingsLoad};
 use crate::ui::sidebar;
@@ -62,6 +62,7 @@ pub mod lifecycle;
 pub mod queue;
 pub mod settings;
 pub mod tabs;
+pub mod terminal;
 pub mod transfers;
 
 pub use actions::FileAction;
@@ -70,6 +71,7 @@ pub use files::{FileKey, Mods, PaneMsg, RequestId};
 pub use lifecycle::ConnStatus;
 pub use queue::{Queue, QueueMsg, QueueTab, RowAction};
 pub use tabs::{SiteConn, Tab, TabId, TabState};
+pub use terminal::TerminalMsg;
 
 /// A workspace's entry as the sidebar lists it.
 #[derive(Debug, PartialEq)]
@@ -333,6 +335,36 @@ pub enum Message {
     },
     /// The window was resized to this width.
     WindowResized(f32),
+    /// Something in a terminal tab: its widget, keyboard, search bar or timers.
+    Terminal {
+        tab: TabId,
+        msg: TerminalMsg,
+    },
+    /// A terminal widget's size in cells changed (the shell follows after
+    /// [`terminal::RESIZE_DEBOUNCE`]).
+    TerminalResized {
+        tab: TabId,
+        cols: u16,
+        rows: u16,
+    },
+    /// One frame's worth of a shell's output (every byte since the last one).
+    TerminalOutput {
+        tab: TabId,
+        shell: ShellId,
+        bytes: Vec<u8>,
+    },
+    /// The end of a shell's output: its exit status, an overflow, then `Closed`.
+    ShellEvent {
+        tab: TabId,
+        shell: ShellId,
+        event: ShellOutput,
+    },
+    /// The shell [`Effect::OpenShell`] asked for under `request` opened (or not).
+    ShellOpened {
+        tab: TabId,
+        request: RequestId,
+        result: Result<ShellId, Error>,
+    },
 }
 
 /// The profile change a form asked for, carried back with its result.
@@ -501,6 +533,38 @@ pub enum Effect {
         password: SecretString,
         mode: ImportMode,
     },
+    /// Opens a terminal of `cols` x `rows` on `session`; back as [`Message::ShellOpened`].
+    OpenShell {
+        tab: TabId,
+        request: RequestId,
+        session: SessionId,
+        cols: u16,
+        rows: u16,
+    },
+    /// Writes to the shell; back as [`TerminalMsg::InputSent`] (one write in flight per
+    /// shell, so bytes keep their order).
+    ShellInput {
+        tab: TabId,
+        shell: ShellId,
+        data: Vec<u8>,
+    },
+    ShellResize {
+        shell: ShellId,
+        cols: u16,
+        rows: u16,
+    },
+    /// Closes the shell (and forgets it in the backend).
+    CloseShell(ShellId),
+    WriteClipboard(String),
+    /// Reads the clipboard for a paste; back as [`TerminalMsg::Pasted`].
+    ReadClipboard(TabId),
+    /// Sends `message` back after `after` (the debounces).
+    Later {
+        after: std::time::Duration,
+        message: Box<Message>,
+    },
+    /// Focuses the terminal tab's search field.
+    FocusTerminalSearch(TabId),
 }
 
 /// The window's width before the first resize event (`main`'s initial size).
@@ -703,6 +767,12 @@ impl App {
                 if index < self.tabs.len() {
                     self.active_tab = Some(index);
                     self.form = None;
+                    // A terminal shown again takes the keyboard (its search bar keeps it).
+                    if let Some(terminal) = self.tabs[index].terminal_mut()
+                        && terminal.search.is_none()
+                    {
+                        terminal.focused = true;
+                    }
                 }
             }
             Message::NewSite => self.form = Some(Form::Site(SiteForm::new_site())),
@@ -807,6 +877,21 @@ impl App {
             Message::BackupRestored(result) => return self.backup_restored(result),
             Message::FilePicked { target, path } => self.file_picked(target, path),
             Message::BusyTick => self.busy_phase = self.busy_phase.wrapping_add(1),
+            Message::Terminal { tab, msg } => return self.terminal_msg(tab, msg),
+            Message::TerminalResized { tab, cols, rows } => {
+                return self.terminal_resized(tab, cols, rows);
+            }
+            Message::TerminalOutput { tab, shell, bytes } => {
+                return self.terminal_output(tab, shell, &bytes);
+            }
+            Message::ShellEvent { tab, shell, event } => {
+                return self.shell_event(tab, shell, event);
+            }
+            Message::ShellOpened {
+                tab,
+                request,
+                result,
+            } => return self.shell_opened(tab, request, result),
         }
         Vec::new()
     }
@@ -925,7 +1010,7 @@ impl App {
             .tabs
             .iter()
             .filter(|tab| {
-                tab.kind == TabKind::Terminal
+                tab.kind() == TabKind::Terminal
                     && self
                         .site(&tab.site)
                         .is_some_and(|site| site.protocol != hoprs_core::Protocol::Ssh)

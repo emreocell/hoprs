@@ -392,7 +392,9 @@ impl App {
         let session = self.tab_session(index);
         let tab = &mut self.tabs[index];
         let tab_id = tab.id;
-        let pane = tab.pane_mut(side);
+        let Some(pane) = tab.pane_mut(side) else {
+            return Vec::new();
+        };
         pane.offset_y = 0.0;
         let scroll = Effect::ScrollPane {
             tab: tab_id,
@@ -425,7 +427,9 @@ impl App {
     /// Goes to `path`: the old entries go, with any editor or dialog about them, and the
     /// list scrolls to the top.
     fn navigate(&mut self, index: usize, side: Side, path: RemotePath) -> Vec<Effect> {
-        let pane = self.tabs[index].pane_mut(side);
+        let Some(pane) = self.tabs[index].pane_mut(side) else {
+            return Vec::new();
+        };
         pane.path = path;
         pane.entries.clear();
         pane.selection = Selection::default();
@@ -440,7 +444,9 @@ impl App {
 
     /// Enters the folder of `row` (`..` goes up); files stay where they are.
     fn open_row(&mut self, index: usize, side: Side, row: usize) -> Vec<Effect> {
-        let pane = self.tabs[index].pane(side);
+        let Some(pane) = self.tabs[index].pane(side) else {
+            return Vec::new();
+        };
         let target = match pane.row(row) {
             Some(Row::Up) => pane.path.parent(),
             // A link may point at a folder: try it; a failure shows in the pane.
@@ -460,7 +466,9 @@ impl App {
             return Vec::new();
         };
         let mods = self.mods;
-        let pane = self.tabs[index].pane_mut(side);
+        let Some(pane) = self.tabs[index].pane_mut(side) else {
+            return Vec::new();
+        };
         match msg {
             PaneMsg::Focus => {}
             PaneMsg::Click(row) => {
@@ -471,11 +479,11 @@ impl App {
                 }
             }
             PaneMsg::Open(row) => {
-                self.tabs[index].focus = side;
+                self.tabs[index].set_focus(side);
                 return self.open_row(index, side, row);
             }
             PaneMsg::Navigate(path) => {
-                self.tabs[index].focus = side;
+                self.tabs[index].set_focus(side);
                 return self.navigate(index, side, path);
             }
             PaneMsg::Sort(key) => {
@@ -502,19 +510,19 @@ impl App {
             }
             PaneMsg::Retry => return self.request_listing(index, side),
             PaneMsg::NewFolder => {
-                self.tabs[index].focus = side;
+                self.tabs[index].set_focus(side);
                 return self.start_new_folder(index, side);
             }
             PaneMsg::Rename => {
-                self.tabs[index].focus = side;
+                self.tabs[index].set_focus(side);
                 return self.start_rename(index, side);
             }
             PaneMsg::Delete => {
-                self.tabs[index].focus = side;
+                self.tabs[index].set_focus(side);
                 return self.start_delete(index, side);
             }
             PaneMsg::Permissions => {
-                self.tabs[index].focus = side;
+                self.tabs[index].set_focus(side);
                 return self.start_permissions(index, side);
             }
             PaneMsg::EditChanged(value) => {
@@ -545,7 +553,7 @@ impl App {
                 pane.note = None;
             }
             PaneMsg::Transfer => {
-                self.tabs[index].focus = side;
+                self.tabs[index].set_focus(side);
                 return self.transfer_selection(index, side);
             }
             PaneMsg::PointerIn | PaneMsg::PointerOut => {
@@ -553,7 +561,7 @@ impl App {
                 return Vec::new();
             }
         }
-        self.tabs[index].focus = side;
+        self.tabs[index].set_focus(side);
         Vec::new()
     }
 
@@ -568,7 +576,9 @@ impl App {
         let Some(index) = self.tab_index(tab) else {
             return Vec::new();
         };
-        let pane = self.tabs[index].pane_mut(side);
+        let Some(pane) = self.tabs[index].pane_mut(side) else {
+            return Vec::new();
+        };
         if pane.request != Some(request_id) {
             // Superseded (or never ours): the pane shows another folder now.
             return Vec::new();
@@ -611,7 +621,9 @@ impl App {
     /// to home (local) or `/`, with a note naming the saved folder. Past that, a failure
     /// shows as usual.
     fn restore_fallback(&mut self, index: usize, side: Side, restore: Restore) -> Vec<Effect> {
-        let path = self.tabs[index].pane(side).path.clone();
+        let Some(path) = self.tabs[index].pane(side).map(|pane| pane.path.clone()) else {
+            return Vec::new();
+        };
         let (saved, target, next) = match restore {
             Restore::Saved => match path.parent() {
                 Some(parent) => (path.clone(), parent, Some(Restore::Parent { saved: path })),
@@ -620,9 +632,10 @@ impl App {
             Restore::Parent { saved } => (saved, self.fallback_dir(side), None),
         };
         let effects = self.navigate(index, side, target);
-        let pane = self.tabs[index].pane_mut(side);
-        pane.restore = next;
-        pane.note = Some(crate::ui::strings::saved_folder_gone(saved.as_str()));
+        if let Some(pane) = self.tabs[index].pane_mut(side) {
+            pane.restore = next;
+            pane.note = Some(crate::ui::strings::saved_folder_gone(saved.as_str()));
+        }
         effects
     }
 
@@ -644,10 +657,14 @@ impl App {
         if self.form.is_some() {
             return Vec::new();
         }
-        let Some(tab) = self
+        // Escape in a terminal tab closes its search bar.
+        if key == FileKey::Escape && self.terminal_escape() {
+            return Vec::new();
+        }
+        let Some(pane) = self
             .active_tab
             .and_then(|i| self.tabs.get(i))
-            .filter(|t| t.is_files())
+            .and_then(|t| t.pane(t.focus()?))
         else {
             return Vec::new();
         };
@@ -655,7 +672,7 @@ impl App {
             return self.file_key(key, shift);
         }
         let typing = matches!(
-            tab.pane(tab.focus).action,
+            pane.action,
             Some(PaneAction::Edit(_) | PaneAction::Permissions(_))
         );
         if typing && key != FileKey::Enter {
@@ -677,10 +694,17 @@ impl App {
             return Vec::new();
         };
         let tab = &mut self.tabs[index];
-        let side = tab.focus;
+        let Some(files) = tab.files_mut() else {
+            return Vec::new();
+        };
+        let side = files.focus;
+        let pane = match side {
+            Side::Local => &mut files.local,
+            Side::Remote => &mut files.remote,
+        };
         // An editor or dialog is open: only Escape (cancel) and Enter (commit a name) act;
         // every other key belongs to it.
-        match (&tab.pane(side).action, key) {
+        match (&pane.action, key) {
             (Some(_), FileKey::Escape) => {
                 self.cancel_action(index, side);
                 return Vec::new();
@@ -688,7 +712,7 @@ impl App {
             (Some(PaneAction::Edit(_)), FileKey::Enter) => return self.commit_edit(index, side),
             (Some(_), _) => return Vec::new(),
             (None, FileKey::Escape) => {
-                tab.pane_mut(side).action_error = None;
+                pane.action_error = None;
                 return Vec::new();
             }
             (None, FileKey::NewFolder) => return self.start_new_folder(index, side),
@@ -698,7 +722,7 @@ impl App {
             (None, _) => {}
         }
         if key == FileKey::SwitchPane {
-            tab.focus = match side {
+            files.focus = match side {
                 Side::Local => Side::Remote,
                 Side::Remote => Side::Local,
             };
@@ -712,7 +736,9 @@ impl App {
         }
         let tab = &mut self.tabs[index];
         let tab_id = tab.id;
-        let pane = tab.pane_mut(side);
+        let Some(pane) = tab.pane_mut(side) else {
+            return Vec::new();
+        };
         let count = pane.row_count();
         if count == 0 {
             return Vec::new();
@@ -759,19 +785,20 @@ impl App {
     /// The scroll offsets of the tab now in the center, so its lists show where their
     /// state says (the scrollable widgets are shared between tabs and forms).
     pub(super) fn sync_scroll(&self) -> Vec<Effect> {
-        let Some(tab) = self
+        let Some((tab, files)) = self
             .active_tab
             .and_then(|i| self.tabs.get(i))
-            .filter(|t| self.form.is_none() && t.is_files())
+            .filter(|_| self.form.is_none())
+            .and_then(|t| Some((t.id, t.files()?)))
         else {
             return Vec::new();
         };
-        [Side::Local, Side::Remote]
+        [(Side::Local, &files.local), (Side::Remote, &files.remote)]
             .into_iter()
-            .map(|side| Effect::ScrollPane {
-                tab: tab.id,
+            .map(|(side, pane)| Effect::ScrollPane {
+                tab,
                 side,
-                offset_y: tab.pane(side).offset_y,
+                offset_y: pane.offset_y,
             })
             .collect()
     }

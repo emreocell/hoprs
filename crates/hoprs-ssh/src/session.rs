@@ -282,6 +282,16 @@ impl SshSession {
     /// "Not connected". Past `max_channels`, or when the server refuses the channel, it
     /// fails with `Protocol`, "Too many channels on this connection (limit N)".
     pub async fn open_channel(&self) -> Result<CountedChannel> {
+        self.open_counted(false).await
+    }
+
+    /// [`open_channel`](Self::open_channel) for a PTY, which never takes the last slot of
+    /// the budget (kept for the SFTP metadata channel; see [`crate::channels`]).
+    pub(crate) async fn open_pty_channel(&self) -> Result<CountedChannel> {
+        self.open_counted(true).await
+    }
+
+    async fn open_counted(&self, pty: bool) -> Result<CountedChannel> {
         let shared = &self.inner.shared;
         let (handle, slot) = {
             // Under the lock `install` resets the budget with: the slot always belongs to
@@ -290,7 +300,12 @@ impl SshSession {
             let Some((handle, generation)) = current.as_ref() else {
                 return Err(Error::new(ErrorKind::Network, "Not connected"));
             };
-            (handle.clone(), shared.budget.acquire(*generation)?)
+            let slot = if pty {
+                shared.budget.acquire_pty(*generation)?
+            } else {
+                shared.budget.acquire(*generation)?
+            };
+            (handle.clone(), slot)
         };
         let channel = handle.channel_open_session().await.map_err(|e| match e {
             russh::Error::ChannelOpenFailure(_) => {

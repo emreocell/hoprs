@@ -27,7 +27,9 @@ pub fn toolbar<'a>(
     compact: bool,
 ) -> Element<'a, Message> {
     let p = palette();
-    let pane = tab.pane(side);
+    let Some(pane) = tab.pane(side) else {
+        return space().into();
+    };
     let msg = move |msg: PaneMsg| Message::Pane {
         tab: tab.id,
         side,

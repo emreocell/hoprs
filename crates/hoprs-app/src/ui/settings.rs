@@ -1,5 +1,5 @@
-//! The settings page in the center: transfers (workers per site, conflict policy) and
-//! the encrypted backup.
+//! The settings page in the center: transfers (workers per site, conflict policy), the
+//! terminal (font size, scrollback, theme) and the encrypted backup.
 
 use std::fmt;
 
@@ -12,7 +12,7 @@ use iced::{Alignment, Element, Length, Padding};
 
 use crate::app::settings::{Backup, BackupMsg, BackupPanel, BackupState, SettingsMsg};
 use crate::app::{App, Message, PickTarget};
-use crate::settings::{WORKERS_MAX, WORKERS_MIN};
+use crate::settings::{FONT_SIZE_MAX, FONT_SIZE_MIN, TerminalTheme, WORKERS_MAX, WORKERS_MIN};
 use crate::ui::site_form::Password;
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
@@ -43,6 +43,28 @@ pub fn policy_label(policy: ConflictPolicy) -> &'static str {
         ConflictPolicy::Skip => strings::POLICY_SKIP,
         ConflictPolicy::OverwriteIfNewer => strings::POLICY_OVERWRITE_IF_NEWER,
         ConflictPolicy::Resume => strings::POLICY_RESUME,
+    }
+}
+
+/// Scrollback sizes the page offers (lines).
+const SCROLLBACK_CHOICES: [usize; 7] = [1_000, 2_000, 5_000, 10_000, 20_000, 50_000, 100_000];
+
+/// `pick_list` needs `Display`: a scrollback size, in lines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Lines(usize);
+
+impl fmt::Display for Lines {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ThemeChoice(TerminalTheme);
+
+impl fmt::Display for ThemeChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0.label())
     }
 }
 
@@ -178,6 +200,58 @@ pub fn view(app: &App) -> Element<'_, Message> {
         );
     }
 
+    let font_size = settings.terminal_font_size;
+    let font_stepper = row![
+        outlined(
+            strings::DECREASE,
+            (font_size > FONT_SIZE_MIN).then(|| msg(SettingsMsg::TerminalFontSize(font_size - 1)))
+        ),
+        container(
+            text(font_size.to_string())
+                .font(theme::MONO)
+                .size(theme::TEXT_MONO)
+        )
+        .width(36)
+        .align_x(Alignment::Center),
+        outlined(
+            strings::INCREASE,
+            (font_size < FONT_SIZE_MAX).then(|| msg(SettingsMsg::TerminalFontSize(font_size + 1)))
+        ),
+    ]
+    .spacing(theme::SPACE_XS)
+    .align_y(Alignment::Center);
+    let mut lines: Vec<Lines> = SCROLLBACK_CHOICES.iter().copied().map(Lines).collect();
+    if !SCROLLBACK_CHOICES.contains(&settings.terminal_scrollback) {
+        // A value typed into the file: shown as it is.
+        lines.push(Lines(settings.terminal_scrollback));
+        lines.sort();
+    }
+    let scrollback = pick_list(lines, Some(Lines(settings.terminal_scrollback)), |lines| {
+        msg(SettingsMsg::TerminalScrollback(lines.0))
+    })
+    .text_size(theme::TEXT_SM)
+    .width(240)
+    .style(theme::pick_list)
+    .menu_style(theme::menu);
+    let themes: Vec<ThemeChoice> = TerminalTheme::ALL.into_iter().map(ThemeChoice).collect();
+    let term_theme = pick_list(
+        themes,
+        Some(ThemeChoice(settings.terminal_theme)),
+        |choice| msg(SettingsMsg::TerminalTheme(choice.0)),
+    )
+    .text_size(theme::TEXT_SM)
+    .width(240)
+    .style(theme::pick_list)
+    .menu_style(theme::menu);
+    let terminal = column![
+        heading(strings::SETTINGS_TERMINAL),
+        field(strings::SETTINGS_FONT_SIZE, font_stepper.into(), None),
+        field(strings::SETTINGS_SCROLLBACK, scrollback.into(), None),
+        muted(strings::SETTINGS_SCROLLBACK_HINT),
+        field(strings::SETTINGS_THEME, term_theme.into(), None),
+    ]
+    .spacing(theme::SPACE_SM);
+
     let content = column![
         row![
             text(strings::SETTINGS_TITLE)
@@ -189,6 +263,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .align_y(Alignment::Center),
         hrule(),
         transfers,
+        hrule(),
+        terminal,
         hrule(),
         backup_view(&app.backup, app.busy_phase),
     ]

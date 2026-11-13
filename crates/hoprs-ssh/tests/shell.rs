@@ -168,10 +168,11 @@ async fn pty_resize_reaches_the_server() {
 #[tokio::test]
 #[ignore = "needs docker: docker compose -f docker/compose.yml up -d"]
 async fn too_many_channels_is_a_clear_error() {
-    // Our own limit, below the server's.
+    // Our own limit, below the server's. PTYs stop one short of it (the last slot stays
+    // free for the SFTP metadata channel): a limit of 3 takes two.
     let dir = TempDir::new().unwrap();
     let mut cfg = alice(&dir);
-    cfg.max_channels = 2;
+    cfg.max_channels = 3;
     let session = connect(cfg).await;
     let first = session.open_shell(PtyRequest::default()).await.unwrap();
     let second = session.open_shell(PtyRequest::default()).await.unwrap();
@@ -182,7 +183,7 @@ async fn too_many_channels_is_a_clear_error() {
         "the refusal waited"
     );
     assert_eq!(e.kind, ErrorKind::Protocol, "{e:?}");
-    assert_eq!(e.message, "Too many channels on this connection (limit 2)");
+    assert_eq!(e.message, "Too many channels on this connection (limit 3)");
     assert!(hoprs_ssh::is_channel_limit(&e));
     // Closing one makes room again.
     let (handle, mut output) = first.into_output();
@@ -233,6 +234,7 @@ async fn exit_reports_status() {
             .expect("timed out waiting for shell end")
         {
             Some(ShellOutput::Data(_)) => {}
+            Some(ShellOutput::Overflowed) => panic!("a short shell never overflows"),
             Some(ShellOutput::Exit(code)) => {
                 assert!(!got_exit, "second Exit");
                 assert_eq!(code, Some(3));
@@ -366,14 +368,25 @@ async fn overflow_tears_down_shell_without_blocking_connection() {
 
     // Draining yields the buffered data, then Closed, then the end of the stream.
     let mut total = 0usize;
+    let mut told = false;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         match timeout(deadline - Instant::now(), output.next())
             .await
             .unwrap_or_else(|_| panic!("shell never closed; drained {total} bytes"))
         {
-            Some(ShellOutput::Closed) => break,
-            Some(ShellOutput::Data(d)) => total += d.len(),
+            Some(ShellOutput::Closed) => {
+                assert!(
+                    told,
+                    "the consumer is told about the overflow before Closed"
+                );
+                break;
+            }
+            Some(ShellOutput::Overflowed) => told = true,
+            Some(ShellOutput::Data(d)) => {
+                assert!(!told, "no data after Overflowed");
+                total += d.len();
+            }
             Some(_) => {}
             None => panic!("output ended without Closed"),
         }

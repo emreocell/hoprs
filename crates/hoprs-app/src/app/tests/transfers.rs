@@ -179,7 +179,7 @@ fn srv_site() -> Site {
 
 /// The row of the entry called `name` in the first tab's pane.
 fn row_of(app: &App, side: Side, name: &str) -> usize {
-    let pane = app.tabs[0].pane(side);
+    let pane = app.tabs[0].pane(side).unwrap();
     usize::from(pane.has_up())
         + pane
             .entries

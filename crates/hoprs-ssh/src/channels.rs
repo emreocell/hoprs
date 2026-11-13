@@ -20,6 +20,12 @@
 //! [`PTY_RESERVE`] = 2 stay free for terminals. Below 4 the reservation shrinks: the one
 //! stream channel SFTP needs comes first.
 //!
+//! **PTYs never take the last slot.** A PTY opens only while fewer than
+//! `max_channels - 1` channels are open: the SFTP metadata channel can always be opened
+//! (again: after a reconnect the terminals may reopen before SFTP does), however many
+//! terminals there are. So of the [`PTY_RESERVE`] slots SFTP leaves, one takes a PTY when
+//! every stream channel is open (default budget: metadata + 7 streams + 1 PTY + the spare).
+//!
 //! **Over the limit.** Opening a channel past `max_channels` fails at once, without asking
 //! the server, with `ErrorKind::Protocol`, "Too many channels on this connection (limit N)".
 //! A channel open the server refuses (its own `MaxSessions` is lower than ours) gives the
@@ -113,11 +119,23 @@ impl ChannelBudget {
     /// channels" when all are taken, and with `Network`, "Not connected" when `generation`
     /// is no longer the current connection.
     pub(crate) fn acquire(self: &Arc<Self>, generation: u64) -> Result<ChannelSlot> {
+        self.acquire_below(generation, self.limit)
+    }
+
+    /// Takes a slot for a PTY: like [`acquire`](Self::acquire), but only while fewer than
+    /// `limit - 1` channels are open, so the last slot always stays free for the SFTP
+    /// metadata channel (which a reconnect or a lost channel may have to open again).
+    pub(crate) fn acquire_pty(self: &Arc<Self>, generation: u64) -> Result<ChannelSlot> {
+        self.acquire_below(generation, self.limit - METADATA_CHANNELS)
+    }
+
+    /// Takes a slot if fewer than `cap` are open; the error names the whole limit.
+    fn acquire_below(self: &Arc<Self>, generation: u64, cap: usize) -> Result<ChannelSlot> {
         let mut count = self.count();
         if count.generation != generation {
             return Err(Error::new(ErrorKind::Network, "Not connected"));
         }
-        if count.open >= self.limit {
+        if count.open >= cap {
             return Err(too_many_channels(self.limit));
         }
         count.open += 1;
@@ -185,6 +203,47 @@ mod tests {
         held.pop();
         assert_eq!(budget.open(), 9, "a closed channel frees its slot");
         let _pty = budget.acquire(1).expect("the freed slot");
+    }
+
+    #[test]
+    fn ptys_always_leave_the_metadata_slot() {
+        // A PTY only opens while open < max_channels - 1: SFTP can always (re)open its
+        // metadata channel, however many terminals are open.
+        let budget = ChannelBudget::new(4);
+        budget.reset(1);
+        let _ptys: Vec<ChannelSlot> = (0..3)
+            .map(|_| budget.acquire_pty(1).expect("PTY under the cap"))
+            .collect();
+        assert_eq!(budget.open(), 3);
+        let e = budget.acquire_pty(1).unwrap_err();
+        assert!(is_channel_limit(&e), "{e:?}");
+        assert_eq!(e.message, "Too many channels on this connection (limit 4)");
+        assert_eq!(budget.open(), 3, "a refused PTY holds no slot");
+        // The last slot still takes the metadata channel (a plain acquire).
+        let metadata = budget.acquire(1).expect("the metadata slot is left");
+        assert_eq!(budget.open(), 4);
+        drop(metadata);
+
+        // With SFTP holding metadata + streams, PTYs stop one short of the limit too.
+        let budget = ChannelBudget::new(10);
+        budget.reset(1);
+        let sftp: Vec<ChannelSlot> = (0..1 + sftp_stream_channels(10, 8))
+            .map(|_| budget.acquire(1).unwrap())
+            .collect();
+        let first = budget.acquire_pty(1).expect("a PTY fits");
+        assert!(
+            budget.acquire_pty(1).is_err(),
+            "the last slot is not a PTY's"
+        );
+        drop(first);
+        assert!(budget.acquire_pty(1).is_ok());
+        // An old generation is "Not connected", as for any channel.
+        assert_eq!(budget.acquire_pty(0).unwrap_err().kind, ErrorKind::Network);
+        // A budget of 1 has no room for a PTY at all.
+        let tiny = ChannelBudget::new(1);
+        tiny.reset(1);
+        assert!(tiny.acquire_pty(1).is_err());
+        drop(sftp);
     }
 
     #[test]

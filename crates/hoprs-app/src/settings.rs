@@ -2,8 +2,9 @@
 //!
 //! A missing file means the defaults. A file that cannot be read or parsed also gives
 //! the defaults, with the error to show inline; it is never overwritten (the app does not
-//! save settings while it is unreadable). A workers value out of range is clamped, not an
-//! error.
+//! save settings while it is unreadable). A value out of range is clamped, not an error;
+//! an unknown terminal theme falls back to the default. Saving keeps the keys this
+//! version does not know (a newer hoprs may have written them).
 
 use std::path::Path;
 
@@ -11,12 +12,63 @@ use hoprs_core::{Error, ErrorKind, Result};
 use hoprs_transfer::ConflictPolicy;
 use serde::{Deserialize, Serialize};
 
+use crate::terminal::TermTheme;
+
 pub const FILE_NAME: &str = "settings.toml";
 pub const WORKERS_MIN: usize = 1;
 pub const WORKERS_MAX: usize = 16;
 pub const WORKERS_DEFAULT: usize = 4;
-/// Largest `settings.toml` read; a real one is under 100 bytes.
+/// Terminal font size, in px (spec §8).
+pub const FONT_SIZE_MIN: u16 = 10;
+pub const FONT_SIZE_MAX: u16 = 24;
+pub const FONT_SIZE_DEFAULT: u16 = 13;
+/// Terminal scrollback, in lines (spec §8).
+pub const SCROLLBACK_MIN: usize = 1_000;
+pub const SCROLLBACK_MAX: usize = 100_000;
+pub const SCROLLBACK_DEFAULT: usize = 10_000;
+/// Largest `settings.toml` read; a real one is under 200 bytes.
 const MAX_BYTES: u64 = 64 * 1024;
+
+/// The terminal's colours. Only one for now: the setting exists so that adding themes
+/// later does not change the file.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TerminalTheme {
+    #[default]
+    HoprsDark,
+}
+
+impl TerminalTheme {
+    pub const ALL: [TerminalTheme; 1] = [TerminalTheme::HoprsDark];
+
+    /// The name in `settings.toml`.
+    fn key(self) -> &'static str {
+        match self {
+            Self::HoprsDark => "hoprs-dark",
+        }
+    }
+
+    /// The name the settings page shows.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::HoprsDark => crate::ui::strings::THEME_HOPRS_DARK,
+        }
+    }
+
+    /// The colours.
+    pub fn colors(self) -> TermTheme {
+        match self {
+            Self::HoprsDark => TermTheme::hoprs_dark(),
+        }
+    }
+
+    /// The theme named `key`; an unknown name (a newer hoprs) is the default.
+    fn from_key(key: &str) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|theme| theme.key() == key)
+            .unwrap_or_default()
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Settings {
@@ -24,6 +76,12 @@ pub struct Settings {
     pub workers_per_site: usize,
     /// What a transfer does when its destination exists.
     pub default_policy: ConflictPolicy,
+    /// The terminal's font size in px (`10..=24`).
+    pub terminal_font_size: u16,
+    /// Lines of history each terminal keeps (`1 000..=100 000`), for the terminals opened
+    /// from now on.
+    pub terminal_scrollback: usize,
+    pub terminal_theme: TerminalTheme,
 }
 
 impl Default for Settings {
@@ -31,8 +89,21 @@ impl Default for Settings {
         Self {
             workers_per_site: WORKERS_DEFAULT,
             default_policy: ConflictPolicy::Ask,
+            terminal_font_size: FONT_SIZE_DEFAULT,
+            terminal_scrollback: SCROLLBACK_DEFAULT,
+            terminal_theme: TerminalTheme::HoprsDark,
         }
     }
+}
+
+/// `size` within `10..=24`.
+pub fn clamp_font_size(size: u16) -> u16 {
+    size.clamp(FONT_SIZE_MIN, FONT_SIZE_MAX)
+}
+
+/// `lines` within `1 000..=100 000`.
+pub fn clamp_scrollback(lines: usize) -> usize {
+    lines.clamp(SCROLLBACK_MIN, SCROLLBACK_MAX)
 }
 
 /// `n` within `1..=16`.
@@ -48,13 +119,20 @@ pub struct SettingsLoad {
     pub error: Option<Error>,
 }
 
-/// The file's layout. Unknown keys are ignored (a newer hoprs may add some).
+/// The file's layout. Unknown keys are ignored here (a newer hoprs may add some) and
+/// kept by [`save`].
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct File {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     workers_per_site: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     default_policy: Option<Policy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    terminal_font_size: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    terminal_scrollback: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    terminal_theme: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -106,16 +184,48 @@ pub fn parse(content: &str) -> Result<Settings> {
         default_policy: file
             .default_policy
             .map_or(defaults.default_policy, ConflictPolicy::from),
+        terminal_font_size: file
+            .terminal_font_size
+            .map_or(defaults.terminal_font_size, |n| {
+                clamp_font_size(u16::try_from(n.max(0)).unwrap_or(FONT_SIZE_MAX))
+            }),
+        terminal_scrollback: file
+            .terminal_scrollback
+            .map_or(defaults.terminal_scrollback, |n| {
+                clamp_scrollback(usize::try_from(n.max(0)).unwrap_or(SCROLLBACK_MAX))
+            }),
+        terminal_theme: file
+            .terminal_theme
+            .as_deref()
+            .map_or(defaults.terminal_theme, TerminalTheme::from_key),
     })
+}
+
+/// The file's keys for `settings` (clamped).
+fn file_of(settings: &Settings) -> File {
+    File {
+        workers_per_site: i64::try_from(clamp_workers(settings.workers_per_site)).ok(),
+        default_policy: Some(settings.default_policy.into()),
+        terminal_font_size: Some(clamp_font_size(settings.terminal_font_size).into()),
+        terminal_scrollback: i64::try_from(clamp_scrollback(settings.terminal_scrollback)).ok(),
+        terminal_theme: Some(settings.terminal_theme.key().to_owned()),
+    }
 }
 
 /// The file content for `settings`.
 pub fn render(settings: &Settings) -> String {
-    let file = File {
-        workers_per_site: i64::try_from(clamp_workers(settings.workers_per_site)).ok(),
-        default_policy: Some(settings.default_policy.into()),
-    };
-    toml::to_string(&file).expect("plain keys always serialize")
+    toml::to_string(&file_of(settings)).expect("plain keys always serialize")
+}
+
+/// `existing` (a file's text) with the keys of `settings` set: every other key, table
+/// and value stays as it was. Fails if `existing` is not TOML.
+fn render_over(existing: &str, settings: &Settings) -> Result<String> {
+    let mut table: toml::Table = toml::from_str(existing).map_err(|err| {
+        Error::new(ErrorKind::Protocol, "Can't read settings.toml").with_detail(err.message())
+    })?;
+    let ours = toml::Table::try_from(file_of(settings)).expect("plain keys always serialize");
+    table.extend(ours);
+    Ok(toml::to_string(&table).expect("a parsed table always serializes"))
 }
 
 /// Reads `path`. Blocking (small file): the backend calls it once when it opens.
@@ -164,9 +274,15 @@ fn cannot_read(detail: String) -> Error {
     Error::new(ErrorKind::Io, "Can't read settings.toml").with_detail(detail)
 }
 
-/// Writes `settings` to `path` atomically (the vault's crash-safe write). Blocking.
+/// Writes `settings` to `path` atomically (the vault's crash-safe write), keeping the
+/// keys of the file there this version does not know. A file that can't be read or
+/// parsed is left alone (an error). Blocking.
 pub fn save(path: &Path, settings: &Settings) -> Result<()> {
-    hoprs_vault::write_atomic(path, render(settings).as_bytes())
+    let content = match read(path)? {
+        Some(existing) => render_over(&existing, settings)?,
+        None => render(settings),
+    };
+    hoprs_vault::write_atomic(path, content.as_bytes())
 }
 
 #[cfg(test)]
@@ -185,6 +301,7 @@ mod tests {
             Settings {
                 workers_per_site: 4,
                 default_policy: ConflictPolicy::Ask,
+                ..Settings::default()
             }
         );
         assert!(!path.exists());
@@ -200,6 +317,7 @@ mod tests {
             let settings = Settings {
                 workers_per_site: 7,
                 default_policy: policy,
+                ..Settings::default()
             };
             save(&path, &settings).unwrap();
             assert_eq!(
@@ -221,6 +339,7 @@ mod tests {
             Settings {
                 workers_per_site: 4,
                 default_policy: ConflictPolicy::Skip,
+                ..Settings::default()
             }
         );
 
@@ -244,6 +363,97 @@ mod tests {
     }
 
     #[test]
+    fn settings_terminal_fields_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let defaults = Settings::default();
+        assert_eq!(defaults.terminal_font_size, 13);
+        assert_eq!(defaults.terminal_scrollback, 10_000);
+        assert_eq!(defaults.terminal_theme, TerminalTheme::HoprsDark);
+
+        // A file from before the terminal: the terminal defaults.
+        std::fs::write(&path, "workers_per_site = 2\n").unwrap();
+        let loaded = load(&path).settings;
+        assert_eq!(loaded.workers_per_site, 2);
+        assert_eq!(loaded.terminal_font_size, 13);
+        assert_eq!(loaded.terminal_scrollback, 10_000);
+
+        // Saved and read back, next to keys this version does not know (kept as they were).
+        std::fs::write(
+            &path,
+            "future_key = 1\nworkers_per_site = 2\n\n[future_table]\nx = \"y\"\n",
+        )
+        .unwrap();
+        let settings = Settings {
+            terminal_font_size: 18,
+            terminal_scrollback: 50_000,
+            ..loaded
+        };
+        save(&path, &settings).unwrap();
+        assert_eq!(
+            load(&path),
+            SettingsLoad {
+                settings,
+                error: None
+            }
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("terminal_font_size = 18"), "{text}");
+        assert!(text.contains("terminal_scrollback = 50000"), "{text}");
+        assert!(text.contains("terminal_theme = \"hoprs-dark\""), "{text}");
+        assert!(
+            text.contains("future_key = 1"),
+            "unknown keys survive: {text}"
+        );
+        assert!(text.contains("[future_table]"), "{text}");
+
+        // Out of range is clamped, on load and on save: 10..=24 and 1 000..=100 000.
+        for (file, font, lines) in [
+            ("terminal_font_size = 2\nterminal_scrollback = 5", 10, 1_000),
+            (
+                "terminal_font_size = 99\nterminal_scrollback = 900000000",
+                24,
+                100_000,
+            ),
+            (
+                "terminal_font_size = -4\nterminal_scrollback = -1",
+                10,
+                1_000,
+            ),
+        ] {
+            let parsed = parse(file).unwrap();
+            assert_eq!(
+                (parsed.terminal_font_size, parsed.terminal_scrollback),
+                (font, lines),
+                "{file}"
+            );
+        }
+        let rendered = render(&Settings {
+            terminal_font_size: 40,
+            terminal_scrollback: 1,
+            ..Settings::default()
+        });
+        let parsed = parse(&rendered).unwrap();
+        assert_eq!(
+            (parsed.terminal_font_size, parsed.terminal_scrollback),
+            (24, 1_000)
+        );
+        assert_eq!(clamp_font_size(9), 10);
+        assert_eq!(clamp_scrollback(250_000), 100_000);
+
+        // A theme this version does not know falls back to "hoprs dark", without an error.
+        let parsed = parse("terminal_theme = \"solarized\"").unwrap();
+        assert_eq!(parsed.terminal_theme, TerminalTheme::HoprsDark);
+        assert_eq!(TerminalTheme::HoprsDark.label(), "hoprs dark");
+
+        // An unreadable file is still never written over: save only merges into a file
+        // it can parse, else it would lose the user's keys.
+        std::fs::write(&path, "this is not toml").unwrap();
+        assert!(save(&path, &Settings::default()).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "this is not toml");
+    }
+
+    #[test]
     fn workers_clamped() {
         assert_eq!(clamp_workers(0), 1);
         assert_eq!(clamp_workers(1), 1);
@@ -264,6 +474,7 @@ mod tests {
         let rendered = render(&Settings {
             workers_per_site: 40,
             default_policy: ConflictPolicy::Ask,
+            ..Settings::default()
         });
         assert_eq!(parse(&rendered).unwrap().workers_per_site, 16);
     }

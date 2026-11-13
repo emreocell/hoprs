@@ -175,25 +175,6 @@ pub fn view<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> {
     }
 }
 
-/// A terminal tab, until the terminal lands (Task 4): a placeholder under the same lost
-/// connection banner as a files tab, or, without a connection, why and how to retry.
-pub fn terminal_placeholder<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> {
-    let body: Element<'a, Message> = match app.conn(&tab.site).state {
-        TabState::Failed(_) => not_connected(app, tab),
-        TabState::Connecting => centered(text(strings::CONNECTING).color(palette().muted).into()),
-        TabState::Connected(_) => centered(
-            text(strings::TERMINAL_PLACEHOLDER)
-                .font(theme::MONO)
-                .color(palette().muted)
-                .into(),
-        ),
-    };
-    match lost_banner(app, tab) {
-        Some(banner) => column![banner, hrule(), body].into(),
-        None => body,
-    }
-}
-
 /// What the bar across a connected tab says, if anything.
 #[derive(Debug, PartialEq)]
 pub enum Banner<'a> {
@@ -218,7 +199,7 @@ pub fn banner(conn: &SiteConn) -> Option<Banner<'_>> {
 /// the reason and "Reconnect" (the session's own reconnect), no modal. A changed host key
 /// shows its blocking explanation there instead, with "Close and reconnect" (or "Remove
 /// the old entry…").
-fn lost_banner<'a>(app: &'a App, tab: &'a Tab) -> Option<Element<'a, Message>> {
+pub(crate) fn lost_banner<'a>(app: &'a App, tab: &'a Tab) -> Option<Element<'a, Message>> {
     let conn = app.conn(&tab.site);
     let error = match banner(conn)? {
         Banner::Lost(error) => error,
@@ -273,7 +254,9 @@ fn pane<'a>(
     place: &'a str,
     this_year: i32,
 ) -> Element<'a, Message> {
-    let pane = tab.pane(side);
+    let Some(pane) = tab.pane(side) else {
+        return space().into();
+    };
     let msg = move |msg: PaneMsg| Message::Pane {
         tab: tab.id,
         side,
@@ -283,7 +266,7 @@ fn pane<'a>(
         Side::Local => app.home.as_ref(),
         Side::Remote => None,
     };
-    let focused = tab.focus == side;
+    let focused = tab.focus() == Some(side);
     let width = fit::pane_width(app.window_width);
     let cols = fit::columns(width, side);
     let conn = app.conn(&tab.site);
@@ -703,7 +686,7 @@ fn failed(error: &Error, retry: Message) -> Element<'_, Message> {
 
 /// The remote side without a connection: "Not connected", why, and Reconnect (the
 /// sidebar's connect path, which retries the failed session) or Edit site.
-fn not_connected<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> {
+pub(crate) fn not_connected<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> {
     let conn = app.conn(&tab.site);
     if conn.host_key_change().is_some() {
         return crate::ui::dialogs::host_key_changed(app, tab);

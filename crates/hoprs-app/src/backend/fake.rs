@@ -445,6 +445,14 @@ impl FakeBackend {
         }
     }
 
+    /// The shell's output yields `event` (an `Exit`, or the pump's `Overflowed`), as the
+    /// real pump would before `Closed`.
+    pub fn push_shell_event(&self, shell: ShellId, event: ShellOutput) {
+        if let Some(fake) = self.state().fake_shells.get(&shell) {
+            let _ = fake.output.send(event);
+        }
+    }
+
     /// The server ends the shell: its output yields `Closed`, input then fails.
     pub fn end_shell(&self, shell: ShellId) {
         if let Some(fake) = self.state().fake_shells.get(&shell) {

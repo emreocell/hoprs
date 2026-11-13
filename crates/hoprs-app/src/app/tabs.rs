@@ -10,7 +10,8 @@
 //! [`App`] holds while the site has tabs. Every writer (a connect's result, the session's
 //! feed, a reconnect, a restart, a moved or edited site, the `known_hosts` fix) changes
 //! that one record, and every tab of the site, old or opened later, reads it. A tab holds
-//! only what is its own: kind, panes, focus (and, later, its terminal). The session goes
+//! only what is its own ([`TabBody`]): a files tab its panes and focus, a terminal tab its
+//! terminal and shell ([`super::terminal`]). The session goes
 //! away only with the last tab of its site: closing one tab keeps it for the others, and
 //! so does the abandon of a connect's dialogs ([`App::abandon_site_prompts`]), which only
 //! the last tab of a connecting site does.
@@ -21,6 +22,7 @@ use hoprs_core::{
 };
 
 use super::files::{Listing, Pane, PaneStatus, Restore, local_path};
+use super::terminal::TerminalTab;
 use super::{App, Effect, KnownHostsFix, RequestId, WorkspaceRow};
 use crate::backend::{AuthMethod, ConnectError, ConnectResult, Connected, SessionId, Side};
 
@@ -84,39 +86,104 @@ impl SiteConn {
     }
 }
 
-/// One tab: a site and, for a files tab, its two panes. A terminal tab has panes too but
-/// never lists them. Its connection is its site's [`SiteConn`].
+/// A files tab's own state: its two panes and the one the keyboard drives.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Tab {
-    pub id: TabId,
-    pub site: SiteId,
-    pub kind: TabKind,
+pub struct FilePanes {
     pub local: Pane,
     pub remote: Pane,
     /// The pane the keyboard drives.
     pub focus: Side,
 }
 
+/// What a tab holds besides its site: the panes of a files tab, or a terminal.
+#[derive(Debug)]
+// One per tab, so the size of the larger variant doesn't matter.
+#[allow(clippy::large_enum_variant)]
+pub enum TabBody {
+    Files(FilePanes),
+    Terminal(Box<TerminalTab>),
+}
+
+/// One tab: a site and its kind's own state ([`TabBody`]). Its connection is its site's
+/// [`SiteConn`].
+#[derive(Debug)]
+pub struct Tab {
+    pub id: TabId,
+    pub site: SiteId,
+    pub body: TabBody,
+}
+
 impl Tab {
+    pub fn kind(&self) -> TabKind {
+        match self.body {
+            TabBody::Files(_) => TabKind::Files,
+            TabBody::Terminal(_) => TabKind::Terminal,
+        }
+    }
+
     pub fn is_files(&self) -> bool {
-        self.kind == TabKind::Files
+        matches!(self.body, TabBody::Files(_))
     }
 
-    pub fn pane(&self, side: Side) -> &Pane {
-        match side {
-            Side::Local => &self.local,
-            Side::Remote => &self.remote,
+    /// The panes of a files tab.
+    pub fn files(&self) -> Option<&FilePanes> {
+        match &self.body {
+            TabBody::Files(files) => Some(files),
+            TabBody::Terminal(_) => None,
         }
     }
 
-    pub fn pane_mut(&mut self, side: Side) -> &mut Pane {
-        match side {
-            Side::Local => &mut self.local,
-            Side::Remote => &mut self.remote,
+    pub fn files_mut(&mut self) -> Option<&mut FilePanes> {
+        match &mut self.body {
+            TabBody::Files(files) => Some(files),
+            TabBody::Terminal(_) => None,
         }
     }
 
-    /// What a pane shows, given its site's connection `conn`.
+    /// The terminal of a terminal tab.
+    pub fn terminal(&self) -> Option<&TerminalTab> {
+        match &self.body {
+            TabBody::Terminal(terminal) => Some(terminal),
+            TabBody::Files(_) => None,
+        }
+    }
+
+    pub fn terminal_mut(&mut self) -> Option<&mut TerminalTab> {
+        match &mut self.body {
+            TabBody::Terminal(terminal) => Some(terminal),
+            TabBody::Files(_) => None,
+        }
+    }
+
+    /// Pane `side` of a files tab.
+    pub fn pane(&self, side: Side) -> Option<&Pane> {
+        self.files().map(|files| match side {
+            Side::Local => &files.local,
+            Side::Remote => &files.remote,
+        })
+    }
+
+    pub fn pane_mut(&mut self, side: Side) -> Option<&mut Pane> {
+        self.files_mut().map(|files| match side {
+            Side::Local => &mut files.local,
+            Side::Remote => &mut files.remote,
+        })
+    }
+
+    /// The pane the keyboard drives (a files tab's).
+    pub fn focus(&self) -> Option<Side> {
+        self.files().map(|files| files.focus)
+    }
+
+    /// Gives the keyboard to pane `side` (a files tab's; nothing for a terminal).
+    pub fn set_focus(&mut self, side: Side) {
+        if let Some(files) = self.files_mut() {
+            files.focus = side;
+        }
+    }
+
+    /// What a pane shows, given its site's connection `conn`. A terminal tab has no pane:
+    /// it says "loading".
     pub fn pane_status<'a>(&'a self, conn: &SiteConn, side: Side) -> PaneStatus<'a> {
         if side == Side::Remote {
             match conn.state {
@@ -125,13 +192,36 @@ impl Tab {
                 TabState::Connected(_) => {}
             }
         }
-        let pane = self.pane(side);
+        let Some(pane) = self.pane(side) else {
+            return PaneStatus::Loading;
+        };
         match &pane.listing {
             Listing::Idle | Listing::Loading => PaneStatus::Loading,
             Listing::Failed(error) => PaneStatus::Failed(error),
             Listing::Loaded if pane.entries.is_empty() => PaneStatus::Empty,
             Listing::Loaded => PaneStatus::Full,
         }
+    }
+
+    /// For the tests: pane `side` of a files tab (panics for a terminal).
+    #[cfg(test)]
+    pub fn local(&self) -> &Pane {
+        &self.files().expect("a files tab").local
+    }
+
+    #[cfg(test)]
+    pub fn remote(&self) -> &Pane {
+        &self.files().expect("a files tab").remote
+    }
+
+    #[cfg(test)]
+    pub fn local_mut(&mut self) -> &mut Pane {
+        &mut self.files_mut().expect("a files tab").local
+    }
+
+    #[cfg(test)]
+    pub fn remote_mut(&mut self) -> &mut Pane {
+        &mut self.files_mut().expect("a files tab").remote
     }
 }
 
@@ -265,24 +355,25 @@ impl App {
             })
             .unwrap_or_else(RemotePath::root);
         let (mut tab, effects) = self.new_tab_at(site, kind, local, remote);
-        if kind == TabKind::Files {
+        if let Some(files) = tab.files_mut() {
             // A folder from the saved tab may be gone since: its first listing falls back.
             let from_saved = |dir: Option<bool>| dir.unwrap_or(false).then_some(Restore::Saved);
-            tab.local.restore = from_saved(
+            files.local.restore = from_saved(
                 restored
                     .and_then(|t| t.local_dir.as_deref())
-                    .map(|d| local_path(d).as_ref() == Some(&tab.local.path)),
+                    .map(|d| local_path(d).as_ref() == Some(&files.local.path)),
             );
-            tab.remote.restore = from_saved(
+            files.remote.restore = from_saved(
                 restored
                     .and_then(|t| t.remote_dir.as_deref())
-                    .map(|d| RemotePath::new(d).ok().as_ref() == Some(&tab.remote.path)),
+                    .map(|d| RemotePath::new(d).ok().as_ref() == Some(&files.remote.path)),
             );
         }
         (tab, effects)
     }
 
-    /// A new tab for `site` at these folders, and the local listing a files tab runs.
+    /// A new tab for `site` (a files tab at these folders), and the local listing a files
+    /// tab runs. A terminal tab starts without a shell: it opens one once connected.
     fn new_tab_at(
         &mut self,
         site: SiteId,
@@ -291,20 +382,23 @@ impl App {
         remote: RemotePath,
     ) -> (Tab, Vec<Effect>) {
         let id = TabId(self.next_id());
-        let mut tab = Tab {
-            id,
-            site,
-            kind,
-            local: Pane::new(local.clone()),
-            remote: Pane::new(remote),
-            focus: Side::Local,
-        };
         if kind == TabKind::Terminal {
-            return (tab, Vec::new());
+            let body = TabBody::Terminal(Box::new(self.new_terminal()));
+            return (Tab { id, site, body }, Vec::new());
         }
         let request_id = RequestId(self.next_id());
-        tab.local.listing = Listing::Loading;
-        tab.local.request = Some(request_id);
+        let mut local_pane = Pane::new(local.clone());
+        local_pane.listing = Listing::Loading;
+        local_pane.request = Some(request_id);
+        let tab = Tab {
+            id,
+            site,
+            body: TabBody::Files(FilePanes {
+                local: local_pane,
+                remote: Pane::new(remote),
+                focus: Side::Local,
+            }),
+        };
         let effect = Effect::List {
             tab: id,
             side: Side::Local,
@@ -415,10 +509,13 @@ impl App {
                 self.queue.site_restored(&site);
                 let mut effects = self.settle_saving(connected.session, true);
                 self.conn_mut(&site).state = TabState::Connected(connected);
-                // The remote panes list their folders now that they can.
+                // The remote panes list their folders now that they can, the terminals
+                // open their shells.
                 for index in self.tabs_of(&site) {
                     effects.extend(self.request_listing(index, Side::Remote));
                 }
+                // A new session: shells of the old one that still look open are dead.
+                effects.extend(self.site_shells_after_connect(&site, !same));
                 effects
             }
             Err(failure) => {
@@ -448,17 +545,23 @@ impl App {
         }
         let source = &self.tabs[index];
         let site = source.site.clone();
-        let (new, mut effects) = if kind == TabKind::Files && source.is_files() {
-            let (local, remote) = (source.local.path.clone(), source.remote.path.clone());
-            self.new_tab_at(site, kind, local, remote)
-        } else {
-            self.new_tab(site, kind, None)
+        let folders = source
+            .files()
+            .map(|files| (files.local.path.clone(), files.remote.path.clone()));
+        let (new, mut effects) = match folders {
+            Some((local, remote)) if kind == TabKind::Files => {
+                self.new_tab_at(site, kind, local, remote)
+            }
+            _ => self.new_tab(site, kind, None),
         };
         let at = index + 1;
         self.tabs.insert(at, new);
         self.active_tab = Some(at);
         self.form = None;
         effects.extend(self.request_listing(at, Side::Remote));
+        if kind == TabKind::Terminal {
+            effects.extend(self.open_terminal_shell(at));
+        }
         effects
     }
 
@@ -484,8 +587,11 @@ impl App {
             Some(active) => Some(active.min(self.tabs.len() - 1)),
             None => None,
         };
+        // A terminal's shell goes with its tab (a shell still opening is closed when its
+        // result finds no tab).
+        let mut effects = Self::terminal_close_effects(&tab);
         if self.tab_of(&tab.site).is_some() {
-            return Vec::new();
+            return effects;
         }
         // The last tab: the site's connection goes with it.
         let conn = self
@@ -496,12 +602,16 @@ impl App {
             TabState::Connected(connected) => Some(connected.session),
             TabState::Failed(failure) => failure.session,
             // The connect's session isn't known yet: its dialogs say which it is.
-            TabState::Connecting => return self.abandon_site_prompts(&tab.site),
+            TabState::Connecting => {
+                effects.extend(self.abandon_site_prompts(&tab.site));
+                return effects;
+            }
         };
         if let Some(session) = session {
             self.forget_session(session);
         }
-        session.map(Effect::CloseSession).into_iter().collect()
+        effects.extend(session.map(Effect::CloseSession));
+        effects
     }
 
     /// The site's host or port changed: its session no longer matches the profile. A

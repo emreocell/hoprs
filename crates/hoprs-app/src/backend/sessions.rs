@@ -543,7 +543,6 @@ impl SessionManager {
 
     /// Opens a terminal of `cols` x `rows` on the SSH session `id` (see
     /// [`BackendApi::open_shell`](super::BackendApi::open_shell)).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn open_shell(&self, id: SessionId, cols: u16, rows: u16) -> Result<ShellId> {
         let link = {
             let sessions = lock(&self.inner.sessions);
@@ -574,7 +573,6 @@ impl SessionManager {
     }
 
     /// The terminal shells of the sessions.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn shells(&self) -> &Shells {
         &self.inner.shells
     }

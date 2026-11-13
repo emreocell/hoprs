@@ -9,8 +9,6 @@ use alacritty_terminal::selection::{Selection, SelectionType};
 use super::TerminalModel;
 
 /// What a drag selects.
-// used by the terminal tab (Plan 6 Task 4)
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectionKind {
     /// Cell by cell (press and drag).
@@ -23,8 +21,6 @@ pub enum SelectionKind {
 
 impl TerminalModel {
     /// Starts a selection at `point`, replacing any previous one.
-    // used by the terminal tab (Plan 6 Task 4)
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn start_selection(&mut self, kind: SelectionKind, point: Point, side: Side) {
         let ty = match kind {
             SelectionKind::Cells => SelectionType::Simple,
@@ -36,8 +32,6 @@ impl TerminalModel {
     }
 
     /// Moves the selection's end (the drag) to `point`.
-    // used by the terminal tab (Plan 6 Task 4)
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn update_selection(&mut self, point: Point, side: Side) {
         let point = self.clamp(point);
         if let Some(selection) = self.term.selection.as_mut() {
@@ -45,8 +39,6 @@ impl TerminalModel {
         }
     }
 
-    // used by the terminal tab (Plan 6 Task 4)
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn clear_selection(&mut self) {
         self.term.selection = None;
     }
@@ -54,8 +46,6 @@ impl TerminalModel {
     /// The selected text; empty without a selection. Rows that wrapped
     /// because the line was wider than the terminal are joined without a
     /// `\n`; a line selection ends with one.
-    // used by the terminal tab (Plan 6 Task 4)
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn selected_text(&self) -> String {
         self.term.selection_to_string().unwrap_or_default()
     }

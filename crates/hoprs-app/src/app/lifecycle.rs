@@ -18,7 +18,7 @@
 use hoprs_core::{ConnectionState, Error, ReconnectPolicy, SavedTab, TabKind, WorkspaceId};
 
 use super::{App, Effect, Message, TabState};
-use crate::app::files::{Listing, local_fs_path};
+use crate::app::files::{Listing, Pane, local_fs_path};
 use crate::app::tabs::TabId;
 use crate::backend::{AuthMethod, BrokerEvent, PromptAnswer, SessionId, Side, WorkspaceTabs};
 
@@ -74,25 +74,25 @@ impl super::Tab {
     /// shell), a files tab at its two folders. A side whose listing failed keeps what
     /// `previous` saved for it: a folder that could not be read is not worth restoring.
     fn saved(&self, previous: Option<&SavedTab>) -> SavedTab {
-        if self.kind == TabKind::Terminal {
+        let Some(files) = self.files() else {
             return SavedTab {
                 kind: TabKind::Terminal,
                 remote_dir: None,
                 local_dir: None,
             };
-        }
-        let failed = |side: Side| matches!(self.pane(side).listing, Listing::Failed(_));
+        };
+        let failed = |pane: &Pane| matches!(pane.listing, Listing::Failed(_));
         SavedTab {
             kind: TabKind::Files,
-            remote_dir: if failed(Side::Remote) {
+            remote_dir: if failed(&files.remote) {
                 previous.and_then(|t| t.remote_dir.clone())
             } else {
-                Some(self.remote.path.as_str().to_owned())
+                Some(files.remote.path.as_str().to_owned())
             },
-            local_dir: if failed(Side::Local) {
+            local_dir: if failed(&files.local) {
                 previous.and_then(|t| t.local_dir.clone())
             } else {
-                Some(local_fs_path(&self.local.path))
+                Some(local_fs_path(&files.local.path))
             },
         }
     }
@@ -148,6 +148,7 @@ impl App {
                 .as_ref()
                 .is_some_and(|c| *c != ConnectionState::Connected);
         let lost = matches!(state, ConnectionState::Disconnected(_));
+        let down = state != ConnectionState::Connected;
         if auth.is_some() {
             conn.auth = auth;
         }
@@ -155,14 +156,21 @@ impl App {
         if lost {
             self.note_failed_endpoint(&site);
         }
+        if down {
+            self.site_connection_down(&site);
+        }
         if !back {
             return Vec::new();
         }
         self.conn_mut(&site).reconnecting = false;
         self.queue.site_restored(&site);
-        let mut effects = Vec::new();
+        // The shells died with the old connection: the terminals open new ones.
+        let mut effects = self.open_site_shells(&site, true);
         for index in self.tabs_of(&site) {
-            if matches!(self.tabs[index].remote.listing, Listing::Failed(_)) {
+            if self.tabs[index]
+                .pane(Side::Remote)
+                .is_some_and(|pane| matches!(pane.listing, Listing::Failed(_)))
+            {
                 effects.extend(self.request_listing(index, Side::Remote));
             }
         }
@@ -205,6 +213,11 @@ impl App {
         };
         let mut effects = self.settle_saving(session, result.is_ok());
         let conn = self.conn_mut(&site);
+        // The feed may have said `Connected` first: the shells reopen once.
+        let back = conn
+            .conn
+            .as_ref()
+            .is_some_and(|c| *c != ConnectionState::Connected);
         conn.reconnecting = false;
         conn.conn = Some(match &result {
             Ok(()) => ConnectionState::Connected,
@@ -215,6 +228,9 @@ impl App {
                 self.queue.site_restored(&site);
                 for index in self.tabs_of(&site) {
                     effects.extend(self.request_listing(index, Side::Remote));
+                }
+                if back {
+                    effects.extend(self.open_site_shells(&site, true));
                 }
             }
             Err(_) => self.note_failed_endpoint(&site),
@@ -356,7 +372,8 @@ impl App {
             | Message::OpenImport
             | Message::Import(_)
             | Message::OpenSettings
-            | Message::Settings(_) => Some(Vec::new()),
+            | Message::Settings(_)
+            | Message::Terminal { .. } => Some(Vec::new()),
             _ => None,
         }
     }

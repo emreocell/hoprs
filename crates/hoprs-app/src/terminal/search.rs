@@ -11,30 +11,71 @@ use super::TerminalModel;
 /// lines are scrollback).
 pub type Range = RangeInclusive<Point>;
 
-/// Finds `query` as literal text, ignoring case, across the scrollback and
-/// the screen; matches may span wrapped rows.
+/// Finds a query as literal text, ignoring case, across the scrollback and
+/// the screen; matches may span wrapped rows. The compiled matcher is kept
+/// for the query (search-as-you-type compiles once per query, not once per
+/// step).
 ///
-/// Forward, it returns the first match starting at or after `from`;
-/// backwards, the last match starting at or before `from`. Both wrap around
-/// the grid. To step through matches, pass the cell after (or before) the
-/// current match's start. `None` for an empty query or no match.
-// used by the terminal tab (Plan 6 Task 4)
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn find(model: &TerminalModel, query: &str, from: Point, backwards: bool) -> Option<Range> {
-    if query.is_empty() {
-        return None;
+/// Forward, [`find`](Self::find) returns the first match starting at or
+/// after `from`; backwards, the last match starting at or before `from`.
+/// Both wrap around the grid. To step through matches, pass the cell after
+/// (or before) the current match's start. `None` for an empty query or no
+/// match.
+#[derive(Default)]
+pub struct Searcher {
+    query: String,
+    /// `None` for an empty query (or one that cannot compile).
+    regex: Option<RegexSearch>,
+    /// How many times a matcher was compiled.
+    #[cfg(test)]
+    compiles: usize,
+}
+
+impl std::fmt::Debug for Searcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Searcher")
+            .field("query", &self.query)
+            .finish_non_exhaustive()
     }
-    let pattern = format!("(?i){}", escape(query));
-    let mut regex = RegexSearch::new(&pattern).ok()?;
-    let direction = if backwards {
-        Direction::Left
-    } else {
-        Direction::Right
-    };
-    let origin = model.clamp(from);
-    model
-        .term
-        .search_next(&mut regex, origin, direction, Side::Left, None)
+}
+
+impl Searcher {
+    /// The query searched for.
+    #[cfg(test)]
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    /// Searches for `query` from now on; compiles only when it changed.
+    pub fn set_query(&mut self, query: &str) {
+        if query == self.query && (self.regex.is_some() || query.is_empty()) {
+            return;
+        }
+        query.clone_into(&mut self.query);
+        self.regex = if query.is_empty() {
+            None
+        } else {
+            #[cfg(test)]
+            {
+                self.compiles += 1;
+            }
+            RegexSearch::new(&format!("(?i){}", escape(query))).ok()
+        };
+    }
+
+    /// The next match of the query from `from` (see the type docs).
+    pub fn find(&mut self, model: &TerminalModel, from: Point, backwards: bool) -> Option<Range> {
+        let regex = self.regex.as_mut()?;
+        let direction = if backwards {
+            Direction::Left
+        } else {
+            Direction::Right
+        };
+        let origin = model.clamp(from);
+        model
+            .term
+            .search_next(regex, origin, direction, Side::Left, None)
+    }
 }
 
 /// Escapes regex metacharacters (regex-syntax's set), so `query` is literal.
@@ -57,6 +98,34 @@ mod tests {
 
     fn at(line: i32, column: usize) -> Point {
         Point::new(Line(line), Column(column))
+    }
+
+    /// One search with a fresh matcher.
+    fn find(model: &TerminalModel, query: &str, from: Point, backwards: bool) -> Option<Range> {
+        let mut searcher = Searcher::default();
+        searcher.set_query(query);
+        searcher.find(model, from, backwards)
+    }
+
+    #[test]
+    fn searcher_compiles_once_per_query() {
+        let mut model = TerminalModel::new(20, 5, 100);
+        model.feed(b"one two one\r\n");
+        let (top, _) = model.grid_bounds();
+        let mut searcher = Searcher::default();
+        searcher.set_query("one");
+        let first = searcher.find(&model, top, false).unwrap();
+        let next = searcher.find(&model, at(0, 1), false).unwrap();
+        assert_eq!((*first.start(), *next.start()), (at(0, 0), at(0, 8)));
+        searcher.set_query("one");
+        assert_eq!(searcher.compiles, 1, "the same query reuses its matcher");
+        searcher.set_query("two");
+        assert_eq!(searcher.find(&model, top, false), Some(at(0, 4)..=at(0, 6)));
+        assert_eq!(searcher.compiles, 2);
+        searcher.set_query("");
+        assert_eq!(searcher.find(&model, top, false), None);
+        assert_eq!(searcher.compiles, 2, "an empty query compiles nothing");
+        assert_eq!(searcher.query(), "");
     }
 
     #[test]

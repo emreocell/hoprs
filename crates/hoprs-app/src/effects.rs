@@ -14,9 +14,12 @@ use hoprs_import::ImportOptions;
 use hoprs_vault::ImportMode;
 use secrecy::SecretString;
 
-use crate::app::{Effect, FileAction, Message, PickTarget, ProfileOp, RequestId, TabId};
+use crate::app::{
+    Effect, FileAction, Message, PickTarget, ProfileOp, RequestId, TabId, TerminalMsg,
+};
 use crate::backend::{
-    BackendApi, KnownHostEntry, PromptAnswer, PromptId, SessionId, Side, WorkspaceTabs,
+    BackendApi, KnownHostEntry, PromptAnswer, PromptId, SessionId, ShellId, ShellOutput, Side,
+    WorkspaceTabs,
 };
 use crate::settings::Settings;
 use crate::ui::site_form::PasswordChange;
@@ -195,7 +198,159 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
             password,
             mode,
         } => Task::future(restore_backup(backend, path, password, mode)),
+        Effect::OpenShell {
+            tab,
+            request,
+            session,
+            cols,
+            rows,
+        } => Task::future(async move {
+            let result = backend.open_shell(session, cols, rows).await;
+            Message::ShellOpened {
+                tab,
+                request,
+                result,
+            }
+        }),
+        Effect::ShellInput { tab, shell, data } => Task::future(async move {
+            // A failure needs no message: a dead shell says so through its output. The
+            // bytes are never logged.
+            let _ = backend.shell_input(shell, data).await;
+            Message::Terminal {
+                tab,
+                msg: TerminalMsg::InputSent(shell),
+            }
+        }),
+        Effect::ShellResize { shell, cols, rows } => Task::future(async move {
+            if let Err(error) = backend.shell_resize(shell, cols, rows).await {
+                tracing::debug!(%error, "terminal resize not delivered");
+            }
+        })
+        .discard(),
+        Effect::CloseShell(shell) => {
+            backend.close_shell(shell);
+            Task::none()
+        }
+        Effect::WriteClipboard(text) => iced::clipboard::write(text),
+        Effect::ReadClipboard(tab) => iced::clipboard::read().map(move |text| Message::Terminal {
+            tab,
+            msg: TerminalMsg::Pasted(text),
+        }),
+        Effect::Later { after, message } => Task::future(later(after, *message)),
+        Effect::FocusTerminalSearch(tab) => {
+            iced::widget::operation::focus(crate::ui::terminal::search_id(tab))
+        }
     }
+}
+
+/// `message`, `after` from now (the debounces; tokio's clock, so tests can pause it).
+pub async fn later(after: Duration, message: Message) -> Message {
+    tokio::time::sleep(after).await;
+    message
+}
+
+/// The longest a terminal frame lasts: output is delivered at most this often.
+pub const FRAME: Duration = Duration::from_millis(16);
+/// The most output one frame takes; past it the shell's pump holds the rest (its own
+/// limit then decides, see `hoprs_ssh::shell`).
+pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
+
+/// A shell's output as the terminal tab takes it: [`batch_output`] over the stream the
+/// backend hands out once, as [`Message::TerminalOutput`] (data) and
+/// [`Message::ShellEvent`] (the rest). An output already taken, or one that ends without
+/// `Closed`, ends with `Closed`.
+pub fn shell_feed(
+    backend: &dyn BackendApi,
+    tab: TabId,
+    shell: ShellId,
+) -> impl Stream<Item = Message> + Send + use<> {
+    let output = backend
+        .shell_output(shell)
+        .unwrap_or_else(|| stream::empty().boxed());
+    let mut closed = false;
+    batch_output(output, FRAME)
+        .chain(stream::once(std::future::ready(ShellOutput::Closed)))
+        .filter_map(move |item| {
+            // Exactly one `Closed`, last.
+            let item = (!closed).then_some(item);
+            closed |= item == Some(ShellOutput::Closed);
+            std::future::ready(item)
+        })
+        .map(move |item| match item {
+            ShellOutput::Data(bytes) => Message::TerminalOutput { tab, shell, bytes },
+            event => Message::ShellEvent { tab, shell, event },
+        })
+}
+
+/// Joins a shell's `Data` into at most one item per `frame` (Review Focus 1): a burst
+/// after a quiet moment goes out at once, with whatever else is already waiting; the
+/// output that keeps coming is held until a frame after the previous item, then goes out
+/// as one. Each item holds at most [`MAX_FRAME_BYTES`] (beyond it the stream stops
+/// pulling until the frame ends). `Exit`, `Overflowed` and `Closed` keep their place:
+/// the data before them goes out first, in its frame, and they right after it.
+pub fn batch_output<S>(output: S, frame: Duration) -> impl Stream<Item = ShellOutput> + Send
+where
+    S: Stream<Item = ShellOutput> + Send + Unpin + 'static,
+{
+    struct Batcher<S> {
+        output: S,
+        /// When the last item went out.
+        last: Option<tokio::time::Instant>,
+        /// An event that ended a batch, to send after it.
+        held: Option<ShellOutput>,
+        ended: bool,
+    }
+
+    let state = Batcher {
+        output,
+        last: None,
+        held: None,
+        ended: false,
+    };
+    stream::unfold(state, move |mut st| async move {
+        if let Some(event) = st.held.take() {
+            return Some((event, st));
+        }
+        if st.ended {
+            return None;
+        }
+        let mut batch = match st.output.next().await {
+            Some(ShellOutput::Data(bytes)) => bytes,
+            Some(event) => return Some((event, st)),
+            None => return None,
+        };
+        let now = tokio::time::Instant::now();
+        let due = st.last.map_or(now, |last| (last + frame).max(now));
+        let wait = tokio::time::sleep_until(due);
+        tokio::pin!(wait);
+        loop {
+            if batch.len() >= MAX_FRAME_BYTES {
+                wait.as_mut().await;
+                break;
+            }
+            tokio::select! {
+                // What is already waiting joins the batch before the frame closes.
+                biased;
+                item = st.output.next() => match item {
+                    Some(ShellOutput::Data(bytes)) => batch.extend_from_slice(&bytes),
+                    // The data keeps its frame; the event follows it.
+                    Some(event) => {
+                        st.held = Some(event);
+                        wait.as_mut().await;
+                        break;
+                    }
+                    None => {
+                        st.ended = true;
+                        wait.as_mut().await;
+                        break;
+                    }
+                },
+                () = &mut wait => break,
+            }
+        }
+        st.last = Some(tokio::time::Instant::now());
+        Some((ShellOutput::Data(batch), st))
+    })
 }
 
 /// "Import from FileZilla": the backend reads, parses and applies the file on the

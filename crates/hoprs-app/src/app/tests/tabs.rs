@@ -19,7 +19,7 @@ fn ssh_site(name: &str, open_as: OpenAs) -> Site {
 }
 
 fn kinds(app: &App) -> Vec<TabKind> {
-    app.tabs.iter().map(|t| t.kind).collect()
+    app.tabs.iter().map(|t| t.kind()).collect()
 }
 
 /// The indices of the site's tabs, in strip order.
@@ -237,7 +237,7 @@ async fn session_state_reaches_every_tab_of_the_session() {
                 ConnStatus::Reconnecting { attempt: 2, .. }
             ),
             "{:?}",
-            tab.kind
+            tab.kind()
         );
         assert_eq!(app.conn(&tab.site).auth, Some(AuthMethod::Password));
     }
@@ -369,8 +369,8 @@ async fn workspace_restores_terminal_tabs() {
         kinds(&app),
         [TabKind::Terminal, TabKind::Files, TabKind::Terminal]
     );
-    assert_eq!(app.tabs[1].remote.path.as_str(), "/var/www");
-    assert_eq!(app.tabs[1].local.path.as_str(), "/home/me/shop");
+    assert_eq!(app.tabs[1].remote().path.as_str(), "/var/www");
+    assert_eq!(app.tabs[1].local().path.as_str(), "/home/me/shop");
     drive(&mut app, &fake, sites).await;
     let session = app.tab_conn(0).session().expect("connected");
     assert!(
@@ -516,6 +516,12 @@ async fn new_terminal_and_files_tabs_join_the_session() {
         kind: TabKind::Terminal,
     });
     assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::OpenShell { session: s, .. } if *s == session)),
+        "the new terminal opens its shell on the session: {effects:?}"
+    );
+    assert!(
         without_panes(effects).is_empty(),
         "no connect: the session is reused"
     );
@@ -548,8 +554,8 @@ async fn new_terminal_and_files_tabs_join_the_session() {
     let mut listed = listings(&effects);
     listed.sort_by_key(|(_, side)| *side == Side::Remote);
     assert_eq!(listed, [(new, Side::Local), (new, Side::Remote)]);
-    assert_eq!(app.tabs[1].local.path, here("/home/me/work"));
-    assert_eq!(app.tabs[1].remote.path, here("/var/www"));
+    assert_eq!(app.tabs[1].local().path, here("/home/me/work"));
+    assert_eq!(app.tabs[1].remote().path, here("/var/www"));
     let paths: Vec<_> = effects
         .iter()
         .filter_map(|e| match e {

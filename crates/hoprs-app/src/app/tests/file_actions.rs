@@ -37,7 +37,7 @@ fn ctrl(app: &mut App, on: bool) {
 
 /// The row of the entry called `name` in a pane.
 fn row_of(app: &App, side: Side, name: &str) -> usize {
-    let pane = app.tabs[0].pane(side);
+    let pane = app.tabs[0].pane(side).unwrap();
     usize::from(pane.has_up())
         + pane
             .entries
@@ -49,6 +49,7 @@ fn row_of(app: &App, side: Side, name: &str) -> usize {
 fn selected_names(app: &App, side: Side) -> Vec<String> {
     app.tabs[0]
         .pane(side)
+        .unwrap()
         .selected_entries()
         .into_iter()
         .map(|e| e.name.clone())
@@ -60,7 +61,7 @@ async fn remote_focused(fake: &Arc<FakeBackend>, a: &Site) -> (App, TabId) {
     let mut app = connected_tab(fake, a).await;
     let tab = app.tabs[0].id;
     app.update(key(FileKey::SwitchPane));
-    assert_eq!(app.tabs[0].focus, Side::Remote);
+    assert_eq!(app.tabs[0].focus().unwrap(), Side::Remote);
     (app, tab)
 }
 
@@ -94,7 +95,7 @@ async fn mkdir_then_refresh() {
         "the editor takes the focus with \"New folder\" selected: {effects:?}"
     );
     assert_eq!(
-        app.tabs[0].remote.action,
+        app.tabs[0].remote().action,
         Some(PaneAction::Edit(Edit {
             kind: EditKind::NewFolder,
             value: "New folder".into(),
@@ -110,7 +111,7 @@ async fn mkdir_then_refresh() {
     ));
     assert!(app.update(key(FileKey::Enter)).is_empty());
     assert!(matches!(
-        &app.tabs[0].remote.action,
+        &app.tabs[0].remote().action,
         Some(PaneAction::Edit(Edit { error: Some(e), .. })) if *e == strings::NAME_TAKEN
     ));
     // Typing clears it; Enter creates the folder on the session.
@@ -120,7 +121,7 @@ async fn mkdir_then_refresh() {
         PaneMsg::EditChanged("build".into()),
     ));
     assert!(matches!(
-        &app.tabs[0].remote.action,
+        &app.tabs[0].remote().action,
         Some(PaneAction::Edit(Edit { error: None, .. }))
     ));
     let create = app.update(key(FileKey::Enter));
@@ -128,14 +129,14 @@ async fn mkdir_then_refresh() {
     assert_eq!(ops.len(), 1);
     assert!(ops[0].1.is_some(), "the remote side works on the session");
     assert_eq!(ops[0].2, FileAction::Mkdir(rpath("/srv/build")));
-    assert_eq!(app.tabs[0].remote.action, None);
+    assert_eq!(app.tabs[0].remote().action, None);
     assert_eq!(
-        app.tabs[0].remote.busy.as_ref().map(|b| b.kind),
+        app.tabs[0].remote().busy.as_ref().map(|b| b.kind),
         Some(BusyKind::NewFolder)
     );
     // Nothing else starts while it runs.
     assert!(app.update(key(FileKey::NewFolder)).is_empty());
-    assert_eq!(app.tabs[0].remote.action, None);
+    assert_eq!(app.tabs[0].remote().action, None);
 
     // Done: the folder is listed again, with the new folder selected.
     let done = run_file_ops(&fake, &create).await;
@@ -146,7 +147,7 @@ async fn mkdir_then_refresh() {
     let refresh = app.update(done.into_iter().next().unwrap());
     assert_eq!(listings(&refresh).len(), 1);
     assert_eq!(listings(&refresh)[0].3, "/srv");
-    assert_eq!(app.tabs[0].remote.busy, None);
+    assert_eq!(app.tabs[0].remote().busy, None);
     settle(&mut app, &fake, run_listings(&fake, &refresh).await).await;
     assert_eq!(entry_names(&app, 0, Side::Remote), ["build", "a.txt"]);
     assert_eq!(selected_names(&app, Side::Remote), ["build"]);
@@ -166,7 +167,7 @@ async fn mkdir_then_refresh() {
             ..
         }]
     ));
-    assert_eq!(app.tabs[0].focus, Side::Local);
+    assert_eq!(app.tabs[0].focus().unwrap(), Side::Local);
     let create = app.update(pane_msg(tab, Side::Local, PaneMsg::EditCommit));
     assert_eq!(
         file_ops(&create),
@@ -193,7 +194,7 @@ async fn rename_inline_commits_on_enter_cancels_on_escape() {
 
     // Nothing selected: nothing to rename.
     assert!(app.update(key(FileKey::Rename)).is_empty());
-    assert_eq!(app.tabs[0].remote.action, None);
+    assert_eq!(app.tabs[0].remote().action, None);
 
     let row = row_of(&app, Side::Remote, "report.pdf");
     app.update(pane_msg(tab, Side::Remote, PaneMsg::Click(row)));
@@ -216,7 +217,7 @@ async fn rename_inline_commits_on_enter_cancels_on_escape() {
         value: "report.pdf".into(),
         error: None,
     }));
-    assert_eq!(app.tabs[0].remote.action, editing);
+    assert_eq!(app.tabs[0].remote().action, editing);
 
     // Escape: back as it was, nothing sent.
     app.update(pane_msg(
@@ -225,13 +226,13 @@ async fn rename_inline_commits_on_enter_cancels_on_escape() {
         PaneMsg::EditChanged("final.pdf".into()),
     ));
     assert!(app.update(key(FileKey::Escape)).is_empty());
-    assert_eq!(app.tabs[0].remote.action, None);
+    assert_eq!(app.tabs[0].remote().action, None);
     assert_eq!(entry_names(&app, 0, Side::Remote), ["b.txt", "report.pdf"]);
     assert!(remote.read_file("/srv/report.pdf").is_some());
 
     // Again: the editor starts from the real name; Enter renames.
     app.update(key(FileKey::Rename));
-    assert_eq!(app.tabs[0].remote.action, editing);
+    assert_eq!(app.tabs[0].remote().action, editing);
     app.update(pane_msg(
         tab,
         Side::Remote,
@@ -260,7 +261,7 @@ async fn rename_inline_commits_on_enter_cancels_on_escape() {
         app.update(pane_msg(tab, Side::Remote, PaneMsg::EditCommit))
             .is_empty()
     );
-    assert_eq!(app.tabs[0].remote.action, None);
+    assert_eq!(app.tabs[0].remote().action, None);
     // A name another entry has is refused inline.
     app.update(key(FileKey::Rename));
     app.update(pane_msg(
@@ -270,7 +271,7 @@ async fn rename_inline_commits_on_enter_cancels_on_escape() {
     ));
     assert!(app.update(key(FileKey::Enter)).is_empty());
     assert!(matches!(
-        &app.tabs[0].remote.action,
+        &app.tabs[0].remote().action,
         Some(PaneAction::Edit(Edit { error: Some(e), .. })) if *e == strings::NAME_TAKEN
     ));
 }
@@ -296,7 +297,7 @@ async fn delete_requires_confirmation() {
     // Only ".." selected: nothing to delete.
     app.update(pane_msg(tab, Side::Remote, PaneMsg::Click(0)));
     assert!(app.update(key(FileKey::Delete)).is_empty());
-    assert_eq!(app.tabs[0].remote.action, None);
+    assert_eq!(app.tabs[0].remote().action, None);
 
     for (i, name) in ["tree", "empty", "f.txt", "link"].into_iter().enumerate() {
         ctrl(&mut app, i > 0);
@@ -313,21 +314,21 @@ async fn delete_requires_confirmation() {
     // Del only asks, with the names.
     let ask = app.update(key(FileKey::Delete));
     assert!(file_ops(&ask).is_empty(), "nothing is deleted yet");
-    let Some(PaneAction::ConfirmDelete(asked)) = &app.tabs[0].remote.action else {
-        panic!("{:?}", app.tabs[0].remote.action);
+    let Some(PaneAction::ConfirmDelete(asked)) = &app.tabs[0].remote().action else {
+        panic!("{:?}", app.tabs[0].remote().action);
     };
     let asked: Vec<&str> = asked.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(asked, ["empty", "tree", "f.txt", "link"]);
     assert_eq!(strings::delete_question(&asked), "Delete 4 items?");
     // Escape and Keep both leave everything in place.
     assert!(app.update(key(FileKey::Escape)).is_empty());
-    assert_eq!(app.tabs[0].remote.action, None);
+    assert_eq!(app.tabs[0].remote().action, None);
     app.update(pane_msg(tab, Side::Remote, PaneMsg::Delete));
     assert!(
         app.update(pane_msg(tab, Side::Remote, PaneMsg::CancelAction))
             .is_empty()
     );
-    assert_eq!(app.tabs[0].remote.action, None);
+    assert_eq!(app.tabs[0].remote().action, None);
     assert!(remote.read_file("/srv/f.txt").is_some());
 
     // Confirmed: one operation, not the transfer queue.
@@ -350,7 +351,7 @@ async fn delete_requires_confirmation() {
     );
     assert!(fake.enqueued().is_empty());
     assert_eq!(
-        app.tabs[0].remote.busy.as_ref().map(|b| (b.kind, b.done)),
+        app.tabs[0].remote().busy.as_ref().map(|b| (b.kind, b.done)),
         Some((BusyKind::Delete, 0))
     );
 
@@ -363,7 +364,7 @@ async fn delete_requires_confirmation() {
     for message in progress.iter().cloned() {
         assert!(app.update(message).is_empty());
     }
-    assert_eq!(app.tabs[0].remote.busy.as_ref().map(|b| b.done), Some(7));
+    assert_eq!(app.tabs[0].remote().busy.as_ref().map(|b| b.done), Some(7));
     assert_eq!(strings::deleting(7), "Deleting… 7 items");
     let refresh = app.update(last.clone());
     assert_eq!(listings(&refresh).len(), 1);
@@ -373,8 +374,8 @@ async fn delete_requires_confirmation() {
         remote.read_file("/elsewhere/k.txt").as_deref(),
         Some(&b"k"[..])
     );
-    assert_eq!(app.tabs[0].remote.busy, None);
-    assert_eq!(app.tabs[0].remote.action_error, None);
+    assert_eq!(app.tabs[0].remote().busy, None);
+    assert_eq!(app.tabs[0].remote().action_error, None);
 }
 
 /// The rwx grid and the octal value follow each other; Apply runs chmod with the mode.
@@ -419,14 +420,15 @@ async fn chmod_dialog_octal_roundtrip() {
             .is_empty()
     );
     assert_eq!(
-        app.tabs[0].local.action, None,
+        app.tabs[0].local().action,
+        None,
         "no permissions on the local side"
     );
 
     let row = row_of(&app, Side::Remote, "run.sh");
     app.update(pane_msg(tab, Side::Remote, PaneMsg::Click(row)));
     app.update(pane_msg(tab, Side::Remote, PaneMsg::Permissions));
-    let dialog = |app: &App| match &app.tabs[0].remote.action {
+    let dialog = |app: &App| match &app.tabs[0].remote().action {
         Some(PaneAction::Permissions(d)) => d.clone(),
         other => panic!("{other:?}"),
     };
@@ -462,9 +464,9 @@ async fn chmod_dialog_octal_roundtrip() {
             mode: 0o750,
         }
     );
-    assert_eq!(app.tabs[0].remote.action, None);
+    assert_eq!(app.tabs[0].remote().action, None);
     settle(&mut app, &fake, run_file_ops(&fake, &apply).await).await;
-    assert_eq!(app.tabs[0].remote.entries[0].mode, Some(0o750));
+    assert_eq!(app.tabs[0].remote().entries[0].mode, Some(0o750));
     assert_eq!(selected_names(&app, Side::Remote), Vec::<String>::new());
 }
 
@@ -485,24 +487,25 @@ async fn action_error_is_inline_not_modal() {
     let done = run_file_ops(&fake, &create).await;
     let refresh = app.update(done.into_iter().next().unwrap());
     let error = app.tabs[0]
-        .remote
+        .remote()
         .action_error
         .clone()
         .expect("inline error");
     assert_eq!(error.kind, ErrorKind::Permission);
     assert!(app.form.is_none(), "no form, no modal");
     assert!(matches!(tab_state(&app, &a.id), TabState::Connected(_)));
-    assert_eq!(app.tabs[0].remote.busy, None);
+    assert_eq!(app.tabs[0].remote().busy, None);
     // The folder is listed again: the table stays, under the error.
     settle(&mut app, &fake, run_listings(&fake, &refresh).await).await;
     assert_eq!(app.pane_status(0, Side::Remote), PaneStatus::Full);
     assert_eq!(entry_names(&app, 0, Side::Remote), ["a.txt"]);
     assert!(
-        app.tabs[0].remote.action_error.is_some(),
+        app.tabs[0].remote().action_error.is_some(),
         "kept until dismissed"
     );
     assert_eq!(
-        app.tabs[0].local.action_error, None,
+        app.tabs[0].local().action_error,
+        None,
         "the other pane is untouched"
     );
 
@@ -516,20 +519,21 @@ async fn action_error_is_inline_not_modal() {
     ));
     let rename = app.update(key(FileKey::Enter));
     assert_eq!(
-        app.tabs[0].remote.action_error, None,
+        app.tabs[0].remote().action_error,
+        None,
         "a new action clears the old error"
     );
     settle(&mut app, &fake, run_file_ops(&fake, &rename).await).await;
     assert_eq!(
-        app.tabs[0].remote.action_error.as_ref().map(|e| e.kind),
+        app.tabs[0].remote().action_error.as_ref().map(|e| e.kind),
         Some(ErrorKind::Permission)
     );
     app.update(pane_msg(tab, Side::Remote, PaneMsg::DismissError));
-    assert_eq!(app.tabs[0].remote.action_error, None);
+    assert_eq!(app.tabs[0].remote().action_error, None);
     // Escape dismisses as well.
-    app.tabs[0].remote.action_error = Some(error);
+    app.tabs[0].remote_mut().action_error = Some(error);
     app.update(key(FileKey::Escape));
-    assert_eq!(app.tabs[0].remote.action_error, None);
+    assert_eq!(app.tabs[0].remote().action_error, None);
 }
 
 /// Results that come back late: for a closed tab, for an operation the pane no longer
@@ -559,7 +563,7 @@ async fn late_action_results_are_safe() {
         result: Ok(()),
     };
     assert!(app.update(stray).is_empty());
-    assert!(app.tabs[0].remote.busy.is_some());
+    assert!(app.tabs[0].remote().busy.is_some());
     // Same id for the other pane: ignored too.
     let other = Message::FileOpDone {
         tab,
@@ -579,8 +583,8 @@ async fn late_action_results_are_safe() {
         listings(&effects).is_empty(),
         "docs is not listed again for /srv"
     );
-    assert_eq!(app.tabs[0].remote.busy, None, "the pane can act again");
-    assert_eq!(app.tabs[0].remote.select_after, None);
+    assert_eq!(app.tabs[0].remote().busy, None, "the pane can act again");
+    assert_eq!(app.tabs[0].remote().select_after, None);
     assert_eq!(entry_names(&app, 0, Side::Remote), ["r.txt"]);
 
     // A closed tab drops its result.
@@ -617,7 +621,7 @@ async fn relisting_resets_the_scroll_offset() {
                 viewport_h: 600.0,
             },
         ));
-        assert_eq!(app.tabs[0].remote.offset_y, 300.0);
+        assert_eq!(app.tabs[0].remote().offset_y, 300.0);
     };
     let to_top = |effects: &[Effect]| {
         effects.iter().any(|e| {
@@ -627,7 +631,7 @@ async fn relisting_resets_the_scroll_offset() {
 
     scrolled(&mut app);
     let retry = app.update(pane_msg(tab, Side::Remote, PaneMsg::Retry));
-    assert_eq!(app.tabs[0].remote.offset_y, 0.0);
+    assert_eq!(app.tabs[0].remote().offset_y, 0.0);
     assert!(to_top(&retry));
     settle(&mut app, &fake, run_listings(&fake, &retry).await).await;
 
@@ -637,7 +641,7 @@ async fn relisting_resets_the_scroll_offset() {
     let create = app.update(key(FileKey::Enter));
     let done = run_file_ops(&fake, &create).await;
     let refresh = app.update(done.into_iter().next().unwrap());
-    assert_eq!(app.tabs[0].remote.offset_y, 0.0);
+    assert_eq!(app.tabs[0].remote().offset_y, 0.0);
     assert!(to_top(&refresh));
 }
 
@@ -669,7 +673,7 @@ async fn shortcuts_are_suppressed_while_renaming() {
     let row = row_of(&app, Side::Remote, "a.txt");
     app.update(pane_msg(tab, Side::Remote, PaneMsg::Click(row)));
     app.update(key(FileKey::Rename));
-    let before = app.tabs[0].clone();
+    let before = app.tabs[0].files().unwrap().clone();
     for k in [
         FileKey::Up,
         FileKey::Down,
@@ -690,7 +694,7 @@ async fn shortcuts_are_suppressed_while_renaming() {
             "{k:?} pressed"
         );
         assert!(app.update(key(k)).is_empty(), "{k:?}");
-        assert_eq!(app.tabs[0], before, "{k:?} changed the pane");
+        assert_eq!(app.tabs[0].files(), Some(&before), "{k:?} changed the pane");
     }
     // Escape goes straight through and cancels.
     assert!(
@@ -700,11 +704,11 @@ async fn shortcuts_are_suppressed_while_renaming() {
         })
         .is_empty()
     );
-    assert_eq!(app.tabs[0].remote.action, None);
+    assert_eq!(app.tabs[0].remote().action, None);
 
     // Same with the permissions dialog open.
     app.update(pane_msg(tab, Side::Remote, PaneMsg::Permissions));
-    let before = app.tabs[0].clone();
+    let before = app.tabs[0].files().unwrap().clone();
     assert!(
         app.update(Message::KeyPressed {
             key: FileKey::Delete,
@@ -714,7 +718,7 @@ async fn shortcuts_are_suppressed_while_renaming() {
     );
     assert!(app.update(key(FileKey::Delete)).is_empty());
     assert!(app.update(key(FileKey::Enter)).is_empty());
-    assert_eq!(app.tabs[0], before);
+    assert_eq!(app.tabs[0].files(), Some(&before));
 
     // A form open in the center takes every key.
     app.update(key(FileKey::Escape));
@@ -745,12 +749,12 @@ async fn permissions_skip_symlinks() {
     // Only the link: nothing to change, the button is off.
     let link = row_of(&app, Side::Remote, "a-link");
     app.update(pane_msg(tab, Side::Remote, PaneMsg::Click(link)));
-    assert!(app.tabs[0].remote.permission_targets().is_empty());
+    assert!(app.tabs[0].remote().permission_targets().is_empty());
     assert!(
         app.update(pane_msg(tab, Side::Remote, PaneMsg::Permissions))
             .is_empty()
     );
-    assert_eq!(app.tabs[0].remote.action, None);
+    assert_eq!(app.tabs[0].remote().action, None);
 
     // Link first, then a file: the dialog is about the file alone, from its mode.
     ctrl(&mut app, true);
@@ -759,8 +763,8 @@ async fn permissions_skip_symlinks() {
     ctrl(&mut app, false);
     assert_eq!(selected_names(&app, Side::Remote), ["a-link", "run.sh"]);
     app.update(pane_msg(tab, Side::Remote, PaneMsg::Permissions));
-    let Some(PaneAction::Permissions(dialog)) = app.tabs[0].remote.action.clone() else {
-        panic!("{:?}", app.tabs[0].remote.action);
+    let Some(PaneAction::Permissions(dialog)) = app.tabs[0].remote().action.clone() else {
+        panic!("{:?}", app.tabs[0].remote().action);
     };
     assert_eq!(dialog.names, ["run.sh"]);
     assert_eq!(dialog.mode, 0o644, "not the link's 777");
@@ -792,8 +796,8 @@ async fn permissions_mixed_modes_are_flagged() {
         shift: true,
     });
     app.update(pane_msg(tab, Side::Remote, PaneMsg::Permissions));
-    let Some(PaneAction::Permissions(dialog)) = &app.tabs[0].remote.action else {
-        panic!("{:?}", app.tabs[0].remote.action);
+    let Some(PaneAction::Permissions(dialog)) = &app.tabs[0].remote().action else {
+        panic!("{:?}", app.tabs[0].remote().action);
     };
     assert_eq!(dialog.names, ["a.txt", "b.txt"]);
     assert_eq!(dialog.mode, 0o644, "the first entry's");
@@ -829,7 +833,7 @@ async fn rename_never_overwrites_an_unlisted_target() {
     );
     settle(&mut app, &fake, run_file_ops(&fake, &commit).await).await;
     let error = app.tabs[0]
-        .remote
+        .remote()
         .action_error
         .clone()
         .expect("refused inline");
@@ -875,7 +879,7 @@ async fn rename_scrolls_its_row_into_view() {
         ),
         "{start:?}"
     );
-    assert_eq!(app.tabs[0].remote.offset_y, 540.0);
+    assert_eq!(app.tabs[0].remote().offset_y, 540.0);
     // Already in view: no scroll.
     app.update(key(FileKey::Escape));
     let again = app.update(key(FileKey::Rename));
@@ -901,7 +905,7 @@ async fn partial_delete_reports_its_count() {
     let go = app.update(pane_msg(tab, Side::Remote, PaneMsg::ConfirmDelete));
     settle(&mut app, &fake, run_file_ops(&fake, &go).await).await;
     let error = app.tabs[0]
-        .remote
+        .remote()
         .action_error
         .clone()
         .expect("inline error");
@@ -944,7 +948,7 @@ async fn case_only_rename_never_overwrites() {
     );
     settle(&mut app, &fake, run_file_ops(&fake, &commit).await).await;
     let error = app.tabs[0]
-        .remote
+        .remote()
         .action_error
         .clone()
         .expect("refused inline");
@@ -962,7 +966,7 @@ async fn case_only_rename_never_overwrites() {
     let row = row_of(&app, Side::Remote, "b.txt");
     let commit = rename(&mut app, row, "B.txt");
     settle(&mut app, &fake, run_file_ops(&fake, &commit).await).await;
-    assert_eq!(app.tabs[0].remote.action_error, None);
+    assert_eq!(app.tabs[0].remote().action_error, None);
     assert_eq!(remote.read_file("/srv/B.txt").as_deref(), Some(&b"b"[..]));
     assert!(remote.read_file("/srv/b.txt").is_none());
     assert_eq!(selected_names(&app, Side::Remote), ["B.txt"]);

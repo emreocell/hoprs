@@ -16,9 +16,6 @@
 //! [`BackendApi::close_shell`]: super::BackendApi::close_shell
 //! [`BackendApi::shell_output`]: super::BackendApi::shell_output
 
-// The terminal tab (Plan 6 Task 4) calls this; until then only the tests do.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};

@@ -362,6 +362,16 @@ impl App {
             | Message::Import(_)
             | Message::OpenSettings
             | Message::Settings(_) => true,
+            // The terminal's keyboard, mouse and search: never while a dialog asks (its
+            // timers and replies still land).
+            Message::Terminal { msg, .. } => !matches!(
+                msg,
+                super::TerminalMsg::ResizeDue(_)
+                    | super::TerminalMsg::SearchDue(_)
+                    | super::TerminalMsg::InputSent(_)
+                    | super::TerminalMsg::Pasted(_)
+                    | super::TerminalMsg::Resized { .. }
+            ),
             _ => false,
         }
     }

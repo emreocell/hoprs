@@ -77,6 +77,10 @@ impl Default for PtyRequest {
 pub enum ShellOutput {
     Data(Vec<u8>),
     Exit(Option<u32>),
+    /// The consumer let more than `MAX_PENDING_OUTPUT` pile up: the excess was dropped and
+    /// the shell is being closed. Comes right before `Closed`, so the consumer can say why
+    /// the shell ended instead of losing output silently.
+    Overflowed,
     Closed,
 }
 
@@ -193,9 +197,10 @@ impl ShellChannel {
     }
 
     /// Splits the shell into its handle and its output: stdout and stderr merged as `Data`,
-    /// then `Exit` when the server reports one, then exactly one [`ShellOutput::Closed`]
-    /// (channel closed, connection lost, closed by us, or torn down after overflowing), after
-    /// which the stream ends. Reconnecting a shell is up to the caller.
+    /// then `Exit` when the server reports one (or [`ShellOutput::Overflowed`] when the
+    /// consumer fell too far behind), then exactly one [`ShellOutput::Closed`] (channel
+    /// closed, connection lost, closed by us, or torn down after overflowing), after which
+    /// the stream ends. Reconnecting a shell is up to the caller.
     ///
     /// Dropping the stream closes the shell too.
     pub fn into_output(
@@ -397,6 +402,7 @@ async fn pump(mut p: Pump, tx: mpsc::Sender<ShellOutput>, stop: Arc<Notify>) {
                     Some(ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. }) => {
                         if !pending.push_data(data.to_vec()) {
                             p.overflowed.store(true, Ordering::SeqCst);
+                            pending.items.push_back(ShellOutput::Overflowed);
                             // Stop reading first: closing may have to wait for the session
                             // task, which may in turn be waiting for this channel to take
                             // its data.
@@ -440,7 +446,7 @@ impl SshSession {
     /// server refuses the channel, with `Protocol`, "Too many channels on this connection
     /// (limit N)".
     pub async fn open_shell(&self, req: PtyRequest) -> Result<ShellChannel> {
-        let (channel, slot) = self.open_channel().await?.into_parts();
+        let (channel, slot) = self.open_pty_channel().await?.into_parts();
         let (mut reader, writer) = channel.split();
         writer
             .request_pty(true, &req.term, req.cols, req.rows, 0, 0, &[])
@@ -571,6 +577,43 @@ mod tests {
         assert_eq!(budget.open(), 0);
         // Closing again is harmless.
         copy.close();
+    }
+
+    /// A server that sends 1 MiB chunks for ever.
+    struct Flood;
+
+    #[async_trait::async_trait]
+    impl ShellReader for Flood {
+        async fn wait(&mut self) -> Option<ChannelMsg> {
+            tokio::task::yield_now().await;
+            Some(ChannelMsg::Data {
+                data: vec![b'y'; 1024 * 1024].into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn overflow_is_reported_before_closed() {
+        use futures_util::StreamExt;
+
+        let writer = Arc::new(SilentServer {
+            close_called: Arc::new(AtomicBool::new(false)),
+        });
+        let shell = ShellChannel::start(Box::new(Flood), writer, None);
+        let (handle, mut output) = shell.into_output();
+        // Nobody reads until the pump gives up on this consumer.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !handle.overflowed() {
+            assert!(Instant::now() < deadline, "the pump never overflowed");
+            tokio::task::yield_now().await;
+        }
+        let mut seen = Vec::new();
+        while let Some(item) = output.next().await {
+            if !matches!(item, ShellOutput::Data(_)) {
+                seen.push(item);
+            }
+        }
+        assert_eq!(seen, [ShellOutput::Overflowed, ShellOutput::Closed]);
     }
 
     #[test]

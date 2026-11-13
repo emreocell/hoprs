@@ -823,7 +823,7 @@ async fn dialog_takes_the_keyboard_from_a_rename_editor() {
         Side::Remote,
         PaneMsg::EditChanged("final.pdf".into()),
     ));
-    let editing = app.tabs[0].remote.action.clone();
+    let editing = app.tabs[0].remote().action.clone();
     assert!(editing.is_some(), "the rename editor is open");
 
     // The dialog opens: the editor loses the keyboard.
@@ -856,7 +856,8 @@ async fn dialog_takes_the_keyboard_from_a_rename_editor() {
         assert!(app.update(blocked.clone()).is_empty(), "{blocked:?}");
     }
     assert_eq!(
-        app.tabs[0].remote.action, editing,
+        app.tabs[0].remote().action,
+        editing,
         "the editor is untouched"
     );
     assert_eq!(app.site_filter, "");
@@ -871,7 +872,7 @@ async fn dialog_takes_the_keyboard_from_a_rename_editor() {
             viewport_h: 300.0,
         },
     ));
-    assert_eq!(app.tabs[0].remote.offset_y, 30.0);
+    assert_eq!(app.tabs[0].remote().offset_y, 30.0);
 
     // Closed: the editor works again.
     app.update(Message::KeyPressed {

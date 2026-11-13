@@ -8,7 +8,7 @@
 
 use hoprs_core::{Protocol, Site, TabKind};
 use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::widget::{Id, button, column, container, row, scrollable, space, text};
+use iced::widget::{Id, button, column, container, row, scrollable, space, text, tooltip};
 use iced::{Alignment, Element, Length, Padding};
 
 use crate::app::{App, Message, Tab};
@@ -93,7 +93,7 @@ fn session_actions(app: &App) -> Option<Element<'_, Message>> {
 fn session_tab<'a>(app: &'a App, index: usize, tab: &'a Tab) -> Element<'a, Message> {
     let active = app.active_tab == Some(index);
     let (name, tag) = match app.site(&tab.site) {
-        Some(site) => (site.name.as_str(), tab_tag(site, tab.kind)),
+        Some(site) => (site.name.as_str(), tab_tag(site, tab.kind())),
         None => (strings::SITE_MISSING, ""),
     };
     let p = palette();
@@ -128,6 +128,23 @@ fn session_tab<'a>(app: &'a App, index: usize, tab: &'a Tab) -> Element<'a, Mess
     .padding(Padding::ZERO.left(theme::SPACE_MD).right(theme::SPACE_XS))
     .style(theme::tab(active))
     .on_press(Message::SelectTab(index));
+    // A terminal's remote title (OSC 0/2) is a hint over the tab, never its name.
+    let button: Element<'a, Message> = match tab.terminal().and_then(|t| t.title.as_deref()) {
+        Some(title) => tooltip(
+            button,
+            container(
+                text(title)
+                    .font(theme::MONO)
+                    .size(theme::TEXT_MONO)
+                    .wrapping(text::Wrapping::None),
+            )
+            .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
+            .style(theme::dialog_box),
+            tooltip::Position::Bottom,
+        )
+        .into(),
+        None => button.into(),
+    };
     let underline = container(space()).width(Length::Fill).height(UNDERLINE);
     let underline = if active {
         underline.style(theme::underline)

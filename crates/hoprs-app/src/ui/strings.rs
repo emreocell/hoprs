@@ -122,7 +122,27 @@ pub const CLOSE_TAB: &str = "×";
 pub const NEW_TERMINAL_TAB: &str = "New terminal tab";
 pub const NEW_FILES_TAB: &str = "New files tab";
 /// A terminal tab until the terminal itself lands (Plan 6 Task 4).
-pub const TERMINAL_PLACEHOLDER: &str = "Terminal starts here";
+/// The terminal tab (Plan 6 Task 4).
+pub const TERMINAL_OVERFLOWED: &str = "Output was too fast and the shell was closed";
+pub const TERMINAL_REOPEN: &str = "Reopen";
+pub const TERMINAL_RESTART: &str = "Restart shell";
+pub const TERMINAL_SHELL_CLOSED: &str = "Shell closed";
+pub const TERMINAL_OPEN_FAILED: &str = "Can't open a shell";
+pub const TERMINAL_RETRY: &str = "Retry";
+/// Written into the scrollback when a new shell starts after a reconnect.
+pub const TERMINAL_RECONNECTED: &str = "— reconnected —";
+pub const TERMINAL_SEARCH_PLACEHOLDER: &str = "Search scrollback";
+pub const TERMINAL_SEARCH_NEXT: &str = "Next";
+pub const TERMINAL_SEARCH_PREVIOUS: &str = "Previous";
+pub const TERMINAL_SEARCH_CLOSE: &str = "Close";
+pub const TERMINAL_SEARCH_NO_MATCH: &str = "No match";
+/// "Shell exited (code N)", or without a code when the server sent none.
+pub fn shell_exited(code: Option<u32>) -> String {
+    match code {
+        Some(code) => format!("Shell exited (code {code})"),
+        None => "Shell exited".to_owned(),
+    }
+}
 
 // File panes.
 pub const LOCAL: &str = "Local";
@@ -542,6 +562,12 @@ pub const SETTINGS_POLICY_HINT: &str =
     "Applies to the next transfers. Ask shows the choice in the queue.";
 pub const SETTINGS_UNREADABLE: &str = "settings.toml can't be read, so the defaults apply. Changes last until hoprs closes and are not saved, to keep the file as it is: fix or delete it to save settings.";
 pub const SETTINGS_SAVE_FAILED: &str = "Can't save settings.toml";
+pub const SETTINGS_TERMINAL: &str = "Terminal";
+pub const SETTINGS_FONT_SIZE: &str = "Font size";
+pub const SETTINGS_SCROLLBACK: &str = "Scrollback lines";
+pub const SETTINGS_SCROLLBACK_HINT: &str = "Applies to terminals opened from now on.";
+pub const SETTINGS_THEME: &str = "Theme";
+pub const THEME_HOPRS_DARK: &str = "hoprs dark";
 pub const POLICY_ASK: &str = "Ask";
 pub const POLICY_OVERWRITE: &str = "Overwrite";
 pub const POLICY_SKIP: &str = "Skip";

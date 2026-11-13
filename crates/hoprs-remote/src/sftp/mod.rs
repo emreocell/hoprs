@@ -60,7 +60,8 @@ const S_IFLNK: u32 = 0o120_000;
 pub struct SftpConfig {
     /// SFTP channels for file streams, clamped to `1..=8`, then capped by the session's
     /// channel budget ([`SshSession::sftp_stream_channels`]): with the default budget of 10,
-    /// at most 7, so the metadata channel and the streams leave 2 channels for terminals.
+    /// at most 7, so the metadata channel and the streams leave 2 channels: one for a
+    /// terminal, and the one PTYs never take (see `hoprs_ssh::channels`).
     pub stream_channels: usize,
 }
 
@@ -844,10 +845,11 @@ mod tests {
         }
         assert_eq!(session.open_channels(), 8, "metadata + 7 streams");
         let first = session.open_shell(PtyRequest::default()).await.unwrap();
-        let second = session.open_shell(PtyRequest::default()).await.unwrap();
+        // The last slot is never a PTY's (the metadata channel may need it again).
         let e = session.open_shell(PtyRequest::default()).await.unwrap_err();
         assert!(hoprs_ssh::is_channel_limit(&e), "{e:?}");
-        drop((first, second, streams));
+        assert_eq!(session.open_channels(), 9);
+        drop((first, streams));
         session.disconnect().await;
 
         // Terminals first: a stream that cannot get its own channel shares one.
@@ -857,10 +859,17 @@ mod tests {
             .unwrap();
         let a = fs.stream_channel().await.unwrap();
         let mut shells = Vec::new();
-        while session.open_channels() < session.max_channels() {
-            shells.push(session.open_shell(PtyRequest::default()).await.unwrap());
-        }
-        assert_eq!(shells.len(), 8);
+        let refused = loop {
+            match session.open_shell(PtyRequest::default()).await {
+                Ok(shell) => shells.push(shell),
+                Err(e) => break e,
+            }
+        };
+        assert!(hoprs_ssh::is_channel_limit(&refused), "{refused:?}");
+        assert_eq!(shells.len(), 7, "PTYs stop one short of the limit");
+        // Something else takes the last slot: the budget is full.
+        let _last = session.open_channel().await.unwrap();
+        assert_eq!(session.open_channels(), session.max_channels());
         let b = fs.stream_channel().await.unwrap();
         assert!(
             Arc::ptr_eq(&a, &b),

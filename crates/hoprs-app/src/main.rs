@@ -125,7 +125,7 @@ fn view(state: &Hoprs) -> iced::Element<'_, Message> {
 
 /// The keyboard for the file panes and dialogs, the mouse button and dropped files
 /// (drags), the transfer engine's events, the prompt broker's dialogs, each connected
-/// session's state, and the window's close requests.
+/// session's state, each terminal's shell output, and the window's close requests.
 fn subscription(state: &Hoprs) -> iced::Subscription<Message> {
     let fixed = [
         iced::event::listen_with(ui::files::key_message),
@@ -151,7 +151,25 @@ fn subscription(state: &Hoprs) -> iced::Subscription<Message> {
             effects::session_feed(Arc::clone(&feed.1), feed.0)
         })
     });
-    iced::Subscription::batch(fixed.into_iter().chain(busy).chain(sessions))
+    // One output feed per open shell, keyed by tab and shell: it starts when the shell
+    // opens and stops when the tab closes or the shell is replaced.
+    let shells = state.app.terminal_feeds().into_iter().map(|(tab, shell)| {
+        iced::Subscription::run_with(ShellFeed(tab, shell, Arc::clone(&state.backend)), |feed| {
+            effects::shell_feed(feed.2.as_ref(), feed.0, feed.1)
+        })
+    });
+    iced::Subscription::batch(fixed.into_iter().chain(busy).chain(sessions).chain(shells))
+}
+
+/// A terminal tab's shell, as the identity of its output feed (the backend rides along).
+struct ShellFeed(app::TabId, backend::ShellId, Arc<dyn BackendApi>);
+
+impl std::hash::Hash for ShellFeed {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        "shell-feed".hash(state);
+        self.0.hash(state);
+        self.1.hash(state);
+    }
 }
 
 /// A session, as the identity of its state feed (the backend rides along).

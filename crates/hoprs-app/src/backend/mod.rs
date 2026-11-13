@@ -126,27 +126,21 @@ pub trait BackendApi: Send + Sync {
     /// stored state, so the next start reopens them paused), then closes every session.
     async fn shutdown(&self);
 
-    // Terminal shells: the terminal tab (Plan 6 Task 4) calls these; until then only the
-    // tests do.
+    // Terminal shells, for the terminal tabs.
     /// Opens a terminal (PTY + shell, `cols` x `rows`) on an SSH session; see
     /// [`shells`]. Not connected: `Network`, "Not connected". Past the connection's channel
     /// budget: `Protocol`, "Too many channels on this connection (limit N)". An FTP session
     /// has no terminal (`Protocol`).
-    #[cfg_attr(not(test), allow(dead_code))]
     async fn open_shell(&self, session: SessionId, cols: u16, rows: u16) -> Result<ShellId>;
     /// Sends keyboard input to the shell. Ended or unknown: `Network`, "Shell closed".
-    #[cfg_attr(not(test), allow(dead_code))]
     async fn shell_input(&self, shell: ShellId, data: Vec<u8>) -> Result<()>;
     /// The terminal is now `cols` x `rows`.
-    #[cfg_attr(not(test), allow(dead_code))]
     async fn shell_resize(&self, shell: ShellId, cols: u16, rows: u16) -> Result<()>;
     /// Closes the shell without waiting for the server (its output then yields `Closed`)
     /// and forgets it. Unknown ids are ignored.
-    #[cfg_attr(not(test), allow(dead_code))]
     fn close_shell(&self, shell: ShellId);
     /// The shell's output (`Data`..., maybe `Exit`, then `Closed`), handed out once, for
     /// the tab's subscription; `None` afterwards and for unknown shells.
-    #[cfg_attr(not(test), allow(dead_code))]
     fn shell_output(&self, shell: ShellId) -> Option<BoxStream<'static, ShellOutput>>;
 
     /// Lists `path` on the local disk, or on the remote side of `session` (an error
@@ -1254,6 +1248,7 @@ mod tests {
             Settings {
                 workers_per_site: 3,
                 default_policy: ConflictPolicy::Skip,
+                ..Settings::default()
             }
         );
         assert_eq!(backend.transfer_snapshot().await.workers, 3);
@@ -1312,6 +1307,7 @@ mod tests {
         let saved = Settings {
             workers_per_site: 9,
             default_policy: ConflictPolicy::Resume,
+            ..Settings::default()
         };
         backend.save_settings(saved).await.unwrap();
         assert_eq!(settings::load(&file).settings, saved);
