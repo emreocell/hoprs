@@ -410,11 +410,13 @@ impl TerminalModel {
     }
 
     /// Puts the terminal back in the modes a fresh shell expects, keeping the grid and
-    /// the history: for a new shell after the old one died mid-program. It ends any
-    /// sequence the old shell left unfinished (CAN, ST), leaves the alternate screen,
-    /// turns off application cursor and keypad keys, bracketed paste, mouse and focus
-    /// reporting, restores alternate scroll, autowrap and the visible cursor, resets the
-    /// scroll region (cursor kept), the character set and the colours.
+    /// the history: for a new shell after the old one died mid-program. Any sequence the
+    /// old shell left unfinished is discarded, never applied: vte dispatches a cut OSC on
+    /// every terminator (BEL, CAN, SUB, ESC), so the parser itself is replaced. Then it
+    /// leaves the alternate screen, turns off application cursor and keypad keys,
+    /// bracketed paste, mouse and focus reporting, restores alternate scroll, autowrap and
+    /// the visible cursor, resets the scroll region (cursor kept), the character set and
+    /// the colours.
     pub fn reset_modes(&mut self) {
         const RESET: &[u8] = concat!(
             "\x18\x1b\\",                                   // abort any sequence, end any string
@@ -431,6 +433,7 @@ impl TerminalModel {
             "\x1b[0m",                                      // default colours
         )
         .as_bytes();
+        self.parser = Processor::new();
         // Nothing here asks for a reply.
         let _ = self.feed(RESET);
     }
@@ -876,6 +879,26 @@ pub(crate) mod tests {
             .find(|c| c.ch == 'a' && row_text(&model, c.line) == "after")
             .unwrap();
         assert_eq!(after.fg, model.theme().fg, "default colours");
+    }
+
+    #[test]
+    fn reset_modes_discards_a_cut_osc() {
+        let mut model = TerminalModel::new(20, 5, 100);
+        let bg = model.theme().bg;
+        // OSC 11 (set the background) cut before its terminator.
+        assert!(model.feed(b"\x1b]11;rgb:ff/00/00").is_empty());
+        model.reset_modes();
+        // Neither the reset nor what follows completes it.
+        model.feed(b"x\x07\x1b\\");
+        let cell = model.cells().next().unwrap();
+        assert_eq!(cell.ch, 'x', "the text after the reset is text");
+        assert_eq!(cell.bg, bg, "the background did not change");
+        // And no colour query or title leaked out either.
+        assert!(model.feed(b"\x1b]4;1;rgb:00/ff/00").is_empty());
+        model.reset_modes();
+        model.feed(b"\x1b[31mr");
+        let red = model.cells().find(|c| c.ch == 'r').unwrap();
+        assert_eq!(red.fg, model.theme().ansi[1], "palette entry 1 untouched");
     }
 
     #[test]

@@ -252,8 +252,11 @@ pub async fn later(after: Duration, message: Message) -> Message {
 
 /// The longest a terminal frame lasts: output is delivered at most this often.
 pub const FRAME: Duration = Duration::from_millis(16);
-/// The most output one batch holds: what the model parses well within a frame.
-pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+/// The most output one batch holds. With [`MAX_IN_FLIGHT`] batches waiting at most,
+/// memory stays bounded and a shell can deliver up to about 125 MiB/s. Measured in
+/// release: feeding 2 MiB of `cat` output takes 23–32 ms (80- to 250-column text, with
+/// and without colours); 4 MiB took 46–54 ms, too close to a UI hitch.
+pub const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024;
 /// Batches of one shell that may wait for `update` at once. While they all wait, the feed
 /// pulls nothing more: the shell's pump holds the output, and past its own limit closes
 /// the shell and says so (`Overflowed`), instead of the app queueing without bound.
