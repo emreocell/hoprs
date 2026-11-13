@@ -11,15 +11,17 @@ Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI), open source (MIT OR Apa
 - Plan 2 (SSH + SFTP): `docs/superpowers/plans/2026-11-12-02-ssh-sftp.md`
 - Plan 3 (FTP + FTPS): `docs/superpowers/plans/2026-11-12-03-ftp-ftps.md`
 - Plan 4 (vault + FileZilla import): `docs/superpowers/plans/2026-11-12-04-vault-import.md`
+- Plan 5 (iced app shell): `docs/superpowers/plans/2026-11-12-05-app-shell.md`
+- Plan 5 visual/manual QA checklist: `docs/qa/plan-5-checklist.md`
 - Deferred follow-ups: `docs/superpowers/plans/2026-11-12-01-followups.md`
 
-## Current status (2026-11-12)
+## Current status (2026-11-13)
 
-- Plans 1 (hoprs-core, hoprs-remote, hoprs-transfer), 2 (hoprs-ssh, `SftpFs`, Docker OpenSSH test env) and 3 (FTP + FTPS: `FtpFs`, `FtpSession` pool/keepalive/reconnect, certificate pinning, protocol-neutral `Connection` + `spawn_site_watcher`, Docker vsftpd test env) merged to `main`.
-- Deferred follow-ups for later plans: `docs/superpowers/plans/2026-11-12-01-followups.md` (per plan: before Plan 5/6, perf, Windows, Later).
-- Plan 4 (hoprs-vault: profiles TOML, keyring secrets, encrypted export/import; hoprs-import: FileZilla `sitemanager.xml` parser and `apply`) implemented on branch `plan-4-vault-import`; every task reviewed, whole-branch review pending.
-- **Next step:** merge Plan 4, then write Plan 5 (iced app) from the real signatures (`Vault`, `SshSession`, `SftpFs`, `FtpFs`, `TransferEngine`, `spawn_site_watcher`).
-- Plans 5-6 are written only after the previous plan is done, using the real signatures it produced.
+- Plans 1 (hoprs-core, hoprs-remote, hoprs-transfer), 2 (hoprs-ssh, `SftpFs`, Docker OpenSSH test env), 3 (FTP + FTPS: `FtpFs`, `FtpSession` pool/keepalive/reconnect, certificate pinning, protocol-neutral `Connection` + `spawn_site_watcher`, Docker vsftpd test env) and 4 (hoprs-vault: profiles TOML, keyring secrets, encrypted export/import; hoprs-import: FileZilla `sitemanager.xml`) merged to `main`.
+- Plan 5 (hoprs-app: iced shell, sidebar, site/workspace forms, file panes with a virtual list, transfer queue, security dialogs, reconnect/status, tab persistence and shutdown, FileZilla import, settings and backup) implemented on branch `plan-5-app-shell`; every task reviewed, QA checklist executed (`docs/qa/plan-5-checklist.md`, some rows NEEDS HUMAN), final whole-branch review pending.
+- Deferred follow-ups for later plans: `docs/superpowers/plans/2026-11-12-01-followups.md` (per plan; Plan 5 section: correctness, UX, perf, Windows, later).
+- **Next step:** merge Plan 5, then write Plan 6 (terminal tab, remote editing, Ctrl+K palette, technical log, spec §9 benchmarks in CI) from the real signatures.
+- Plan 6 is written only after Plan 5 is done, using the real signatures it produced.
 - Docker integration tests: `docker compose -f docker/compose.yml up -d --build --wait`, then `cargo test --workspace --all-features -- --ignored --test-threads=1`.
 
 ## Decisions already made (do not re-litigate)
