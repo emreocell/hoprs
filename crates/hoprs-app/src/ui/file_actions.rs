@@ -18,8 +18,8 @@ use crate::ui::virtual_list::ROW_HEIGHT;
 
 /// The toolbar under the path bar: the actions, each with its key, and on the right the
 /// operation in flight.
-/// `compact` (a narrow pane, [`crate::ui::fit::compact_toolbar`]): no key hints, tighter
-/// padding, and while an operation runs only its progress (the actions are all dim then).
+/// `compact` (a narrow pane, [`crate::ui::fit::compact_toolbar`]): no key hints, and while
+/// an operation runs only its progress (the actions are all dim then).
 pub fn toolbar<'a>(
     tab: &'a Tab,
     conn: &SiteConn,
@@ -53,13 +53,8 @@ pub fn toolbar<'a>(
                     .color(p.rule_2),
             );
         }
-        let pad_x = if compact {
-            theme::SPACE_2XS
-        } else {
-            theme::SPACE_XS
-        };
         button(content.align_y(Alignment::Center))
-            .padding(Padding::from([theme::SPACE_3XS, pad_x]))
+            .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_2XS]))
             .style(theme::button_text)
             .on_press_maybe(enabled.then(|| msg(pane_msg)))
     };
@@ -127,11 +122,7 @@ pub fn toolbar<'a>(
     bar.spacing(theme::SPACE_3XS)
         .align_y(Alignment::Center)
         .height(ROW_HEIGHT)
-        .padding(Padding::ZERO.left(theme::SPACE_XS).right(if compact {
-            theme::SPACE_XS
-        } else {
-            theme::SPACE_MD
-        }))
+        .padding(Padding::ZERO.left(theme::SPACE_XS).right(theme::SPACE_XS))
         .into()
 }
 
@@ -159,13 +150,8 @@ fn edit_action<'a>(
         );
     }
     let refused = matches!(edit, Some(Err(_)));
-    let pad_x = if compact {
-        theme::SPACE_2XS
-    } else {
-        theme::SPACE_XS
-    };
     let button = button(content.align_y(Alignment::Center))
-        .padding(Padding::from([theme::SPACE_3XS, pad_x]))
+        .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_2XS]))
         .style(move |t, status| {
             theme::button_text(
                 t,

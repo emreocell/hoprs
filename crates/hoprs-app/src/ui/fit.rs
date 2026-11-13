@@ -13,10 +13,11 @@ pub const PERMISSIONS_WIDTH: f32 = 110.0;
 /// (Permissions first, then Modified).
 pub const NAME_MIN: f32 = 120.0;
 
-/// Below these pane widths the toolbar drops its key hints and tightens its padding
-/// (the full remote toolbar, with Edit, needs ~540 px; the local one ~385 px).
-const TOOLBAR_FULL_REMOTE: f32 = 545.0;
-const TOOLBAR_FULL_LOCAL: f32 = 390.0;
+/// Below these pane widths the toolbar drops its key hints (the remote toolbar, with
+/// Edit, needs ~490 px with them; the local one ~345 px). The buttons are flat text with
+/// 4 px sides, so the hints fit in both panes of the default 1280 px window.
+const TOOLBAR_FULL_REMOTE: f32 = 492.0;
+const TOOLBAR_FULL_LOCAL: f32 = 360.0;
 /// Below this center width the queue head uses short labels.
 const QUEUE_HEAD_FULL: f32 = 900.0;
 
@@ -164,9 +165,11 @@ mod tests {
 
     #[test]
     fn toolbars_and_queue_head_go_compact_when_narrow() {
-        // The remote toolbar has Edit too (Plan 6 Task 8): full from a 1346 px window.
-        assert!(compact_toolbar(pane_width(1280.0), Side::Remote));
-        assert!(!compact_toolbar(pane_width(1346.0), Side::Remote));
+        // The remote toolbar has Edit too (Plan 6 Task 8); both keep their key hints at
+        // the default 1280 px window (Plan 6 Task 11), the remote one down to ~1240 px.
+        assert!(!compact_toolbar(pane_width(1280.0), Side::Remote));
+        assert!(!compact_toolbar(pane_width(1240.0), Side::Remote));
+        assert!(compact_toolbar(pane_width(1200.0), Side::Remote));
         assert!(!compact_toolbar(pane_width(1280.0), Side::Local));
         assert!(compact_toolbar(pane_width(960.0), Side::Remote));
         assert!(compact_toolbar(pane_width(960.0), Side::Local));
