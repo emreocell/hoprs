@@ -663,15 +663,15 @@ pub fn session_feed(
     })
 }
 
-/// Closes a session, then ends its remote edits: all sent, their files go; unsent ones
-/// (a close that did not ask, e.g. the site was deleted) are kept as recovered copies,
-/// nothing deleted. Returns the copies kept and their root (none: no message).
+/// Ends a session's remote edits, then closes it: all sent, their files go (an upload
+/// under way is waited for, never cut by the close); unsent ones (a close that did not
+/// ask, e.g. the site was deleted) are kept as recovered copies, nothing deleted. Returns
+/// the copies kept and their root (none: no message).
 pub async fn close_session(
     backend: Arc<dyn BackendApi>,
     session: SessionId,
 ) -> Option<(Vec<KeptEdit>, PathBuf)> {
-    backend.close(session).await;
-    match backend.finish_edits(session, false).await {
+    let kept = match backend.finish_edits(session, false).await {
         Ok(unsent) if unsent.is_empty() => None,
         Ok(_) => match backend.keep_edits(session).await {
             Ok(kept) => Some((kept, backend.recovered_dir())),
@@ -684,7 +684,9 @@ pub async fn close_session(
             tracing::warn!(session = session.0, %error, "cannot end the remote edits; their files stay");
             None
         }
-    }
+    };
+    backend.close(session).await;
+    kept
 }
 
 /// How long a forced exit waits for the unsent edits to be kept.

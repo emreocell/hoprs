@@ -823,6 +823,12 @@ async fn close_session_keeps_unsent_edits_and_says_where() {
     assert_eq!(std::fs::read(&kept[0].recovered).unwrap(), b"unsent");
     assert_eq!(std::fs::read(&local).unwrap(), b"unsent", "nothing deleted");
     assert_eq!(files_under(&kept_in), vec![kept[0].recovered.clone()]);
+    // Final review: the edits are settled (an upload under way finishes, the rest is
+    // kept) before the session closes, never cut by the close.
+    assert_eq!(
+        fake.calls(),
+        vec![Call::KeepEdits(session), Call::Close(session)]
+    );
 
     app.update(edit(EditMsg::Kept {
         kept: kept.clone(),
