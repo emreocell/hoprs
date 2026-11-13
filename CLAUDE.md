@@ -19,10 +19,11 @@ Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI), open source (MIT OR Apa
 
 ## Current status (2026-11-13)
 
-- Plans 1–5 merged to `main`: core + transfer engine, SSH/SFTP, FTP/FTPS, vault + FileZilla import, the iced app.
-- Plan 6 (terminal tabs over the site's SSH connection, remote editing with re-upload on save, Ctrl+K palette, technical log panel, idle-drop fixes, perf job) implemented on branch `plan-6-terminal-polish`; QA checklist run (`docs/qa/plan-6-checklist.md`, NEEDS HUMAN rows wait for the author).
-- Deferred follow-ups: `docs/superpowers/plans/2026-11-12-01-followups.md` (a "Plan 6" section lists what was left out, grouped).
-- **Next step:** merge Plan 6, then check the first `perf.yml` run on `main` (its `push: main` trigger starts it after the merge; `workflow_dispatch` cannot run a workflow that is not on the default branch yet, so it never ran on the branch), then prepare the v1 release: packaging, icon, `.desktop` file, version.
+- Plans 1–6 merged to `main` (v1 feature-complete): core + transfer engine, SSH/SFTP, FTP/FTPS, vault + FileZilla import, the iced app, and Plan 6 (terminal tabs over the site's SSH connection, remote editing with re-upload on save, Ctrl+K palette, technical log panel, idle-drop fixes, perf job).
+- `perf.yml` first ran green on `main` (2026-11-13): startup 84 ms, idle 33 MB, 100k rows p95 0.58 ms, SFTP 1 GiB 0.99x `scp`; small files are known gaps (FTP 1.003x, SFTP 2.0x `lftp`). Numbers and method: `docs/perf/README.md`.
+- QA checklists `docs/qa/plan-5-checklist.md` and `docs/qa/plan-6-checklist.md` still have NEEDS HUMAN rows for the author (real input devices, a GUI editor, a 10-minute idle on the author's FTP server).
+- Deferred follow-ups: `docs/superpowers/plans/2026-11-12-01-followups.md` (per plan; Plan 6 section first item: two queued items can write the same destination at once).
+- **Next step:** prepare the v1 release (packaging, icon, `.desktop` file, version), and work the follow-ups starting with the same-destination race.
 - Docker integration tests: `docker compose -f docker/compose.yml up -d --build --wait`, then `cargo test --workspace --all-features -- --ignored --test-threads=1`.
 
 ## Decisions already made (do not re-litigate)
