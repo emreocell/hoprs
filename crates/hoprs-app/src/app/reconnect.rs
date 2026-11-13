@@ -13,6 +13,11 @@
 //! - a transfer is queued at once: the engine holds it until the site is back;
 //! - a terminal waits without a shell and opens one when the session is back.
 //!
+//! The same holding applies while the transport is reconnecting by itself (`Reconnecting`
+//! on a site that connected before: its own round after a drop, or the session manager's
+//! quiet extra round), without a reconnect of the app's own: the actions run when it is
+//! back. If that round gives up instead, the held actions get the app's reconnection.
+//!
 //! A reconnection that fails fails the held actions with its reason; they are never
 //! replayed later. A session refused for good (host key, authentication, TLS) never
 //! reconnects this way: its actions fail as before, and its banner keeps the reason and
@@ -48,10 +53,13 @@ impl SiteConn {
             )
     }
 
-    /// An action on the site waits for a reconnection (running, or to be started).
+    /// An action on the site waits for a reconnection (running, by the app or the
+    /// transport, or to be started).
     pub(crate) fn awaits_reconnection(&self) -> bool {
         matches!(&self.state, TabState::Connected(_))
-            && (self.reconnecting || self.lost_to_network())
+            && (self.reconnecting
+                || self.lost_to_network()
+                || matches!(self.conn, Some(ConnectionState::Reconnecting { .. })))
     }
 }
 
@@ -76,6 +84,23 @@ impl App {
         }
         let mut out = Vec::with_capacity(effects.len());
         for effect in effects {
+            if let Effect::Enqueue(specs) = &effect {
+                // Queued at once (the engine keeps an item until its site is back); each
+                // lost site it names reconnects.
+                let mut sites: Vec<SiteId> = Vec::new();
+                for spec in specs {
+                    if !sites.contains(&spec.site) {
+                        sites.push(spec.site.clone());
+                    }
+                }
+                for site in sites {
+                    if self.conn(&site).awaits_reconnection() {
+                        out.extend(self.reconnect_on_demand(&site));
+                    }
+                }
+                out.push(effect);
+                continue;
+            }
             let site = match &effect {
                 Effect::List {
                     session: Some(session),
@@ -85,7 +110,6 @@ impl App {
                     session: Some(session),
                     ..
                 } => self.site_of_session(*session),
-                Effect::Enqueue(specs) => specs.first().map(|spec| spec.site.clone()),
                 _ => None,
             };
             let Some(site) = site.filter(|site| self.conn(site).awaits_reconnection()) else {
@@ -93,11 +117,7 @@ impl App {
                 continue;
             };
             out.extend(self.reconnect_on_demand(&site));
-            match effect {
-                // The engine keeps it queued until the site is back.
-                Effect::Enqueue(_) => out.push(effect),
-                held => self.hold(site, held),
-            }
+            self.hold(site, effect);
         }
         out
     }
@@ -113,31 +133,69 @@ impl App {
         held.push(effect);
     }
 
-    /// The site is connected again: its held actions run, once. A listing the pane no
-    /// longer waits for is dropped.
+    /// The site is connected again: its held actions run, once. A listing or a file
+    /// operation its pane no longer waits for (the tab closed, another folder) is dropped.
     pub(super) fn release_held(&mut self, site: &SiteId) -> Vec<Effect> {
         let held = self.held.remove(site).unwrap_or_default();
         let mut effects = Vec::new();
         for effect in held {
-            if let Effect::List {
-                tab,
-                side,
-                request_id,
-                ..
-            } = &effect
-            {
-                let current = self
-                    .tab_index(*tab)
+            let pane_of = |tab: &super::TabId, side: &crate::backend::Side| {
+                self.tab_index(*tab)
                     .and_then(|index| self.tabs[index].pane(*side))
-                    .is_some_and(|pane| pane.request == Some(*request_id));
-                if !current {
-                    continue;
+            };
+            match &effect {
+                Effect::List {
+                    tab,
+                    side,
+                    request_id,
+                    ..
+                } => {
+                    if !pane_of(tab, side).is_some_and(|pane| pane.request == Some(*request_id)) {
+                        continue;
+                    }
+                    self.replayed.insert(*request_id);
                 }
-                self.replayed.insert(*request_id);
+                Effect::FileOp { tab, side, op, .. } => {
+                    let waiting = pane_of(tab, side)
+                        .and_then(|pane| pane.busy.as_ref())
+                        .is_some_and(|busy| busy.op == *op);
+                    if !waiting {
+                        continue;
+                    }
+                }
+                _ => {}
             }
             effects.push(effect);
         }
+        self.forget_stale_replays();
         effects
+    }
+
+    /// Keeps only the replayed listings a pane still waits for (the others are done or
+    /// superseded), so the set never grows.
+    pub(super) fn forget_stale_replays(&mut self) {
+        let waiting: Vec<super::files::RequestId> = self
+            .tabs
+            .iter()
+            .flat_map(|tab| {
+                [
+                    tab.pane(crate::backend::Side::Local),
+                    tab.pane(crate::backend::Side::Remote),
+                ]
+            })
+            .flatten()
+            .filter_map(|pane| pane.request)
+            .collect();
+        self.replayed.retain(|request| waiting.contains(request));
+    }
+
+    /// The transport gave up while actions waited for its own round and the app has not
+    /// reconnected yet: they get the app's reconnection instead (see the module docs).
+    pub(super) fn reconnect_for_held(&mut self, site: &SiteId) -> Option<Effect> {
+        if self.held.get(site).is_none_or(Vec::is_empty) {
+            return None;
+        }
+        self.reconnect_on_demand(site)
     }
 
     /// The reconnection failed (or the session was refused): the held actions fail with

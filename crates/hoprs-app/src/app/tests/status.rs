@@ -1027,3 +1027,62 @@ async fn host_key_or_auth_failure_does_not_auto_reconnect() {
         );
     }
 }
+
+/// Task 5 fix round 1: while the transport reconnects by itself (its own round after a
+/// drop, or the session manager's quiet extra round), an action waits instead of failing
+/// "Not connected", and runs once when the session is back, with no reconnect of the
+/// app's own. If that round gives up, the app reconnects for the waiting action.
+#[tokio::test]
+async fn action_during_transport_reconnect_waits_and_runs_once() {
+    let a = site("a", "a.example", "u", Protocol::Ftp);
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    let mut app = loaded(&fake).await;
+    let sites = connect_effect(app.update(Message::ConnectSite(a.id.clone())));
+    drive(&mut app, &fake, sites).await;
+    let session = session_of(&app, &a.id);
+    let tab = app.tabs[0].id;
+
+    state(
+        &mut app,
+        session,
+        ConnectionState::Reconnecting { attempt: 1 },
+    );
+    let effects = navigate(&mut app, tab, "/srv");
+    assert!(reconnects(&effects).is_empty(), "{effects:?}");
+    assert!(remote_lists(&effects, tab).is_empty(), "{effects:?}");
+    assert!(!app.tab_conn(0).reconnecting);
+    assert_eq!(app.tabs[0].remote().listing, Listing::Loading);
+    let effects = state(
+        &mut app,
+        session,
+        ConnectionState::Reconnecting { attempt: 2 },
+    );
+    assert!(remote_lists(&effects, tab).is_empty(), "{effects:?}");
+    let effects = state(&mut app, session, ConnectionState::Connected);
+    assert_eq!(remote_lists(&effects, tab), vec![path("/srv")]);
+    assert!(reconnects(&effects).is_empty());
+    assert!(app.held.is_empty());
+
+    // The round gives up while an action waits: the app reconnects for it, then the
+    // action runs once.
+    state(
+        &mut app,
+        session,
+        ConnectionState::Reconnecting { attempt: 1 },
+    );
+    navigate(&mut app, tab, "/tmp");
+    let lost = Error::new(ErrorKind::Network, "Connection timed out");
+    let effects = state(&mut app, session, ConnectionState::Disconnected(lost));
+    assert_eq!(reconnects(&effects), vec![session], "{effects:?}");
+    assert!(remote_lists(&effects, tab).is_empty(), "{effects:?}");
+    let effects = app.update(Message::Reconnected {
+        session,
+        result: Ok(()),
+    });
+    assert_eq!(remote_lists(&effects, tab), vec![path("/tmp")]);
+    assert!(
+        app.replayed.is_empty(),
+        "no stale replay ids: {:?}",
+        app.replayed
+    );
+}

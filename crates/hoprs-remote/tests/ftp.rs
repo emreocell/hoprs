@@ -1363,6 +1363,21 @@ async fn ftp_survives_server_idle_timeout() {
     fast.disconnect().await;
 }
 
+/// Two commands at once after the server closed the idle control connection (`ftp-idle`,
+/// 20 s): the first one's idle check finds it gone and reconnects; the second, queued behind
+/// it, waits for that reconnection instead of failing "Not connected". Both succeed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
+async fn concurrent_commands_after_idle_drop_both_succeed() {
+    let (s, _p) = session_with(ftp_idle_config()).await;
+    tokio::time::sleep(Duration::from_secs(25)).await;
+    let (a, b) = tokio::join!(session_quote(&s, "PWD"), session_quote(&s, "PWD"));
+    assert_eq!(a.expect("first command").0, 257);
+    assert_eq!(b.expect("second command").0, 257);
+    assert_eq!(s.generation(), 2, "one reconnection");
+    s.disconnect().await;
+}
+
 /// `disconnect` does not wait for a keepalive `NOOP` the server never answers, and closes
 /// the control connection.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

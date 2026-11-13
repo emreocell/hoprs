@@ -167,9 +167,12 @@ impl App {
         if down {
             self.site_connection_down(&site);
         }
-        // Refused for good: the actions waiting for a reconnection fail now.
+        // Refused for good: the actions waiting for a reconnection fail now. Given up for a
+        // network reason while they waited for the transport's own round: the app
+        // reconnects for them.
         let mut effects = match &refused {
             Some(error) => self.fail_held(&site, error),
+            None if lost => self.reconnect_for_held(&site).into_iter().collect(),
             None => Vec::new(),
         };
         if !back {
@@ -256,6 +259,7 @@ impl App {
                 if back {
                     effects.extend(self.open_site_shells(&site, true));
                 }
+                self.forget_stale_replays();
             }
             Err(error) => {
                 self.note_failed_endpoint(&site);

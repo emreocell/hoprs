@@ -25,14 +25,16 @@
 //!
 //! **Connection log and idle drops (Plan 6, Task 5).** Each session has a monitor task, the
 //! one place that logs its connection: every state change at `info` (site name, protocol,
-//! `host:port`, the new state, the reason as `ErrorKind` and message, and how long the
-//! session had been idle), an unanswered keepalive at `warn`. The transports log nothing.
-//! "Idle" counts from the last remote filesystem call (listings, file operations,
-//! transfers) or shell input. When the transport gives up reconnecting (its attempts spent
-//! while nobody used the site, say), the monitor starts **one** more round by itself, quietly
-//! (a network failure only, never host key, authentication or TLS, and only for a session
-//! that was connected before); the next such drop waits for the user (the app reconnects on
-//! their next action). The budget comes back once the session is connected again.
+//! `host:port`, the new state, the reason as `ErrorKind` and message, and
+//! `since_last_request_secs`), an unanswered keepalive at `warn`. The transports log
+//! nothing. `since_last_request_secs` counts from the start of the last remote filesystem
+//! call (listing, file operation, the opening of a transfer's stream) or shell input: a long
+//! transfer still running counts from its start. When the transport gives up reconnecting
+//! (a whole round of attempts failed, while nobody used the site, say), the monitor starts
+//! **one** more round by itself, quietly (a network failure only, never host key,
+//! authentication or TLS, never after `close`, and only for a session that was connected
+//! before); the next such drop waits for the user (the app reconnects on their next action).
+//! The budget comes back once the session is connected again.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -149,21 +151,37 @@ struct SessionLabel {
     attempts: u32,
 }
 
-/// When a session was last used (remote filesystem calls, shell input).
+/// When a session was last asked something (remote filesystem calls, shell input), and
+/// whether `close` closed it.
 #[derive(Debug)]
-struct Activity(Mutex<Instant>);
+struct Activity {
+    last_request: Mutex<Instant>,
+    closed: std::sync::atomic::AtomicBool,
+}
 
 impl Activity {
     fn new() -> Self {
-        Self(Mutex::new(Instant::now()))
+        Self {
+            last_request: Mutex::new(Instant::now()),
+            closed: std::sync::atomic::AtomicBool::new(false),
+        }
     }
 
     fn touch(&self) {
-        *lock(&self.0) = Instant::now();
+        *lock(&self.last_request) = Instant::now();
     }
 
-    fn idle(&self) -> Duration {
-        lock(&self.0).elapsed()
+    fn since_last_request(&self) -> Duration {
+        lock(&self.last_request).elapsed()
+    }
+
+    /// `close` is closing the session: its end is the user's, not the network's.
+    fn mark_closed(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
     }
 }
 
@@ -655,7 +673,9 @@ impl SessionManager {
         if let Some(watcher) = &entry.watcher {
             watcher.abort();
         }
-        // Closed by the user: nothing to log or reconnect any more.
+        // Closed by the user: nothing to log or reconnect any more (the flag covers a
+        // monitor that is running right now, the abort the rest).
+        entry.activity.mark_closed();
         if let Some(monitor) = &entry.monitor {
             monitor.abort();
         }
@@ -929,14 +949,22 @@ impl RemoteFs for ActiveFs {
 
 /// Starts the session's monitor (see the module docs): it logs every state change and
 /// starts one more reconnection round, quietly, when the transport gives up on a session
-/// that was connected (a network failure only). It ends with the connection's state
-/// channel, or when `close` aborts it.
+/// that was connected (a network failure only).
+///
+/// It holds a clone of the session's link, which keeps the connection (and so its state
+/// channel) alive: it does not end by itself. `close` aborts it (and `close_all` closes
+/// every session when the window closes).
 fn spawn_monitor(label: SessionLabel, link: Link, activity: Arc<Activity>) -> JoinHandle<()> {
     let mut state = link.state();
     let conn = link.connection();
     tokio::spawn(async move {
         let mut current = state.borrow_and_update().clone();
-        log_transition(&label, &current, conn.last_error(), activity.idle());
+        log_transition(
+            &label,
+            &current,
+            conn.last_error(),
+            activity.since_last_request(),
+        );
         // One quiet round per connection: spent by a retry, back once connected.
         let mut retry_left = true;
         while state.changed().await.is_ok() {
@@ -944,20 +972,28 @@ fn spawn_monitor(label: SessionLabel, link: Link, activity: Arc<Activity>) -> Jo
             if next == current {
                 continue;
             }
-            current = next;
-            log_transition(&label, &current, conn.last_error(), activity.idle());
+            let previous = std::mem::replace(&mut current, next);
+            let since = activity.since_last_request();
+            log_transition(&label, &current, conn.last_error(), since);
             match &current {
                 ConnectionState::Connected => retry_left = true,
                 ConnectionState::Disconnected(error)
-                    if retry_left && conn.generation() > 0 && gave_up_on_network(error) =>
+                    if retry_left
+                        && conn.generation() > 0
+                        && gave_up_on_network(&previous, error, &activity) =>
                 {
                     retry_left = false;
                     tracing::info!(
                         site = ?label.name,
                         protocol = %protocol_name(label.protocol),
                         endpoint = %label.endpoint,
-                        "connection given up while idle; reconnecting once"
+                        since_last_request_secs = since.as_secs(),
+                        "reconnection given up; trying one more round"
                     );
+                    // Without the site's lock: `reconnect_now` only starts a round when the
+                    // session is `Disconnected` and is ignored while one runs, so racing
+                    // `SessionManager::reconnect` (which holds the lock for its own wait)
+                    // starts at most one round; neither waits on the other.
                     link.reconnect_now().await;
                 }
                 _ => {}
@@ -966,11 +1002,13 @@ fn spawn_monitor(label: SessionLabel, link: Link, activity: Arc<Activity>) -> Jo
     })
 }
 
-/// Whether a session that ended `Disconnected` with `error` was given up on by its
-/// transport for a network failure (worth one more round), not refused (host key,
-/// authentication, TLS) nor closed by the user.
-fn gave_up_on_network(error: &Error) -> bool {
-    error.kind == ErrorKind::Network && error.message != "Disconnected by user"
+/// Whether the transport gave up on the session for a network failure, worth one more
+/// round: it was reconnecting (a whole round failed), the error is a network one (not a
+/// host key, authentication or TLS refusal), and `close` is not closing it.
+fn gave_up_on_network(previous: &ConnectionState, error: &Error, activity: &Activity) -> bool {
+    matches!(previous, ConnectionState::Reconnecting { .. })
+        && error.kind == ErrorKind::Network
+        && !activity.is_closed()
 }
 
 /// The protocol as the connection log names it.
@@ -997,7 +1035,7 @@ fn log_transition(
     label: &SessionLabel,
     state: &ConnectionState,
     last_error: Option<Error>,
-    idle: Duration,
+    since_last_request: Duration,
 ) {
     let (name, reason) = match state {
         ConnectionState::Connecting => ("connecting".to_owned(), None),
@@ -1009,7 +1047,7 @@ fn log_transition(
         ConnectionState::WaitingForUser => ("waiting for the user".to_owned(), None),
         ConnectionState::Disconnected(error) => ("disconnected".to_owned(), Some(error.clone())),
     };
-    let idle_secs = idle.as_secs();
+    let since_last_request_secs = since_last_request.as_secs();
     if matches!(state, ConnectionState::Reconnecting { attempt: 1 })
         && let Some(error) = &reason
         && error.detail.as_deref() == Some(hoprs_core::KEEPALIVE_UNANSWERED)
@@ -1018,7 +1056,7 @@ fn log_transition(
             site = ?label.name,
             protocol = %protocol_name(label.protocol),
             endpoint = %label.endpoint,
-            idle_secs,
+            since_last_request_secs,
             "keepalive not answered"
         );
     }
@@ -1029,7 +1067,7 @@ fn log_transition(
         endpoint = %label.endpoint,
         state = ?name,
         reason = ?reason,
-        idle_secs,
+        since_last_request_secs,
         "connection state changed"
     );
 }
@@ -1356,10 +1394,17 @@ mod tests {
             "endpoint=ftp.shop.example:2121",
             "state=\"reconnecting 1/5\"",
             "reason=\"network: Connection lost (no reply to the keepalive)\"",
-            "idle_secs=1",
         ] {
             assert!(dropped.contains(expected), "{expected:?} in {dropped}");
         }
+        // About a second since the listing (a slow machine may round up).
+        let since: u64 = dropped
+            .split("since_last_request_secs=")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("no since_last_request_secs in {dropped}"));
+        assert!((1..=3).contains(&since), "{dropped}");
         let warned = text
             .lines()
             .find(|l| l.contains("WARN"))

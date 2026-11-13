@@ -1356,8 +1356,9 @@ async fn reconnect_resets_the_dead_shells_modes() {
     assert_eq!(inputs(&effects), [b"\x1b[A".to_vec()]);
 }
 
-/// "Restart shell" never clicks into nothing: without a live session it is dim, with a
-/// hint, and does nothing.
+/// "Restart shell" while the transport reconnects by itself (Task 5 fix round 1): the
+/// click is taken, nothing is sent yet (no reconnect of the app's own, no shell on a dead
+/// session), and the shell opens once the session is back.
 #[tokio::test]
 async fn restart_waits_for_the_connection() {
     let s = ssh_site("term", OpenAs::Terminal);
@@ -1375,7 +1376,7 @@ async fn restart_waits_for_the_connection() {
         event: ShellSignal::Closed,
     });
     assert!(app.can_restart_terminal(0));
-    // Then the connection drops: the button waits for it.
+    // Then the connection drops: the transport reconnects.
     let lost = Error::new(hoprs_core::ErrorKind::Network, "Connection reset");
     fake.drop_connection(session, lost.clone());
     app.update(Message::SessionState {
@@ -1383,7 +1384,7 @@ async fn restart_waits_for_the_connection() {
         state: ConnectionState::Reconnecting { attempt: 1 },
         auth: None,
     });
-    assert!(!app.can_restart_terminal(0));
+    assert!(app.can_restart_terminal(0));
     assert!(
         app.update(Message::Terminal {
             tab,
@@ -1391,7 +1392,17 @@ async fn restart_waits_for_the_connection() {
         })
         .is_empty()
     );
-    assert_eq!(term(&app, 0).end_banner().unwrap().action, "Restart shell");
+    assert_eq!(term(&app, 0).shell, ShellState::Idle, "waits for its shell");
+    let effects = app.update(Message::SessionState {
+        session,
+        state: ConnectionState::Connected,
+        auth: None,
+    });
+    let opens = effects
+        .iter()
+        .filter(|e| matches!(e, Effect::OpenShell { .. }))
+        .count();
+    assert_eq!(opens, 1, "{effects:?}");
 }
 
 /// The remote title is capped; input waiting behind a slow write is capped too, and the

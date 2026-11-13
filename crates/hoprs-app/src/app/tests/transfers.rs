@@ -1353,3 +1353,53 @@ async fn transfer_on_dropped_session_reconnects() {
     );
     assert!(app.tab_conn(0).reconnecting);
 }
+
+/// Task 5 fix round 1: a file operation held for a reconnection is dropped if its tab
+/// closed meanwhile (never run behind the user's back).
+#[tokio::test]
+async fn held_file_op_of_a_closed_tab_is_dropped() {
+    // An SSH site with a terminal and a files tab: the terminal keeps the site's
+    // connection when the files tab closes.
+    let mut a = site("a", "h", "u", Protocol::Ssh);
+    a.ssh.open_as = hoprs_core::OpenAs::Both;
+    a.remote_dir = Some("/srv".into());
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    fake.remote_fs(&a.id).add_dir("/srv/sub");
+    fake.local_fs().add_dir("/home/me/dir");
+    let mut app = connected_tab(&fake, &a).await;
+    let index = app.tabs.iter().position(|t| t.is_files()).unwrap();
+    assert_eq!(app.tabs.len(), 2);
+    let tab = app.tabs[index].id;
+    assert!(app.can_act(index, Side::Remote));
+    let session = app.tab_conn(index).session().unwrap();
+    let lost = Error::new(ErrorKind::Network, "Connection lost");
+    fake.drop_connection(session, lost.clone());
+    app.update(Message::SessionState {
+        session,
+        state: hoprs_core::ConnectionState::Disconnected(lost),
+        auth: None,
+    });
+    app.update(pane_msg(tab, Side::Remote, PaneMsg::NewFolder));
+    let effects = app.update(pane_msg(tab, Side::Remote, PaneMsg::EditCommit));
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Reconnect { session: s } if *s == session)),
+        "{effects:?}"
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::FileOp { .. })),
+        "held: {effects:?}"
+    );
+
+    app.update(Message::CloseTab(tab));
+    assert_eq!(app.tabs.len(), 1, "the terminal stays");
+    let effects = app.update(Message::Reconnected {
+        session,
+        result: Ok(()),
+    });
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::FileOp { .. })),
+        "{effects:?}"
+    );
+}
