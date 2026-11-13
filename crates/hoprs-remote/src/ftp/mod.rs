@@ -383,9 +383,11 @@ impl FtpFs {
         let stat = format!("STAT {path}");
         let mdtm = format!("MDTM {path}");
         let (context, name) = (path.to_string(), name.to_owned());
+        // Beside the control connection when a transfer connection is free (the engine's
+        // per-file `stat`s, 4 workers at once).
         let probe = self
             .session
-            .with_control(move |c| {
+            .with_any(move |c| {
                 Box::pin(async move {
                     let (code, text) = session::quote(&mut c.stream, &size, &context).await?;
                     if matches!(code, 500 | 502) {
@@ -888,9 +890,11 @@ impl RemoteFs for FtpFs {
         let command = format_timeval(mtime).map(|stamp| format!("MFMT {stamp} {path}"));
         arg(path)?;
         let context = path.to_string();
+        // Beside the control connection when a transfer connection is free (the engine sets
+        // each file's time after its upload).
         let reply = self
             .session
-            .with_control(move |c| {
+            .with_any(move |c| {
                 Box::pin(async move {
                     if !c.has_mfmt {
                         return Ok(None);

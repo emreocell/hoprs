@@ -314,6 +314,12 @@ const MAX_TRANSFER_CONNECTIONS: usize = 8;
 /// 1 s), about 31 s, before it runs or fails.
 const IDLE_CHECK: Duration = Duration::from_secs(15);
 
+/// A transfer connection back in the pool for less than this is reused without a `NOOP`
+/// first: no server's idle timeout is that short, and a round trip per file is what many
+/// small files cost most (spec §9). A connection that died anyway fails its transfer with
+/// `Network`, which the engine retries.
+const POOL_FRESH: Duration = Duration::from_secs(2);
+
 /// The control connection of `generation` was lost with `error`; `immediate` reconnects
 /// without the first delay (a command is waiting).
 type Lost = (u64, Error, bool);
@@ -366,8 +372,8 @@ struct Shared {
     last_error: StdMutex<Option<Error>>,
     generation: AtomicU64,
     state: watch::Sender<ConnectionState>,
-    /// Idle transfer connections, tagged with their generation.
-    idle: StdMutex<Vec<(FtpStream, u64)>>,
+    /// Idle transfer connections, tagged with their generation and when they came back.
+    idle: StdMutex<Vec<(Control, u64, Instant)>>,
     /// One permit per checked-out transfer connection.
     permits: Arc<Semaphore>,
     /// `transfer_connections`: the number of permits.
@@ -519,10 +525,11 @@ impl Shared {
     }
 
     /// An idle transfer connection of `generation`; older ones are dropped (closed).
-    fn take_idle(&self, generation: u64) -> Option<FtpStream> {
+    /// An idle transfer connection of `generation`, and when it came back to the pool.
+    fn take_idle(&self, generation: u64) -> Option<(Control, Instant)> {
         let mut idle = self.idle.lock().unwrap_or_else(PoisonError::into_inner);
-        idle.retain(|(_, g)| *g == generation);
-        idle.pop().map(|(stream, _)| stream)
+        idle.retain(|(_, g, _)| *g == generation);
+        idle.pop().map(|(control, _, at)| (control, at))
     }
 
     fn clear_idle(&self) {
@@ -914,8 +921,8 @@ impl FtpSession {
         shared
             .peak_checked_out
             .fetch_max(checked_out, Ordering::Relaxed);
-        let pooled = |stream, generation| PooledConn {
-            stream: Some(stream),
+        let pooled = |control, generation| PooledConn {
+            control: Some(control),
             generation,
             clean: false,
             shared: Arc::downgrade(shared),
@@ -923,17 +930,78 @@ impl FtpSession {
         };
 
         let generation = shared.generation();
-        while let Some(mut stream) = shared.take_idle(generation) {
+        while let Some((mut control, returned)) = shared.take_idle(generation) {
+            if returned.elapsed() < POOL_FRESH {
+                return Ok(pooled(control, generation));
+            }
             // The server may have closed it while idle (idle timeout).
-            if let Ok(Ok(())) = tokio::time::timeout(shared.reply_timeout, stream.noop()).await {
-                return Ok(pooled(stream, generation));
+            if let Ok(Ok(())) =
+                tokio::time::timeout(shared.reply_timeout, control.stream.noop()).await
+            {
+                return Ok(pooled(control, generation));
             }
         }
         let control = shared.open().await?;
         if shared.generation() != generation || !shared.is_connected() {
             return Err(not_connected());
         }
-        Ok(pooled(control.stream, generation))
+        Ok(pooled(control, generation))
+    }
+
+    /// An idle transfer connection that came back to the pool less than [`POOL_FRESH`] ago,
+    /// if one is waiting and the pool has room. Never waits, never opens a connection, never
+    /// sends a `NOOP`.
+    fn try_fresh(&self) -> Option<PooledConn> {
+        let shared = &self.inner.shared;
+        if !shared.is_connected() {
+            return None;
+        }
+        let permit = shared.permits.clone().try_acquire_owned().ok()?;
+        let generation = shared.generation();
+        let (control, returned) = shared.take_idle(generation)?;
+        if returned.elapsed() >= POOL_FRESH {
+            shared
+                .idle
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push((control, generation, returned));
+            return None;
+        }
+        let checked_out = shared.transfer_connections - shared.permits.available_permits();
+        shared
+            .peak_checked_out
+            .fetch_max(checked_out, Ordering::Relaxed);
+        Some(PooledConn {
+            control: Some(control),
+            generation,
+            clean: false,
+            shared: Arc::downgrade(shared),
+            _permit: permit,
+        })
+    }
+
+    /// Runs a short command sequence `f` (no data connection) on a transfer connection that
+    /// is idle and fresh ([`POOL_FRESH`]), so that the workers' per-file metadata does not
+    /// queue on the control connection; on the control connection ([`with_control`]
+    /// (Self::with_control)) when there is none. On a transfer connection `f` is bounded by
+    /// [`FtpConfig::command_timeout`]; afterwards the connection goes back to the pool, unless
+    /// `f` lost it (reported, as a transfer's loss is, and closed) or timed out (closed).
+    pub(crate) async fn with_any<T, F>(&self, f: F) -> Result<T>
+    where
+        F: for<'c> FnOnce(&'c mut Control) -> BoxFuture<'c, Result<T>>,
+    {
+        let Some(mut conn) = self.try_fresh() else {
+            return self.with_control(f).await;
+        };
+        let Ok(result) = tokio::time::timeout(self.command_timeout(), f(conn.control())).await
+        else {
+            return Err(Error::new(ErrorKind::Network, "Command timed out"));
+        };
+        match &result {
+            Err(e) if is_control_loss(e) || e.kind == ErrorKind::Tls => conn.report(e),
+            _ => conn.mark_clean(),
+        }
+        result
     }
 
     /// The most transfer connections checked out at once so far.
@@ -1007,7 +1075,7 @@ impl Drop for InFlight<'_> {
 /// freed either way.
 pub struct PooledConn {
     /// `Some` until dropped.
-    stream: Option<FtpStream>,
+    control: Option<Control>,
     generation: u64,
     clean: bool,
     shared: Weak<Shared>,
@@ -1017,9 +1085,14 @@ pub struct PooledConn {
 impl PooledConn {
     /// The logged-in connection, in binary mode.
     pub fn stream(&mut self) -> &mut FtpStream {
-        self.stream
+        &mut self.control().stream
+    }
+
+    /// The connection with what its `FEAT` announced.
+    pub(crate) fn control(&mut self) -> &mut Control {
+        self.control
             .as_mut()
-            .expect("the stream is present until drop")
+            .expect("the connection is present until drop")
     }
 
     /// The session generation this connection was opened in.
@@ -1051,7 +1124,7 @@ impl PooledConn {
 
 impl Drop for PooledConn {
     fn drop(&mut self) {
-        let (Some(stream), Some(shared)) = (self.stream.take(), self.shared.upgrade()) else {
+        let (Some(control), Some(shared)) = (self.control.take(), self.shared.upgrade()) else {
             return;
         };
         if self.clean && self.generation == shared.generation() && shared.is_connected() {
@@ -1059,7 +1132,7 @@ impl Drop for PooledConn {
                 .idle
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .push((stream, self.generation));
+                .push((control, self.generation, Instant::now()));
         }
     }
 }
