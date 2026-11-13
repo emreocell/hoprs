@@ -32,6 +32,9 @@ struct CountingFs {
     /// While set, `open_write` truncates the file, then waits for a permit (a slow upload
     /// already under way).
     write_gate: Mutex<Option<Arc<Semaphore>>>,
+    /// The next `open_read` first replaces the file with this (data, mtime): a write on
+    /// the server that lands while the download starts.
+    change_on_read: Mutex<Option<(Vec<u8>, std::time::SystemTime)>>,
 }
 
 impl CountingFs {
@@ -76,6 +79,10 @@ impl RemoteFs for CountingFs {
     async fn open_read(&self, path: &RemotePath, offset: u64) -> Result<BoxAsyncRead> {
         self.check()?;
         self.reads.fetch_add(1, Ordering::SeqCst);
+        let change = self.change_on_read.lock().unwrap().take();
+        if let Some((data, mtime)) = change {
+            self.inner.add_file(path.as_str(), &data, mtime);
+        }
         self.inner.open_read(path, offset).await
     }
     async fn open_write(&self, path: &RemotePath, offset: u64) -> Result<BoxAsyncWrite> {
@@ -293,6 +300,30 @@ fn path_traversal_is_refused() {
         local_path_for(&session, "/a/..b/c..").unwrap(),
         session.join("a").join("..b").join("c..")
     );
+}
+
+/// Final review: the file changes on the server while the edit downloads it (the bytes
+/// fetched are the new ones). The baseline is the server's copy as downloaded, so the
+/// next save uploads; it is not taken for someone else's change.
+#[tokio::test(start_paused = true)]
+async fn change_during_download_is_not_a_remote_change() {
+    let mut h = harness(false);
+    *h.fs.change_on_read.lock().unwrap() = Some((
+        b"version 2, longer\n".to_vec(),
+        UNIX_EPOCH + Duration::from_secs(2_000),
+    ));
+    let id = h.start(FILE).await.unwrap();
+    let local = h.edits.local_path(id).unwrap();
+    assert_eq!(std::fs::read(&local).unwrap(), b"version 2, longer\n");
+
+    h.save(id, b"my change\n");
+    tokio::time::advance(DEBOUNCE).await;
+    let event = h.next_event().await;
+    assert!(
+        matches!(event, EditEvent::Uploaded { id: got, .. } if got == id),
+        "{event:?}"
+    );
+    assert_eq!(h.mem.read_file(FILE).unwrap(), b"my change\n");
 }
 
 #[tokio::test(start_paused = true)]
