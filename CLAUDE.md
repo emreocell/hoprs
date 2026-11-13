@@ -43,4 +43,5 @@ Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI), open source (MIT OR Apa
 
 - Cargo workspace under `crates/`; only `hoprs-app` may depend on iced. Dependency graph is fixed in the spec §4.1.
 - `cargo fmt --all --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings` must be clean on every commit.
+- `rust-toolchain.toml` pins the exact toolchain (`1.99.1`) for reproducible release builds; `scripts/package-deb.sh` builds the `.deb` with it. Bumping it is a deliberate change, in its own commit.
 - Conversation with the author is in Portuguese (pt-BR); code, identifiers, UI strings and commit messages in English.

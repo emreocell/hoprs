@@ -59,10 +59,16 @@ esac
 # rustc applies the last matching remap, so the most specific prefixes come last
 # ($CARGO_HOME may live inside the repository, as in the container build).
 cargo_home=${CARGO_HOME:-$HOME/.cargo}
-# Encoded (0x1f-separated) so paths with spaces stay whole; it overrides RUSTFLAGS.
-sep=$'\x1f'
-export CARGO_ENCODED_RUSTFLAGS="--remap-path-prefix=$HOME=/build$sep\
---remap-path-prefix=$repo=/hoprs$sep--remap-path-prefix=$cargo_home=/cargo"
+# Appended to the caller's RUSTFLAGS, which are space-separated: paths with spaces
+# cannot be passed that way, so they are refused.
+for path in "$HOME" "$repo" "$cargo_home"; do
+    if [[ "$path" == *" "* ]]; then
+        echo "FAIL  path with a space, cannot be remapped through RUSTFLAGS: $path" >&2
+        exit 1
+    fi
+done
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$HOME=/build \
+--remap-path-prefix=$repo=/hoprs --remap-path-prefix=$cargo_home=/cargo"
 
 if [ "$(cargo deb --version 2>/dev/null)" != "cargo-deb $CARGO_DEB_VERSION" ]; then
     cargo install cargo-deb --version "$CARGO_DEB_VERSION" --locked >&2

@@ -165,13 +165,22 @@ probe() {
     out=$(timeout 60 xvfb-run -a env -u WAYLAND_DISPLAY "$@" HOPRS_PROBE_STARTUP=1 \
         LD_DEBUG=libs LD_DEBUG_OUTPUT="/tmp/ld-$name" hoprs)
     echo "$out"
+    printf '%s\n' "$out" > "/tmp/probe-$name.out"
     grep -q '^startup_ms=' <<< "$out"
 }
 stage "probe under xvfb-run (tiny-skia)" probe tiny-skia ICED_BACKEND=tiny-skia
-# The renderer a user gets by default: iced tries wgpu first and takes tiny-skia only if
-# wgpu finds no adapter at all. Mesa's software adapter (llvmpipe) always counts, so here,
-# without a GPU, wgpu runs on the CPU. This proves that path starts, not that it is cheap.
+# The renderer a user gets by default (no ICED_BACKEND). Without a GPU render node, as
+# here, hoprs picks tiny-skia itself (crates/hoprs-app/src/renderer.rs); otherwise iced
+# would run wgpu on Mesa's software adapter, at about 165 MB.
 stage "probe under xvfb-run (default renderer)" probe default
+# Spec §9: under 80 MB. The memory reading of the default run above.
+default_rss_under_80() {
+    local rss
+    rss=$(sed -n 's/^startup_ms=[0-9]* rss_mb=\([0-9.]*\)$/\1/p' /tmp/probe-default.out)
+    echo "rss_mb=${rss:-none}"
+    [ -n "$rss" ] && awk -v rss="$rss" 'BEGIN {exit !(rss < 80)}'
+}
+stage "default renderer: rss_mb < 80" default_rss_under_80
 
 # Every library the probes loaded must come from a package hoprs' Depends brought in, not
 # from one the check tools installed afterwards. This proves everything loaded comes from

@@ -14,6 +14,7 @@ mod effects;
 mod icon;
 mod logbuf;
 mod probe;
+mod renderer;
 mod settings;
 mod terminal;
 mod ui;
@@ -54,10 +55,13 @@ const TERMINAL_LOG_CAP: &str = "warn";
 /// probe instead (see `probe`): the same start-up, then two lines on stdout, then exit.
 pub fn run() -> iced::Result {
     let started = Instant::now();
+    // First, while hoprs is still single-threaded: it may set `ICED_BACKEND`.
+    let renderer = renderer::pick();
     let probe = probe::enabled().then(|| probe::Probe::new(started));
     let filter = log_filter(std::env::var("RUST_LOG").ok().as_deref());
     let log = logbuf::LogBuffer::new();
     init_logging(&filter, log.clone());
+    tracing::info!("{}", renderer.0);
 
     let _instance = match acquire_first_instance_lock(&instance_lock_paths()) {
         Ok(Some(lock)) => Some(lock),

@@ -36,5 +36,8 @@ fi
 
 # The builder's home, for the "no builder paths in the binary" stage. Run the check on
 # the machine that built the package (or pass HOPRS_BUILDER_HOME) for it to mean much.
-docker run --rm -v "$deb_dir:/pkg:ro" -e HOPRS_BUILDER_HOME="${HOPRS_BUILDER_HOME:-$HOME}" \
+# /sys is not namespaced: the container would see the host's GPU render nodes. An empty
+# /sys/class/drm makes it the GPU-less machine the check means (as a CI runner is).
+docker run --rm -v "$deb_dir:/pkg:ro" --tmpfs /sys/class/drm \
+    -e HOPRS_BUILDER_HOME="${HOPRS_BUILDER_HOME:-$HOME}" \
     "$image" "/pkg/$deb_name"
