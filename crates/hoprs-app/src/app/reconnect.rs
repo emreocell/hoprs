@@ -3,7 +3,8 @@
 //! A connected site whose session ended `Disconnected` for a network reason (its transport
 //! spent its attempts, say while nobody used it) comes back by itself on the user's next
 //! action on one of its tabs: listing or going to a folder, a file operation, a transfer,
-//! opening a terminal or restarting its shell. Instead of failing, the action reconnects
+//! opening a terminal or restarting its shell, saving a file open for editing (its upload
+//! waits: [`crate::backend::EditEvent::Pending`]). Instead of failing, the action reconnects
 //! the session ([`Effect::Reconnect`], once for the site, the banner showing
 //! "Reconnecting…" meanwhile) and waits:
 //!

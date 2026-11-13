@@ -534,11 +534,23 @@ impl App {
                 id,
                 remote_may_be_truncated,
             } => {
-                if let Some(edit) = find(&mut self.edits, id) {
-                    edit.status = EditStatus::Waiting {
-                        truncated: remote_may_be_truncated,
-                    };
+                let Some(edit) = find(&mut self.edits, id) else {
+                    return Vec::new();
+                };
+                edit.status = EditStatus::Waiting {
+                    truncated: remote_may_be_truncated,
+                };
+                // A save in the editor is the user acting on the site: a session lost to
+                // the network reconnects (never one refused for good; once).
+                let (site, session) = (edit.site.clone(), edit.session);
+                if self
+                    .conns
+                    .get(&site)
+                    .is_none_or(|conn| conn.session() != Some(session))
+                {
+                    return Vec::new();
                 }
+                return self.reconnect_on_demand(&site).into_iter().collect();
             }
             EditEvent::Failed {
                 id,

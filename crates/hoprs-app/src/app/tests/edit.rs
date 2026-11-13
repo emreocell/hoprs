@@ -1247,3 +1247,71 @@ async fn center_questions_never_overwrite_and_forms_stack() {
     app.unpark_form_for_tests();
     assert!(matches!(app.form, Some(Form::Settings)));
 }
+
+fn session_state(app: &mut App, session: SessionId, state: hoprs_core::ConnectionState) {
+    app.update(Message::SessionState {
+        session,
+        state,
+        auth: None,
+    });
+}
+
+fn reconnects(effects: &[Effect]) -> Vec<SessionId> {
+    effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Reconnect { session } => Some(*session),
+            _ => None,
+        })
+        .collect()
+}
+
+fn pending(id: EditId) -> Message {
+    edit(EditMsg::Event(EditEvent::Pending {
+        id,
+        remote_may_be_truncated: false,
+    }))
+}
+
+/// Final review: a save made in the editor while the session is lost to the network (the
+/// transport gave up, say after a laptop sleep) reconnects the session, as a user action
+/// on its tab would; once, and never for a session refused for good.
+#[tokio::test]
+async fn pending_edit_on_lost_session_reconnects() {
+    use hoprs_core::ConnectionState;
+    let a = srv_site(Protocol::Ssh);
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    let (mut app, session, id) = editing(&fake, &a).await;
+    let lost = Error::new(ErrorKind::Network, "Connection lost");
+    session_state(&mut app, session, ConnectionState::Disconnected(lost));
+
+    let effects = app.update(pending(id));
+    assert_eq!(reconnects(&effects), vec![session], "{effects:?}");
+    assert!(matches!(the_edit(&app).status, EditStatus::Waiting { .. }));
+    // A reconnection already runs: another save starts none.
+    let effects = app.update(pending(id));
+    assert!(reconnects(&effects).is_empty(), "{effects:?}");
+
+    // Refused for good: the save waits, nothing reconnects.
+    for refused in [
+        Error::new(ErrorKind::Auth, "Authentication failed"),
+        hoprs_ssh::testing::changed_host_key_error("h", 3),
+        Error::new(ErrorKind::Tls, "Certificate not trusted"),
+    ] {
+        let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+        let (mut app, session, id) = editing(&fake, &a).await;
+        session_state(
+            &mut app,
+            session,
+            ConnectionState::Disconnected(refused.clone()),
+        );
+        let effects = app.update(pending(id));
+        assert!(reconnects(&effects).is_empty(), "{refused:?}: {effects:?}");
+        assert!(matches!(the_edit(&app).status, EditStatus::Waiting { .. }));
+    }
+
+    // Connected: a pending save (the backend is still trying) reconnects nothing.
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    let (mut app, _, id) = editing(&fake, &a).await;
+    assert!(reconnects(&app.update(pending(id))).is_empty());
+}
