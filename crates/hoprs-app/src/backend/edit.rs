@@ -37,18 +37,37 @@
 //! **Down.** A save while the session is not `Connected`, or one whose upload fails with
 //! a network error, is held as [`EditState::Pending`] ([`EditEvent::Pending`]). The worker
 //! watches the session's state and syncs every pending edit when the session is
-//! `Connected` again (Review Focus 3). An in-place upload cut in the middle has damaged
-//! the remote copy itself, so its retry skips the stamp check (the change was ours).
+//! `Connected` again (Review Focus 3): on every observed state change whose current value
+//! is `Connected`, whatever came before (a `Reconnecting`/`Connected` pair can arrive as
+//! one change while the worker is busy). A save held while the session still says
+//! `Connected` (the link died first) is also retried with a backoff ([`RETRY_MIN`] doubling
+//! to [`RETRY_MAX`]).
+//!
+//! **A cut in-place write** may have truncated the remote copy (the events say so, with
+//! `remote_may_be_truncated`, and a `warn` is logged). Cut by the network, the first retry
+//! that reaches the server skips the stamp check once (the change was ours). Cut by
+//! anything else (quota, permission), the remote file is `stat`ed at once and that stamp
+//! becomes the baseline: later saves are checked as usual. A temporary upload file left
+//! behind by a cut is removed (best effort) after the next successful upload or connect.
+//! Temporary names, local and remote, carry a random suffix.
+//!
+//! **Recovered copies.** "Keep remote" and "Save a copy" first save the local version to
+//! `<recovered>/<site>/<remote path>.local-<timestamp>` (`$XDG_DATA_HOME/hoprs/recovered`,
+//! durable, `0700`/`0600`, never overwriting another copy), then replace the local file by
+//! the server's version ([`EditEvent::ReplacedByRemote`]).
 //!
 //! **Closing.** [`EditManager::finish`] removes a session's local files only when none of
 //! them holds unsent changes (or the user said to discard them); it waits for an upload in
-//! flight first. A closed session leaves its edits as they are until then.
+//! flight first. A closed session leaves its edits as they are until then. Recovered
+//! copies live elsewhere and are never removed.
+//!
+//! Two `start`s of the same file at once make one edit (a lock per session and path).
 //!
 //! Logs name paths and sizes, never contents.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::hash::{DefaultHasher, Hasher};
+use std::hash::{BuildHasher, DefaultHasher, Hasher};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
@@ -67,6 +86,10 @@ use super::{SessionId, blocking};
 
 /// Quiet time after the last change of a file before it is uploaded.
 pub const DEBOUNCE: Duration = Duration::from_millis(500);
+/// First retry of a save held while the session said `Connected`.
+pub const RETRY_MIN: Duration = Duration::from_secs(1);
+/// Longest wait between such retries.
+pub const RETRY_MAX: Duration = Duration::from_secs(30);
 
 /// One remote file being edited locally.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -81,9 +104,27 @@ pub enum EditEvent {
     /// sent; the user picks an [`EditChoice`].
     RemoteChanged { id: EditId },
     /// The session is down: the save is held and goes up on the next `Connected`.
-    Pending { id: EditId },
-    /// The upload failed for another reason; the next save tries again.
-    Failed { id: EditId, error: Error },
+    /// `remote_may_be_truncated`: an in-place write was cut, the server's copy may be
+    /// incomplete until the retry.
+    Pending {
+        id: EditId,
+        remote_may_be_truncated: bool,
+    },
+    /// The upload failed for another reason; the next save tries again (see `Pending` for
+    /// the flag).
+    Failed {
+        id: EditId,
+        error: Error,
+        remote_may_be_truncated: bool,
+    },
+    /// "Keep remote" or "Save a copy": the local file now holds the server's version; the
+    /// user's version was saved at `recovered` (`None`: there was no local file). With
+    /// `reload_editor`, the editor must reload the file.
+    ReplacedByRemote {
+        id: EditId,
+        recovered: Option<PathBuf>,
+        reload_editor: bool,
+    },
     /// The edit ended ([`EditManager::finish`]); its local file is gone.
     Closed { id: EditId },
 }
@@ -93,11 +134,11 @@ pub enum EditEvent {
 pub enum EditChoice {
     /// Upload the local version over the server's.
     Overwrite,
-    /// Download the server's version over the local file, keeping the local one beside
-    /// it as `<name>.local-<timestamp>`.
+    /// Save the local version as a recovered copy (see the module docs), then download
+    /// the server's version over the local file.
     KeepRemote,
-    /// Upload the local version beside the original as `<name>.hoprs-<timestamp>`, then
-    /// continue from the server's version (downloaded over the local file).
+    /// Like `KeepRemote`, and also upload the local version beside the original as
+    /// `<name>.hoprs-<timestamp>`; later saves still target the original.
     SaveCopy,
 }
 
@@ -162,6 +203,17 @@ impl RemoteStamp {
     }
 }
 
+/// The session an edit belongs to, as [`EditManager::start`] needs it.
+pub struct EditSession {
+    pub session: SessionId,
+    /// Names the session's folder of recovered copies (the site id).
+    pub site: String,
+    pub fs: Arc<dyn RemoteFs>,
+    /// The session's connection state (the edits of a session follow the first one's).
+    pub state: watch::Receiver<ConnectionState>,
+    pub mode: UploadMode,
+}
+
 /// Opens a local file in the editor: `(editor command, path)`. Runs on the blocking pool.
 pub type Launcher = Arc<dyn Fn(&str, &Path) -> Result<()> + Send + Sync>;
 
@@ -171,8 +223,12 @@ pub struct EditManager {
     inner: Arc<Inner>,
 }
 
+/// Held by a `start` of one session and remote path.
+type StartLock = Arc<tokio::sync::Mutex<()>>;
+
 struct Inner {
     root: PathBuf,
+    recovered: PathBuf,
     watch_files: bool,
     launcher: Launcher,
     next_id: AtomicU64,
@@ -181,6 +237,8 @@ struct Inner {
     sessions: Mutex<HashMap<SessionId, SessionEdits>>,
     /// Serializes the creation of session directories.
     setup: tokio::sync::Mutex<()>,
+    /// One `start` at a time per session and remote path.
+    starting: Mutex<HashMap<(SessionId, RemotePath), StartLock>>,
 }
 
 /// A session's directory, watcher and worker.
@@ -195,6 +253,7 @@ struct SessionEdits {
 struct Edit {
     id: EditId,
     session: SessionId,
+    site: String,
     remote: RemotePath,
     local: PathBuf,
     fs: Arc<dyn RemoteFs>,
@@ -210,9 +269,23 @@ struct SyncState {
     /// Hash of the bytes last downloaded or uploaded.
     synced: u64,
     state: EditState,
-    /// The next upload skips the stamp check: the user chose "Overwrite", or an in-place
-    /// upload of ours was cut and changed the remote copy itself.
+    /// The next attempt that reaches the server skips the stamp check, once: the user
+    /// chose "Overwrite", or the network cut an in-place upload of ours.
     skip_check: bool,
+    /// Temporary upload files a cut may have left on the server.
+    orphans: Vec<RemotePath>,
+}
+
+impl SyncState {
+    fn synced(stamp: RemoteStamp, synced: u64, orphans: Vec<RemotePath>) -> Self {
+        Self {
+            stamp,
+            synced,
+            state: EditState::Synced,
+            skip_check: false,
+            orphans,
+        }
+    }
 }
 
 impl Edit {
@@ -259,6 +332,21 @@ fn digest(data: &[u8]) -> u64 {
     hasher.finish()
 }
 
+/// 16 random hex digits, for temporary names.
+fn nonce() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u64(COUNTER.fetch_add(1, Ordering::Relaxed));
+    hasher.write_u128(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+    );
+    hasher.write_u32(std::process::id());
+    format!("{:016x}", hasher.finish())
+}
+
 /// `YYYYmmdd-HHMMSS`, local time, for the names of kept copies.
 fn timestamp() -> String {
     chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()
@@ -269,17 +357,24 @@ fn no_edit() -> Error {
 }
 
 impl EditManager {
-    /// Edits under `root`, watched with `notify`, opened with [`launch_editor`].
-    pub fn new(root: PathBuf) -> Self {
-        Self::with_options(root, true, Arc::new(launch_editor))
+    /// Edits under `root`, recovered copies under `recovered`, watched with `notify`,
+    /// opened with [`launch_editor`].
+    pub fn new(root: PathBuf, recovered: PathBuf) -> Self {
+        Self::with_options(root, recovered, true, Arc::new(launch_editor))
     }
 
     /// `watch_files: false` leaves the file events to [`file_event`](Self::file_event)
     /// (tests, the fake backend).
-    pub fn with_options(root: PathBuf, watch_files: bool, launcher: Launcher) -> Self {
+    pub fn with_options(
+        root: PathBuf,
+        recovered: PathBuf,
+        watch_files: bool,
+        launcher: Launcher,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 root,
+                recovered,
                 watch_files,
                 launcher,
                 next_id: AtomicU64::new(1),
@@ -287,23 +382,32 @@ impl EditManager {
                 edits: Mutex::new(HashMap::new()),
                 sessions: Mutex::new(HashMap::new()),
                 setup: tokio::sync::Mutex::new(()),
+                starting: Mutex::new(HashMap::new()),
             }),
         }
     }
 
     /// Downloads `remote` into the session's directory, remembers its [`RemoteStamp`] and
     /// opens it with `editor`. A file already being edited is not downloaded again (its
-    /// local copy may hold unsent changes): the editor opens it again, same id. `state`
-    /// is the session's connection state (the edits of a session follow the first one's).
+    /// local copy may hold unsent changes): the editor opens it again, same id.
     pub async fn start(
         &self,
-        session: SessionId,
-        fs: Arc<dyn RemoteFs>,
-        state: watch::Receiver<ConnectionState>,
-        mode: UploadMode,
+        target: EditSession,
         remote: RemotePath,
         editor: &str,
     ) -> Result<EditId> {
+        let EditSession {
+            session,
+            site,
+            fs,
+            state,
+            mode,
+        } = target;
+        let starting = lock(&self.inner.starting)
+            .entry((session, remote.clone()))
+            .or_default()
+            .clone();
+        let _starting = starting.lock().await;
         let existing = lock(&self.inner.edits)
             .values()
             .find(|edit| edit.session == session && edit.remote == remote)
@@ -333,18 +437,18 @@ impl EditManager {
         let edit = Arc::new(Edit {
             id,
             session,
+            site,
             remote: remote.clone(),
             local: local.clone(),
             fs,
             mode,
             state,
             turn: Arc::default(),
-            sync: Mutex::new(SyncState {
-                stamp: RemoteStamp::of(&entry),
+            sync: Mutex::new(SyncState::synced(
+                RemoteStamp::of(&entry),
                 synced,
-                state: EditState::Synced,
-                skip_check: false,
-            }),
+                Vec::new(),
+            )),
         });
         lock(&self.inner.edits).insert(id, edit);
         tracing::info!(edit = id.0, remote = %remote, local = %local.display(), size, "remote edit started");
@@ -373,36 +477,35 @@ impl EditManager {
                 }
                 Outcome::Unchanged | Outcome::Uploaded | Outcome::Pending => Ok(()),
             },
-            EditChoice::KeepRemote => {
+            EditChoice::KeepRemote | EditChoice::SaveCopy => {
                 let _turn = edit.turn.lock().await;
                 let local = edit.local.clone();
-                let backup = sibling(&local, &format!(".local-{}", timestamp()));
-                let kept = backup.clone();
-                blocking(move || match std::fs::copy(&local, &backup) {
-                    Ok(_) => Ok(()),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                    Err(e) => Err(e.into()),
-                })
-                .await?;
-                tracing::info!(edit = id.0, kept = %kept.display(), "kept the local version beside the edit");
-                self.inner.adopt_remote(&edit).await
-            }
-            EditChoice::SaveCopy => {
-                let _turn = edit.turn.lock().await;
-                let local = edit.local.clone();
-                let data = blocking(move || read_local(&local))
-                    .await?
-                    .ok_or_else(|| Error::new(ErrorKind::NotFound, "The local file is gone"))?;
-                let name = edit.remote.file_name().unwrap_or("file");
-                let parent = edit.remote.parent().unwrap_or_else(RemotePath::root);
-                let copy = parent.join(&format!("{name}.hoprs-{}", timestamp()));
-                if edit.fs.stat(&copy).await.is_ok() {
-                    return Err(Error::new(ErrorKind::Conflict, "The copy already exists")
-                        .with_detail(copy.to_string()));
+                let data = blocking(move || read_local(&local)).await?;
+                // The user's version is safe on disk before anything else happens.
+                let recovered = match &data {
+                    Some(data) => Some(self.inner.recover(&edit, data.clone()).await?),
+                    None => None,
+                };
+                if choice == EditChoice::SaveCopy {
+                    let data = data
+                        .ok_or_else(|| Error::new(ErrorKind::NotFound, "The local file is gone"))?;
+                    let name = edit.remote.file_name().unwrap_or("file");
+                    let parent = edit.remote.parent().unwrap_or_else(RemotePath::root);
+                    let copy = parent.join(&format!("{name}.hoprs-{}", timestamp()));
+                    if edit.fs.stat(&copy).await.is_ok() {
+                        return Err(Error::new(ErrorKind::Conflict, "The copy already exists")
+                            .with_detail(copy.to_string()));
+                    }
+                    write_remote(edit.fs.as_ref(), &copy, &data).await?;
+                    tracing::info!(edit = id.0, copy = %copy, size = data.len(), "saved the local version beside the remote file");
                 }
-                write_remote(edit.fs.as_ref(), &copy, &data).await?;
-                tracing::info!(edit = id.0, copy = %copy, size = data.len(), "saved the local version beside the remote file");
-                self.inner.adopt_remote(&edit).await
+                self.inner.adopt_remote(&edit).await?;
+                self.inner.emit(EditEvent::ReplacedByRemote {
+                    id,
+                    recovered,
+                    reload_editor: true,
+                });
+                Ok(())
             }
         }
     }
@@ -591,7 +694,7 @@ impl Inner {
             Ok(Some(data)) => data,
             // Mid-save (removed, not recreated yet): the creation brings another event.
             Ok(None) => return Outcome::Unchanged,
-            Err(error) => return self.failed(edit, error),
+            Err(error) => return self.failed(edit, error, false),
         };
         let hash = digest(&data);
         let (stamp, skip_check) = {
@@ -606,14 +709,18 @@ impl Inner {
             (st.stamp, st.skip_check)
         };
         if !edit.connected() {
-            return self.pending(edit);
+            return self.pending(edit, false);
         }
         let before = match edit.fs.stat(&edit.remote).await {
             Ok(entry) => Some(entry),
             Err(error) if error.kind == ErrorKind::NotFound => None,
-            Err(error) if error.kind == ErrorKind::Network => return self.pending(edit),
-            Err(error) => return self.failed(edit, error),
+            Err(error) if error.kind == ErrorKind::Network => return self.pending(edit, false),
+            Err(error) => return self.failed(edit, error, false),
         };
+        if skip_check {
+            // This attempt reached the server: the one pass is used.
+            edit.sync_state().skip_check = false;
+        }
         let unchanged = before
             .as_ref()
             .is_some_and(|entry| stamp.matches(&RemoteStamp::of(entry)));
@@ -624,17 +731,27 @@ impl Inner {
             return Outcome::Conflict;
         }
         let mode_bits = before.as_ref().and_then(|entry| entry.mode);
-        if let Err((error, clobbered)) =
-            upload(edit.fs.as_ref(), &edit.remote, edit.mode, &data, mode_bits).await
+        if let Err(cut) = upload(edit.fs.as_ref(), &edit.remote, edit.mode, &data, mode_bits).await
         {
-            if clobbered {
-                edit.sync_state().skip_check = true;
+            if let Some(orphan) = cut.orphan {
+                edit.sync_state().orphans.push(orphan);
             }
-            return if error.kind == ErrorKind::Network {
-                self.pending(edit)
-            } else {
-                self.failed(edit, error)
-            };
+            if cut.clobbered {
+                tracing::warn!(edit = id.0, remote = %edit.remote, error = %cut.error, "an in-place upload was cut; the remote file may be truncated");
+            }
+            if cut.error.kind == ErrorKind::Network {
+                if cut.clobbered {
+                    edit.sync_state().skip_check = true;
+                }
+                return self.pending(edit, cut.clobbered);
+            }
+            if cut.clobbered {
+                // The damage is the new baseline: later saves are checked against it.
+                if let Ok(entry) = edit.fs.stat(&edit.remote).await {
+                    edit.sync_state().stamp = RemoteStamp::of(&entry);
+                }
+            }
+            return self.failed(edit, cut.error, cut.clobbered);
         }
         let stamp = match edit.fs.stat(&edit.remote).await {
             Ok(entry) => RemoteStamp::of(&entry),
@@ -644,35 +761,76 @@ impl Inner {
                 mtime: None,
             },
         };
-        *edit.sync_state() = SyncState {
-            stamp,
-            synced: hash,
-            state: EditState::Synced,
-            skip_check: false,
-        };
+        {
+            let mut st = edit.sync_state();
+            let orphans = std::mem::take(&mut st.orphans);
+            *st = SyncState::synced(stamp, hash, orphans);
+        }
         tracing::info!(edit = id.0, remote = %edit.remote, size = data.len(), "remote edit uploaded");
         self.emit(EditEvent::Uploaded {
             id,
             at: SystemTime::now(),
         });
+        self.clean_orphans(edit).await;
         Outcome::Uploaded
     }
 
-    fn pending(&self, edit: &Edit) -> Outcome {
+    /// Removes (best effort) the temporary upload files cuts left on the server.
+    async fn clean_orphans(&self, edit: &Edit) {
+        let orphans = std::mem::take(&mut edit.sync_state().orphans);
+        let mut left = Vec::new();
+        for orphan in orphans {
+            match edit.fs.remove_file(&orphan).await {
+                Ok(()) => {
+                    tracing::info!(edit = edit.id.0, temp = %orphan, "removed a temporary upload file left by a cut");
+                }
+                Err(error) if error.kind == ErrorKind::NotFound => {}
+                Err(_) => left.push(orphan),
+            }
+        }
+        edit.sync_state().orphans.extend(left);
+    }
+
+    fn pending(&self, edit: &Edit, remote_may_be_truncated: bool) -> Outcome {
         edit.set_state(EditState::Pending);
         tracing::info!(edit = edit.id.0, remote = %edit.remote, "session not connected; edit held until it reconnects");
-        self.emit(EditEvent::Pending { id: edit.id });
+        self.emit(EditEvent::Pending {
+            id: edit.id,
+            remote_may_be_truncated,
+        });
         Outcome::Pending
     }
 
-    fn failed(&self, edit: &Edit, error: Error) -> Outcome {
+    fn failed(&self, edit: &Edit, error: Error, remote_may_be_truncated: bool) -> Outcome {
         edit.set_state(EditState::Failed);
         tracing::warn!(edit = edit.id.0, remote = %edit.remote, %error, "remote edit upload failed");
         self.emit(EditEvent::Failed {
             id: edit.id,
             error: error.clone(),
+            remote_may_be_truncated,
         });
         Outcome::Failed(error)
+    }
+
+    /// Saves `data` (the user's version) as a new recovered copy (see the module docs) and
+    /// returns its path.
+    async fn recover(&self, edit: &Edit, data: Vec<u8>) -> Result<PathBuf> {
+        let root = self.recovered.clone();
+        let site = if plain_component(&edit.site) {
+            edit.site.clone()
+        } else {
+            "site".to_owned()
+        };
+        let remote = edit.remote.clone();
+        let path = blocking(move || {
+            create_private_dir_all(&root)?;
+            set_private(&root, 0o700)?;
+            let base = local_path_for(&root.join(site), remote.as_str())?;
+            write_new_private(&base, &format!(".local-{}", timestamp()), &data)
+        })
+        .await?;
+        tracing::info!(edit = edit.id.0, remote = %edit.remote, recovered = %path.display(), "saved the local version as a recovered copy");
+        Ok(path)
     }
 
     /// Downloads the server's copy over the local file and takes its stamp. The caller
@@ -684,12 +842,11 @@ impl Inner {
         let size = data.len();
         let local = edit.local.clone();
         blocking(move || write_private(&local, &data)).await?;
-        *edit.sync_state() = SyncState {
-            stamp: RemoteStamp::of(&entry),
-            synced,
-            state: EditState::Synced,
-            skip_check: false,
-        };
+        {
+            let mut st = edit.sync_state();
+            let orphans = std::mem::take(&mut st.orphans);
+            *st = SyncState::synced(RemoteStamp::of(&entry), synced, orphans);
+        }
         tracing::info!(edit = edit.id.0, remote = %edit.remote, size, "remote version downloaded over the edit");
         Ok(())
     }
@@ -722,7 +879,8 @@ async fn run_worker(
     mut state: watch::Receiver<ConnectionState>,
 ) {
     let mut due: HashMap<EditId, Instant> = HashMap::new();
-    let mut connected = matches!(*state.borrow_and_update(), ConnectionState::Connected);
+    let mut backoff: HashMap<EditId, Duration> = HashMap::new();
+    state.borrow_and_update();
     let mut state_open = true;
     loop {
         let next = due.values().min().copied();
@@ -746,17 +904,19 @@ async fn run_worker(
                     state_open = false;
                     continue;
                 }
-                let now = matches!(*state.borrow_and_update(), ConnectionState::Connected);
-                if now && !connected {
-                    let Some(inner) = inner.upgrade() else { break };
-                    for edit in inner.session_edits(session) {
-                        if edit.sync_state().state == EditState::Pending {
-                            tracing::info!(edit = edit.id.0, remote = %edit.remote, "session reconnected; uploading the held edit");
-                            inner.sync(&edit, false).await;
-                        }
+                // Whatever came before: a drop and a reconnect may arrive as one change.
+                if !matches!(*state.borrow_and_update(), ConnectionState::Connected) {
+                    continue;
+                }
+                let Some(inner) = inner.upgrade() else { break };
+                for edit in inner.session_edits(session) {
+                    inner.clean_orphans(&edit).await;
+                    if edit.sync_state().state == EditState::Pending {
+                        tracing::info!(edit = edit.id.0, remote = %edit.remote, "session connected; uploading the held edit");
+                        let outcome = inner.sync(&edit, false).await;
+                        schedule_retry(&edit, &outcome, &mut due, &mut backoff);
                     }
                 }
-                connected = now;
             }
             () = wake => {
                 let now = Instant::now();
@@ -767,11 +927,31 @@ async fn run_worker(
                 for id in ready {
                     due.remove(&id);
                     if let Some(edit) = inner.edit(id) {
-                        inner.sync(&edit, false).await;
+                        let outcome = inner.sync(&edit, false).await;
+                        schedule_retry(&edit, &outcome, &mut due, &mut backoff);
                     }
                 }
             }
         }
+    }
+}
+
+/// A save held while the session still says `Connected` (the link died first) is retried
+/// after a growing delay; one held while it is down waits for `Connected`.
+fn schedule_retry(
+    edit: &Edit,
+    outcome: &Outcome,
+    due: &mut HashMap<EditId, Instant>,
+    backoff: &mut HashMap<EditId, Duration>,
+) {
+    if matches!(outcome, Outcome::Pending) && edit.connected() {
+        let wait = backoff
+            .get(&edit.id)
+            .map_or(RETRY_MIN, |wait| (*wait * 2).min(RETRY_MAX));
+        backoff.insert(edit.id, wait);
+        due.insert(edit.id, Instant::now() + wait);
+    } else if !matches!(outcome, Outcome::Pending) {
+        backoff.remove(&edit.id);
     }
 }
 
@@ -826,19 +1006,32 @@ async fn write_remote(fs: &dyn RemoteFs, remote: &RemotePath, data: &[u8]) -> Re
     Ok(())
 }
 
-/// Uploads `data` by `mode` (see the module docs). The error says whether the remote copy
-/// itself may be damaged (an in-place write that did not finish).
+/// Why an upload did not finish.
+struct Cut {
+    error: Error,
+    /// An in-place write started: the remote copy itself may be damaged.
+    clobbered: bool,
+    /// A temporary file that may be left on the server.
+    orphan: Option<RemotePath>,
+}
+
+/// Uploads `data` by `mode` (see the module docs).
 async fn upload(
     fs: &dyn RemoteFs,
     remote: &RemotePath,
     mode: UploadMode,
     data: &[u8],
     mode_bits: Option<u32>,
-) -> std::result::Result<(), (Error, bool)> {
+) -> std::result::Result<(), Cut> {
     if mode == UploadMode::TempRename
         && let (Some(name), Some(parent)) = (remote.file_name(), remote.parent())
     {
-        let temp = parent.join(&format!(".{name}.hoprs-upload"));
+        let temp = parent.join(&format!(".{name}.{}.hoprs-upload", nonce()));
+        let network = |error: Error, temp: &RemotePath| Cut {
+            error,
+            clobbered: false,
+            orphan: Some(temp.clone()),
+        };
         match write_remote(fs, &temp, data).await {
             Ok(()) => {
                 if let Some(bits) = mode_bits {
@@ -848,7 +1041,7 @@ async fn upload(
                 match fs.rename(&temp, remote).await {
                     Ok(()) => return Ok(()),
                     Err(error) if error.kind == ErrorKind::Network => {
-                        return Err((error, false));
+                        return Err(network(error, &temp));
                     }
                     Err(error) => {
                         tracing::debug!(remote = %remote, %error, "rename over the file refused; writing in place");
@@ -856,14 +1049,18 @@ async fn upload(
                     }
                 }
             }
-            Err(error) if error.kind == ErrorKind::Network => return Err((error, false)),
+            Err(error) if error.kind == ErrorKind::Network => return Err(network(error, &temp)),
             Err(error) => {
                 tracing::debug!(remote = %remote, %error, "cannot write a temporary file; writing in place");
                 let _ = fs.remove_file(&temp).await;
             }
         }
     }
-    write_remote(fs, remote, data).await.map_err(|e| (e, true))
+    write_remote(fs, remote, data).await.map_err(|error| Cut {
+        error,
+        clobbered: true,
+        orphan: None,
+    })
 }
 
 /// The local file's bytes; `None` if it does not exist (right now).
@@ -891,9 +1088,8 @@ fn write_private(path: &Path, data: &[u8]) -> Result<()> {
     create_private_dir_all(parent)?;
     let mut name = OsString::from(".");
     name.push(path.file_name().unwrap_or_default());
-    name.push(".hoprs-dl");
+    name.push(format!(".{}.hoprs-dl", nonce()));
     let temp = parent.join(name);
-    let _ = std::fs::remove_file(&temp);
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -910,6 +1106,40 @@ fn write_private(path: &Path, data: &[u8]) -> Result<()> {
     }
     set_private(&temp, 0o600)?;
     std::fs::rename(&temp, path).map_err(|e| Error::from(e).with_detail(path.display().to_string()))
+}
+
+/// Writes `data` to a new file named `base` + `suffix`, or `base` + `suffix-N` if taken
+/// (never replacing a file), `0600`, its directories `0700`. Returns its path.
+fn write_new_private(base: &Path, suffix: &str, data: &[u8]) -> Result<PathBuf> {
+    let parent = base
+        .parent()
+        .ok_or_else(|| Error::new(ErrorKind::Io, "No parent directory"))?;
+    create_private_dir_all(parent)?;
+    for n in 0u32.. {
+        let path = if n == 0 {
+            sibling(base, suffix)
+        } else {
+            sibling(base, &format!("{suffix}-{n}"))
+        };
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
+            Ok(mut file) => {
+                file.write_all(data)
+                    .map_err(|e| Error::from(e).with_detail(path.display().to_string()))?;
+                set_private(&path, 0o600)?;
+                return Ok(path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(Error::from(e).with_detail(path.display().to_string())),
+        }
+    }
+    unreachable!("some numbered name is free")
 }
 
 /// Creates `dir` and its missing parents, `0700` on Unix.
@@ -963,6 +1193,21 @@ fn refused(remote: &str) -> Error {
     .with_detail(format!("{remote:?}"))
 }
 
+/// Whether `part` is one plain file name (see [`local_path_for`]).
+fn plain_component(part: &str) -> bool {
+    let plain = !part.is_empty()
+        && part != "."
+        && part != ".."
+        && !part.contains(['\\', '\0', '/'])
+        && !(cfg!(windows) && part.contains(':'));
+    let mut components = Path::new(part).components();
+    plain
+        && matches!(
+            (components.next(), components.next()),
+            (Some(Component::Normal(_)), None)
+        )
+}
+
 /// The local path of `remote` under `session_dir`: each component of the absolute remote
 /// path must be a plain name (not empty, `.` or `..`, without `\`, NUL or, on Windows,
 /// `:`), and the result must stay inside `session_dir`.
@@ -973,17 +1218,7 @@ pub fn local_path_for(session_dir: &Path, remote: &str) -> Result<PathBuf> {
     }
     let mut path = session_dir.to_path_buf();
     for part in relative.split('/') {
-        let plain = !part.is_empty()
-            && part != "."
-            && part != ".."
-            && !part.contains(['\\', '\0'])
-            && !(cfg!(windows) && part.contains(':'));
-        let mut components = Path::new(part).components();
-        let single = matches!(
-            (components.next(), components.next()),
-            (Some(Component::Normal(_)), None)
-        );
-        if !plain || !single {
+        if !plain_component(part) {
             return Err(refused(remote));
         }
         path.push(part);
@@ -1049,6 +1284,16 @@ pub fn default_edit_dir() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
         .join("hoprs")
         .join("edit")
+}
+
+/// `$XDG_DATA_HOME/hoprs/recovered` (durable: recovered copies outlive the session and
+/// the login), else the cache directory's, else the temporary directory's.
+pub fn default_recovered_dir() -> PathBuf {
+    dirs::data_dir()
+        .or_else(dirs::cache_dir)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("hoprs")
+        .join("recovered")
 }
 
 #[cfg(test)]

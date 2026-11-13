@@ -78,7 +78,7 @@ use secrecy::{ExposeSecret, SecretString};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use super::broker::{PromptKind, PromptRequest};
-use super::edit::{EditManager, Launcher, UploadMode};
+use super::edit::{EditManager, EditSession, Launcher, UploadMode};
 use super::shells::{ShellControl, Shells, shell_closed};
 use super::{
     AuthMethod, BackendApi, BrokerEvent, ConnectError, ConnectResult, Connected, ControlOp,
@@ -290,7 +290,12 @@ impl FakeBackend {
                     .push((command.to_owned(), path.to_owned()));
                 Ok(())
             });
-            let edits = EditManager::with_options(dir.path().join("edit"), false, launcher);
+            let edits = EditManager::with_options(
+                dir.path().join("edit"),
+                dir.path().join("recovered"),
+                false,
+                launcher,
+            );
             (dir, edits)
         });
         edits
@@ -1159,7 +1164,7 @@ impl BackendApi for FakeBackend {
         remote: RemotePath,
         editor: String,
     ) -> Result<EditId> {
-        let (fs, state) = {
+        let target = {
             let state = self.state();
             if !state.connected.contains(&session) {
                 return Err(Error::new(ErrorKind::Network, "Not connected"));
@@ -1170,11 +1175,15 @@ impl BackendApi for FakeBackend {
                 .ok_or_else(|| Self::not_found("Unknown session"))?;
             let fs: Arc<dyn RemoteFs> = Arc::new(state.remotes[site].clone());
             let watch = state.watches[&session].subscribe();
-            (fs, watch)
+            EditSession {
+                session,
+                site: site.to_string(),
+                fs,
+                state: watch,
+                mode: UploadMode::TempRename,
+            }
         };
-        self.edits()
-            .start(session, fs, state, UploadMode::TempRename, remote, &editor)
-            .await
+        self.edits().start(target, remote, &editor).await
     }
 
     async fn resolve_edit(&self, id: EditId, choice: EditChoice) -> Result<()> {
@@ -1237,7 +1246,13 @@ mod tests {
         fake.drop_connection(session, Error::new(ErrorKind::Network, "lost"));
         fake.save_edit(session, id, b"two");
         tokio::time::advance(super::super::edit::DEBOUNCE).await;
-        assert_eq!(events.recv().await.unwrap(), EditEvent::Pending { id });
+        assert_eq!(
+            events.recv().await.unwrap(),
+            EditEvent::Pending {
+                id,
+                remote_may_be_truncated: false
+            }
+        );
         assert_eq!(fake.edits_pending(session).await.len(), 1);
         assert_eq!(remote.read_file("/f.txt").unwrap(), b"one");
 

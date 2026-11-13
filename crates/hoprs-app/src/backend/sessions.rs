@@ -766,6 +766,13 @@ impl SessionManager {
             .ok_or_else(|| Error::new(ErrorKind::Network, "Not connected"))
     }
 
+    /// The site of a session.
+    pub fn site(&self, id: SessionId) -> Option<SiteId> {
+        lock(&self.inner.sessions)
+            .get(&id)
+            .map(|entry| entry.site.clone())
+    }
+
     /// The protocol of a session's site.
     pub fn protocol(&self, id: SessionId) -> Option<Protocol> {
         lock(&self.inner.sessions)

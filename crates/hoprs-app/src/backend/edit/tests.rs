@@ -7,18 +7,36 @@ use std::time::UNIX_EPOCH;
 use async_trait::async_trait;
 use hoprs_core::{ErrorKind, RemoteEntry};
 use hoprs_remote::{BoxAsyncRead, BoxAsyncWrite, MemFs};
+use tokio::sync::{Notify, Semaphore};
 use tokio::time::Instant;
 
 use super::*;
 
-/// `MemFs` that counts writes and can lose the network.
+/// `MemFs` that counts reads and writes, can lose the network, cut the next write after
+/// truncating the file, and hold `stat` at a gate.
+#[derive(Default)]
 struct CountingFs {
     inner: MemFs,
     writes: AtomicUsize,
+    reads: AtomicUsize,
     offline: AtomicBool,
+    /// The next `stat`s that fail with a network error.
+    stat_failures: AtomicUsize,
+    /// The next `open_write` truncates the file, then fails with this.
+    cut_next_write: Mutex<Option<ErrorKind>>,
+    /// While set, `stat` waits for a permit (after telling `stat_entered`).
+    stat_gate: Mutex<Option<Arc<Semaphore>>>,
+    stat_entered: Notify,
 }
 
 impl CountingFs {
+    fn new(inner: MemFs) -> Self {
+        Self {
+            inner,
+            ..Self::default()
+        }
+    }
+
     fn check(&self) -> Result<()> {
         if self.offline.load(Ordering::SeqCst) {
             Err(Error::new(ErrorKind::Network, "Connection lost"))
@@ -35,16 +53,33 @@ impl RemoteFs for CountingFs {
         self.inner.list(path).await
     }
     async fn stat(&self, path: &RemotePath) -> Result<RemoteEntry> {
+        let gate = self.stat_gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            self.stat_entered.notify_one();
+            let _permit = gate.acquire().await.unwrap();
+        }
         self.check()?;
+        let failures = self.stat_failures.load(Ordering::SeqCst);
+        if failures > 0 {
+            self.stat_failures.store(failures - 1, Ordering::SeqCst);
+            return Err(Error::new(ErrorKind::Network, "Connection lost"));
+        }
         self.inner.stat(path).await
     }
     async fn open_read(&self, path: &RemotePath, offset: u64) -> Result<BoxAsyncRead> {
         self.check()?;
+        self.reads.fetch_add(1, Ordering::SeqCst);
         self.inner.open_read(path, offset).await
     }
     async fn open_write(&self, path: &RemotePath, offset: u64) -> Result<BoxAsyncWrite> {
         self.check()?;
         self.writes.fetch_add(1, Ordering::SeqCst);
+        let cut = self.cut_next_write.lock().unwrap().take();
+        if let Some(kind) = cut {
+            // Truncated, then the connection (or the quota) gives out.
+            drop(self.inner.open_write(path, offset).await?);
+            return Err(Error::new(kind, "Write cut"));
+        }
         self.inner.open_write(path, offset).await
     }
     async fn mkdir(&self, path: &RemotePath) -> Result<()> {
@@ -74,6 +109,7 @@ type Launched = Arc<Mutex<Vec<(String, PathBuf)>>>;
 struct Harness {
     _dir: tempfile::TempDir,
     root: PathBuf,
+    recovered: PathBuf,
     edits: EditManager,
     mem: MemFs,
     fs: Arc<CountingFs>,
@@ -83,6 +119,7 @@ struct Harness {
 }
 
 const SESSION: SessionId = SessionId(7);
+const SITE: &str = "site-1";
 const FILE: &str = "/home/alice/notes.txt";
 
 fn rp(path: &str) -> RemotePath {
@@ -92,6 +129,7 @@ fn rp(path: &str) -> RemotePath {
 fn harness(watch_files: bool) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("edit");
+    let recovered = dir.path().join("data").join("recovered");
     let launched: Launched = Arc::default();
     let record = launched.clone();
     let launcher: Launcher = Arc::new(move |command: &str, path: &Path| {
@@ -101,22 +139,19 @@ fn harness(watch_files: bool) -> Harness {
             .push((command.to_owned(), path.to_owned()));
         Ok(())
     });
-    let edits = EditManager::with_options(root.clone(), watch_files, launcher);
+    let edits = EditManager::with_options(root.clone(), recovered.clone(), watch_files, launcher);
     let mem = MemFs::new();
     mem.add_file(
         FILE,
         b"version 1\n",
         UNIX_EPOCH + Duration::from_secs(1_000),
     );
-    let fs = Arc::new(CountingFs {
-        inner: mem.clone(),
-        writes: AtomicUsize::new(0),
-        offline: AtomicBool::new(false),
-    });
+    let fs = Arc::new(CountingFs::new(mem.clone()));
     let events = edits.subscribe();
     Harness {
         _dir: dir,
         root,
+        recovered,
         edits,
         mem,
         fs,
@@ -128,16 +163,18 @@ fn harness(watch_files: bool) -> Harness {
 
 impl Harness {
     async fn start(&self, path: &str) -> Result<EditId> {
-        self.edits
-            .start(
-                SESSION,
-                self.fs.clone(),
-                self.state.subscribe(),
-                UploadMode::TempRename,
-                rp(path),
-                "my-editor --wait",
-            )
-            .await
+        self.start_with(path, UploadMode::TempRename).await
+    }
+
+    async fn start_with(&self, path: &str, mode: UploadMode) -> Result<EditId> {
+        let target = EditSession {
+            session: SESSION,
+            site: SITE.to_owned(),
+            fs: self.fs.clone(),
+            state: self.state.subscribe(),
+            mode,
+        };
+        self.edits.start(target, rp(path), "my-editor --wait").await
     }
 
     fn writes(&self) -> usize {
@@ -156,6 +193,23 @@ impl Harness {
             .await
             .expect("an edit event")
             .expect("the event channel is open")
+    }
+
+    /// The recovered copies of `FILE`.
+    fn recovered_copies(&self) -> Vec<PathBuf> {
+        let dir = self.recovered.join(SITE).join("home").join("alice");
+        let mut copies: Vec<PathBuf> = std::fs::read_dir(dir)
+            .map(|entries| entries.map(|e| e.unwrap().path()).collect())
+            .unwrap_or_default();
+        copies.sort();
+        copies
+    }
+}
+
+fn held(id: EditId) -> EditEvent {
+    EditEvent::Pending {
+        id,
+        remote_may_be_truncated: false,
     }
 }
 
@@ -387,18 +441,31 @@ async fn keep_remote_preserves_local_copy() {
 
     h.edits.resolve(id, EditChoice::KeepRemote).await.unwrap();
     assert_eq!(std::fs::read(&local).unwrap(), b"their version\n");
-    let copies: Vec<PathBuf> = std::fs::read_dir(local.parent().unwrap())
+    let copies = h.recovered_copies();
+    assert_eq!(copies.len(), 1, "one recovered copy: {copies:?}");
+    let name = copies[0]
+        .file_name()
         .unwrap()
-        .map(|e| e.unwrap().path())
-        .filter(|p| {
-            p.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with("notes.txt.local-")
-        })
-        .collect();
-    assert_eq!(copies.len(), 1, "one preserved local copy");
+        .to_string_lossy()
+        .into_owned();
+    assert!(name.starts_with("notes.txt.local-"), "{name}");
     assert_eq!(std::fs::read(&copies[0]).unwrap(), b"my version\n");
+    assert_eq!(
+        h.next_event().await,
+        EditEvent::ReplacedByRemote {
+            id,
+            recovered: Some(copies[0].clone()),
+            reload_editor: true,
+        }
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&copies[0]), 0o600);
+        assert_eq!(mode(&h.recovered), 0o700);
+        assert_eq!(mode(copies[0].parent().unwrap()), 0o700);
+    }
     assert_eq!(h.mem.read_file(FILE).unwrap(), b"their version\n");
     assert_eq!(h.writes(), 0);
     assert!(h.edits.pending(SESSION).await.is_empty());
@@ -408,6 +475,26 @@ async fn keep_remote_preserves_local_copy() {
     tokio::time::advance(DEBOUNCE).await;
     assert!(matches!(h.next_event().await, EditEvent::Uploaded { .. }));
     assert_eq!(h.mem.read_file(FILE).unwrap(), b"merged\n");
+
+    // A second conflict in the same second: a new copy, never over the first.
+    h.mem
+        .add_file(FILE, b"theirs 2\n", UNIX_EPOCH + Duration::from_secs(3_000));
+    h.save(id, b"mine 2\n");
+    tokio::time::advance(DEBOUNCE).await;
+    assert_eq!(h.next_event().await, EditEvent::RemoteChanged { id });
+    h.edits.resolve(id, EditChoice::KeepRemote).await.unwrap();
+    let copies = h.recovered_copies();
+    assert_eq!(copies.len(), 2, "{copies:?}");
+    let contents: Vec<Vec<u8>> = copies.iter().map(|c| std::fs::read(c).unwrap()).collect();
+    assert!(contents.contains(&b"my version\n".to_vec()));
+    assert!(contents.contains(&b"mine 2\n".to_vec()));
+
+    // Finishing the edit (nothing unsent) removes the edit directory, not the copies.
+    assert!(h.edits.finish(SESSION, false).await.unwrap().is_empty());
+    assert!(!local.exists());
+    for copy in &copies {
+        assert!(copy.exists(), "{copy:?} survives finish");
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -439,6 +526,28 @@ async fn save_copy_uploads_beside() {
     assert_eq!(h.mem.read_file(FILE).unwrap(), b"their version\n");
     assert_eq!(std::fs::read(&local).unwrap(), b"their version\n");
     assert!(h.edits.pending(SESSION).await.is_empty());
+    // The user's version is also kept locally, durably.
+    let copies = h.recovered_copies();
+    assert_eq!(copies.len(), 1, "{copies:?}");
+    assert_eq!(std::fs::read(&copies[0]).unwrap(), b"my version\n");
+    assert_eq!(
+        h.next_event().await,
+        EditEvent::ReplacedByRemote {
+            id,
+            recovered: Some(copies[0].clone()),
+            reload_editor: true,
+        }
+    );
+
+    // Later saves still target the original, with the conflict check.
+    h.save(id, b"continued\n");
+    tokio::time::advance(DEBOUNCE).await;
+    assert!(matches!(h.next_event().await, EditEvent::Uploaded { .. }));
+    assert_eq!(h.mem.read_file(FILE).unwrap(), b"continued\n");
+
+    assert!(h.edits.finish(SESSION, false).await.unwrap().is_empty());
+    assert!(!local.exists());
+    assert!(copies[0].exists(), "the recovered copy survives finish");
 }
 
 /// Review Focus 3: a save while the session is down is held, then uploaded by itself
@@ -454,7 +563,7 @@ async fn pending_edit_uploads_after_reconnect() {
         .send_replace(ConnectionState::Reconnecting { attempt: 1 });
     h.save(id, b"saved while down\n");
     tokio::time::advance(DEBOUNCE).await;
-    assert_eq!(h.next_event().await, EditEvent::Pending { id });
+    assert_eq!(h.next_event().await, held(id));
     assert_eq!(h.mem.read_file(FILE).unwrap(), b"version 1\n");
     let pending = h.edits.pending(SESSION).await;
     assert_eq!(pending[0].state, EditState::Pending);
@@ -481,7 +590,7 @@ async fn pending_edit_uploads_after_reconnect() {
     h.fs.offline.store(true, Ordering::SeqCst);
     h.save(id, b"second\n");
     tokio::time::advance(DEBOUNCE).await;
-    assert_eq!(h.next_event().await, EditEvent::Pending { id });
+    assert_eq!(h.next_event().await, held(id));
     h.state
         .send_replace(ConnectionState::Reconnecting { attempt: 1 });
     settle().await;
@@ -580,4 +689,191 @@ fn launcher_passes_the_path_as_one_argument() {
         path.to_str().unwrap()
     );
     assert!(!pwned.exists());
+}
+
+/// Important 1 (fix round 1): the drop and the reconnect arrive back to back while the
+/// worker is busy with the sync that hits the dead link; the held edit still goes up,
+/// exactly once.
+#[tokio::test(start_paused = true)]
+async fn coalesced_reconnect_still_uploads_the_held_edit() {
+    let mut h = harness(false);
+    let id = h.start(FILE).await.unwrap();
+    let gate = Arc::new(Semaphore::new(0));
+    *h.fs.stat_gate.lock().unwrap() = Some(gate.clone());
+    h.fs.stat_failures.store(1, Ordering::SeqCst);
+
+    // The state still says connected; the link is dead: the sync's stat will fail.
+    h.save(id, b"saved on a dead link\n");
+    tokio::time::advance(DEBOUNCE).await;
+    h.fs.stat_entered.notified().await;
+    // While the worker waits on that stat: the drop and the reconnect, back to back.
+    h.state
+        .send_replace(ConnectionState::Reconnecting { attempt: 1 });
+    h.state.send_replace(ConnectionState::Connected);
+    *h.fs.stat_gate.lock().unwrap() = None;
+    gate.add_permits(1);
+
+    assert_eq!(h.next_event().await, held(id));
+    assert!(matches!(
+        h.next_event().await,
+        EditEvent::Uploaded { id: got, .. } if got == id
+    ));
+    assert_eq!(h.mem.read_file(FILE).unwrap(), b"saved on a dead link\n");
+    // The backoff retry that was scheduled finds nothing left to send.
+    tokio::time::advance(RETRY_MAX * 2).await;
+    settle().await;
+    h.save(id, b"next\n");
+    tokio::time::advance(DEBOUNCE).await;
+    assert!(matches!(h.next_event().await, EditEvent::Uploaded { .. }));
+    assert_eq!(
+        h.writes(),
+        2,
+        "the held edit went up once, then the next save"
+    );
+}
+
+/// A save held while the session still says `Connected` is retried by itself.
+#[tokio::test(start_paused = true)]
+async fn held_save_on_a_connected_session_is_retried() {
+    let mut h = harness(false);
+    let id = h.start(FILE).await.unwrap();
+    h.fs.stat_failures.store(2, Ordering::SeqCst);
+    h.save(id, b"retried\n");
+    tokio::time::advance(DEBOUNCE).await;
+    assert_eq!(h.next_event().await, held(id));
+    // First retry after RETRY_MIN: fails again; the next waits twice as long.
+    assert_eq!(h.next_event().await, held(id));
+    assert!(matches!(h.next_event().await, EditEvent::Uploaded { .. }));
+    assert_eq!(h.mem.read_file(FILE).unwrap(), b"retried\n");
+}
+
+/// Important 2, network path: an in-place write cut by the network is reported as
+/// possibly truncated; the first retry after the reconnect skips the stamp check (the
+/// damage was ours), and the check is back afterwards.
+#[tokio::test(start_paused = true)]
+async fn cut_in_place_upload_by_network_skips_the_check_once() {
+    let mut h = harness(false);
+    let id = h.start_with(FILE, UploadMode::InPlace).await.unwrap();
+    *h.fs.cut_next_write.lock().unwrap() = Some(ErrorKind::Network);
+    h.save(id, b"mine\n");
+    tokio::time::advance(DEBOUNCE).await;
+    assert_eq!(
+        h.next_event().await,
+        EditEvent::Pending {
+            id,
+            remote_may_be_truncated: true
+        }
+    );
+    assert_eq!(h.mem.read_file(FILE).unwrap(), b"", "truncated by the cut");
+
+    h.state
+        .send_replace(ConnectionState::Reconnecting { attempt: 1 });
+    settle().await;
+    h.state.send_replace(ConnectionState::Connected);
+    assert!(matches!(h.next_event().await, EditEvent::Uploaded { .. }));
+    assert_eq!(h.mem.read_file(FILE).unwrap(), b"mine\n");
+
+    // Not a lasting pass: someone else's change is caught again.
+    h.mem
+        .add_file(FILE, b"theirs\n", UNIX_EPOCH + Duration::from_secs(5_000));
+    h.save(id, b"mine again\n");
+    tokio::time::advance(DEBOUNCE).await;
+    assert_eq!(h.next_event().await, EditEvent::RemoteChanged { id });
+    assert_eq!(h.mem.read_file(FILE).unwrap(), b"theirs\n");
+}
+
+/// Important 2, other failures (quota, permission): the damaged file becomes the
+/// baseline at once, and later saves are checked against it.
+#[tokio::test(start_paused = true)]
+async fn cut_in_place_upload_by_quota_adopts_the_damage_as_baseline() {
+    let mut h = harness(false);
+    let id = h.start_with(FILE, UploadMode::InPlace).await.unwrap();
+    *h.fs.cut_next_write.lock().unwrap() = Some(ErrorKind::Permission);
+    h.save(id, b"mine\n");
+    tokio::time::advance(DEBOUNCE).await;
+    match h.next_event().await {
+        EditEvent::Failed {
+            id: got,
+            error,
+            remote_may_be_truncated,
+        } => {
+            assert_eq!(got, id);
+            assert_eq!(error.kind, ErrorKind::Permission);
+            assert!(remote_may_be_truncated);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(h.mem.read_file(FILE).unwrap(), b"");
+
+    // The next save is checked against the truncated file, which is unchanged: it goes up.
+    h.save(id, b"mine, retried\n");
+    tokio::time::advance(DEBOUNCE).await;
+    assert!(matches!(h.next_event().await, EditEvent::Uploaded { .. }));
+    assert_eq!(h.mem.read_file(FILE).unwrap(), b"mine, retried\n");
+
+    // And the check still works after a quota cut.
+    *h.fs.cut_next_write.lock().unwrap() = Some(ErrorKind::Permission);
+    h.save(id, b"cut again\n");
+    tokio::time::advance(DEBOUNCE).await;
+    assert!(matches!(h.next_event().await, EditEvent::Failed { .. }));
+    h.mem
+        .add_file(FILE, b"theirs\n", UNIX_EPOCH + Duration::from_secs(5_000));
+    h.save(id, b"after theirs\n");
+    tokio::time::advance(DEBOUNCE).await;
+    assert_eq!(h.next_event().await, EditEvent::RemoteChanged { id });
+    assert_eq!(h.mem.read_file(FILE).unwrap(), b"theirs\n");
+}
+
+/// A temporary upload file left on the server by a cut is removed after the next
+/// successful upload; temporary names are random.
+#[tokio::test(start_paused = true)]
+async fn orphaned_temp_upload_is_cleaned_after_the_next_upload() {
+    let mut h = harness(false);
+    let id = h.start(FILE).await.unwrap();
+    *h.fs.cut_next_write.lock().unwrap() = Some(ErrorKind::Network);
+    h.save(id, b"mine\n");
+    tokio::time::advance(DEBOUNCE).await;
+    assert_eq!(h.next_event().await, held(id));
+    let names = |mem: MemFs| async move {
+        mem.list(&rp("/home/alice"))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect::<Vec<String>>()
+    };
+    let left = names(h.mem.clone()).await;
+    let temp = left
+        .iter()
+        .find(|n| n.ends_with(".hoprs-upload"))
+        .expect("the cut left the temporary file")
+        .clone();
+    assert!(temp.starts_with(".notes.txt."), "{temp}");
+    assert!(
+        temp.len() > ".notes.txt..hoprs-upload".len() + 8,
+        "random part: {temp}"
+    );
+    // The original was never touched by a temporary-file upload.
+    assert_eq!(h.mem.read_file(FILE).unwrap(), b"version 1\n");
+
+    h.state
+        .send_replace(ConnectionState::Reconnecting { attempt: 1 });
+    settle().await;
+    h.state.send_replace(ConnectionState::Connected);
+    assert!(matches!(h.next_event().await, EditEvent::Uploaded { .. }));
+    assert_eq!(names(h.mem.clone()).await, vec!["notes.txt".to_owned()]);
+}
+
+/// Two `start`s of the same file at once make one edit (one download).
+#[tokio::test]
+async fn concurrent_starts_make_one_edit() {
+    let h = harness(false);
+    let (a, b) = tokio::join!(h.start(FILE), h.start(FILE));
+    assert_eq!(a.unwrap(), b.unwrap());
+    assert_eq!(h.fs.reads.load(Ordering::SeqCst), 1, "downloaded once");
+    assert_eq!(
+        h.launched.lock().unwrap().len(),
+        2,
+        "the editor opened for each"
+    );
 }

@@ -35,7 +35,7 @@ use secrecy::SecretString;
 use tokio::sync::{broadcast, mpsc, watch};
 
 pub use broker::{BrokerEvent, PromptAnswer, PromptBroker, PromptId};
-pub use edit::{EditChoice, EditEvent, EditId, EditManager, EditSummary, UploadMode};
+pub use edit::{EditChoice, EditEvent, EditId, EditManager, EditSession, EditSummary, UploadMode};
 pub use ops::DeleteTarget;
 pub use sessions::{
     ConnectError, ConnectResult, Connected, SessionConfig, SessionId, SessionManager,
@@ -301,6 +301,9 @@ pub struct BackendConfig {
     pub backup_params: ExportParams,
     /// The local copies of remote files being edited (see [`edit::default_edit_dir`]).
     pub edit_dir: PathBuf,
+    /// The user's versions saved when a remote edit takes the server's (see
+    /// [`edit::default_recovered_dir`]).
+    pub recovered_dir: PathBuf,
 }
 
 impl BackendConfig {
@@ -313,6 +316,7 @@ impl BackendConfig {
             sessions: SessionConfig::default(),
             backup_params: ExportParams::default(),
             edit_dir: edit::default_edit_dir(),
+            recovered_dir: edit::default_recovered_dir(),
         })
     }
 }
@@ -372,7 +376,7 @@ impl Backend {
             config.sessions,
         );
         Ok(Backend {
-            edits: EditManager::new(config.edit_dir),
+            edits: EditManager::new(config.edit_dir, config.recovered_dir),
             profile_dir: config.profile_dir,
             settings_path,
             settings: loaded,
@@ -539,9 +543,18 @@ impl BackendApi for Backend {
             Some(hoprs_core::Protocol::Ssh) => UploadMode::TempRename,
             _ => UploadMode::InPlace,
         };
-        self.edits
-            .start(session, fs, state, mode, remote, &editor)
-            .await
+        let site = self
+            .sessions
+            .site(session)
+            .ok_or_else(|| Error::new(hoprs_core::ErrorKind::NotFound, "Session closed"))?;
+        let target = EditSession {
+            session,
+            site: site.to_string(),
+            fs,
+            state,
+            mode,
+        };
+        self.edits.start(target, remote, &editor).await
     }
 
     async fn resolve_edit(&self, id: EditId, choice: EditChoice) -> Result<()> {
@@ -765,6 +778,7 @@ mod tests {
             sessions: SessionConfig::default(),
             backup_params: CHEAP_BACKUP,
             edit_dir: dir.join("edit"),
+            recovered_dir: dir.join("recovered"),
         };
         Backend::open(config, Arc::new(MemoryStore::new())).unwrap()
     }
@@ -1017,6 +1031,7 @@ mod tests {
             },
             backup_params: CHEAP_BACKUP,
             edit_dir: dir.path().join("edit"),
+            recovered_dir: dir.path().join("recovered"),
         };
         let backend = Backend::open(config, Arc::new(MemoryStore::new())).unwrap();
         let key = "AAAAC3NzaC1lZDI1NTE5AAAAIGrhflDkrs18RwIFvHFCsoXLdUL+0cVr81616Tzk8aBj";
@@ -1175,6 +1190,7 @@ mod tests {
             sessions: SessionConfig::default(),
             backup_params: CHEAP_BACKUP,
             edit_dir: dir.path().join("edit"),
+            recovered_dir: dir.path().join("recovered"),
         };
         let backend = Backend::open(config, Arc::new(MemoryStore::new())).unwrap();
         assert!(backend.engine.snapshot().await.is_empty());
@@ -1478,6 +1494,7 @@ mod tests {
             },
             backup_params: CHEAP_BACKUP,
             edit_dir: dir.path().join("edit"),
+            recovered_dir: dir.path().join("recovered"),
         };
         let backend = Arc::new(Backend::open(config, Arc::new(MemoryStore::new())).unwrap());
         let mut prompts = backend.prompt_events().unwrap();
