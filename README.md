@@ -22,7 +22,8 @@ Linux (Ubuntu) is the v1 target. At run time hoprs needs:
   and key passphrases. Without one, hoprs still connects but asks for the password every
   time.
 - **The XDG desktop portal** (`xdg-desktop-portal` with a GNOME/GTK or KDE backend) for the
-  "Choose…" file dialogs. `zenity` is used as a fallback.
+  "Choose…" file dialogs (through the `rfd` crate). `rfd` falls back to `zenity` when no
+  portal answers; that fallback is untested.
 - **`ssh-agent`** (optional), used when a site has "Use ssh-agent" ticked.
 
 Building needs a Rust toolchain (stable) and a C compiler (`build-essential`) for the
