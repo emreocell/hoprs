@@ -628,12 +628,16 @@ async fn start_stor(
     .await
 }
 
+/// The transfer `opened` on `conn`, or its error. A connection loss is reported to the
+/// session (`report`), except on a connection reused without a check, whose first loss is
+/// retried on a new connection instead (as in `with_any`).
 fn transfer_opened(
     conn: &mut PooledConn,
     opened: Opened,
     path: &RemotePath,
     reusable: bool,
 ) -> Result<Transfer> {
+    let report = !conn.unchecked();
     let e = match opened {
         Ok(Ok(transfer)) => return Ok(transfer),
         Ok(Err(e @ suppaftp::FtpError::UnexpectedResponse(_))) => {
@@ -647,7 +651,9 @@ fn transfer_opened(
         Err(_) => Error::new(ErrorKind::Network, format!("Connection lost: {path}"))
             .with_detail("no reply to the transfer command"),
     };
-    conn.report(&e);
+    if report {
+        conn.report(&e);
+    }
     Err(e)
 }
 

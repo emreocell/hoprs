@@ -93,7 +93,7 @@ The bench exits with status 1 when a target is missed, 2 when it cannot run.
 
 ### Known gaps
 
-A target listed in `HOPRS_BENCH_KNOWN_GAPS` (`big_sftp`, `small_sftp`, `small_ftp`) is
+A target listed in `HOPRS_BENCH_KNOWN_GAPS` (only `small_sftp` and `small_ftp` are accepted) is
 still measured and printed, marked "known gap (see follow-up)", and does not fail the job;
 every other target is fatal. `scripts/perf.sh` sets the list (see its header); a listed
 target that passes again is printed as such and should leave the list.
@@ -135,8 +135,12 @@ History (same machine, same bench): SFTP small files 183.8 s â†’ 155.6 s (2.22 â
   such a connection is reused without a `NOOP`, and if it turns out dead its first
   command is retried once on a new connection.
 - **No conflict check under a new folder.** A folder the run creates (missing before its
-  `mkdir`) is empty, so its files skip the conflict `stat` on their first attempt; a
-  resumed, retried or recovered run checks again.
+  `mkdir`, and its `mkdir` did not find it made meanwhile) is empty, so its files skip the
+  conflict `stat` on their first attempt; a resumed, retried or recovered run checks
+  again. Only while one item owns that folder: when another unfinished item writes to the
+  same path, above it or below it, its files keep the check. **Accepted risk:** another
+  client (outside this hoprs) creating a file in the new folder before the child is
+  dispatched is not seen, and that file is overwritten.
 - **Size-only check after a copy.** `RemoteFs::size`: FTP sends `SIZE` alone instead of
   `SIZE` + `STAT` + `MDTM`.
 

@@ -1013,6 +1013,8 @@ impl FtpSession {
         match self.run_pooled(&mut conn, &f, false).await {
             // Reused without a check and dead: once more, on a new connection.
             Err(e) if is_control_loss(&e) => {
+                // Frees this slot first; `checkout_new` still waits if every slot is taken
+                // meanwhile, as any transfer does (and gives up if the session goes down).
                 drop(conn);
                 let mut conn = self.checkout_new().await?;
                 self.run_pooled(&mut conn, &f, true).await

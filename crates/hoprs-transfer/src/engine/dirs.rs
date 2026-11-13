@@ -179,10 +179,14 @@ impl Actor {
         if pending > 0 && initial == TransferState::Queued {
             self.dirs.insert(id, DirProgress { pending, failed });
         }
+        // The folder is fresh only while no other tree writes there.
+        let root = self.root_of(id);
+        let fresh = created && !self.destination_shared(root, super::actor::destination(&parent));
         for (child_id, child) in ids.into_iter().zip(children) {
-            if created && !child.is_dir && child.state == TransferState::Queued {
+            if fresh && !child.is_dir && child.state == TransferState::Queued {
                 self.fresh_dst.insert(child_id);
             }
+            self.drop_overlapping_fresh(root, &child.spec);
             self.add_item(TransferItem {
                 id: child_id,
                 parent: Some(id),

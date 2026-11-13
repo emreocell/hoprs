@@ -6,7 +6,7 @@
 //! - 10 000 files of 4 KiB over SFTP and over FTP, at 10 ms RTT: hoprs takes no longer
 //!   than `lftp mirror -R --parallel=4`.
 //!
-//! `HOPRS_BENCH_KNOWN_GAPS` (comma-separated: `big_sftp`, `small_sftp`, `small_ftp`) lists
+//! `HOPRS_BENCH_KNOWN_GAPS` (comma-separated: `small_sftp`, `small_ftp`) lists
 //! targets known to be missed: still measured and printed, marked "known gap", not fatal.
 //!
 //! Each side runs [`Config::runs`] times (median), alternating which goes first. Prints a
@@ -64,7 +64,7 @@ struct Config {
     runs: usize,
     /// Scenarios to run (all by default).
     only: Vec<String>,
-    /// Targets known to be missed (`small_sftp`, `small_ftp`, `big_sftp`): still measured
+    /// Targets known to be missed (only `small_sftp` and `small_ftp` may be): still measured
     /// and printed, marked as a known gap, and not failing the bench.
     known_gaps: Vec<String>,
 }
@@ -130,8 +130,13 @@ fn main() {
     }
     let cfg = Config::from_env();
     for gap in &cfg.known_gaps {
-        if !["big_sftp", "small_sftp", "small_ftp"].contains(&gap.as_str()) {
-            fail_setup(&format!("unknown target {gap:?} in HOPRS_BENCH_KNOWN_GAPS"));
+        // Ruling R-c: only the small-file targets may be known gaps; every other one is
+        // always fatal.
+        if !["small_sftp", "small_ftp"].contains(&gap.as_str()) {
+            fail_setup(&format!(
+                "HOPRS_BENCH_KNOWN_GAPS: {gap:?} cannot be a known gap \
+                 (only small_sftp and small_ftp; every other target is fatal)"
+            ));
         }
     }
     let rt = tokio::runtime::Builder::new_multi_thread()

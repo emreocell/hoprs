@@ -35,7 +35,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use hoprs_core::{Error, ErrorKind, RemoteEntry, Result, SiteId};
+use hoprs_core::{Error, ErrorKind, RemoteEntry, RemotePath, Result, SiteId};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -47,7 +47,7 @@ use super::{EngineConfig, Event, EventKind, SiteEndpoints};
 use crate::conflict::{Decision, decide};
 use crate::copy::CopyOutcome;
 use crate::model::{
-    ConflictInfo, ConflictPolicy, TransferId, TransferItem, TransferSpec, TransferState,
+    ConflictInfo, ConflictPolicy, Direction, TransferId, TransferItem, TransferSpec, TransferState,
 };
 use crate::progress::{ProgressTracker, ProgressUpdate};
 use crate::store::QueueStore;
@@ -218,6 +218,13 @@ pub(super) struct Actor {
     /// destination is missing, so their first `prepare` skips the conflict check.
     /// Leaving `Queued` (dispatch, pause, cancel) drops the mark: any later attempt
     /// (resume, retry, after a restart) checks.
+    ///
+    /// Only while one item owns that new subtree: a folder is not marked when another
+    /// unfinished item's destination is the same path, above it or below it, and such an
+    /// item enqueued or added later drops the marks under its path
+    /// (`drop_overlapping_fresh`). Accepted risk: another client creating a file in the
+    /// new folder before the child is dispatched is not seen, and that file is
+    /// overwritten.
     pub(super) fresh_dst: HashSet<TransferId>,
     pub(super) worker_tx: mpsc::UnboundedSender<WorkerMsg>,
 }
@@ -319,6 +326,7 @@ impl Actor {
                         return;
                     }
                 };
+                self.drop_overlapping_fresh(id, &spec);
                 self.add_item(TransferItem {
                     id,
                     parent: None,
@@ -408,6 +416,49 @@ impl Actor {
     }
 
     /// Tracks a newly persisted item and emits `Added`.
+    /// The top-level item `id` belongs to.
+    pub(super) fn root_of(&self, mut id: TransferId) -> TransferId {
+        while let Some(parent) = self.items.get(&id).and_then(|item| item.parent) {
+            id = parent;
+        }
+        id
+    }
+
+    /// Whether an unfinished item of another tree than `root` writes to `dst`, above it
+    /// or below it.
+    pub(super) fn destination_shared(&self, root: TransferId, dst: &RemotePath) -> bool {
+        self.items.values().any(|item| {
+            !item.state.is_terminal()
+                && self.root_of(item.id) != root
+                && paths_overlap(destination(&item.spec), dst)
+        })
+    }
+
+    /// A new item of the tree `root` writes `spec` to the same path as a fresh mark of
+    /// another tree, above it or below it: those marks no longer hold (the folder has
+    /// another writer).
+    pub(super) fn drop_overlapping_fresh(&mut self, root: TransferId, spec: &TransferSpec) {
+        if self.fresh_dst.is_empty() {
+            return;
+        }
+        let dst = destination(spec);
+        let stale: Vec<TransferId> = self
+            .fresh_dst
+            .iter()
+            .copied()
+            .filter(|marked| {
+                self.root_of(*marked) != root
+                    && self
+                        .items
+                        .get(marked)
+                        .is_some_and(|item| paths_overlap(destination(&item.spec), dst))
+            })
+            .collect();
+        for marked in stale {
+            self.fresh_dst.remove(&marked);
+        }
+    }
+
     pub(super) fn add_item(&mut self, item: TransferItem) {
         if item.state == TransferState::Queued {
             self.queued
@@ -853,6 +904,27 @@ impl Actor {
         self.last_progress = Some(now);
         self.emit(EventKind::Progress(updates));
     }
+}
+
+/// Where `spec` writes.
+pub(super) fn destination(spec: &TransferSpec) -> &RemotePath {
+    match spec.direction {
+        Direction::Upload => &spec.remote,
+        Direction::Download => &spec.local,
+    }
+}
+
+/// `a` and `b` are the same path, or one is below the other. Sites and sides are not
+/// compared: a false overlap only costs a conflict check.
+pub(super) fn paths_overlap(a: &RemotePath, b: &RemotePath) -> bool {
+    let below = |inner: &str, outer: &str| {
+        outer == "/"
+            || inner
+                .strip_prefix(outer)
+                .is_some_and(|rest| rest.starts_with('/'))
+    };
+    let (a, b) = (a.as_str(), b.as_str());
+    a == b || below(a, b) || below(b, a)
 }
 
 #[cfg(test)]

@@ -1086,6 +1086,13 @@ async fn resumed_run_drops_the_pending_final_count() {
     wait_progress(&mut rx).await;
     engine.pause(id).await.unwrap();
     wait_state(&mut rx, id, TransferState::Paused).await;
+    // The paused run's final count: the new run starts from it and only reports counts
+    // past it, so an update with exactly this count after the resume is the stale one.
+    let paused = find(&engine.snapshot().await, id).bytes_done;
+    assert!(
+        paused > 0 && paused < bytes.len() as u64,
+        "paused at {paused}"
+    );
     engine.resume(id).await.unwrap();
     wait_state(&mut rx, id, TransferState::Active).await;
 
@@ -1095,8 +1102,7 @@ async fn resumed_run_drops_the_pending_final_count() {
             EventKind::Progress(updates) => stale.extend(
                 updates
                     .into_iter()
-                    .filter(|u| u.id == id && u.bytes_per_sec == 0)
-                    .filter(|u| u.bytes_done != bytes.len() as u64),
+                    .filter(|u| u.id == id && u.bytes_done == paused),
             ),
             EventKind::StateChanged { id: i, state } if i == id && state.is_terminal() => {
                 assert_eq!(state, TransferState::Done);
@@ -1183,4 +1189,62 @@ async fn resumed_file_in_new_folder_continues_from_offset() {
     assert_eq!(wait_terminal(&mut rx, child).await, TransferState::Done);
     assert_eq!(remote.read_file("/srv/tree/a.bin").unwrap(), bytes);
     assert_eq!(fault.read_offsets(), vec![0, paused]);
+}
+
+/// Two items write into the same new folder: the tree `/a/tree` into `/srv/tree` (it
+/// creates the folder) and the file `/b/x` into `/srv/tree/x`, enqueued while the folder
+/// is being prepared. The folder has two writers, so its files keep their conflict check:
+/// `/b/x` goes first (lower id), and the tree's `x` then meets the conflict policy (`Ask`:
+/// waits for a decision; `Skip`: skipped). It never overwrites `/b/x`'s copy.
+#[tokio::test(flavor = "multi_thread")]
+async fn shared_new_folder_keeps_the_conflict_check() {
+    use hoprs_transfer::ConflictPolicy;
+    for policy in [ConflictPolicy::Ask, ConflictPolicy::Skip] {
+        let local = MemFs::new();
+        let (a, b) = (data(3000), data(5000));
+        local.add_file("/a/tree/x", &a, mtime());
+        local.add_file("/b/x", &b, mtime());
+        let mem = MemFs::new();
+        mem.add_dir("/srv");
+        let remote = FaultFs::new(mem.clone());
+        // The folder's preparation outlasts the second enqueue.
+        remote.set_latency(Duration::from_millis(50));
+        let config = EngineConfig {
+            default_policy: policy,
+            ..EngineConfig::default()
+        };
+        let (engine, mut rx) = engine_with(Arc::new(local), Arc::new(remote), 1, config).await;
+        let tree = engine
+            .enqueue(spec(Direction::Upload, "/a/tree", "/srv/tree"))
+            .await
+            .unwrap();
+        let file = engine
+            .enqueue(spec(Direction::Upload, "/b/x", "/srv/tree/x"))
+            .await
+            .unwrap();
+        assert_eq!(wait_terminal(&mut rx, file).await, TransferState::Done);
+        // The tree's own `x`.
+        let x = wait_for(&mut rx, |e| {
+            matches!(e, EventKind::StateChanged { id, state }
+                if *id != tree && *id != file
+                    && (state.is_terminal() || matches!(state, TransferState::AwaitingDecision(_))))
+        })
+        .await;
+        let EventKind::StateChanged { state, .. } = x else {
+            unreachable!()
+        };
+        match policy {
+            ConflictPolicy::Ask => assert!(
+                matches!(state, TransferState::AwaitingDecision(_)),
+                "{state:?}"
+            ),
+            _ => assert!(matches!(state, TransferState::Skipped(_)), "{state:?}"),
+        }
+        assert_eq!(
+            mem.read_file("/srv/tree/x").unwrap(),
+            b,
+            "{policy:?}: overwritten"
+        );
+        engine.shutdown().await;
+    }
 }

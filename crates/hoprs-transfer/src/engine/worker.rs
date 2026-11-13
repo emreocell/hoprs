@@ -176,15 +176,16 @@ async fn prepare(route: &Route, policy: ConflictPolicy, fresh_dst: bool) -> Resu
 
 /// Creates the destination directory (an existing one is fine) and lists the source.
 /// `mkdir` succeeds on an existing directory, so a `stat` first tells whether this run
-/// creates it.
+/// creates it. A `mkdir` that fails on a directory that is there now means someone else
+/// made it meanwhile: not created by this run.
 async fn prepare_dir(route: &Route) -> Result<Prepared> {
-    let missing = matches!(
+    let mut created = matches!(
         route.dst.stat(&route.dst_path).await,
         Err(e) if e.kind == ErrorKind::NotFound
     );
     if let Err(e) = route.dst.mkdir(&route.dst_path).await {
         match route.dst.stat(&route.dst_path).await {
-            Ok(entry) if entry.kind == EntryKind::Dir => {}
+            Ok(entry) if entry.kind == EntryKind::Dir => created = false,
             _ => return Err(e),
         }
     }
@@ -196,10 +197,7 @@ async fn prepare_dir(route: &Route) -> Result<Prepared> {
                 .with_detail(format!("{:?} in {}", bad.name, route.src_path)),
         );
     }
-    Ok(Prepared::Dir {
-        entries,
-        created: missing,
-    })
+    Ok(Prepared::Dir { entries, created })
 }
 
 /// Whether `name` is a single path component accepted by `RemotePath::join`.
