@@ -26,7 +26,7 @@
 //! **Upload.** Before uploading, the remote file is `stat`ed: if its size, or its mtime to
 //! the second (FTP's `MDTM` resolution; both stamps come from the same server and the
 //! same command, so they compare exactly at that resolution), differ from the
-//! [`RemoteStamp`] of the last download (`stat`ed once it is done) or upload, nothing is sent and
+//! [`RemoteStamp`] of the last download or upload, nothing is sent and
 //! [`EditEvent::RemoteChanged`] asks the user ([`EditChoice`]). Otherwise the bytes go up
 //! by [`UploadMode`]: SFTP writes a temporary file beside the original and renames it over
 //! (OpenSSH's `posix-rename` replaces atomically; a server without it refuses to rename
@@ -505,9 +505,6 @@ impl EditManager {
         let dir = self.session_dir(session, &state).await?;
         let local = local_path_for(&dir, remote.as_str())?;
         let data = fetch(fs.as_ref(), &remote).await?;
-        // The baseline is the server's copy as it is once downloaded: a write that landed
-        // during the download is not taken later for someone else's change.
-        let stamp = RemoteStamp::of(&fs.stat(&remote).await?);
         let size = data.len();
         let synced = digest(&data);
         {
@@ -529,7 +526,11 @@ impl EditManager {
             state,
             turn: Arc::default(),
             ending: AtomicBool::new(false),
-            sync: Mutex::new(SyncState::synced(stamp, synced, Vec::new())),
+            sync: Mutex::new(SyncState::synced(
+                RemoteStamp::of(&entry),
+                synced,
+                Vec::new(),
+            )),
         });
         lock(&self.inner.edits).insert(id, edit);
         tracing::info!(edit = id.0, remote = %remote, local = %local.display(), size, "remote edit started");
