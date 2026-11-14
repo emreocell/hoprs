@@ -1,14 +1,16 @@
 import { useEffect, useId, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
+import { useT } from "../i18n";
 
 export type InstallTab = { id: string; label: string; lines: string[] };
-type Notice = "" | "Copied" | "Press Ctrl+C to copy";
+type Notice = "" | "copied" | "pressCtrlC";
 
 // "Copied" fades after a moment; the Ctrl+C hint stays until the next key press or click.
 const RESET_MS = 1400;
 
 export function InstallWell({ tabs }: { tabs: InstallTab[] }) {
   const uid = useId();
+  const t = useT().install;
   const [active, setActive] = useState(tabs[0]?.id ?? "");
   const [notice, setNotice] = useState<Notice>("");
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -17,7 +19,7 @@ export function InstallWell({ tabs }: { tabs: InstallTab[] }) {
 
   useEffect(() => () => clearTimeout(timer.current), []);
 
-  const fallback = notice === "Press Ctrl+C to copy";
+  const fallback = notice === "pressCtrlC";
   useEffect(() => {
     if (!fallback) return;
     const clear = () => setNotice("");
@@ -32,7 +34,7 @@ export function InstallWell({ tabs }: { tabs: InstallTab[] }) {
   const announce = (next: Notice) => {
     setNotice(next);
     clearTimeout(timer.current);
-    if (next === "Copied") timer.current = setTimeout(() => setNotice(""), RESET_MS);
+    if (next === "copied") timer.current = setTimeout(() => setNotice(""), RESET_MS);
   };
 
   const select = (id: string) => {
@@ -58,7 +60,7 @@ export function InstallWell({ tabs }: { tabs: InstallTab[] }) {
     if (!tab) return;
     try {
       await navigator.clipboard.writeText(tab.lines.join("\n"));
-      announce("Copied");
+      announce("copied");
     } catch {
       const code = codeRefs.current[tab.id];
       const selection = window.getSelection();
@@ -68,16 +70,16 @@ export function InstallWell({ tabs }: { tabs: InstallTab[] }) {
         selection.removeAllRanges();
         selection.addRange(range);
       }
-      announce("Press Ctrl+C to copy");
+      announce("pressCtrlC");
     }
   };
 
-  const copied = notice === "Copied";
+  const copied = notice === "copied";
 
   return (
     <div className="install-well">
       <div className="install-bar">
-        <div role="tablist" aria-label="Install method" className="install-tabs">
+        <div role="tablist" aria-label={t.method} className="install-tabs">
           {tabs.map((tab, index) => (
             <button
               key={tab.id}
@@ -109,7 +111,7 @@ export function InstallWell({ tabs }: { tabs: InstallTab[] }) {
               </>
             )}
           </svg>
-          <span>{copied ? "Copied" : "Copy"}</span>
+          <span>{copied ? t.copied : t.copy}</span>
         </button>
       </div>
       {tabs.map((tab) => (
@@ -136,7 +138,7 @@ export function InstallWell({ tabs }: { tabs: InstallTab[] }) {
           </pre>
         </div>
       ))}
-      <p role="status" className="install-status small muted">{notice}</p>
+      <p role="status" className="install-status small muted">{notice ? t[notice] : ""}</p>
     </div>
   );
 }

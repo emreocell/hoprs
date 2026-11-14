@@ -1,14 +1,14 @@
 import { facts } from "../facts";
+import { useT } from "../i18n";
 
 export default function OpenSource() {
+  const t = useT().openSource;
   return (
     <section className="section container" aria-labelledby="os-title">
-      <h2 id="os-title">Open source.</h2>
-      <p className="lead">
-        MIT OR Apache-2.0. Built on iced, russh, suppaftp and alacritty_terminal.
-      </p>
+      <h2 id="os-title">{t.title}</h2>
+      <p className="lead">{t.lead}</p>
       <p>
-        <a href={facts.repoUrl}>Read the code on GitHub</a>
+        <a href={facts.repoUrl}>{t.link}</a>
       </p>
     </section>
   );

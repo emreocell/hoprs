@@ -107,4 +107,7 @@ jobs:
           rm -f "$RUNNER_TEMP/key"
       - name: Check the live page
         if: steps.release.outputs.ready == 'true'
-        run: curl -fsS https://hoprs.online/ | grep -q '<h1'
+        run: |
+          set -euo pipefail
+          curl -fsS https://hoprs.online/ | grep -q '<h1'
+          curl -fsS https://hoprs.online/pt-br/ | grep -q 'lang="pt-BR"'

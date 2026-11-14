@@ -1,18 +1,13 @@
 import Shot from "../components/Shot";
+import { useT } from "../i18n";
 
 export default function Connection() {
+  const t = useT().connection;
   return (
     <section className="section container" aria-labelledby="conn-title">
-      <h2 id="conn-title">One connection, two tabs.</h2>
-      <p className="lead">
-        A terminal tab and a files tab share one SSH connection. Add more tabs over the same session.
-      </p>
-      <Shot
-        name="split"
-        slot="shot-split"
-        alt="hoprs terminal tab on the same SSH connection, showing ls -la of the project folder while the upload keeps running below."
-        lazy
-      />
+      <h2 id="conn-title">{t.title}</h2>
+      <p className="lead">{t.lead}</p>
+      <Shot name="split" slot="shot-split" alt={t.shotAlt} lazy />
     </section>
   );
 }
