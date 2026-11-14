@@ -1,0 +1,74 @@
+# Publishes a GitHub Release when a v* tag is pushed: hoprs_<version>-1_amd64.deb and
+# SHA256SUMS, with the tag's CHANGELOG.md section as the notes. Every check runs before
+# `gh release create`, so a failure at any step publishes nothing.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+# One run per tag; a second push of the same tag waits, and then fails at
+# `gh release create` because the release already exists.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # package-deb.sh builds inside an Ubuntu 24.04 container, so the host does not
+    # matter for the binary; it is named anyway.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag matches the workspace version
+        run: |
+          tag_version=${GITHUB_REF_NAME#v}
+          crate_version=$(awk '
+            /^\[/ { section = $0; next }
+            section == "[workspace.package]" && /^version *=/ {
+              gsub(/^version *= *"|".*$/, ""); print; exit
+            }' Cargo.toml)
+          if [ -z "$crate_version" ]; then
+            echo "::error::no version in [workspace.package] of Cargo.toml"
+            exit 1
+          fi
+          if [ "$tag_version" != "$crate_version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME is version $tag_version, but [workspace.package] version in Cargo.toml is $crate_version"
+            exit 1
+          fi
+          echo "VERSION=$crate_version" >> "$GITHUB_ENV"
+
+      # Before the build: a missing or empty CHANGELOG section fails in seconds.
+      - name: Release notes
+        run: scripts/release-notes.sh "$VERSION" > notes.md
+
+      - name: Build the .deb
+        run: |
+          deb=$(scripts/package-deb.sh)
+          echo "DEB=$deb" >> "$GITHUB_ENV"
+
+      - name: Check the .deb on a clean Ubuntu 24.04
+        run: scripts/check-deb.sh "$DEB"
+
+      - name: SHA256SUMS
+        run: |
+          mkdir dist
+          cp "$DEB" dist/
+          cd dist
+          sha256sum hoprs_*.deb > SHA256SUMS
+          sha256sum --check SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/hoprs_*.deb dist/SHA256SUMS \
+            --verify-tag --title "hoprs $VERSION" --notes-file notes.md

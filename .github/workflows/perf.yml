@@ -27,7 +27,7 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       # Xvfb and the X11 client libraries winit loads at run time for the start-up probe;
       # the baselines of the network bench.
