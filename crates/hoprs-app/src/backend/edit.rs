@@ -1558,13 +1558,15 @@ fn create_private_dir_all(dir: &Path) -> Result<()> {
 
 /// Sets `mode` on Unix; nothing elsewhere (the user's profile directories are private
 /// there already).
-fn set_private(path: &Path, _mode: u32) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(_mode))
-            .map_err(|e| Error::from(e).with_detail(path.display().to_string()))?;
-    }
+#[cfg(unix)]
+fn set_private(path: &Path, mode: u32) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        .map_err(|e| Error::from(e).with_detail(path.display().to_string()))
+}
+
+#[cfg(not(unix))]
+fn set_private(_path: &Path, _mode: u32) -> Result<()> {
     Ok(())
 }
 

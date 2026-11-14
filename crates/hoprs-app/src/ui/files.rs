@@ -850,7 +850,8 @@ mod tests {
     }
 
     /// Ctrl+K opens the palette unless a widget took it: a focused terminal captures every
-    /// key (Ctrl+K is the shell's there); a text field lets it through.
+    /// key (Ctrl+K is the shell's there); a text field lets it through. "Ctrl" is iced's
+    /// `COMMAND`: Cmd on macOS, as `key_message` matches `modifiers.command()`.
     #[test]
     fn ctrl_k_opens_the_palette_unless_captured() {
         let id = window::Id::unique();
@@ -868,8 +869,8 @@ mod tests {
             })
         };
         let opens = |m: Option<Message>| matches!(m, Some(Message::Palette(PaletteMsg::Open)));
-        let ctrl = keyboard::Modifiers::CTRL;
-        let ctrl_shift = keyboard::Modifiers::CTRL | keyboard::Modifiers::SHIFT;
+        let ctrl = keyboard::Modifiers::COMMAND;
+        let ctrl_shift = keyboard::Modifiers::COMMAND | keyboard::Modifiers::SHIFT;
         assert!(opens(key_message(press("k", ctrl), Status::Ignored, id)));
         assert!(opens(key_message(
             press("K", ctrl_shift),
@@ -881,7 +882,7 @@ mod tests {
             None
         );
         // Without Ctrl (typing a k), or with Alt, nothing.
-        let alt = keyboard::Modifiers::CTRL | keyboard::Modifiers::ALT;
+        let alt = keyboard::Modifiers::COMMAND | keyboard::Modifiers::ALT;
         for (c, modifiers) in [
             ("k", keyboard::Modifiers::default()),
             ("k", alt),
