@@ -16,8 +16,9 @@ at it; Add/Remove Programs has one per-machine (HKLM) entry with the MSI version
 0 (the upgrade path); `msiexec /x` exits 0; the exe, the shortcuts and the entry are gone
 while the file in %APPDATA%\hoprs is still there; the .zip holds exactly hoprs.exe,
 LICENSE-MIT, LICENSE-APACHE and README.txt, and its hoprs.exe prints the same version and
-imports no VC++ runtime DLL; no builder paths in that exe (-BuilderPaths, default: this machine's %USERPROFILE% and the repository). Prints OK per check, throws
-with the first failing one (exit code 1).
+imports no VC++ runtime DLL; no builder paths in that exe (-BuilderPaths, default: this
+machine's %USERPROFILE% and the repository). Prints OK per check, throws with the first
+failing one (exit code 1).
 #>
 param(
     [Parameter(Mandatory)][string]$Msi,
