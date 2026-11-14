@@ -1,74 +1,153 @@
 # hoprs
-A fast, native SSH/SFTP/FTP desktop client written in Rust.
-Design spec: [docs/superpowers/specs/2026-11-11-hoprs-design.md](docs/superpowers/specs/2026-11-11-hoprs-design.md)
+
+A fast, native SSH, SFTP, FTP and FTPS desktop client for Linux, written in Rust.
+
+hoprs keeps the idea that made FileZilla useful (a list of saved sites you open with one
+click) and puts a terminal, a two-pane file browser and a persistent transfer queue behind
+it, in one quiet window that opens in under 100 ms and idles at about 33 MB.
+
+- **Version:** 1.0.0 ([changelog](CHANGELOG.md))
+- **Platform:** Linux (Ubuntu 24.04 or newer, amd64). The code is portable; other platforms are not packaged yet.
+- **License:** MIT OR Apache-2.0
+
+## Contents
+
+- [Features](#features)
+- [Install](#install)
+- [First steps](#first-steps)
+- [Using hoprs](#using-hoprs)
+- [Where your data lives](#where-your-data-lives)
+- [Configuration](#configuration)
+- [System requirements](#system-requirements)
+- [Building from source](#building-from-source)
+- [Architecture](#architecture)
+- [Testing](#testing)
+- [Performance](#performance)
+- [Releasing](#releasing)
+- [Troubleshooting](#troubleshooting)
+- [Contributing](#contributing)
+- [Security](#security)
+- [License](#license)
+
+## Features
+
+- **Saved sites with a protocol each:** `ssh` (terminal, files over SFTP, or both, over one
+  connection), `ftp`, `ftps-explicit` and `ftps-implicit`. Plain FTP is allowed and labelled
+  `ftp (unencrypted)`.
+- **Workspaces:** a workspace is a bundle of sites. Opening it connects all of them and
+  restores their tabs. A site can belong to several workspaces.
+- **Terminal:** `xterm-256color` with truecolor, 10 000 lines of scrollback by default,
+  find in scrollback, copy and paste, and a reconnect bar when the connection drops.
+- **Two-pane file browser:** local and remote side by side, virtualised lists that stay
+  smooth at 100 000 entries, rename, new folder, delete, upload and download.
+- **Transfer queue:** persistent (SQLite), parallel, resumes after a dropped connection or
+  a restart, checks size and time, and handles conflicts per item or for the whole batch
+  (ask, overwrite, overwrite if newer, skip, resume). Two items never write the same
+  destination at once.
+- **Remote editing:** open a remote file in your editor; every save is uploaded, and if the
+  file changed on the server you choose what happens instead of losing either side.
+- **Credentials in the system keyring** (Secret Service). Site files hold no secrets.
+  `ssh-agent` is supported and preferred.
+- **Encrypted backup:** export and import all sites, workspaces and passwords in one file
+  (Argon2id and XChaCha20-Poly1305).
+- **FileZilla import:** reads `sitemanager.xml` and reports what was imported and what was
+  skipped.
+- **Security prompts inline:** host key and certificate changes are shown in place, never as
+  a cascade of modal dialogs. `known_hosts` is verified; FTPS certificates can be pinned.
+- **Connections that survive:** keepalive, automatic reconnection with backoff, and recovery
+  from connections that servers drop while idle.
+- **Command palette:** Ctrl+K jumps to any tab, site, workspace or action.
+- **Technical log:** a log panel and `RUST_LOG` support, with no passwords, file contents or
+  terminal bytes in it.
 
 ## Install
 
-Download `hoprs_1.0.0-1_amd64.deb` and `SHA256SUMS` from the
-[latest Release](../../releases/latest) (Ubuntu 24.04 or newer, amd64), then:
+### From the `.deb` (recommended)
 
-```sh
-sha256sum -c SHA256SUMS --ignore-missing
-sudo apt install ./hoprs_1.0.0-1_amd64.deb
-```
+1. Download `hoprs_1.0.0-1_amd64.deb` and `SHA256SUMS` from the
+   [latest release](https://github.com/engviniciusbs/hoprs/releases/latest).
+2. Check the download and install it:
 
-`apt` pulls the libraries hoprs needs. Start it from the app menu or with `hoprs`;
-`hoprs --version` prints the version.
+   ```sh
+   sha256sum -c SHA256SUMS --ignore-missing
+   sudo apt install ./hoprs_1.0.0-1_amd64.deb
+   ```
 
-Without a GPU (no render node under `/dev/dri`, as in many VMs) hoprs draws with the
-software renderer (tiny-skia) so it stays light. Set `ICED_BACKEND` (`tiny-skia` or `wgpu`)
-to force one.
+   Expected output of the first command: `hoprs_1.0.0-1_amd64.deb: OK`. `apt` installs the
+   libraries hoprs needs (Wayland, X11, Vulkan/EGL loaders, D-Bus).
+
+3. Start hoprs from the app menu, or run:
+
+   ```sh
+   hoprs             # opens the window
+   hoprs --version   # prints "hoprs 1.0.0"
+   hoprs --help
+   ```
+
+Only one instance runs at a time; starting a second one prints `hoprs is already running`
+and exits.
 
 ### Uninstall
 
 ```sh
-sudo apt remove hoprs
+sudo apt remove hoprs   # or: sudo apt purge hoprs
 ```
 
-Your data stays: `~/.config/hoprs` (sites, workspaces, settings), `~/.local/share/hoprs`
-(transfer queue, recovered edits) and the passwords in the system keyring. To remove them
-too, delete both folders and the keyring entries whose service starts with `hoprs/` (one per
-site; for example with Seahorse, "Passwords and Keys").
+Neither command touches your data (see [Where your data lives](#where-your-data-lives)). To
+remove it too, delete `~/.config/hoprs` and `~/.local/share/hoprs`, and the keyring entries
+whose service starts with `hoprs/` (one per site), for example in Seahorse ("Passwords and
+Keys").
 
-### Build the package yourself
+## First steps
 
-```sh
-scripts/package-deb.sh   # needs Docker; builds in an Ubuntu 24.04 container
-scripts/check-deb.sh target/deb-ubuntu-24.04/debian/hoprs_1.0.0-1_amd64.deb
-```
+1. **Add a site.** Click "New site", pick the protocol, fill in host, port and user, and
+   choose how to authenticate: `ssh-agent`, a key file (with an optional passphrase), a
+   password, or keyboard-interactive. For SSH sites, "Open as" chooses files, terminal or
+   both.
+2. **Or import from FileZilla.** "Import from FileZilla" reads `sitemanager.xml` (usually
+   `~/.config/filezilla/sitemanager.xml`) and shows a report of what came in and what was
+   skipped and why.
+3. **Group sites into a workspace.** "Open workspace" then connects every site in it and
+   restores the tabs you had.
+4. **Back everything up.** "Export backup…" writes one encrypted file with your sites,
+   workspaces and passwords, protected by a password you choose (without it the backup
+   cannot be opened). "Restore backup…" on another machine brings all three back. Restoring
+   replaces everything: sites, workspaces and passwords not in the backup are removed, and
+   hoprs asks before doing it.
 
-The `.deb` ends up in `target/deb-ubuntu-24.04/debian/`. `check-deb.sh` installs it in a
-clean Ubuntu 24.04 container and checks files, `--version`, removal and purge.
+The first time hoprs meets an SSH host it shows the host key fingerprint inline and asks
+before trusting it; a changed key is shown as a warning, never accepted silently.
 
-## Running
+## Using hoprs
 
-```sh
-cargo run --release   # builds and runs the `hoprs` binary (crate hoprs-app)
-```
+### Terminal
 
-Profiles live in `~/.config/hoprs` (`sites.toml`, `workspaces.toml`, `settings.toml`) and
-the transfer queue in `~/.local/share/hoprs/queue.db`. Passwords never go in those files:
-they are kept in the system keyring. Only one instance runs at a time.
+An SSH site opens as files, terminal or both. Its terminal and files tabs share one
+connection, and "New terminal tab" or "New files tab" adds more over the same connection.
+Font size (10 to 24 px) and scrollback (1 000 to 100 000 lines) are in Settings. When the
+connection drops, a bar offers "Reconnect" and a new shell opens.
 
-## Terminal
+The server cannot write to your clipboard (OSC 52 is off).
 
-An SSH site opens as files, terminal or both ("Open as" in the site form); its terminal
-and files tabs share one connection, and "New terminal tab" / "New files tab" add more.
-The terminal is `xterm-256color` with truecolor, keeps 10 000 lines of scrollback by
-default, and its font size (10 to 24 px) and scrollback (1 000 to 100 000 lines) are in
-Settings. When the connection drops, a bar offers "Reconnect" and a new shell opens.
+### Transfers
 
-## Remote editing
+Select files in either pane and press Ctrl+Enter, or drag them across. Every transfer goes
+into the queue at the bottom, which survives restarts: close hoprs in the middle of an
+upload and it resumes where it stopped. When the destination already exists, hoprs asks
+what to do (ask, overwrite, overwrite if newer, skip, resume), for that item or for the rest
+of the batch.
 
-Select a remote file and press F4 (or "Edit"): hoprs downloads it to
+### Remote editing
+
+Select a remote file and press F4 (or "Edit"). hoprs downloads it to
 `$XDG_RUNTIME_DIR/hoprs/edit/`, opens it with the editor set in Settings › Remote editing
-(default `xdg-open`; for example `gedit` or `code --wait`, the file's path is added last)
-and uploads it again each time you save (after 500 ms of quiet). If the file changed on
-the server since you opened it, nothing is overwritten: the strip offers Overwrite, Keep
-remote or Save a copy. Closing a tab or the window with unsent changes asks first, and
-unsent changes are kept as copies in `~/.local/share/hoprs/recovered`.
+(default `xdg-open`; for example `gedit` or `code --wait`, with the file's path added last),
+and uploads it every time you save, after 500 ms of quiet. If the file changed on the server
+since you opened it, nothing is overwritten: a strip offers Overwrite, Keep remote or Save a
+copy. Closing a tab or the window with unsent changes asks first, and unsent changes are kept
+in `~/.local/share/hoprs/recovered`.
 
-## Keyboard shortcuts
+### Keyboard shortcuts
 
 | Key | Where | Does |
 |---|---|---|
@@ -82,35 +161,254 @@ unsent changes are kept as copies in `~/.local/share/hoprs/recovered`.
 | Ctrl+Enter | file pane | Upload or download the selection |
 | Tab | files tab | Switch pane |
 
-Plain Ctrl+K in a focused terminal goes to the shell (it kills the rest of the line in
-bash). The Log button in the status bar opens the technical log (no secrets, no terminal
-contents).
+Plain Ctrl+K in a focused terminal goes to the shell (in bash it kills the rest of the
+line).
 
-## System dependencies
+### Log
 
-Linux (Ubuntu) is the v1 target. At run time hoprs needs:
+The Log button in the status bar opens the technical log: connections, retries, transfer
+decisions. It never contains passwords, passphrases, file contents or terminal output.
 
-- **A Wayland or X11 session.** iced draws through wgpu (Vulkan or OpenGL), so a working
-  GPU driver (Mesa is enough) is required.
+## Where your data lives
+
+| Path | Holds |
+|---|---|
+| `~/.config/hoprs/sites.toml` | Saved sites (no secrets) |
+| `~/.config/hoprs/workspaces.toml` | Workspaces |
+| `~/.config/hoprs/settings.toml` | Settings |
+| `~/.local/share/hoprs/queue.db` | The transfer queue (SQLite) |
+| `~/.local/share/hoprs/recovered/` | Remote edits that could not be uploaded |
+| `$XDG_RUNTIME_DIR/hoprs/edit/` | Working copies of files being edited (cleared at logout) |
+| System keyring, service `hoprs/<site-id>` | Passwords and key passphrases |
+
+The TOML files are plain text and safe to keep in a dotfiles repository: they never hold a
+password or passphrase.
+
+## Configuration
+
+Most settings live in the Settings screen. A few environment variables change behaviour:
+
+| Variable | Effect | Default |
+|---|---|---|
+| `RUST_LOG` | Log filter, in [`EnvFilter`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html) syntax (`info`, `hoprs_ssh=debug`, ...). Terminal crates are capped at `warn` so terminal bytes never reach the log | `info` (noisy dependencies at `warn`) |
+| `ICED_BACKEND` | Renderer: `wgpu` (GPU) or `tiny-skia` (software) | chosen at start-up |
+| `SSH_AUTH_SOCK` | The `ssh-agent` socket used by sites with "Use ssh-agent" | set by your session |
+
+**Renderer.** At start-up hoprs looks for a GPU render node under `/dev/dri`. With none, or
+with only software drivers (as in many VMs), it draws with tiny-skia, which keeps memory at
+about 32 MB instead of the 166 MB that llvmpipe takes. Set `ICED_BACKEND` to force either.
+
+## System requirements
+
+At run time:
+
+- **A Wayland or X11 session.** With a GPU, iced draws through wgpu (Vulkan or OpenGL; Mesa
+  is enough); without one it falls back to the software renderer.
 - **The Secret Service and a keyring daemon** (GNOME Keyring or KWallet) to save passwords
   and key passphrases. Without one, hoprs still connects but asks for the password every
   time.
 - **The XDG desktop portal** (`xdg-desktop-portal` with a GNOME/GTK or KDE backend) for the
-  "Choose…" file dialogs (through the `rfd` crate). `rfd` falls back to `zenity` when no
-  portal answers; that fallback is untested.
-- **`ssh-agent`** (optional), used when a site has "Use ssh-agent" ticked.
+  "Choose…" file dialogs. Without a portal they fall back to `zenity` (untested).
+- **`ssh-agent`** (optional).
 - **A text editor** for remote editing; `xdg-open` (from `xdg-utils`) by default.
 
-Building needs a Rust toolchain (stable) and a C compiler (`build-essential`) for the
-crypto dependencies.
+## Building from source
 
-## Tests
+### Prerequisites
+
+- **Rust 1.99.1.** `rust-toolchain.toml` pins it; with [rustup](https://rustup.rs) installed,
+  the right toolchain (with `rustfmt` and `clippy`) is fetched on the first `cargo` command.
+- **A C toolchain** for the crypto dependencies:
+
+  ```sh
+  sudo apt install build-essential cmake pkg-config
+  ```
+
+- **Docker** (optional) for the integration tests and for building the `.deb`.
+
+### Build and run
+
+```sh
+git clone https://github.com/engviniciusbs/hoprs.git
+cd hoprs
+cargo run --release        # builds and starts the `hoprs` binary (crate hoprs-app)
+```
+
+The binary ends up in `target/release/hoprs`.
+
+### Build the `.deb`
+
+```sh
+scripts/package-deb.sh                                              # needs Docker
+scripts/check-deb.sh target/deb-ubuntu-24.04/debian/hoprs_1.0.0-1_amd64.deb
+```
+
+`package-deb.sh` builds inside an Ubuntu 24.04 container pinned by digest, with
+`cargo-deb`, `--locked` and the pinned toolchain, so the package only needs glibc 2.39.
+`check-deb.sh` installs the result in a clean Ubuntu 24.04 container and checks the file
+list and permissions, that every loaded library comes from `Depends`, that the app starts
+and idles under 80 MB, and that removing and purging the package keep user data.
+
+### Scripts
+
+| Script | Does |
+|---|---|
+| `scripts/package-deb.sh` | Builds the `.deb` in a container (`--host` builds on this machine) |
+| `scripts/check-deb.sh <deb>` | Installs and checks a `.deb` in a clean container |
+| `scripts/icons.sh` | Renders the PNG icons (16 to 512 px) from the SVG |
+| `scripts/perf.sh` | Runs every performance check (about 45 min) |
+| `scripts/release-notes.sh` | Prints a version's section of the changelog |
+| `scripts/workspace-version.sh` | Prints the workspace version |
+
+## Architecture
+
+A Cargo workspace of seven crates. Only `hoprs-app` depends on iced; everything else is
+tested without a GUI.
+
+```
+crates/
+├── hoprs-core/      shared types: Site, Protocol, Workspace, RemotePath, RemoteEntry, Error
+├── hoprs-vault/     TOML profiles, keyring, encrypted export and import
+├── hoprs-ssh/       SSH session: authentication, PTY, keepalive, known_hosts
+├── hoprs-remote/    the RemoteFs trait, with SFTP and FTP/FTPS implementations
+├── hoprs-transfer/  transfer engine: queue, workers, resume, conflicts
+├── hoprs-import/    FileZilla sitemanager.xml importer
+└── hoprs-app/       the iced application: screens, widgets, theme, the `hoprs` binary
+```
+
+Dependencies (A → B means A depends on B), and no others:
+
+```
+every crate → hoprs-core
+hoprs-remote   → hoprs-ssh
+hoprs-transfer → hoprs-remote
+hoprs-import   → hoprs-vault
+hoprs-app      → hoprs-transfer, hoprs-remote, hoprs-ssh, hoprs-vault, hoprs-import
+```
+
+One tokio runtime runs all I/O; the UI thread never blocks on it.
+
+| Concern | Library |
+|---|---|
+| GUI | [iced](https://iced.rs) |
+| Async runtime | [tokio](https://tokio.rs) |
+| SSH and SFTP | [russh](https://github.com/Eugeny/russh), russh-sftp |
+| FTP and FTPS | [suppaftp](https://github.com/veeso/suppaftp) |
+| Terminal emulation | [alacritty_terminal](https://github.com/alacritty/alacritty) |
+| File watching (remote editing) | [notify](https://github.com/notify-rs/notify) |
+| Queue storage | SQLite |
+| Keyring | Secret Service |
+
+The full design is in
+[docs/superpowers/specs/2026-11-11-hoprs-design.md](docs/superpowers/specs/2026-11-11-hoprs-design.md)
+(in Portuguese), and the implementation plans are in
+[docs/superpowers/plans/](docs/superpowers/plans/).
+
+## Testing
 
 ```sh
 cargo test --workspace --all-features
-# Integration tests against the Docker test servers (OpenSSH, vsftpd):
-docker compose -f docker/compose.yml up -d --build --wait
-cargo test --workspace --all-features -- --ignored --test-threads=1
 ```
 
-Performance targets (spec §9) and their last numbers: [docs/perf/README.md](docs/perf/README.md).
+Integration tests run against real servers (OpenSSH and vsftpd, including FTPS and servers
+that drop idle connections) in Docker:
+
+```sh
+docker compose -f docker/compose.yml up -d --build --wait
+cargo test --workspace --all-features -- --ignored --test-threads=1
+docker compose -f docker/compose.yml -p hoprs-test down -v
+```
+
+The private keys and certificates under `docker/fixtures/` and
+`crates/*/tests/fixtures/` exist only for these test servers. They protect nothing.
+
+Every commit must pass:
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+```
+
+CI (`.github/workflows/ci.yml`) runs lint, unit tests, the Docker integration tests, the
+benchmarks build and the `.deb` build and check on every pull request and on `main`.
+
+## Performance
+
+The v1 targets and the last numbers from `.github/workflows/perf.yml` (2026-11-13). How each
+one is measured: [docs/perf/README.md](docs/perf/README.md).
+
+| Target | Last result |
+|---|---|
+| Open in under 500 ms | 84 ms |
+| Idle memory under 80 MB | 33 MB |
+| 100 000 entries scroll at 60 fps (p95 frame under 16 ms) | p95 0.58 ms |
+| SFTP 1 GiB at 50 ms RTT, at least 90% of `scp` | 0.99 × `scp` |
+| 10 000 small files over FTP, no slower than `lftp` | 1.003 × `lftp` (known gap) |
+| 10 000 small files over SFTP, no slower than `lftp` | 2.0 × `lftp` (known gap) |
+
+The perf workflow runs on every push to `main` and weekly. It is never a required check,
+because shared runners are noisy.
+
+## Releasing
+
+1. Bump the version in the workspace `Cargo.toml` and add its section to `CHANGELOG.md`.
+2. Merge to `main` with CI green.
+3. Tag and push:
+
+   ```sh
+   git tag v1.0.1
+   git push origin v1.0.1
+   ```
+
+`.github/workflows/release.yml` checks the tag against the workspace version, builds and
+checks the `.deb`, writes `SHA256SUMS`, creates a draft release with the changelog section as
+notes, downloads the assets back to verify the checksums, and only then publishes. A tag with
+a `-` (`v1.1.0-rc.1`) becomes a pre-release.
+
+## Troubleshooting
+
+**The window is slow or uses a lot of memory in a VM.** The VM's GPU may be a 2D-only device
+(`virtio_gpu`, `vmwgfx`) that wgpu runs through llvmpipe. Start with
+`ICED_BACKEND=tiny-skia hoprs`.
+
+**hoprs asks for the password every time.** No Secret Service answered. Install and unlock a
+keyring (`gnome-keyring` or KWallet), then save the password again in the site form.
+
+**"Choose…" does nothing.** Install `xdg-desktop-portal` and a backend for your desktop
+(`xdg-desktop-portal-gnome` or `xdg-desktop-portal-kde`).
+
+**A connection keeps dropping.** Open the log (status bar, Log) and look at the INFO lines
+around the drop; they name the cause (timeout, server close, reconnect attempts). For more,
+start hoprs with `RUST_LOG=hoprs_ssh=debug,hoprs_remote=debug`.
+
+**The host key changed.** hoprs shows the old and new fingerprints and connects only if you
+accept the new key. Check with the server's administrator first.
+
+## Contributing
+
+Issues and pull requests are welcome.
+
+- Keep `cargo fmt` and `cargo clippy -D warnings` clean (see [Testing](#testing)).
+- Only `hoprs-app` may depend on iced, and the crate graph above is fixed.
+- Tests must be portable: use `tempfile`, never a literal `/tmp`.
+- Logs must never contain a password, passphrase, file contents or terminal bytes.
+- Code, identifiers, UI strings and commit messages are in English.
+
+## Security
+
+Please report vulnerabilities privately through
+[GitHub security advisories](https://github.com/engviniciusbs/hoprs/security/advisories/new)
+rather than in a public issue.
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion
+in this work, as defined in the Apache-2.0 license, shall be dual licensed as above, without
+any additional terms or conditions.
