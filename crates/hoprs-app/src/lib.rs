@@ -9,9 +9,12 @@ mod app;
 mod backend;
 #[doc(hidden)]
 pub mod bench;
+pub mod cli;
 mod effects;
+mod icon;
 mod logbuf;
 mod probe;
+mod renderer;
 mod settings;
 mod terminal;
 mod ui;
@@ -27,6 +30,7 @@ use iced::Task;
 
 use crate::app::{App, Message};
 use crate::backend::{Backend, BackendApi, BackendConfig, LazyKeyringStore};
+pub use crate::icon::{APP_ID, window_icon};
 
 /// Smallest window that still fits the sidebar and two file panes.
 const MIN_WINDOW: iced::Size = iced::Size::new(960.0, 640.0);
@@ -51,10 +55,13 @@ const TERMINAL_LOG_CAP: &str = "warn";
 /// probe instead (see `probe`): the same start-up, then two lines on stdout, then exit.
 pub fn run() -> iced::Result {
     let started = Instant::now();
+    // First, while hoprs is still single-threaded: it may set `ICED_BACKEND`.
+    let renderer = renderer::pick();
     let probe = probe::enabled().then(|| probe::Probe::new(started));
     let filter = log_filter(std::env::var("RUST_LOG").ok().as_deref());
     let log = logbuf::LogBuffer::new();
     init_logging(&filter, log.clone());
+    tracing::info!("{}", renderer.0);
 
     let _instance = match acquire_first_instance_lock(&instance_lock_paths()) {
         Ok(Some(lock)) => Some(lock),
@@ -84,6 +91,11 @@ pub fn run() -> iced::Result {
             min_size: Some(MIN_WINDOW),
             // A close request goes to `update`: tabs saved, backend shut down, then closed.
             exit_on_close_request: false,
+            icon: window_icon(),
+            platform_specific: iced::window::settings::PlatformSpecific {
+                application_id: APP_ID.to_owned(),
+                ..iced::window::settings::PlatformSpecific::default()
+            },
             ..iced::window::Settings::default()
         })
         .run()

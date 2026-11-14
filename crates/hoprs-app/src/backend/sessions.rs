@@ -2026,6 +2026,19 @@ mod tests {
     /// Unpauses a compose service when dropped. Never panics.
     struct Unpause(&'static str);
 
+    impl Unpause {
+        /// Unpauses now, off the runtime's thread, and disarms the guard.
+        async fn now(self) {
+            let service = self.0;
+            std::mem::forget(self);
+            tokio::task::spawn_blocking(move || {
+                hoprs_ssh::testing::docker(&["unpause", service]);
+            })
+            .await
+            .unwrap();
+        }
+    }
+
     impl Drop for Unpause {
         fn drop(&mut self) {
             let service = self.0;
@@ -2041,9 +2054,17 @@ mod tests {
     /// nothing answers), as when a NAT drops an idle connection. The keepalive notices, the
     /// transport tries its round and gives up; once the server answers again the session
     /// comes back by itself, with no click, and the next listing works.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    ///
+    /// The server comes back during the monitor's one quiet round, which the test waits
+    /// for in the connection log. Not on the state channel: `Disconnected` lasts only until
+    /// the monitor starts that round, and a watch receiver can miss it; it then saw only the
+    /// quiet round's own `Disconnected`, unpaused after the last round and waited for
+    /// nothing (CI runs 43510478053, 43582756753). On one thread, so the log captures every
+    /// task.
+    #[tokio::test]
     #[ignore = "needs docker: docker compose -f docker/compose.yml up -d --build --wait"]
     async fn silent_drop_is_detected_and_recovered() {
+        let (logs, _guard) = capture_logs();
         let f = fixture_config(
             Arc::new(MemoryStore::new()),
             SessionConfig {
@@ -2079,27 +2100,39 @@ mod tests {
         let mut state = f.manager.state(id).unwrap();
 
         let unpause = Unpause("ftp-idle");
-        hoprs_ssh::testing::docker(&["pause", "ftp-idle"]);
-        let gave_up = tokio::time::timeout(
-            Duration::from_secs(30),
-            state.wait_for(|s| matches!(s, ConnectionState::Disconnected(_))),
-        )
+        tokio::task::spawn_blocking(|| hoprs_ssh::testing::docker(&["pause", "ftp-idle"]))
+            .await
+            .unwrap();
+        // The keepalive notices, the transport's round fails and gives up: the monitor
+        // starts its one quiet round (only after a network failure). Its first attempt is
+        // now pending, `connect_timeout` long, and a second one follows.
+        let quiet_round = "reconnection given up; trying one more round";
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !logs.text().contains(quiet_round) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
         .await
-        .expect("the drop is detected and the transport gives up")
-        .unwrap()
-        .clone();
-        let ConnectionState::Disconnected(error) = gave_up else {
-            unreachable!()
-        };
-        assert_eq!(error.kind, ErrorKind::Network, "{error:?}");
-        drop(unpause);
+        .unwrap_or_else(|_| {
+            panic!(
+                "the drop is detected and the transport gives up: {}",
+                logs.text()
+            )
+        });
+        let text = logs.text();
+        let gave_up = text
+            .lines()
+            .find(|l| l.contains("state=\"disconnected\""))
+            .unwrap_or_else(|| panic!("the give-up in the log: {text}"));
+        assert!(gave_up.contains("reason=\"network: "), "{gave_up}");
+        unpause.now().await;
 
         tokio::time::timeout(
             Duration::from_secs(30),
             state.wait_for(|s| *s == ConnectionState::Connected),
         )
         .await
-        .expect("back without a click")
+        .unwrap_or_else(|_| panic!("back without a click: {}", logs.text()))
         .unwrap();
         let entries = remote.list(&home).await.expect("the next listing works");
         assert!(!entries.is_empty());

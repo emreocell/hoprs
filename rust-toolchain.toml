@@ -1,3 +1,5 @@
 [toolchain]
-channel = "stable"
+# Pinned for reproducible builds; scripts/package-deb.sh builds the release with this
+# version. Bump it deliberately.
+channel = "1.99.1"
 components = ["rustfmt", "clippy"]

@@ -1,8 +1,14 @@
 name: CI
 
+# Pushes to main, and every pull request. Plan branches always go through a PR, so a
+# push to one would only run the same jobs a second time.
 on:
   push:
+    branches: [main]
   pull_request:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -12,12 +18,34 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Release notes self-test
+        run: bash scripts/release-notes.sh --self-test
+      - name: Deb check self-test (Debian to crate version mapping)
+        run: bash docker/deb-check/inside.sh --self-test
+      # The release fails at tag time without a CHANGELOG section for the version; fail
+      # here instead, on the PR that bumps the version.
+      - name: CHANGELOG has a section for the workspace version
+        run: scripts/release-notes.sh "$(scripts/workspace-version.sh)" >/dev/null
+      # The workflows name the toolchain (rust-toolchain@X.Y.Z) so they state what
+      # runs; rust-toolchain.toml is the source of truth. Fail when they drift apart.
+      - name: Workflows use the pinned toolchain
+        run: |
+          pinned=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)
+          drift=$(grep -HnE 'uses: *dtolnay/rust-toolchain@' .github/workflows/*.yml \
+            | grep -v "dtolnay/rust-toolchain@${pinned//./\\.}\$" || true)
+          if [ -n "$drift" ]; then
+            echo "::error::rust-toolchain.toml pins $pinned; these workflow steps differ:"
+            echo "$drift"
+            exit 1
+          fi
 
   test:
     strategy:
@@ -28,7 +56,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features
 
@@ -37,7 +67,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       - run: docker compose -f docker/compose.yml up -d --build --wait
       - run: cargo test --workspace --all-features -- --ignored --test-threads=1
@@ -49,7 +81,41 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       # The engine benches only; the spec §9 benches run in perf.yml.
       - run: cargo bench -p hoprs-transfer --bench engine -- --quick
+
+  # Builds the .deb as the release does (scripts/package-deb.sh: Ubuntu 24.04 container,
+  # pinned toolchain, --locked) and proves it installs, runs and uninstalls on a clean
+  # Ubuntu 24.04 (scripts/check-deb.sh). Expected runtime: about 15-25 minutes on a cold
+  # cache (the release build inside the container), a few minutes on a warm one. The
+  # release workflow does not use this cache: it is always a clean build.
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/cache@v4
+        with:
+          path: |
+            target/deb-ubuntu-24.04/cargo-home
+            target/deb-ubuntu-24.04/release
+          key: deb-build-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: deb-build-
+      - name: Build the .deb
+        run: |
+          deb=$(scripts/package-deb.sh)
+          echo "DEB=$deb" >> "$GITHUB_ENV"
+      # HOPRS_BUILDER_HOME: prefixes that must not appear in the binary. The runner's
+      # $HOME, and the container build's: its HOME is /tmp (checked as /tmp/.cargo and
+      # /tmp/.rustup, since a bare /tmp is legitimately in the binary, e.g.
+      # /tmp/.X11-unix), the repository at /src, the image's toolchain in /opt.
+      - name: Check the .deb on a clean Ubuntu 24.04
+        run: |
+          HOPRS_BUILDER_HOME="$HOME:/tmp/.cargo:/tmp/.rustup:/src/crates/:/src/target/:/opt/cargo/:/opt/rustup/" \
+            scripts/check-deb.sh "$DEB"
