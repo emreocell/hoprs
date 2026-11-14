@@ -49,7 +49,7 @@ html, body { overflow-x: clip; background: var(--color-paper); }
 
 .shot { width: 100%; margin: var(--space-xl) 0 0; aspect-ratio: 16 / 10; border: 1px solid var(--color-rule); border-radius: var(--radius); }
 
-.section { padding-block: var(--section-gap-s) 0; display: grid; gap: var(--space-lg); justify-items: start; }
+.section { padding-block: var(--section-gap-s) 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-lg); justify-items: start; }
 .well { margin: 0; width: 100%; max-width: 48rem; padding: var(--space-md) var(--space-lg); background: var(--color-paper-2); border: 1px solid var(--color-rule); border-radius: var(--radius); font-family: var(--font-display); font-size: var(--text-sm); line-height: 1.7; overflow-x: auto; }
 .out { list-style: none; display: grid; gap: var(--space-xs); }
 .out li { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-xs) var(--space-lg); }
@@ -66,3 +66,19 @@ html, body { overflow-x: clip; background: var(--color-paper); }
 .faq details { border-bottom: 1px solid var(--color-rule); }
 .faq summary { display: flex; align-items: center; min-height: 48px; padding-block: var(--space-xs); cursor: pointer; font-family: var(--font-display); }
 .faq details p { padding-bottom: var(--space-md); color: var(--color-ink-2); }
+
+/* Install well */
+.install-well { width: 100%; max-width: 48rem; min-width: 0; display: grid; gap: var(--space-xs); }
+.install-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-sm); }
+.install-tabs { display: flex; gap: var(--space-xs); }
+.install-tab, .install-copy { display: inline-flex; align-items: center; gap: var(--space-xs); min-height: 44px; padding-inline: var(--space-md); background: transparent; color: var(--color-muted); border: 0; border-bottom: 2px solid transparent; border-radius: 0; font-family: var(--font-display); font-size: var(--text-sm); cursor: pointer; transition: color 0s steps(1), background 0s steps(1), border-color 0s steps(1); }
+.install-tab:hover, .install-copy:hover { color: var(--color-ink); background: var(--color-accent-wash); }
+.install-tab:active, .install-copy:active { background: var(--color-paper-3); }
+.install-tab[aria-selected="true"] { color: var(--color-ink); border-bottom-color: var(--color-accent); }
+.install-tab:focus-visible, .install-copy:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
+.install-copy { border: 1px solid var(--color-rule-2); border-radius: var(--radius); color: var(--color-ink); }
+.install-copy:disabled { color: var(--color-rule-2); cursor: not-allowed; }
+.install-pre { display: flex; gap: var(--space-sm); max-width: 100%; overflow-x: auto; }
+.install-pre code { white-space: pre; font: inherit; }
+.install-prompts { display: flex; flex-direction: column; color: var(--color-muted); user-select: none; }
+.install-status { min-height: 1.5em; }
