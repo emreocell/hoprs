@@ -14,7 +14,7 @@ it.skipIf(!existsSync(indexPath))(
     const html = readFileSync(indexPath, "utf8");
     expect(html).toContain(`<h1`);
     expect(html).toContain(heroHeadline);
-    expect(html).toContain("sudo apt install ./hoprs_1.0.0-1_amd64.deb");
+    expect(html).toContain(`sudo apt install ./${facts.debName}`);
     // Every download is in the HTML, so a visitor without scripts can reach all of them.
     for (const url of [facts.debUrl, facts.dmgUrl, facts.msiUrl, facts.zipUrl]) expect(html).toContain(`href="${url}"`);
     // The prerender pre-selects Linux: the hero button is the .deb.

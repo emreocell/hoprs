@@ -15,7 +15,10 @@ fn version_prints_name_and_version() {
     for flag in ["--version", "-V"] {
         let out = hoprs(&[flag]);
         assert_eq!(out.status.code(), Some(0));
-        assert_eq!(String::from_utf8_lossy(&out.stdout), "hoprs 1.0.0\n");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("hoprs {}\n", env!("CARGO_PKG_VERSION"))
+        );
     }
 }
 

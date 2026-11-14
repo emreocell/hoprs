@@ -1,6 +1,6 @@
 // Filled by hand per release. facts.test.ts checks the version against the workspace Cargo.toml.
 const repoUrl = "https://github.com/engviniciusbs/hoprs";
-const version = "1.0.0";
+const version = "1.1.0";
 const debName = `hoprs_${version}-1_amd64.deb`;
 const dmgName = `hoprs_${version}_macos_universal.dmg`;
 const msiName = `hoprs_${version}_windows_x64.msi`;

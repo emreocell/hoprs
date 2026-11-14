@@ -2,14 +2,14 @@
 
 Website: https://hoprs.online
 
-A fast, native SSH, SFTP, FTP and FTPS desktop client for Linux, written in Rust.
+A fast, native SSH, SFTP, FTP and FTPS desktop client for Linux, macOS and Windows, written in Rust.
 
 hoprs keeps the idea that made FileZilla useful (a list of saved sites you open with one
 click) and puts a terminal, a two-pane file browser and a persistent transfer queue behind
 it, in one quiet window that opens in under 100 ms and idles at about 33 MB.
 
-- **Version:** 1.0.0 ([changelog](CHANGELOG.md))
-- **Platform:** Linux (Ubuntu 24.04 or newer, amd64). The code is portable; other platforms are not packaged yet.
+- **Version:** 1.1.0 ([changelog](CHANGELOG.md))
+- **Platforms:** Linux (Ubuntu 24.04 or newer, amd64), macOS 11 or newer (Apple Silicon and Intel), Windows 10 or newer (x64).
 - **License:** MIT OR Apache-2.0
 
 ## Contents
@@ -58,47 +58,104 @@ it, in one quiet window that opens in under 100 ms and idles at about 33 MB.
   a cascade of modal dialogs. `known_hosts` is verified; FTPS certificates can be pinned.
 - **Connections that survive:** keepalive, automatic reconnection with backoff, and recovery
   from connections that servers drop while idle.
-- **Command palette:** Ctrl+K jumps to any tab, site, workspace or action.
+- **Command palette:** Ctrl+K (Cmd+K on macOS) jumps to any tab, site, workspace or action.
 - **Technical log:** a log panel and `RUST_LOG` support, with no passwords, file contents or
   terminal bytes in it.
 
 ## Install
 
-### From the `.deb` (recommended)
+Every release has these files on the
+[latest release](https://github.com/engviniciusbs/hoprs/releases/latest) page, plus
+`SHA256SUMS` for all of them:
 
-1. Download `hoprs_1.0.0-1_amd64.deb` and `SHA256SUMS` from the
-   [latest release](https://github.com/engviniciusbs/hoprs/releases/latest).
+| System | File |
+|---|---|
+| Linux (Ubuntu 24.04 or newer, amd64) | `hoprs_1.1.0-1_amd64.deb` |
+| macOS 11 or newer, Apple Silicon and Intel | `hoprs_1.1.0_macos_universal.dmg` |
+| Windows 10 or newer, x64 (installer, per machine) | `hoprs_1.1.0_windows_x64.msi` |
+| Windows 10 or newer, x64 (portable) | `hoprs_1.1.0_windows_x64.zip` |
+
+The macOS and Windows builds are **not signed** with a paid certificate (see the steps
+below), so each system warns once on first launch.
+
+### Linux: the `.deb` (recommended)
+
+1. Download `hoprs_1.1.0-1_amd64.deb` and `SHA256SUMS`.
 2. Check the download and install it:
 
    ```sh
    sha256sum -c SHA256SUMS --ignore-missing
-   sudo apt install ./hoprs_1.0.0-1_amd64.deb
+   sudo apt install ./hoprs_1.1.0-1_amd64.deb
    ```
 
-   Expected output of the first command: `hoprs_1.0.0-1_amd64.deb: OK`. `apt` installs the
+   Expected output of the first command: `hoprs_1.1.0-1_amd64.deb: OK`. `apt` installs the
    libraries hoprs needs (Wayland, X11, Vulkan/EGL loaders, D-Bus).
 
 3. Start hoprs from the app menu, or run:
 
    ```sh
    hoprs             # opens the window
-   hoprs --version   # prints "hoprs 1.0.0"
+   hoprs --version   # prints "hoprs 1.1.0"
    hoprs --help
    ```
 
 Only one instance runs at a time; starting a second one prints `hoprs is already running`
 and exits.
 
+### macOS: the `.dmg`
+
+1. Download `hoprs_1.1.0_macos_universal.dmg` and `SHA256SUMS`, and check it:
+
+   ```sh
+   shasum -a 256 -c SHA256SUMS --ignore-missing
+   ```
+
+2. Open the `.dmg` and drag hoprs to Applications.
+3. Open hoprs once. macOS refuses, because the app is ad-hoc signed only, not notarised.
+   Go to System Settings, Privacy & Security, and click "Open Anyway". Or, in Terminal:
+
+   ```sh
+   xattr -dr com.apple.quarantine /Applications/hoprs.app
+   ```
+
+   You do this once per download.
+4. **Keychain:** hoprs keeps passwords in the macOS Keychain. After each update macOS asks
+   for Keychain access again (an ad-hoc signature changes with every build); choose
+   "Always Allow".
+
+The `.dmg` is one universal build for Apple Silicon and Intel Macs.
+
+### Windows: the `.msi` or the `.zip`
+
+1. Download `hoprs_1.1.0_windows_x64.msi` (or the portable `hoprs_1.1.0_windows_x64.zip`)
+   and `SHA256SUMS`. In PowerShell, compare the hash with the line in `SHA256SUMS`:
+
+   ```powershell
+   (Get-FileHash .\hoprs_1.1.0_windows_x64.msi -Algorithm SHA256).Hash
+   ```
+
+2. Run the `.msi`. It installs per machine (it asks for administrator rights) and adds a
+   Start menu entry and a desktop shortcut. On "Windows protected your PC" (SmartScreen),
+   choose "More info", then "Run anyway".
+3. The `.zip` holds `hoprs.exe`, the licences and a `README.txt`; unzip it anywhere and run
+   `hoprs.exe`. SmartScreen may warn the same way.
+
+`hoprs.exe` links the C runtime statically, so the Visual C++ redistributable is not needed.
+`hoprs --version` and `hoprs --help` print into the cmd or PowerShell window you run them in.
+
 ### Uninstall
 
-```sh
-sudo apt remove hoprs   # or: sudo apt purge hoprs
-```
+| System | How | Your data |
+|---|---|---|
+| Linux | `sudo apt remove hoprs` (or `purge`) | Kept |
+| macOS | Drag hoprs from Applications to the Bin | Kept |
+| Windows | Settings, Apps, hoprs, Uninstall (the `.zip`: delete the folder) | Kept |
 
-Neither command touches your data (see [Where your data lives](#where-your-data-lives)). To
-remove it too, delete `~/.config/hoprs` and `~/.local/share/hoprs`, and the keyring entries
-whose service starts with `hoprs/` (one per site), for example in Seahorse ("Passwords and
-Keys").
+Uninstalling never touches your data or your saved passwords (see
+[Where your data lives](#where-your-data-lives)). To remove them too, delete the folders
+listed there, and the keyring entries whose service starts with `hoprs/` (one per site):
+in Seahorse ("Passwords and Keys") on Linux, Keychain Access on macOS, Credential Manager on
+Windows.
 
 ## First steps
 
@@ -107,7 +164,8 @@ Keys").
    password, or keyboard-interactive. For SSH sites, "Open as" chooses files, terminal or
    both.
 2. **Or import from FileZilla.** "Import from FileZilla" reads `sitemanager.xml` (usually
-   `~/.config/filezilla/sitemanager.xml`) and shows a report of what came in and what was
+   `~/.config/filezilla/sitemanager.xml`; `~/.config/filezilla` on macOS too,
+   `%APPDATA%\FileZilla\sitemanager.xml` on Windows) and shows a report of what came in and what was
    skipped and why.
 3. **Group sites into a workspace.** "Open workspace" then connects every site in it and
    restores the tabs you had.
@@ -142,18 +200,22 @@ of the batch.
 ### Remote editing
 
 Select a remote file and press F4 (or "Edit"). hoprs downloads it to
-`$XDG_RUNTIME_DIR/hoprs/edit/`, opens it with the editor set in Settings › Remote editing
-(default `xdg-open`; for example `gedit` or `code --wait`, with the file's path added last),
-and uploads it every time you save, after 500 ms of quiet. If the file changed on the server
+`$XDG_RUNTIME_DIR/hoprs/edit/` (a temporary folder on macOS and Windows), opens it with the editor set in Settings › Remote editing
+(default `system`: `xdg-open` on Linux, `open -t` on macOS, the file's associated app on
+Windows, with the Open With dialog if it has none; or your own command such as `gedit` or
+`code --wait`, with the file's path added last), and uploads it every time you save, after 500 ms of quiet. If the file changed on the server
 since you opened it, nothing is overwritten: a strip offers Overwrite, Keep remote or Save a
 copy. Closing a tab or the window with unsent changes asks first, and unsent changes are kept
-in `~/.local/share/hoprs/recovered`.
+in the `recovered` folder of your data directory.
+
+On Windows a custom editor must be a program that opens a window and can wait: use
+`code.cmd --wait` or a full path. Console editors such as `vim.exe` do not work.
 
 ### Keyboard shortcuts
 
 | Key | Where | Does |
 |---|---|---|
-| Ctrl+K | anywhere (Ctrl+Shift+K in a focused terminal) | Go to anything: tabs, sites, workspaces, actions |
+| Ctrl+K (Cmd+K on macOS) | anywhere (Ctrl+Shift+K in a focused terminal, on macOS too) | Go to anything: tabs, sites, workspaces, actions |
 | Ctrl+Shift+C / Ctrl+Shift+V | terminal | Copy the selection / paste |
 | Ctrl+Shift+F | terminal | Find in scrollback |
 | F2 | file pane | Rename |
@@ -163,7 +225,7 @@ in `~/.local/share/hoprs/recovered`.
 | Ctrl+Enter | file pane | Upload or download the selection |
 | Tab | files tab | Switch pane |
 
-Plain Ctrl+K in a focused terminal goes to the shell (in bash it kills the rest of the
+Terminal shortcuts use Ctrl+Shift on every system, macOS included. Plain Ctrl+K in a focused terminal goes to the shell (in bash it kills the rest of the
 line).
 
 ### Log
@@ -173,15 +235,12 @@ decisions. It never contains passwords, passphrases, file contents or terminal o
 
 ## Where your data lives
 
-| Path | Holds |
-|---|---|
-| `~/.config/hoprs/sites.toml` | Saved sites (no secrets) |
-| `~/.config/hoprs/workspaces.toml` | Workspaces |
-| `~/.config/hoprs/settings.toml` | Settings |
-| `~/.local/share/hoprs/queue.db` | The transfer queue (SQLite) |
-| `~/.local/share/hoprs/recovered/` | Remote edits that could not be uploaded |
-| `$XDG_RUNTIME_DIR/hoprs/edit/` | Working copies of files being edited (cleared at logout) |
-| System keyring, service `hoprs/<site-id>` | Passwords and key passphrases |
+| What | Linux | macOS | Windows |
+|---|---|---|---|
+| Config: `sites.toml` (no secrets), `workspaces.toml`, `settings.toml` | `~/.config/hoprs/` | `~/Library/Application Support/hoprs/` | `%APPDATA%\hoprs\` |
+| Transfer queue `queue.db` (SQLite), `recovered/` (remote edits that could not be uploaded) | `~/.local/share/hoprs/` | `~/Library/Application Support/hoprs/` | `%APPDATA%\hoprs\` |
+| Working copies of files being edited | `$XDG_RUNTIME_DIR/hoprs/edit/` (cleared at logout) | a temporary folder | a temporary folder |
+| Passwords and key passphrases, service `hoprs/<site-id>` | Secret Service (GNOME Keyring, KWallet) | macOS Keychain | Windows Credential Manager |
 
 The TOML files are plain text and safe to keep in a dotfiles repository: they never hold a
 password or passphrase.
@@ -194,15 +253,15 @@ Most settings live in the Settings screen. A few environment variables change be
 |---|---|---|
 | `RUST_LOG` | Log filter, in [`EnvFilter`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html) syntax (`info`, `hoprs_ssh=debug`, ...). Terminal crates are capped at `warn` so terminal bytes never reach the log | `info` (noisy dependencies at `warn`) |
 | `ICED_BACKEND` | Renderer: `wgpu` (GPU) or `tiny-skia` (software) | chosen at start-up |
-| `SSH_AUTH_SOCK` | The `ssh-agent` socket used by sites with "Use ssh-agent" | set by your session |
+| `SSH_AUTH_SOCK` | The `ssh-agent` socket used by sites with "Use ssh-agent". On Windows, hoprs uses the OpenSSH agent pipe `\\.\pipe\openssh-ssh-agent` (an MSYS or Git for Windows `SSH_AUTH_SOCK` falls back to it); Pageant is not supported | set by your session |
 
-**Renderer.** At start-up hoprs looks for a GPU render node under `/dev/dri`. With none, or
+**Renderer (Linux).** At start-up hoprs looks for a GPU render node under `/dev/dri`. With none, or
 with only software drivers (as in many VMs), it draws with tiny-skia, which keeps memory at
 about 32 MB instead of the 166 MB that llvmpipe takes. Set `ICED_BACKEND` to force either.
 
 ## System requirements
 
-At run time:
+**Linux** at run time:
 
 - **A Wayland or X11 session.** With a GPU, iced draws through wgpu (Vulkan or OpenGL; Mesa
   is enough); without one it falls back to the software renderer.
@@ -213,6 +272,13 @@ At run time:
   "Choose…" file dialogs. Without a portal they fall back to `zenity` (untested).
 - **`ssh-agent`** (optional).
 - **A text editor** for remote editing; `xdg-open` (from `xdg-utils`) by default.
+
+**macOS:** 11 (Big Sur) or newer, Apple Silicon or Intel. The Keychain stores passwords;
+`ssh-agent` is read from `SSH_AUTH_SOCK` (launchd's agent works).
+
+**Windows:** 10 or newer, x64 (ARM64 is not built). The Credential Manager stores passwords.
+For `ssh-agent`, start the "OpenSSH Authentication Agent" service. No other runtime is
+needed.
 
 ## Building from source
 
@@ -242,7 +308,7 @@ The binary ends up in `target/release/hoprs`.
 
 ```sh
 scripts/package-deb.sh                                              # needs Docker
-scripts/check-deb.sh target/deb-ubuntu-24.04/debian/hoprs_1.0.0-1_amd64.deb
+scripts/check-deb.sh target/deb-ubuntu-24.04/debian/hoprs_1.1.0-1_amd64.deb
 ```
 
 `package-deb.sh` builds inside an Ubuntu 24.04 container pinned by digest, with
@@ -259,6 +325,8 @@ and idles under 80 MB, and that removing and purging the package keep user data.
 | `scripts/check-deb.sh <deb>` | Installs and checks a `.deb` in a clean container |
 | `scripts/icons.sh` | Renders the PNG icons (16 to 512 px) from the SVG |
 | `scripts/perf.sh` | Runs every performance check (about 45 min) |
+| `scripts/package-macos.sh`, `scripts/check-macos.sh` | Build and check the universal `.dmg` (on macOS) |
+| `scripts/package-windows.sh`, `scripts/check-windows.ps1` | Build and check the `.msi` and `.zip` (on Windows) |
 | `scripts/release-notes.sh` | Prints a version's section of the changelog |
 | `scripts/workspace-version.sh` | Prints the workspace version |
 
@@ -363,20 +431,32 @@ because shared runners are noisy.
    ```
 
 `.github/workflows/release.yml` checks the tag against the workspace version, builds and
-checks the `.deb`, writes `SHA256SUMS`, creates a draft release with the changelog section as
-notes, downloads the assets back to verify the checksums, and only then publishes. A tag with
-a `-` (`v1.1.0-rc.1`) becomes a pre-release.
+checks the packages on three runners (Linux `.deb`, macOS `.dmg`, Windows `.msi` and `.zip`),
+writes `SHA256SUMS`, creates a draft release with the changelog section as notes, downloads
+the assets back to verify the checksums, and only then publishes: all or nothing. A tag with
+a `-` (`v1.2.0-rc.1`) becomes a pre-release. Running the workflow by hand
+(`workflow_dispatch`) is a dry run that builds and checks everything and publishes nothing.
+
+The site at hoprs.online deploys only once `v<version>` is a published, non-prerelease
+release, and again after each successful Release run, so its download links never point at
+a release that does not exist yet.
 
 ## Troubleshooting
 
-**The window is slow or uses a lot of memory in a VM.** The VM's GPU may be a 2D-only device
+**The window is slow or uses a lot of memory in a VM (Linux).** The VM's GPU may be a 2D-only device
 (`virtio_gpu`, `vmwgfx`) that wgpu runs through llvmpipe. Start with
 `ICED_BACKEND=tiny-skia hoprs`.
 
-**hoprs asks for the password every time.** No Secret Service answered. Install and unlock a
-keyring (`gnome-keyring` or KWallet), then save the password again in the site form.
+**hoprs asks for the password every time.** On Linux no Secret Service answered: install and
+unlock a keyring (`gnome-keyring` or KWallet), then save the password again in the site form.
+On macOS, click "Always Allow" in the Keychain prompt (it comes back after each update).
 
-**"Choose…" does nothing.** Install `xdg-desktop-portal` and a backend for your desktop
+**macOS says the app is damaged or from an unidentified developer.** See the steps under
+[Install](#macos-the-dmg): "Open Anyway", or the `xattr` command.
+
+**Windows shows "Windows protected your PC".** Choose "More info", then "Run anyway".
+
+**"Choose…" does nothing (Linux).** Install `xdg-desktop-portal` and a backend for your desktop
 (`xdg-desktop-portal-gnome` or `xdg-desktop-portal-kde`).
 
 **A connection keeps dropping.** Open the log (status bar, Log) and look at the INFO lines
