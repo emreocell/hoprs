@@ -1,0 +1,28 @@
+/* Hallmark · shape: single page · genre: atmospheric · theme: terminal (by request, palette and type from the hoprs app) · job: try · draw: hoprs-1
+ * hero: committed · nav: slim · footer: plain · imagery: the product · signature: figures printed as a tool's output
+ * axes: dark/mono+sans/neutral · posture: committed · contrast: pass · fold: pass · v2.0.0 */
+/* Hallmark · pre-emit critique: P3 H3 E3 S3 R3 V3 · weakest: scaffold only, no page yet, sections come in Task 2 */
+@import "tailwindcss";
+@import "./tokens.css";
+@import "./base.css";
+
+/* Tailwind reads the tokens from tokens.css; nothing is declared twice. */
+@theme inline {
+  --color-paper: var(--color-paper);
+  --color-paper-2: var(--color-paper-2);
+  --color-paper-3: var(--color-paper-3);
+  --color-ink: var(--color-ink);
+  --color-ink-2: var(--color-ink-2);
+  --color-muted: var(--color-muted);
+  --color-rule: var(--color-rule);
+  --color-rule-2: var(--color-rule-2);
+  --color-accent: var(--color-accent);
+  --color-accent-ink: var(--color-accent-ink);
+  --color-accent-wash: var(--color-accent-wash);
+  --color-focus: var(--color-focus);
+  --font-display: var(--font-display);
+  --font-body: var(--font-body);
+  --radius: var(--radius);
+}
+
+html, body { overflow-x: clip; background: var(--color-paper); }
