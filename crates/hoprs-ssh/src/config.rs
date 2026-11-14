@@ -41,7 +41,8 @@ fn redact(secret: &Option<SecretString>) -> Option<&'static str> {
 #[derive(Clone)]
 pub struct AuthConfig {
     pub use_agent: bool,
-    /// `None` uses `SSH_AUTH_SOCK`.
+    /// `None` uses `SSH_AUTH_SOCK`; on Windows, when that is unset too, the OpenSSH agent
+    /// pipe `\\.\pipe\openssh-ssh-agent`.
     pub agent_socket: Option<PathBuf>,
     pub key: KeySource,
     pub password: Option<SecretString>,
