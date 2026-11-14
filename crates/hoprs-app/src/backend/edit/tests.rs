@@ -644,34 +644,130 @@ async fn finish_keeps_files_with_pending_changes() {
     assert_eq!(h.next_event().await, EditEvent::Closed { id });
 }
 
+/// The argv of `editor_launch` (panics on `System` or an error).
+fn launch_argv(command: &str, path: &Path) -> Vec<String> {
+    match editor_launch(command, path).unwrap() {
+        EditorLaunch::Argv(argv) => argv.into_iter().map(|a| a.into_string().unwrap()).collect(),
+        EditorLaunch::System => panic!("{command:?} is not a command line"),
+    }
+}
+
 #[test]
 fn editor_command_is_split_without_shell() {
     let path = Path::new("/run/user/1000/hoprs/edit/7/my file; rm -rf ~.txt");
-    let argv = |command: &str| -> Vec<String> {
-        editor_argv(command, path)
-            .unwrap()
-            .into_iter()
-            .map(|a| a.into_string().unwrap())
-            .collect()
-    };
+    let argv = |command: &str| launch_argv(command, path);
     let last = path.to_str().unwrap().to_owned();
+    // A saved `xdg-open` (the default before `system`) keeps working.
     assert_eq!(argv("xdg-open"), vec!["xdg-open".to_owned(), last.clone()]);
+    assert_eq!(argv("code --wait"), vec!["code", "--wait", last.as_str()]);
     assert_eq!(
         argv("code --wait --new-window"),
         vec!["code", "--wait", "--new-window", last.as_str()]
     );
+    let message = |command: &str| editor_launch(command, path).unwrap_err().message;
+    assert_eq!(
+        message("\"unterminated"),
+        "The editor command has an unmatched quote"
+    );
+    for blank in ["", "   "] {
+        assert_eq!(message(blank), "No editor command is set", "{blank:?}");
+    }
+}
+
+/// POSIX quoting (Linux, macOS): single quotes, and shell syntax stays literal.
+#[cfg(unix)]
+#[test]
+fn editor_command_uses_posix_quoting_on_unix() {
+    let path = Path::new("/run/user/1000/hoprs/edit/7/my file; rm -rf ~.txt");
+    let argv = |command: &str| launch_argv(command, path);
+    let last = path.to_str().unwrap();
     assert_eq!(
         argv("'/opt/My Editor/bin/edit' -n \"two words\""),
-        vec!["/opt/My Editor/bin/edit", "-n", "two words", last.as_str()]
+        vec!["/opt/My Editor/bin/edit", "-n", "two words", last]
     );
-    // Shell syntax stays literal: no expansion, no command substitution, no pipes.
+    // No expansion, no command substitution, no pipes.
     assert_eq!(
         argv("vim $HOME $(id) | tee"),
-        vec!["vim", "$HOME", "$(id)", "|", "tee", last.as_str()]
+        vec!["vim", "$HOME", "$(id)", "|", "tee", last]
     );
-    for bad in ["", "   ", "'unterminated"] {
-        assert!(editor_argv(bad, path).is_err(), "{bad:?}");
+    assert!(editor_launch("'unterminated", path).is_err());
+}
+
+#[test]
+fn system_is_the_os_default_editor() {
+    let path = Path::new("/run/user/1000/hoprs/edit/7/notes.conf");
+    for command in ["system", " System ", "SYSTEM"] {
+        assert!(
+            matches!(editor_launch(command, path), Ok(EditorLaunch::System)),
+            "{command:?}"
+        );
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn system_argv_on_linux_is_xdg_open() {
+    let path = Path::new("/run/user/1000/hoprs/edit/7/notes.conf");
+    assert_eq!(
+        system_argv(path),
+        vec![OsString::from("xdg-open"), path.as_os_str().to_owned()]
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn system_argv_on_macos_is_open_text() {
+    let path = Path::new("/private/var/folders/x/hoprs/edit/7/notes.conf");
+    assert_eq!(
+        system_argv(path),
+        vec![
+            OsString::from("open"),
+            OsString::from("-t"),
+            path.as_os_str().to_owned()
+        ]
+    );
+}
+
+/// Windows command-line rules (as `CommandLineToArgvW`); pure, so tested on every OS.
+#[test]
+fn windows_rules_split_like_command_line_to_argv() {
+    let split = |command: &str| split_windows(command).map(|w| w.join("|"));
+    let some = |s: &str| Some(s.to_owned());
+    // Backslashes are path separators, not escapes.
+    assert_eq!(split(r"C:\Tools\vim.exe"), some(r"C:\Tools\vim.exe"));
+    assert_eq!(
+        split(r#""C:\Program Files\Notepad++\notepad++.exe" -multiInst"#),
+        some(r"C:\Program Files\Notepad++\notepad++.exe|-multiInst")
+    );
+    // The program name: quotes delimit it, a trailing backslash stays.
+    assert_eq!(split(r#""C:\My Editor\" -n"#), some(r"C:\My Editor\|-n"));
+    assert_eq!(split("  code\t --wait  "), some("code|--wait"));
+    // Arguments: 2n backslashes + quote are n backslashes and a quote toggle; 2n+1 are
+    // n backslashes and a literal quote; `""` inside quotes is a literal quote.
+    assert_eq!(split(r#"e "a b" c\d"#), some(r"e|a b|c\d"));
+    assert_eq!(split(r#"e a\"b"#), some(r#"e|a"b"#));
+    assert_eq!(split(r#"e "a\\" b"#), some(r"e|a\|b"));
+    assert_eq!(split(r#"e "a""b" """#), some(r#"e|a"b|"#));
+    assert_eq!(
+        split(r#"e 'single quotes' stay"#),
+        some("e|'single|quotes'|stay")
+    );
+    assert_eq!(split(""), some(""));
+    assert_eq!(split("   ").map(|s| s.is_empty()), Some(true));
+    // An unmatched quote is refused (CommandLineToArgvW would close it at the end).
+    assert_eq!(split(r#""C:\Program Files\x.exe"#), None);
+    assert_eq!(split(r#"e "open"#), None);
+}
+
+#[cfg(windows)]
+#[test]
+fn split_command_uses_windows_rules_on_windows() {
+    let words = |command: &str| split_command(command).unwrap();
+    assert_eq!(
+        words(r#""C:\Program Files\Notepad++\notepad++.exe" -multiInst"#),
+        vec![r"C:\Program Files\Notepad++\notepad++.exe", "-multiInst"]
+    );
+    assert_eq!(words(r"C:\Tools\vim.exe"), vec![r"C:\Tools\vim.exe"]);
 }
 
 /// The real launcher: the path reaches the program as one argument, shell characters

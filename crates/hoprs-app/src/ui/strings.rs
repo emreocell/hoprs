@@ -744,7 +744,9 @@ pub const QUIT_EDITS_HINT: &str = "The window stays open until you choose. Nothi
 pub const EDIT_UNSENT: &str = "not uploaded";
 pub const EDIT_CONFLICT: &str = "changed on the server";
 pub const EDITOR_COMMAND: &str = "Editor";
-pub const EDITOR_COMMAND_HINT: &str = "The command remote files open with; the file's path is added last. For example: xdg-open, gedit, code --wait.";
+pub const EDITOR_COMMAND_HINT: &str = "system opens remote files in the system default editor. Or type a command; the file's path is added last. For example: gedit, code --wait.";
+/// Next to the editor field when it holds `system`.
+pub const EDITOR_SYSTEM_DEFAULT: &str = "System default";
 pub const EDITOR_COMMAND_EMPTY: &str = "Type a command";
 pub const SETTINGS_EDITING: &str = "Remote editing";
 

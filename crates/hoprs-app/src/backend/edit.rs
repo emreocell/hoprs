@@ -9,10 +9,12 @@
 //! on disk before this run's first edit of that session (a crash left it; ids restart
 //! each run) is moved aside as `<session>.stale-<timestamp>`, never deleted.
 //!
-//! **Editor.** The configured command is split with shell quoting rules ([`shlex`]) but no
-//! shell runs: no expansion, no substitution. The path is the last argument, as one
-//! argument. The editor is spawned detached (its own process group, null stdio) and
-//! never waited on by the caller; a thread reaps it when it exits ([`launch_editor`]).
+//! **Editor.** The setting `system` opens the OS's default editor (`xdg-open`, `open -t`,
+//! `ShellExecuteW`). Any other command is split with shell quoting rules ([`shlex`]; on
+//! Windows, command-line rules) but no shell runs: no expansion, no substitution. The path
+//! is the last argument, as one argument. The editor is spawned detached (its own process
+//! group, null stdio) and never waited on by the caller; a thread reaps it when it exits
+//! ([`launch_editor`]).
 //!
 //! **Watching.** One `notify` watcher per session directory, watching the directory of
 //! each edited file (added once it exists) and not the files themselves: editors that save by renaming a temporary file over the
@@ -1631,10 +1633,27 @@ pub fn local_path_for(session_dir: &Path, remote: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// The editor command split into program and arguments (shell quoting rules, no shell),
-/// `path` last.
-pub fn editor_argv(command: &str, path: &Path) -> Result<Vec<OsString>> {
-    let words = shlex::split(command).ok_or_else(|| {
+/// How [`launch_editor`] opens a file.
+#[derive(Debug, PartialEq, Eq)]
+pub enum EditorLaunch {
+    /// The OS's default editor (the setting `system`): `xdg-open` on Linux, `open -t` on
+    /// macOS, `ShellExecuteW` with the `open` verb on Windows.
+    System,
+    /// A command line: the program, its arguments, the file's path last.
+    Argv(Vec<OsString>),
+}
+
+/// The setting value that means the OS's default editor (trimmed, any case).
+const SYSTEM_EDITOR: &str = "system";
+
+/// What the editor setting `command` runs for `path`: `system` (trimmed, any case) is
+/// [`EditorLaunch::System`]; anything else is split ([`split_command`]) into program and
+/// arguments, no shell, with `path` last.
+pub fn editor_launch(command: &str, path: &Path) -> Result<EditorLaunch> {
+    if command.trim().eq_ignore_ascii_case(SYSTEM_EDITOR) {
+        return Ok(EditorLaunch::System);
+    }
+    let words = split_command(command).ok_or_else(|| {
         Error::new(ErrorKind::Io, "The editor command has an unmatched quote")
             .with_detail(command.to_owned())
     })?;
@@ -1643,14 +1662,172 @@ pub fn editor_argv(command: &str, path: &Path) -> Result<Vec<OsString>> {
     }
     let mut argv: Vec<OsString> = words.into_iter().map(OsString::from).collect();
     argv.push(path.as_os_str().to_owned());
-    Ok(argv)
+    Ok(EditorLaunch::Argv(argv))
 }
 
-/// Launches the editor (see [`editor_argv`]) detached, without waiting for it: null
-/// stdio, its own process group on Unix, reaped by a thread when it exits.
+/// `command` split into words, `None` on an unmatched quote: POSIX shell quoting
+/// ([`shlex`]) on Unix, Windows command-line rules ([`split_windows`]) on Windows. No
+/// shell runs either way.
+fn split_command(command: &str) -> Option<Vec<String>> {
+    #[cfg(windows)]
+    {
+        split_windows(command)
+    }
+    #[cfg(not(windows))]
+    {
+        shlex::split(command)
+    }
+}
+
+/// `command` split with the rules of `CommandLineToArgvW`, except that an unmatched
+/// double quote is refused (`None`) instead of closed at the end. The first word (the
+/// program) ends at the next whitespace, or at the closing quote when it starts with
+/// one, and its backslashes are literal. In the other words, whitespace outside quotes
+/// separates; `2n` backslashes before a `"` are `n` backslashes and the quote toggles
+/// quoting, `2n + 1` are `n` backslashes and a literal `"`; backslashes before anything
+/// else are literal; `""` inside quotes is a literal `"`. Single quotes are plain
+/// characters.
+#[cfg(any(windows, test))]
+fn split_windows(command: &str) -> Option<Vec<String>> {
+    let is_space = |c: char| c == ' ' || c == '\t';
+    let mut chars = command.trim_start_matches(is_space).chars().peekable();
+    let mut words = Vec::new();
+    if chars.peek().is_none() {
+        return Some(words);
+    }
+    let mut program = String::new();
+    if chars.next_if_eq(&'"').is_some() {
+        loop {
+            match chars.next()? {
+                '"' => break,
+                c => program.push(c),
+            }
+        }
+    } else {
+        while let Some(c) = chars.next_if(|&c| !is_space(c)) {
+            program.push(c);
+        }
+    }
+    words.push(program);
+
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut quoted = false;
+    let mut backslashes = 0usize;
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                backslashes += 1;
+                in_word = true;
+            }
+            '"' => {
+                word.extend(std::iter::repeat_n('\\', backslashes / 2));
+                // An escaped quote, or `""` inside quotes: a literal quote.
+                if backslashes % 2 == 1 || (quoted && chars.next_if_eq(&'"').is_some()) {
+                    word.push('"');
+                } else {
+                    quoted = !quoted;
+                }
+                backslashes = 0;
+                in_word = true;
+            }
+            c if is_space(c) && !quoted => {
+                word.extend(std::iter::repeat_n('\\', backslashes));
+                backslashes = 0;
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            c => {
+                word.extend(std::iter::repeat_n('\\', backslashes));
+                backslashes = 0;
+                word.push(c);
+                in_word = true;
+            }
+        }
+    }
+    if quoted {
+        return None;
+    }
+    word.extend(std::iter::repeat_n('\\', backslashes));
+    if in_word {
+        words.push(word);
+    }
+    Some(words)
+}
+
+/// The command line of the OS's default editor for `path` on Linux (`xdg-open`) and
+/// macOS (`open -t`: the default *text* editor, so `.conf` or extensionless files open
+/// in something useful). Windows uses `ShellExecuteW` instead.
+#[cfg(not(windows))]
+fn system_argv(path: &Path) -> Vec<OsString> {
+    let mut argv: Vec<OsString> = if cfg!(target_os = "macos") {
+        vec!["open".into(), "-t".into()]
+    } else {
+        vec!["xdg-open".into()]
+    };
+    argv.push(path.as_os_str().to_owned());
+    argv
+}
+
+/// Launches the editor of the setting `command` (see [`editor_launch`]) on `path`,
+/// detached, without waiting for it.
 pub fn launch_editor(command: &str, path: &Path) -> Result<()> {
-    let argv = editor_argv(command, path)?;
-    let (program, args) = argv.split_first().expect("editor_argv is never empty");
+    match editor_launch(command, path)? {
+        EditorLaunch::Argv(argv) => spawn_editor(&argv, path),
+        EditorLaunch::System => open_with_system(path),
+    }
+}
+
+/// The OS's default editor on Linux and macOS: [`system_argv`], spawned like a command.
+#[cfg(not(windows))]
+fn open_with_system(path: &Path) -> Result<()> {
+    spawn_editor(&system_argv(path), path)
+}
+
+/// The OS's default editor on Windows: `ShellExecuteW` with the `open` verb (the file
+/// type's association, no console window); a type without one (`SE_ERR_NOASSOC`) opens
+/// in `notepad.exe`.
+#[cfg(windows)]
+fn open_with_system(path: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::{SE_ERR_NOASSOC, ShellExecuteW};
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let wide = |s: &std::ffi::OsStr| -> Vec<u16> { s.encode_wide().chain([0]).collect() };
+    let verb = wide(std::ffi::OsStr::new("open"));
+    let file = wide(path.as_os_str());
+    // SAFETY: `verb` and `file` are NUL-terminated UTF-16 buffers that outlive the call;
+    // the window, parameters and directory may be null.
+    let code = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    } as isize;
+    if code > 32 {
+        tracing::info!(editor = "system", path = %path.display(), "editor started");
+        return Ok(());
+    }
+    if code == SE_ERR_NOASSOC as isize {
+        tracing::debug!(path = %path.display(), "no file association: opening in notepad");
+        return spawn_editor(&["notepad.exe".into(), path.as_os_str().to_owned()], path);
+    }
+    Err(Error::new(ErrorKind::Io, "Cannot start the editor")
+        .with_detail(format!("ShellExecuteW failed with code {code}")))
+}
+
+/// Spawns `argv` (program first, never empty) detached, without waiting for it: null
+/// stdio; on Unix its own process group; on Windows its own process group and no
+/// inherited console (`DETACHED_PROCESS`; a GUI editor still opens its window); reaped
+/// by a thread when it exits.
+fn spawn_editor(argv: &[OsString], path: &Path) -> Result<()> {
+    let (program, args) = argv.split_first().expect("an editor argv is never empty");
     let mut child = std::process::Command::new(program);
     child
         .args(args)
@@ -1661,6 +1838,14 @@ pub fn launch_editor(command: &str, path: &Path) -> Result<()> {
     {
         use std::os::unix::process::CommandExt;
         child.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // winbase.h; `CREATE_NO_WINDOW` stays unset (a GUI editor shows its window).
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        child.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
     let mut child = child.spawn().map_err(|e| {
         Error::new(ErrorKind::Io, "Cannot start the editor")

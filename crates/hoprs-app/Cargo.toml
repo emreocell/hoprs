@@ -43,13 +43,17 @@ shlex = "2.0"
 # `image` crate with every codec; `png` is the one format needed. MIT OR Apache-2.0.
 png = "0.18"
 
-# Windows: attach to the parent console so `hoprs.exe --version` prints (GUI subsystem).
+# Windows: attach to the parent console so `hoprs.exe --version` prints (GUI subsystem),
+# and open remote edits with the default editor.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
+    # Remote editing's `system` editor: ShellExecuteW, SW_SHOWNORMAL.
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [[bin]]

@@ -30,8 +30,9 @@ pub const SCROLLBACK_DEFAULT: usize = 10_000;
 pub const KEEPALIVE_MIN: u64 = 10;
 pub const KEEPALIVE_MAX: u64 = 300;
 pub const KEEPALIVE_DEFAULT: u64 = 30;
-/// The command remote edits open files with (the path is added as its last argument).
-pub const EDITOR_DEFAULT: &str = "xdg-open";
+/// The editor remote edits open files with: `system` is the OS's default editor; any other
+/// value is a command, the path added as its last argument.
+pub const EDITOR_DEFAULT: &str = "system";
 /// Largest `settings.toml` read; a real one is under 200 bytes.
 const MAX_BYTES: u64 = 64 * 1024;
 
@@ -91,8 +92,9 @@ pub struct Settings {
     /// Seconds between keepalives on an idle SSH or FTP connection (`10..=300`), for the
     /// connections made from now on.
     pub keepalive_secs: u64,
-    /// The editor of remote edits: a command split with shell quoting rules (no shell
-    /// runs), the file's path added last. Never empty ([`valid_editor`]).
+    /// The editor of remote edits: `system` (the OS's default editor), or a command split
+    /// with shell quoting rules (Windows command-line rules on Windows; no shell runs), the
+    /// file's path added last. Never empty ([`valid_editor`]).
     pub editor_command: String,
 }
 
@@ -337,6 +339,12 @@ pub fn save(path: &Path, settings: &Settings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fresh install opens remote edits with the OS's default editor.
+    #[test]
+    fn editor_default_is_system() {
+        assert_eq!(Settings::default().editor_command, "system");
+    }
 
     #[test]
     fn settings_roundtrip_and_invalid_file_untouched() {
