@@ -133,3 +133,32 @@ jobs:
         run: |
           HOPRS_BUILDER_HOME="$HOME:/tmp/.cargo:/tmp/.rustup:/src/crates/:/src/target/:/opt/cargo/:/opt/rustup/" \
             scripts/check-deb.sh "$DEB"
+
+  # Builds the universal macOS .dmg as the release will (scripts/package-macos.sh: both
+  # Apple targets with the pinned toolchain, --locked, lipo, cargo-packager's .app, ad-hoc
+  # signature, hdiutil) and checks it (scripts/check-macos.sh: both slices, signature,
+  # Info.plist, --version in each slice, no builder paths). The .dmg is kept a few days as
+  # a workflow artifact, to download and try on a Mac.
+  package-macos:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the .dmg
+        run: |
+          dmg=$(scripts/package-macos.sh)
+          echo "DMG=$dmg" >> "$GITHUB_ENV"
+      - name: Check the .dmg
+        run: scripts/check-macos.sh "$DMG"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hoprs-macos-dmg
+          path: ${{ env.DMG }}
+          retention-days: 5
+          if-no-files-found: error

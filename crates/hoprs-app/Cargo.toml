@@ -132,3 +132,30 @@ assets = [
     ["../../LICENSE-MIT", "usr/share/doc/hoprs/", "644"],
     ["../../LICENSE-APACHE", "usr/share/doc/hoprs/", "644"],
 ]
+
+# macOS and Windows installers, built with cargo-packager (the version is pinned in the
+# scripts that call it). The package's identity comes first, shared by every platform,
+# then one table per platform. Relative paths are from this directory.
+# macOS: scripts/package-macos.sh builds the universal binary itself, asks cargo-packager
+# for the `app` format only, then signs ad hoc and makes the .dmg with hdiutil; checked
+# by scripts/check-macos.sh.
+[package.metadata.packager]
+product-name = "hoprs"
+identifier = "online.hoprs.hoprs"
+description = "SSH terminal, SFTP and FTP/FTPS client"
+# The same text as [package.metadata.deb] extended-description.
+long-description = """\
+hoprs is a fast, native desktop client for SSH, SFTP, FTP and FTPS. Save your sites, \
+group them into workspaces, browse local and remote files side by side, and queue \
+transfers that resume and handle conflicts. SSH sites open a terminal, a file browser, \
+or both over one connection. Credentials live in the system keyring, and sites can be \
+imported from FileZilla."""
+homepage = "https://hoprs.online"
+copyright = "hoprs developers"
+license-file = "../../LICENSE-MIT"
+# The .app takes the .icns as is (the first .icns listed).
+icons = ["assets/icon/hoprs.icns"]
+
+[package.metadata.packager.macos]
+# Also the binary's deployment target (MACOSX_DEPLOYMENT_TARGET in package-macos.sh).
+minimum-system-version = "11.0"
