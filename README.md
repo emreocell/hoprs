@@ -2,6 +2,44 @@
 A fast, native SSH/SFTP/FTP desktop client written in Rust.
 Design spec: [docs/superpowers/specs/2026-11-11-hoprs-design.md](docs/superpowers/specs/2026-11-11-hoprs-design.md)
 
+## Install
+
+Download `hoprs_1.0.0-1_amd64.deb` and `SHA256SUMS` from the
+[latest Release](../../releases/latest) (Ubuntu 24.04 or newer, amd64), then:
+
+```sh
+sha256sum -c SHA256SUMS --ignore-missing
+sudo apt install ./hoprs_1.0.0-1_amd64.deb
+```
+
+`apt` pulls the libraries hoprs needs. Start it from the app menu or with `hoprs`;
+`hoprs --version` prints the version.
+
+Without a GPU (no render node under `/dev/dri`, as in many VMs) hoprs draws with the
+software renderer (tiny-skia) so it stays light. Set `ICED_BACKEND` (`tiny-skia` or `wgpu`)
+to force one.
+
+### Uninstall
+
+```sh
+sudo apt remove hoprs
+```
+
+Your data stays: `~/.config/hoprs` (sites, workspaces, settings), `~/.local/share/hoprs`
+(transfer queue, recovered edits) and the passwords in the system keyring. To remove them
+too, delete both folders and the keyring entries whose service starts with `hoprs/` (one per
+site; for example with Seahorse, "Passwords and Keys").
+
+### Build the package yourself
+
+```sh
+scripts/package-deb.sh   # needs Docker; builds in an Ubuntu 24.04 container
+scripts/check-deb.sh target/deb-ubuntu-24.04/debian/hoprs_1.0.0-1_amd64.deb
+```
+
+The `.deb` ends up in `target/deb-ubuntu-24.04/debian/`. `check-deb.sh` installs it in a
+clean Ubuntu 24.04 container and checks files, `--version`, removal and purge.
+
 ## Running
 
 ```sh
