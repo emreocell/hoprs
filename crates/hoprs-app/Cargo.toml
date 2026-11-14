@@ -45,7 +45,12 @@ png = "0.18"
 
 # Windows: attach to the parent console so `hoprs.exe --version` prints (GUI subsystem).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+] }
 
 [[bin]]
 name = "hoprs"
