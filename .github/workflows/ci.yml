@@ -66,6 +66,14 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       # The --ignored (Docker) tests stay in `integration`, on Linux.
       - run: cargo test --workspace --all-features
+      # The release binary uses the GUI subsystem; --version must still print to the
+      # parent console.
+      - name: hoprs.exe --version prints (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          cargo build --release -p hoprs-app
+          target/release/hoprs.exe --version | grep -q '^hoprs '
 
   integration:
     runs-on: ubuntu-latest
