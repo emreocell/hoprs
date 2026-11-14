@@ -23,3 +23,8 @@ it("asset names follow the release patterns", () => {
     expect(url.endsWith(`/v${v}/${name}`)).toBe(true);
   }
 });
+
+it("release date matches the CHANGELOG entry of the version", () => {
+  const changelog = readFileSync(new URL("../../CHANGELOG.md", import.meta.url), "utf8");
+  expect(changelog).toContain(`## ${facts.version} — ${facts.releaseDate}`);
+});

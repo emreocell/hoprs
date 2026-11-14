@@ -1,24 +1,23 @@
 import { useId, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import { InstallWell } from "../components/InstallWell";
+import OsLogo from "../components/OsLogo";
+import { downloads, systems as systemIds } from "../downloads";
 import { facts } from "../facts";
+import { useT } from "../i18n";
 import { useDetectedOs } from "../platform";
 import type { Os } from "../platform";
 
-const linuxTabs = [
-  { id: "apt", label: "apt", lines: [`wget ${facts.debUrl}`, `sudo apt install ./${facts.debName}`] },
-  { id: "checksum", label: "checksum", lines: [`wget ${facts.sumsUrl}`, "sha256sum -c SHA256SUMS --ignore-missing"] },
-  { id: "source", label: "source", lines: [`git clone ${facts.repoUrl}.git`, "cd hoprs", "cargo run --release"] },
-];
-
-const systems: { id: Os; label: string }[] = [
-  { id: "linux", label: "Linux" },
-  { id: "macos", label: "macOS" },
-  { id: "windows", label: "Windows" },
-];
+const systems: { id: Os; label: string }[] = systemIds.map((id) => ({ id, label: downloads[id].name }));
 
 export default function Install() {
   const uid = useId();
+  const t = useT().install;
+  const linuxTabs = [
+    { id: "apt", label: "apt", lines: [`wget ${facts.debUrl}`, `sudo apt install ./${facts.debName}`] },
+    { id: "checksum", label: "checksum", lines: [`wget ${facts.sumsUrl}`, "sha256sum -c SHA256SUMS --ignore-missing"] },
+    { id: "source", label: t.source, lines: [`git clone ${facts.repoUrl}.git`, "cd hoprs", "cargo run --release"] },
+  ];
   const detected = useDetectedOs();
   const [picked, setPicked] = useState<Os | null>(null);
   const active = picked ?? detected;
@@ -38,9 +37,9 @@ export default function Install() {
 
   return (
     <section id="install" className="section container" aria-labelledby="install-title">
-      <h2 id="install-title">Ready when you are.</h2>
+      <h2 id="install-title">{t.title}</h2>
       <div className="install-systems">
-        <div role="tablist" aria-label="Operating system" className="install-tabs">
+        <div role="tablist" aria-label={t.systems} className="install-tabs">
           {systems.map((system, index) => (
             <button
               key={system.id}
@@ -57,6 +56,7 @@ export default function Install() {
               onClick={() => setPicked(system.id)}
               onKeyDown={(e) => onKeyDown(e, index)}
             >
+              <OsLogo os={system.id} />
               {system.label}
             </button>
           ))}
@@ -69,7 +69,7 @@ export default function Install() {
         aria-labelledby={`${uid}-os-linux`}
         hidden={active !== "linux"}
       >
-        <p className="lead">Ubuntu 24.04 or newer, amd64.</p>
+        <p className="lead">{t.linuxLead}</p>
         <InstallWell tabs={linuxTabs} />
       </div>
       <div
@@ -79,17 +79,22 @@ export default function Install() {
         aria-labelledby={`${uid}-os-macos`}
         hidden={active !== "macos"}
       >
-        <p className="lead">macOS 11 or newer, Apple silicon and Intel.</p>
+        <p className="lead">{t.macLead}</p>
         <p>
-          <a className="btn btn-primary" href={facts.dmgUrl}>Download {facts.dmgName}</a>
+          <a className="btn btn-primary" href={facts.dmgUrl}>
+            {t.download} {facts.dmgName}
+          </a>
         </p>
         <ol className="steps">
-          <li>Open the disk image and drag hoprs to Applications.</li>
-          <li>The app is not notarized. Open hoprs once, then go to System Settings, Privacy &amp; Security, and choose Open Anyway.</li>
-          <li>Or, in Terminal: <code>xattr -dr com.apple.quarantine /Applications/hoprs.app</code></li>
+          {t.macSteps.map((step) => (
+            <li key={step}>{step}</li>
+          ))}
+          <li>
+            {t.macTerminal} <code>xattr -dr com.apple.quarantine /Applications/hoprs.app</code>
+          </li>
         </ol>
         <p className="small muted">
-          Check it with <a href={facts.sumsUrl}>SHA256SUMS</a>.
+          {t.checkWith} <a href={facts.sumsUrl}>SHA256SUMS</a>.
         </p>
       </div>
       <div
@@ -99,17 +104,22 @@ export default function Install() {
         aria-labelledby={`${uid}-os-windows`}
         hidden={active !== "windows"}
       >
-        <p className="lead">Windows, 64-bit.</p>
+        <p className="lead">{t.windowsLead}</p>
         <p className="actions">
-          <a className="btn btn-primary" href={facts.msiUrl}>Download {facts.msiName}</a>
-          <a className="btn btn-secondary" href={facts.zipUrl}>Portable {facts.zipName}</a>
+          <a className="btn btn-primary" href={facts.msiUrl}>
+            {t.download} {facts.msiName}
+          </a>
+          <a className="btn btn-secondary" href={facts.zipUrl}>
+            {t.portable} {facts.zipName}
+          </a>
         </p>
         <ol className="steps">
-          <li>Run the installer, or unzip the portable build anywhere.</li>
-          <li>The app is not signed. If SmartScreen says Windows protected your PC, choose More info, then Run anyway.</li>
+          {t.windowsSteps.map((step) => (
+            <li key={step}>{step}</li>
+          ))}
         </ol>
         <p className="small muted">
-          Check it with <a href={facts.sumsUrl}>SHA256SUMS</a>.
+          {t.checkWith} <a href={facts.sumsUrl}>SHA256SUMS</a>.
         </p>
       </div>
     </section>

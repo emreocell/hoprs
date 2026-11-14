@@ -40,6 +40,8 @@ html, body { overflow-x: clip; background: var(--color-paper); }
 .nav-row, .footer-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-md); padding-block: var(--space-sm); }
 .nav-links { display: flex; flex-wrap: wrap; align-items: center; gap: 0 var(--space-lg); font-size: var(--text-sm); }
 .nav-links a { display: inline-flex; align-items: center; min-height: 44px; }
+/* Phones: a tighter gap and no version number keep the nav on one row, with the web fonts or the fallback (no shift when they load). */
+@media (max-width: 30rem) { .nav-links { gap: 0 var(--space-sm); } .nav-version { display: none; } }
 .footer { border-top: 1px solid var(--color-rule); margin-top: var(--section-gap-s); padding-block: var(--space-lg); }
 
 /* The hero fills most of the first screen (the stamp's committed posture); the main shot follows below the fold,
@@ -64,6 +66,9 @@ html, body { overflow-x: clip; background: var(--color-paper); }
 .btn-primary:hover { background: var(--color-ink-2); }
 .btn-secondary { background: transparent; color: var(--color-ink); }
 .btn-secondary:hover { background: var(--color-accent-wash); }
+/* System marks on the download buttons and the Install tabs: one text size, the label's colour. */
+.btn { gap: var(--space-xs); }
+.os-logo { flex: none; width: 1em; height: 1em; }
 
 .shot { width: 100%; margin: var(--space-xl) 0 0; aspect-ratio: 16 / 10; border: 1px solid var(--color-rule); border-radius: var(--radius); overflow: hidden; background: var(--color-paper-2); }
 .hero-shot .shot { margin-top: var(--section-gap-s); }

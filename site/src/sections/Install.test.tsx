@@ -41,16 +41,37 @@ it("Windows tab has .msi and .zip links and the SmartScreen step", async () => {
   expect(panel.textContent).toContain("SmartScreen");
 });
 
-it("the hero button follows the detected system after hydration", () => {
+function heroDownloads() {
+  const hero = screen.getByRole("heading", { level: 1 }).closest("section")!;
+  return within(hero)
+    .getAllByRole("link")
+    .filter((a) => a.getAttribute("href")!.includes("/releases/download/"));
+}
+
+it("the hero offers all three downloads, the detected system first and primary", () => {
   stubUa("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", "MacIntel");
   render(<App />);
-  const hero = screen.getByRole("heading", { level: 1 }).closest("section")!;
-  expect(within(hero).getByRole("link", { name: "Download .dmg" }).getAttribute("href")).toBe(facts.dmgUrl);
+  const links = heroDownloads();
+  expect(links.map((a) => a.getAttribute("href"))).toEqual([facts.dmgUrl, facts.debUrl, facts.msiUrl]);
+  expect(links.map((a) => a.className)).toEqual(["btn btn-primary", "btn btn-secondary", "btn btn-secondary"]);
+  expect(links[0].textContent).toBe("Download for macOS .dmg");
+  for (const a of links) expect(a.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
 });
 
-it("the hero button is the .deb on Linux", () => {
+it("the hero lists Linux first on Linux, and Windows first on Windows", () => {
   stubUa("Mozilla/5.0 (X11; Linux x86_64)", "Linux x86_64");
   render(<App />);
-  const hero = screen.getByRole("heading", { level: 1 }).closest("section")!;
-  expect(within(hero).getByRole("link", { name: "Download .deb" }).getAttribute("href")).toBe(facts.debUrl);
+  expect(heroDownloads().map((a) => a.getAttribute("href"))).toEqual([facts.debUrl, facts.dmgUrl, facts.msiUrl]);
+  expect(screen.getByRole("link", { name: "Download for Linux .deb" }).className).toBe("btn btn-primary");
+  cleanup();
+  stubUa("Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Win32");
+  render(<App />);
+  expect(heroDownloads().map((a) => a.getAttribute("href"))).toEqual([facts.msiUrl, facts.debUrl, facts.dmgUrl]);
+});
+
+it("the system tabs carry the system marks", () => {
+  render(<Install />);
+  for (const tab of screen.getAllByRole("tab", { name: /^(Linux|macOS|Windows)$/ })) {
+    expect(tab.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
+  }
 });

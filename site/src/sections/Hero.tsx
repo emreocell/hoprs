@@ -1,19 +1,15 @@
 import { facts } from "../facts";
+import OsLogo from "../components/OsLogo";
 import Shot from "../components/Shot";
+import { downloadOrder, downloads } from "../downloads";
 import { GlyphField } from "../glyph/GlyphField";
+import { useT } from "../i18n";
 import { useDetectedOs } from "../platform";
 
-const downloads = {
-  linux: { href: facts.debUrl, label: "Download .deb" },
-  macos: { href: facts.dmgUrl, label: "Download .dmg" },
-  windows: { href: facts.msiUrl, label: "Download .msi" },
-} as const;
-
-export const heroHeadline = "SSH, SFTP and FTP in one window.";
-export const heroSentence = "A fast, native file client for Linux, macOS and Windows.";
-
 export default function Hero() {
-  const download = downloads[useDetectedOs()];
+  const t = useT().hero;
+  // The prerender lists Linux first; after hydration the visitor's system moves to the front.
+  const order = downloadOrder(useDetectedOs());
   return (
     <>
       <section className="hero" aria-labelledby="hero-title">
@@ -21,21 +17,26 @@ export default function Hero() {
           <GlyphField />
         </div>
         <div className="container intro">
-          <h1 id="hero-title">{heroHeadline}</h1>
-          <p className="lead">{heroSentence}</p>
+          <h1 id="hero-title">{t.headline}</h1>
+          <p className="lead">{t.sentence}</p>
           <div className="actions">
-            <a className="btn btn-primary" href={download.href}>{download.label}</a>
+            {order.map((os, i) => {
+              const d = downloads[os];
+              return (
+                <a key={os} className={`btn ${i === 0 ? "btn-primary" : "btn-secondary"}`} href={d.href}>
+                  <OsLogo os={os} />
+                  <span className="sr-only">{t.downloadFor}</span>{" "}
+                  {d.name} {d.ext}
+                </a>
+              );
+            })}
             <a className="btn btn-secondary" href={facts.repoUrl}>GitHub</a>
           </div>
         </div>
       </section>
       {/* Below the hero, not in it: the glyph field never runs behind the opaque shot. */}
       <div className="container hero-shot">
-        <Shot
-          name="main"
-          slot="shot-main"
-          alt="hoprs files tab: the local project folder on the left, the same folder on the build server on the right, one upload running in the transfer queue."
-        />
+        <Shot name="main" slot="shot-main" alt={t.shotAlt} />
       </div>
     </>
   );

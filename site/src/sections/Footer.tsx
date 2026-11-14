@@ -1,21 +1,28 @@
 import { facts } from "../facts";
+import { formatDate, pagePath, useLang, useT } from "../i18n";
 
 export default function Footer() {
+  const lang = useLang();
+  const dict = useT();
+  const t = dict.footer;
   return (
     <footer className="footer">
       <div className="container footer-row">
-        <a className="wordmark" href="/" aria-label="hoprs, home">
+        <a className="wordmark" href={pagePath[lang]} aria-label={dict.nav.home}>
           <img src="/icon.svg" alt="" width="24" height="24" />
           <span>hoprs</span>
         </a>
-        <nav aria-label="Footer" className="nav-links">
+        <nav aria-label={t.label} className="nav-links">
           <a href={facts.repoUrl}>GitHub</a>
-          <a href={facts.releasesUrl}>Releases</a>
-          <a href={facts.changelogUrl}>Changelog</a>
-          <a href={facts.securityUrl}>Security</a>
-          <a href={facts.licenseUrl}>License</a>
+          <a href={facts.releasesUrl}>{t.releases}</a>
+          <a href={facts.changelogUrl}>{t.changelog}</a>
+          <a href={facts.securityUrl}>{t.security}</a>
+          <a href={facts.licenseUrl}>{t.license}</a>
         </nav>
-        <p className="muted small">Licensed MIT OR Apache-2.0.</p>
+        <p className="muted small">
+          {t.licensed} {t.madeBy} <a href={facts.maintainerUrl}>{facts.maintainer}</a>. {t.updated}{" "}
+          <time dateTime={facts.releaseDate}>{formatDate(lang, facts.releaseDate)}</time>.
+        </p>
       </div>
     </footer>
   );

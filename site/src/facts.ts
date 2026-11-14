@@ -1,6 +1,10 @@
 // Filled by hand per release. facts.test.ts checks the version against the workspace Cargo.toml.
-const repoUrl = "https://github.com/engviniciusbs/hoprs";
+const maintainer = "engviniciusbs";
+const maintainerUrl = `https://github.com/${maintainer}`;
+const repoUrl = `${maintainerUrl}/hoprs`;
 const version = "1.1.0";
+// The date of the GitHub Release above (CHANGELOG.md), shown as "Updated" in the footer.
+const releaseDate = "2026-11-14";
 const debName = `hoprs_${version}-1_amd64.deb`;
 const dmgName = `hoprs_${version}_macos_universal.dmg`;
 const msiName = `hoprs_${version}_windows_x64.msi`;
@@ -8,7 +12,11 @@ const zipName = `hoprs_${version}_windows_x64.zip`;
 const releaseBase = `${repoUrl}/releases/download/v${version}`;
 
 export const facts = {
+  siteUrl: "https://hoprs.online",
   version,
+  releaseDate,
+  maintainer,
+  maintainerUrl,
   debName,
   debUrl: `${releaseBase}/${debName}`,
   dmgName,
@@ -24,6 +32,7 @@ export const facts = {
   securityUrl: `${repoUrl}#security`,
   perfDocUrl: `${repoUrl}/blob/main/docs/perf/README.md`,
   licenseUrl: `${repoUrl}/blob/main/LICENSE-MIT`,
+  apacheLicenseUrl: `${repoUrl}/blob/main/LICENSE-APACHE`,
   issuesUrl: `${repoUrl}/issues`,
   perf: { startupMs: 84, idleMb: 33, rowsP95Ms: 0.58, rows: 100000, sftpVsScp: 0.99, measuredOn: "2026-11-13" },
 } as const;

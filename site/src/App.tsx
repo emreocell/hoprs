@@ -1,3 +1,5 @@
+import { LangProvider } from "./i18n";
+import type { Lang } from "./i18n";
 import Connection from "./sections/Connection";
 import Faq from "./sections/Faq";
 import Fast from "./sections/Fast";
@@ -8,9 +10,9 @@ import Install from "./sections/Install";
 import Nav from "./sections/Nav";
 import OpenSource from "./sections/OpenSource";
 
-export default function App() {
+export default function App({ lang = "en" }: { lang?: Lang }) {
   return (
-    <>
+    <LangProvider lang={lang}>
       <Nav />
       <main>
         <Hero />
@@ -22,6 +24,6 @@ export default function App() {
         <Faq />
       </main>
       <Footer />
-    </>
+    </LangProvider>
   );
 }
