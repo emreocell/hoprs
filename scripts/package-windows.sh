@@ -8,7 +8,8 @@
 #    for the toolchain rust-toolchain.toml pins;
 # 2. `cargo build --release --locked -p hoprs-app --target x86_64-pc-windows-msvc`, with
 #    the builder's paths ($HOME, $CARGO_HOME, the repository) remapped out of the binary,
-#    as package-deb.sh does, and the linker told to record only the .pdb's file name
+#    as package-deb.sh does, cl.exe told to trim them from the C code's __FILE__
+#    strings (aws-lc), and the linker told to record only the .pdb's file name
 #    (by default it embeds the .pdb's full path, which is inside the repository);
 # 3. cargo-packager's `wix` format makes the per-machine .msi from
 #    [package.metadata.packager] in crates/hoprs-app/Cargo.toml, with two overrides:
@@ -98,6 +99,12 @@ done
 export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$home_w=/build \
 --remap-path-prefix=$repo_w=/hoprs --remap-path-prefix=$cargo_home_w=/cargo \
 -Clink-arg=/PDBALTPATH:%_PDB%"
+# The C code built by cc (aws-lc-sys, under CARGO_HOME) is out of rustc's reach: its
+# __FILE__ strings (aws-lc's error records) would keep the full source paths. cl.exe
+# trims them with -d1trimfile:<prefix>\ (most specific prefix first); the `-` form,
+# because MSYS would rewrite a value starting with `/` as a path.
+export CFLAGS_x86_64_pc_windows_msvc="${CFLAGS_x86_64_pc_windows_msvc:+$CFLAGS_x86_64_pc_windows_msvc }\
+-d1trimfile:$cargo_home_w\\ -d1trimfile:$repo_w\\ -d1trimfile:$home_w\\"
 
 cargo build --release --locked -p hoprs-app --target "$TARGET" >&2
 bin_dir=$repo/target/$TARGET/release
