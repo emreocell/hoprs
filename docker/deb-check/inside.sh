@@ -37,12 +37,51 @@ finish() {
     exit 1
 }
 
-deb_src=${1:?usage: hoprs-deb-check <deb>}
+# The crate version (what `hoprs --version` prints) of a Debian version cargo-deb made:
+# the Debian revision (`-1`) dropped, and the `~` cargo-deb puts in a prerelease
+# (`1.0.0-rc1` -> `1.0.0~rc1-1`, so it sorts before 1.0.0) mapped back to `-`. Semver
+# has no `~`, so every `~` came from cargo-deb.
+cargo_version() {
+    local upstream=${1%-*}
+    printf '%s\n' "${upstream//\~/-}"
+}
+
+# --self-test: checks cargo_version against the versions cargo-deb 3.8.0 produces.
+self_test() {
+    local fails=0 deb want got
+    while read -r deb want; do
+        got=$(cargo_version "$deb")
+        if [ "$got" = "$want" ]; then
+            echo "ok    $deb -> $got"
+        else
+            echo "FAIL  $deb -> $got, want $want"
+            fails=$((fails + 1))
+        fi
+    done <<'CASES'
+1.0.0-1 1.0.0
+1.2.3-2 1.2.3
+1.0.0~rc1-1 1.0.0-rc1
+1.0.0~rc.1+build.5-1 1.0.0-rc.1+build.5
+1.0.0~beta-2-1 1.0.0-beta-2
+1.0.0-rc-1 1.0.0-rc
+CASES
+    if [ "$fails" -ne 0 ]; then
+        echo "deb check self-test: $fails failed"
+        exit 1
+    fi
+    echo "deb check self-test: all passed"
+    exit 0
+}
+if [ "${1:-}" = --self-test ]; then
+    self_test
+fi
+
+deb_src=${1:?usage: hoprs-deb-check <deb> | --self-test}
 # apt installs local files by path; a copy keeps it out of the read-only mount.
 deb=/tmp/$(basename "$deb_src")
 cp "$deb_src" "$deb"
 version=$(dpkg-deb -f "$deb" Version)
-upstream=${version%-*}
+upstream=$(cargo_version "$version")
 
 # Files the package must install, and remove again.
 installed_files=(
