@@ -73,6 +73,12 @@ pub fn pick() -> Choice {
             // SAFETY: called first thing in `run`, on the main thread, before hoprs (or
             // anything it links) starts a thread; nothing reads the environment
             // concurrently.
+            //
+            // Child processes inherit it: the remote-edit editor (`backend/edit.rs`) and
+            // the folder opener (`effects.rs`). That is acceptable: only iced programs
+            // read `ICED_BACKEND`, and one started on this machine would make the same
+            // choice (no GPU render node, so tiny-skia); everything else ignores it. A
+            // value the user set is inherited the same way.
             unsafe { std::env::set_var(ENV, backend) };
             if drivers.is_empty() {
                 Choice(format!("renderer: {backend} (no GPU render node)"))

@@ -68,8 +68,9 @@ hoprs-ssh = { path = "../hoprs-ssh", features = ["testing"] }
 # Debian package, built by scripts/package-deb.sh and checked by scripts/check-deb.sh.
 [package.metadata.deb]
 name = "hoprs"
-# A fixed project identity: no personal name or e-mail ships in the package.
-maintainer = "hoprs developers <hoprs@users.noreply.github.com>"
+# A fixed project identity: no personal name or e-mail ships in the package. `.invalid`
+# is reserved (RFC 2606), so the address can never reach anyone.
+maintainer = "hoprs developers <noreply@hoprs.invalid>"
 copyright = "hoprs developers"
 license-file = ["../../LICENSE-MIT", "0"]
 section = "net"
