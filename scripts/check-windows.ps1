@@ -166,16 +166,28 @@ try {
     # Latin-1 maps each byte to one character, so IndexOf finds ASCII paths in the binary.
     # Both separators: rustc and the C compilers record paths either way.
     $text = [System.Text.Encoding]::Latin1.GetString([System.IO.File]::ReadAllBytes($zipExe))
+    # Each hit is reported with the printable string around it (up to 5 per path form),
+    # to tell which part of the build recorded it.
     $hits = @()
     foreach ($path in $BuilderPaths) {
         if (-not $path) { continue }
         foreach ($form in @($path, $path.Replace('\', '/'))) {
-            if ($text.IndexOf($form, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-                $hits += $form
+            $at = 0
+            $shown = 0
+            while ($shown -lt 5) {
+                $at = $text.IndexOf($form, $at, [System.StringComparison]::OrdinalIgnoreCase)
+                if ($at -lt 0) { break }
+                $start = $at
+                while ($start -gt 0 -and $text[$start - 1] -ge ' ' -and $text[$start - 1] -le '~') { $start-- }
+                $end = $at + $form.Length
+                while ($end -lt $text.Length -and $text[$end] -ge ' ' -and $text[$end] -le '~') { $end++ }
+                $hits += "'$($text.Substring($start, [Math]::Min($end - $start, 300)))'"
+                $shown++
+                $at = $end
             }
         }
     }
-    Check "no builder paths in hoprs.exe ($($BuilderPaths -join ', '))" ($hits.Count -eq 0) "found $($hits -join ', ')"
+    Check "no builder paths in hoprs.exe ($($BuilderPaths -join ', '))" ($hits.Count -eq 0) "found $($hits -join '; ')"
 
     Write-Host 'OK    all checks passed'
 }
