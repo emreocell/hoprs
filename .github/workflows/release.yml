@@ -25,7 +25,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      # No token in .git/config: package-deb.sh mounts the repository into the build
+      # container, where every build script and proc-macro runs, and this job's token can
+      # write releases.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Tag matches the workspace version
         run: |
@@ -78,33 +83,35 @@ jobs:
             --title "hoprs $VERSION" --notes-file notes.md
           echo "DRAFT_CREATED=1" >> "$GITHUB_ENV"
 
+      # Downloaded back and checked against SHA256SUMS: the bytes on the release, not
+      # just their sizes. A draft's assets download with the token.
       - name: Upload and verify the assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "$GITHUB_REF_NAME" dist/hoprs_*.deb dist/SHA256SUMS
-          assets=$(gh release view "$GITHUB_REF_NAME" --json assets \
-            --jq '.assets[] | "\(.name) \(.size)"')
-          echo "$assets"
+          check="$RUNNER_TEMP/release-assets"
+          mkdir "$check"
+          gh release download "$GITHUB_REF_NAME" --dir "$check"
+          ls -l "$check"
           for file in dist/hoprs_*.deb dist/SHA256SUMS; do
-            name=$(basename "$file")
-            want=$(stat -c %s "$file")
-            got=$(awk -v n="$name" '$1 == n { print $2 }' <<<"$assets")
-            if [ -z "$got" ] || [ "$got" -eq 0 ] || [ "$got" -ne "$want" ]; then
-              echo "::error::asset $name: size on the release '${got:-missing}', local $want"
+            if [ ! -f "$check/$(basename "$file")" ]; then
+              echo "::error::asset $(basename "$file") is not on the release"
               exit 1
             fi
           done
+          cmp dist/SHA256SUMS "$check/SHA256SUMS"
+          (cd "$check" && sha256sum --check --strict SHA256SUMS)
 
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release edit "$GITHUB_REF_NAME" --draft=false
 
-      # A failed run leaves no draft behind, so a re-run can create it again. Only a
-      # draft this run created is deleted (never a published release, never the tag).
-      - name: Delete the draft on failure
-        if: failure() && env.DRAFT_CREATED == '1'
+      # A failed or cancelled run leaves no draft behind, so a re-run can create it again.
+      # Only a draft this run created is deleted (never a published release, never the tag).
+      - name: Delete the draft on failure or cancel
+        if: (failure() || cancelled()) && env.DRAFT_CREATED == '1'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

@@ -40,8 +40,16 @@ case "${1:-}" in
             docker/deb-build >&2
         target=target/deb-ubuntu-24.04
         mkdir -p "$target/cargo-home"
+        # The build runs every dependency's build script and proc-macro, so the container
+        # gets no .git: an empty tmpfs hides it (a CI checkout may keep a token in
+        # .git/config, and nothing in the build reads git). In a git worktree .git is a
+        # file pointing outside the mount, so there is nothing to hide.
+        hide_git=()
+        if [ -d "$repo/.git" ]; then
+            hide_git=(--tmpfs /src/.git)
+        fi
         deb=$(docker run --rm --user "$(id -u):$(id -g)" \
-            -v "$repo:/src" -w /src \
+            -v "$repo:/src" "${hide_git[@]}" -w /src \
             -e HOME=/tmp \
             -e CARGO_HOME="/src/$target/cargo-home" \
             -e CARGO_TARGET_DIR="/src/$target" \
