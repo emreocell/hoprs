@@ -1,11 +1,19 @@
 import { facts } from "../facts";
 import Shot from "../components/Shot";
 import { GlyphField } from "../glyph/GlyphField";
+import { useDetectedOs } from "../platform";
+
+const downloads = {
+  linux: { href: facts.debUrl, label: "Download .deb" },
+  macos: { href: facts.dmgUrl, label: "Download .dmg" },
+  windows: { href: facts.msiUrl, label: "Download .msi" },
+} as const;
 
 export const heroHeadline = "SSH, SFTP and FTP in one window.";
-export const heroSentence = "A fast, native file client for Linux, written in Rust.";
+export const heroSentence = "A fast, native file client for Linux, macOS and Windows.";
 
 export default function Hero() {
+  const download = downloads[useDetectedOs()];
   return (
     <>
       <section className="hero" aria-labelledby="hero-title">
@@ -16,7 +24,7 @@ export default function Hero() {
           <h1 id="hero-title">{heroHeadline}</h1>
           <p className="lead">{heroSentence}</p>
           <div className="actions">
-            <a className="btn btn-primary" href={facts.debUrl}>Download .deb</a>
+            <a className="btn btn-primary" href={download.href}>{download.label}</a>
             <a className="btn btn-secondary" href={facts.repoUrl}>GitHub</a>
           </div>
         </div>

@@ -1,13 +1,18 @@
 name: Site
 
 # The landing page under site/. Builds on every change to it; on main it also
-# deploys to https://hoprs.online (the VPS, see site/deploy/README.md).
+# deploys to https://hoprs.online (the VPS, see site/deploy/README.md), but only
+# once the GitHub Release for facts.ts's version exists (published, not a prerelease):
+# the page links to its assets. When the Release workflow finishes, the deploy runs again.
 on:
   push:
     branches: [main]
     paths: ['site/**', '.github/workflows/site.yml', 'Cargo.toml']
   pull_request:
     paths: ['site/**', '.github/workflows/site.yml', 'Cargo.toml']
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -15,6 +20,8 @@ permissions:
 
 jobs:
   build:
+    # A workflow_run builds main, only after a successful release.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -23,6 +30,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_run' && 'main' || '' }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -41,7 +49,9 @@ jobs:
 
   deploy:
     needs: build
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: >-
+      (github.event_name != 'pull_request' && github.event_name != 'workflow_run' && github.ref == 'refs/heads/main')
+      || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     environment:
       name: production
@@ -54,11 +64,35 @@ jobs:
       # /etc/ssh/ssh_host_ed25519_key.pub on 2026-11-14). Never ssh-keyscan here.
       SITE_HOST_KEY: '92.113.39.90 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA/99jx1mIPxWRQXcSXWs6bYltIxejjWyMKAbQnEHmJQ'
     steps:
-      - uses: actions/download-artifact@v4
+      # Needs the checkout only for the version in facts.ts; the dist comes from the build job.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_run' && 'main' || '' }}
+          sparse-checkout: site/src/facts.ts
+          sparse-checkout-cone-mode: false
+      - name: Check the release exists
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^const version = "\(.*\)";/\1/p' site/src/facts.ts)"
+          if [ -z "$VERSION" ]; then echo "::error::no version in site/src/facts.ts"; exit 1; fi
+          if info="$(gh release view "v$VERSION" --repo ${{ github.repository }} --json isDraft,isPrerelease 2>/dev/null)" \
+            && [ "$(jq -r '.isDraft or .isPrerelease' <<<"$info")" = "false" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Release v$VERSION is missing, a draft or a prerelease; skipping the deploy. It runs again when the Release workflow succeeds."
+          fi
+      - if: steps.release.outputs.ready == 'true'
+        uses: actions/download-artifact@v4
         with:
           name: site-dist
           path: dist
       - name: Publish to the VPS
+        if: steps.release.outputs.ready == 'true'
         env:
           SITE_DEPLOY_KEY: ${{ secrets.SITE_DEPLOY_KEY }}
         run: |
@@ -73,4 +107,5 @@ jobs:
             hoprs-site@92.113.39.90 "$GITHUB_SHA"
           rm -f "$RUNNER_TEMP/key"
       - name: Check the live page
+        if: steps.release.outputs.ready == 'true'
         run: curl -fsS https://hoprs.online/ | grep -q '<h1'
