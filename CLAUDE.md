@@ -21,12 +21,13 @@ Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI), open source (MIT OR Apa
 
 ## Current status (2026-11-14)
 
-- Plans 1–7 merged to `main` (v1 feature-complete): core + transfer engine, SSH/SFTP, FTP/FTPS, vault + FileZilla import, the iced app, Plan 6 (terminal tabs over the site's SSH connection, remote editing with re-upload on save, Ctrl+K palette, technical log panel, idle-drop fixes, perf job) and Plan 7 (one writer per destination). Plan 8 (release 1.0.0: `.deb` packaging, icon, `.desktop`, release workflow) is on its branch `plan-8-release`.
+- Plans 1–7 merged to `main` (v1 feature-complete): core + transfer engine, SSH/SFTP, FTP/FTPS, vault + FileZilla import, the iced app, Plan 6 (terminal tabs over the site's SSH connection, remote editing with re-upload on save, Ctrl+K palette, technical log panel, idle-drop fixes, perf job) Plan 7 (one writer per destination) and Plan 8 (release 1.0.0: `.deb` packaging, icon, `.desktop`, release workflow).
+- **v1.0.0 released (2026-11-14):** tag `v1.0.0` on `342ff80`, GitHub Release with `hoprs_1.0.0-1_amd64.deb` + `SHA256SUMS` (checksum verified after download).
 - `perf.yml` first ran green on `main` (2026-11-13): startup 84 ms, idle 33 MB, 100k rows p95 0.58 ms, SFTP 1 GiB 0.99x `scp`; small files are known gaps (FTP 1.003x, SFTP 2.0x `lftp`). Numbers and method: `docs/perf/README.md`.
 - QA checklists `docs/qa/plan-5-checklist.md` and `docs/qa/plan-6-checklist.md` still have NEEDS HUMAN rows for the author (real input devices, a GUI editor, a 10-minute idle on the author's FTP server).
 - Deferred follow-ups: `docs/superpowers/plans/2026-11-12-01-followups.md` (per plan, sections Plan 6, 7 and 8).
-- Plan 7 merged (same-destination race fixed). Plan 8 (release 1.0.0: icon, `.desktop`, `.deb`, `release.yml`) is on branch `plan-8-release`; `docs/qa/release-1.0-checklist.md` has the NEEDS HUMAN rows (install, icon sizes, dock grouping, tag).
-- **Next step:** merge Plan 8, then tag `v1.0.0` (the author confirms) and check the published Release and its downloaded `.deb`; then work the remaining follow-ups.
+- `docs/qa/release-1.0-checklist.md` has the NEEDS HUMAN rows (install the `.deb`, icon sizes, dock grouping, uninstall keeps data).
+- **Next step:** the author runs the NEEDS HUMAN rows; then work the follow-ups (Plan 8 section first: tag-on-`main` check in `release.yml`, `actions/checkout@v5` for the Node 20 deprecation).
 - Docker integration tests: `docker compose -f docker/compose.yml up -d --build --wait`, then `cargo test --workspace --all-features -- --ignored --test-threads=1`.
 
 ## Decisions already made (do not re-litigate)
