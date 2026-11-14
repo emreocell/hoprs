@@ -80,6 +80,7 @@ function Get-ArpEntries {
         'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
         'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
     )
+    # A function returning an empty array returns $null: callers wrap it in @().
     return @(Get-ItemProperty -Path $keys -ErrorAction SilentlyContinue |
         Where-Object { $_.PSObject.Properties['DisplayName'] -and $_.DisplayName -eq 'hoprs' })
 }
@@ -126,7 +127,7 @@ try {
     $target = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut).TargetPath
     Check 'Start menu shortcut targets the installed hoprs.exe' ($target -ieq $installedExe) "targets '$target'"
 
-    $entries = Get-ArpEntries
+    $entries = @(Get-ArpEntries)
     Check 'one Add/Remove Programs entry' ($entries.Count -eq 1) "found $($entries.Count)"
     Check 'the entry is per machine (HKLM)' ($entries[0].PSPath -like '*HKEY_LOCAL_MACHINE*') $entries[0].PSPath
     Check "the entry's DisplayVersion is $msiVersion" ($entries[0].DisplayVersion -eq $msiVersion) "got '$($entries[0].DisplayVersion)'"
@@ -137,7 +138,7 @@ try {
     Check 'reinstall (REINSTALL=ALL REINSTALLMODE=vomus) exits 0' ($code -eq 0) "exit code $code, log $log"
     $line = Get-VersionLine $installedExe
     Check 'hoprs.exe --version after the reinstall' ($line -eq "hoprs $version") "got '$line'"
-    Check 'still one Add/Remove Programs entry' ((Get-ArpEntries).Count -eq 1) "found $((Get-ArpEntries).Count)"
+    Check 'still one Add/Remove Programs entry' (@(Get-ArpEntries).Count -eq 1) "found $(@(Get-ArpEntries).Count)"
 
     $log = Join-Path $work 'uninstall.log'
     $code = Invoke-Msiexec @('/x', "`"$Msi`"", '/qn', '/l*v', "`"$log`"")
@@ -147,7 +148,7 @@ try {
 
     Check 'hoprs.exe gone after the uninstall' (-not (Test-Path $installedExe))
     Check 'Start menu shortcut gone after the uninstall' (-not (Test-Path $shortcut))
-    Check 'Add/Remove Programs entry gone after the uninstall' ((Get-ArpEntries).Count -eq 0) "found $((Get-ArpEntries).Count)"
+    Check 'Add/Remove Programs entry gone after the uninstall' (@(Get-ArpEntries).Count -eq 0) "found $(@(Get-ArpEntries).Count)"
     $kept = (Test-Path $keep) -and ((Get-Content $keep -Raw).Trim() -eq $marker)
     Check "user data kept by the uninstall: $keep" $kept
 
