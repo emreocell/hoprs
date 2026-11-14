@@ -46,13 +46,16 @@ notes() {
 # The fixed "Installing" block, for the assets of one version (the names of
 # .github/workflows/release.yml).
 installing() {
-    local v=$1
+    local v=$1 deb_v
+    # cargo-deb's version: the first `-` (a prerelease) becomes `~`, so 1.0.0-rc1 is
+    # hoprs_1.0.0~rc1-1_amd64.deb (docker/deb-check/inside.sh maps it back).
+    deb_v=${v/-/\~}
     cat <<EOF
 ## Installing
 
-**Linux** (Ubuntu, amd64): download \`hoprs_${v}-1_amd64.deb\`, then
+**Linux** (Ubuntu, amd64): download \`hoprs_${deb_v}-1_amd64.deb\`, then
 
-    sudo apt install ./hoprs_${v}-1_amd64.deb
+    sudo apt install ./hoprs_${deb_v}-1_amd64.deb
 
 **macOS** (11 or later, Apple silicon and Intel): open \`hoprs_${v}_macos_universal.dmg\` and drag hoprs to Applications. The app is not notarized, so macOS refuses the first open: go to System Settings → Privacy & Security and click Open Anyway, or run
 
@@ -177,8 +180,10 @@ EOF
     expect_contains "Installing block: Windows" 1.0.0 "$dir/CHANGELOG.md" \
         "hoprs_1.0.0_windows_x64.msi" '"Windows protected your PC"' "More info" \
         "Run anyway" "hoprs_1.0.0_windows_x64.zip"
-    expect_contains "Installing block: the version is the one asked for" 1.0.0-rc1 \
-        "$dir/CHANGELOG.md" "sudo apt install ./hoprs_1.0.0-rc1-1_amd64.deb"
+    # cargo-deb turns the first `-` of a prerelease into `~` (docker/deb-check/inside.sh).
+    expect_contains "Installing block: a prerelease's asset names" 1.0.0-rc1 \
+        "$dir/CHANGELOG.md" "sudo apt install ./hoprs_1.0.0~rc1-1_amd64.deb" \
+        "hoprs_1.0.0-rc1_macos_universal.dmg" "hoprs_1.0.0-rc1_windows_x64.msi"
     expect_contains "Installing block: the new-builds line" 1.0.0 "$dir/CHANGELOG.md" \
         "The Windows and macOS builds are new and not yet tried on real machines; please open an issue if something is off."
     if got=$(release_notes 3.0.0 "$dir/CHANGELOG.md" 2>/dev/null) || [ -n "$got" ]; then
