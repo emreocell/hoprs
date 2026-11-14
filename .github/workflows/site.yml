@@ -1,6 +1,7 @@
 name: Site
 
-# The landing page under site/. Builds on every change to it; deploy comes later.
+# The landing page under site/. Builds on every change to it; on main it also
+# deploys to https://hoprs.online (the VPS, see site/deploy/README.md).
 on:
   push:
     branches: [main]
@@ -37,3 +38,39 @@ jobs:
         with:
           name: site-dist
           path: site/dist
+
+  deploy:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://hoprs.online
+    concurrency:
+      group: site-deploy
+      cancel-in-progress: false
+    env:
+      # Pinned host key of 92.113.39.90 (checked against the server's
+      # /etc/ssh/ssh_host_ed25519_key.pub on 2026-11-14). Never ssh-keyscan here.
+      SITE_HOST_KEY: '92.113.39.90 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA/99jx1mIPxWRQXcSXWs6bYltIxejjWyMKAbQnEHmJQ'
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: site-dist
+          path: dist
+      - name: Publish to the VPS
+        env:
+          SITE_DEPLOY_KEY: ${{ secrets.SITE_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s\n' "$SITE_DEPLOY_KEY" > "$RUNNER_TEMP/key"
+          printf '%s\n' "$SITE_HOST_KEY" > "$RUNNER_TEMP/known_hosts"
+          # The key's forced command (hoprs-site-receive) takes only the SHA.
+          tar -C dist -c . | ssh -i "$RUNNER_TEMP/key" \
+            -o IdentitiesOnly=yes -o BatchMode=yes \
+            -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" -o StrictHostKeyChecking=yes \
+            hoprs-site@92.113.39.90 "$GITHUB_SHA"
+          rm -f "$RUNNER_TEMP/key"
+      - name: Check the live page
+        run: curl -fsS https://hoprs.online/ | grep -q '<h1'
