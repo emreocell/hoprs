@@ -32,7 +32,9 @@ pub const KEEPALIVE_MAX: u64 = 300;
 pub const KEEPALIVE_DEFAULT: u64 = 30;
 /// The editor remote edits open files with: `system` is the OS's default editor; any other
 /// value is a command, the path added as its last argument.
-pub const EDITOR_DEFAULT: &str = "system";
+pub const EDITOR_DEFAULT: &str = SYSTEM_EDITOR;
+/// The editor setting that means the OS's default editor ([`is_system_editor`]).
+pub const SYSTEM_EDITOR: &str = "system";
 /// Largest `settings.toml` read; a real one is under 200 bytes.
 const MAX_BYTES: u64 = 64 * 1024;
 
@@ -113,6 +115,12 @@ impl Default for Settings {
 }
 
 /// Whether `command` can be the editor command: something besides blanks.
+/// Whether the editor setting `command` means the OS's default editor: `system`, trimmed,
+/// in any case.
+pub fn is_system_editor(command: &str) -> bool {
+    command.trim().eq_ignore_ascii_case(SYSTEM_EDITOR)
+}
+
 pub fn valid_editor(command: &str) -> bool {
     !command.trim().is_empty()
 }
@@ -344,6 +352,14 @@ mod tests {
     #[test]
     fn editor_default_is_system() {
         assert_eq!(Settings::default().editor_command, "system");
+    }
+
+    #[test]
+    fn system_editor_is_recognised() {
+        assert!(is_system_editor(" System "));
+        assert!(is_system_editor("system"));
+        assert!(!is_system_editor("xdg-open"));
+        assert!(!is_system_editor("system-editor"));
     }
 
     #[test]

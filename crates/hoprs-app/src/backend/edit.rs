@@ -1643,14 +1643,11 @@ pub enum EditorLaunch {
     Argv(Vec<OsString>),
 }
 
-/// The setting value that means the OS's default editor (trimmed, any case).
-const SYSTEM_EDITOR: &str = "system";
-
 /// What the editor setting `command` runs for `path`: `system` (trimmed, any case) is
 /// [`EditorLaunch::System`]; anything else is split ([`split_command`]) into program and
 /// arguments, no shell, with `path` last.
 pub fn editor_launch(command: &str, path: &Path) -> Result<EditorLaunch> {
-    if command.trim().eq_ignore_ascii_case(SYSTEM_EDITOR) {
+    if crate::settings::is_system_editor(command) {
         return Ok(EditorLaunch::System);
     }
     let words = split_command(command).ok_or_else(|| {
@@ -1792,12 +1789,25 @@ fn open_with_system(path: &Path) -> Result<()> {
 #[cfg(windows)]
 fn open_with_system(path: &Path) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{S_FALSE, S_OK};
+    use windows_sys::Win32::System::Com::{
+        COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
+    };
     use windows_sys::Win32::UI::Shell::{SE_ERR_NOASSOC, ShellExecuteW};
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
     let wide = |s: &std::ffi::OsStr| -> Vec<u16> { s.encode_wide().chain([0]).collect() };
     let verb = wide(std::ffi::OsStr::new("open"));
     let file = wide(path.as_os_str());
+    // Shell extensions behind an association may need COM, as `ShellExecuteW`'s
+    // documentation says; this thread's own initialisation is undone afterwards.
+    // SAFETY: the reserved pointer must be null; the flags are valid.
+    let com = unsafe {
+        CoInitializeEx(
+            std::ptr::null(),
+            (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32,
+        )
+    };
     // SAFETY: `verb` and `file` are NUL-terminated UTF-16 buffers that outlive the call;
     // the window, parameters and directory may be null.
     let code = unsafe {
@@ -1810,6 +1820,10 @@ fn open_with_system(path: &Path) -> Result<()> {
             SW_SHOWNORMAL,
         )
     } as isize;
+    if com == S_OK || com == S_FALSE {
+        // SAFETY: balances this thread's successful `CoInitializeEx` above.
+        unsafe { CoUninitialize() };
+    }
     if code > 32 {
         tracing::info!(editor = "system", path = %path.display(), "editor started");
         return Ok(());

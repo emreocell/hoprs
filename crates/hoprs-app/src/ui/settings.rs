@@ -294,7 +294,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     .spacing(theme::SPACE_SM)
     .align_y(Alignment::Center);
     // The setting stays a string; `system` reads as what it does.
-    if editor_value.trim().eq_ignore_ascii_case("system") {
+    if crate::settings::is_system_editor(editor_value) {
         editor_field = editor_field.push(muted(strings::EDITOR_SYSTEM_DEFAULT));
     }
     let mut editing = column![
