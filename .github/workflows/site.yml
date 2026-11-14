@@ -109,5 +109,9 @@ jobs:
         if: steps.release.outputs.ready == 'true'
         run: |
           set -euo pipefail
-          curl -fsS https://hoprs.online/ | grep -q '<h1'
-          curl -fsS https://hoprs.online/pt-br/ | grep -q 'lang="pt-BR"'
+          # Fetch to a file first: `curl | grep -q` fails under pipefail when grep exits
+          # early and curl gets a write error (23).
+          curl -fsS https://hoprs.online/ -o "$RUNNER_TEMP/en.html"
+          grep -q '<h1' "$RUNNER_TEMP/en.html"
+          curl -fsS https://hoprs.online/pt-br/ -o "$RUNNER_TEMP/pt-br.html"
+          grep -q 'lang="pt-BR"' "$RUNNER_TEMP/pt-br.html"
