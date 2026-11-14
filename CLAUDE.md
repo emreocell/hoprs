@@ -15,12 +15,14 @@ Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI), open source (MIT OR Apa
 - Plan 6 (terminal, remote editing, palette, log, perf job): `docs/superpowers/plans/2026-11-13-06-terminal-polish.md`
 - Plan 7 (same-destination serialisation): `docs/superpowers/plans/2026-11-13-07-same-destination.md`
 - Plan 8 (release 1.0.0: icons, `.deb`, release workflow): `docs/superpowers/plans/2026-11-13-08-release-1.0.md`
+- Landing page for https://hoprs.online: code in `site/` (Vite + React + Tailwind, prerendered), spec `docs/superpowers/specs/2026-11-14-landing-page-design.md`, plan `docs/superpowers/plans/2026-11-14-09-landing-page.md`, deploy notes `site/deploy/README.md`, workflow `.github/workflows/site.yml`
 - QA checklists (manual runs, NEEDS HUMAN rows with steps): `docs/qa/plan-5-checklist.md`, `docs/qa/plan-6-checklist.md`, `docs/qa/release-1.0-checklist.md`
 - Performance targets, how they are measured, last numbers: `docs/perf/README.md` (`scripts/perf.sh`, `.github/workflows/perf.yml`)
 - Deferred follow-ups: `docs/superpowers/plans/2026-11-12-01-followups.md`
 
 ## Current status (2026-11-14)
 
+- Landing page for https://hoprs.online is on branch `plan-9-landing-page` (Cloudflare zone, VPS via KoreGo).
 - Plans 1–7 merged to `main` (v1 feature-complete): core + transfer engine, SSH/SFTP, FTP/FTPS, vault + FileZilla import, the iced app, Plan 6 (terminal tabs over the site's SSH connection, remote editing with re-upload on save, Ctrl+K palette, technical log panel, idle-drop fixes, perf job) Plan 7 (one writer per destination) and Plan 8 (release 1.0.0: `.deb` packaging, icon, `.desktop`, release workflow).
 - **v1.0.0 released (2026-11-14):** tag `v1.0.0` on `342ff80`, GitHub Release with `hoprs_1.0.0-1_amd64.deb` + `SHA256SUMS` (checksum verified after download).
 - `perf.yml` first ran green on `main` (2026-11-13): startup 84 ms, idle 33 MB, 100k rows p95 0.58 ms, SFTP 1 GiB 0.99x `scp`; small files are known gaps (FTP 1.003x, SFTP 2.0x `lftp`). Numbers and method: `docs/perf/README.md`.
