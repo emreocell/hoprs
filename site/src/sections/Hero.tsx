@@ -1,4 +1,5 @@
 import { facts } from "../facts";
+import { GlyphField } from "../glyph/GlyphField";
 
 export const heroHeadline = "SSH, SFTP and FTP in one window.";
 export const heroSentence = "A fast, native file client for Linux, written in Rust.";
@@ -6,7 +7,9 @@ export const heroSentence = "A fast, native file client for Linux, written in Ru
 export default function Hero() {
   return (
     <section className="hero" aria-labelledby="hero-title">
-      <div data-slot="glyph-field" className="glyph-field" aria-hidden="true" />
+      <div data-slot="glyph-field" className="glyph-field" aria-hidden="true">
+        <GlyphField />
+      </div>
       <div className="container hero-body">
         <h1 id="hero-title">{heroHeadline}</h1>
         <p className="lead">{heroSentence}</p>

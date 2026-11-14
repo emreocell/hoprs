@@ -39,6 +39,15 @@ html, body { overflow-x: clip; background: var(--color-paper); }
 
 .hero { position: relative; isolation: isolate; padding-block: var(--space-xl) var(--space-2xl); }
 .glyph-field { position: absolute; inset: 0; z-index: -1; pointer-events: none; background: none; }
+/* The glyph field: 130 cells across (JetBrains Mono advances 0.6em, cells 1.85 times as tall as wide).
+ * Dim under the text column so the headline reads; full strength to the right. Masks read alpha only. */
+.glyph-field { container-type: size; --glyph-mask: linear-gradient(100deg, color-mix(in srgb, var(--color-ink) 28%, transparent) 0 38%, var(--color-ink) 72%); -webkit-mask-image: var(--glyph-mask); mask-image: var(--glyph-mask); }
+.glyph-pre, .glyph-canvas { position: absolute; top: 0; left: 0; margin: 0; font-family: var(--font-display); font-size: calc(100cqw / 78); line-height: 1.11; white-space: pre; color: var(--glyph-0); user-select: none; }
+.glyph-field:has(> .glyph-canvas[data-ready]) > .glyph-pre { visibility: hidden; }
+@media (max-width: 40rem) {
+  .glyph-field { --glyph-mask: linear-gradient(color-mix(in srgb, var(--color-ink) 42%, transparent) 0 100%); }
+  .glyph-pre, .glyph-canvas { font-size: calc(100cqw / 39); }
+}
 .hero-body { display: grid; gap: var(--space-lg); justify-items: start; }
 .actions { display: flex; flex-wrap: wrap; gap: var(--space-sm); }
 .btn { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding-inline: var(--space-lg); border-radius: var(--radius); font-family: var(--font-display); font-size: var(--text-sm); text-decoration: none; border: 1px solid var(--color-rule-2); transition: background var(--dur-micro) var(--ease-out); }
