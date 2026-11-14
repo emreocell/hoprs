@@ -30,8 +30,11 @@ pub const SCROLLBACK_DEFAULT: usize = 10_000;
 pub const KEEPALIVE_MIN: u64 = 10;
 pub const KEEPALIVE_MAX: u64 = 300;
 pub const KEEPALIVE_DEFAULT: u64 = 30;
-/// The command remote edits open files with (the path is added as its last argument).
-pub const EDITOR_DEFAULT: &str = "xdg-open";
+/// The editor remote edits open files with: `system` is the OS's default editor; any other
+/// value is a command, the path added as its last argument.
+pub const EDITOR_DEFAULT: &str = SYSTEM_EDITOR;
+/// The editor setting that means the OS's default editor ([`is_system_editor`]).
+pub const SYSTEM_EDITOR: &str = "system";
 /// Largest `settings.toml` read; a real one is under 200 bytes.
 const MAX_BYTES: u64 = 64 * 1024;
 
@@ -91,8 +94,9 @@ pub struct Settings {
     /// Seconds between keepalives on an idle SSH or FTP connection (`10..=300`), for the
     /// connections made from now on.
     pub keepalive_secs: u64,
-    /// The editor of remote edits: a command split with shell quoting rules (no shell
-    /// runs), the file's path added last. Never empty ([`valid_editor`]).
+    /// The editor of remote edits: `system` (the OS's default editor), or a command split
+    /// with shell quoting rules (Windows command-line rules on Windows; no shell runs), the
+    /// file's path added last. Never empty ([`valid_editor`]).
     pub editor_command: String,
 }
 
@@ -108,6 +112,12 @@ impl Default for Settings {
             editor_command: EDITOR_DEFAULT.to_owned(),
         }
     }
+}
+
+/// Whether the editor setting `command` means the OS's default editor: `system`, trimmed,
+/// in any case.
+pub fn is_system_editor(command: &str) -> bool {
+    command.trim().eq_ignore_ascii_case(SYSTEM_EDITOR)
 }
 
 /// Whether `command` can be the editor command: something besides blanks.
@@ -337,6 +347,20 @@ pub fn save(path: &Path, settings: &Settings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fresh install opens remote edits with the OS's default editor.
+    #[test]
+    fn editor_default_is_system() {
+        assert_eq!(Settings::default().editor_command, "system");
+    }
+
+    #[test]
+    fn system_editor_is_recognised() {
+        assert!(is_system_editor(" System "));
+        assert!(is_system_editor("system"));
+        assert!(!is_system_editor("xdg-open"));
+        assert!(!is_system_editor("system-editor"));
+    }
 
     #[test]
     fn settings_roundtrip_and_invalid_file_untouched() {

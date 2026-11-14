@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Prints the release notes of one version: the body of its `## <version>` section in
 # CHANGELOG.md, up to the next `## ` heading, without the heading line and without
-# leading or trailing blank lines. The heading may carry a suffix after a space
+# leading or trailing blank lines; then, after a blank line, a fixed `## Installing`
+# block naming that version's assets (Linux, macOS, Windows). The heading may carry a suffix after a space
 # (`## 1.0.0 — 2026-11-13`); `1.0.0` never matches `## 1.0.0-rc1` or `## 1.0.01`.
 # CRLF line endings are accepted (and stripped from the output).
 #
@@ -42,8 +43,43 @@ notes() {
     printf '%s\n' "$body"
 }
 
+# The fixed "Installing" block, for the assets of one version (the names of
+# .github/workflows/release.yml).
+installing() {
+    local v=$1 deb_v
+    # cargo-deb's version: the first `-` (a prerelease) becomes `~`, so 1.0.0-rc1 is
+    # hoprs_1.0.0~rc1-1_amd64.deb (docker/deb-check/inside.sh maps it back).
+    deb_v=${v/-/\~}
+    cat <<EOF
+## Installing
+
+**Linux** (Ubuntu, amd64): download \`hoprs_${deb_v}-1_amd64.deb\`, then
+
+    sudo apt install ./hoprs_${deb_v}-1_amd64.deb
+
+**macOS** (11 or later, Apple silicon and Intel): open \`hoprs_${v}_macos_universal.dmg\` and drag hoprs to Applications. The app is not notarized, so macOS refuses the first open: go to System Settings → Privacy & Security and click Open Anyway, or run
+
+    xattr -dr com.apple.quarantine /Applications/hoprs.app
+
+After each update, Keychain asks again before hoprs can read its saved passwords; choose Always Allow.
+
+**Windows** (x64): run \`hoprs_${v}_windows_x64.msi\`. It is not signed, so SmartScreen says "Windows protected your PC": click More info, then Run anyway. Or use the portable \`hoprs_${v}_windows_x64.zip\`: unzip it and run \`hoprs.exe\`.
+
+The Windows and macOS builds are new and not yet tried on real machines; please open an issue if something is off.
+EOF
+}
+
+# The release notes: the CHANGELOG section, then the Installing block. Nothing is
+# printed if the section is missing or empty.
+release_notes() {
+    local body
+    body=$(notes "$1" "$2") || return 1
+    printf '%s\n\n' "$body"
+    installing "$1"
+}
+
 self_test() {
-    local dir fails=0
+    local dir got fails=0
     dir=$(mktemp -d)
     # shellcheck disable=SC2064 # expand $dir now
     trap "rm -rf '$dir'" EXIT
@@ -108,6 +144,55 @@ EOF
     expect_fail "empty section" 0.9.0 "$dir/CHANGELOG.md"
     expect_fail "missing changelog file" 1.0.0 "$dir/nope.md"
 
+    # The full notes: the CHANGELOG section first, then the Installing block for that
+    # version.
+    expect_contains() { # name version file needle...
+        local name=$1 version=$2 file=$3 got needle
+        shift 3
+        if ! got=$(release_notes "$version" "$file" 2>&1); then
+            echo "FAIL  $name: exited non-zero: [$got]"
+            fails=$((fails + 1))
+            return
+        fi
+        for needle in "$@"; do
+            if ! grep -qF -- "$needle" <<<"$got"; then
+                echo "FAIL  $name: no [$needle] in [$got]"
+                fails=$((fails + 1))
+                return
+            fi
+        done
+        echo "OK    $name"
+    }
+    local full
+    full=$(release_notes 1.0.0 "$dir/CHANGELOG.md" 2>&1) || true
+    if [[ "$full" == "$(printf 'First release.\n\n- Item one.\n- Item two.\n\n## Installing\n')"* ]]; then
+        echo "OK    full notes: the CHANGELOG section, then the Installing block"
+    else
+        echo "FAIL  full notes: section then Installing expected, got [$full]"
+        fails=$((fails + 1))
+    fi
+    expect_contains "Installing block: Linux" 1.0.0 "$dir/CHANGELOG.md" \
+        "sudo apt install ./hoprs_1.0.0-1_amd64.deb"
+    expect_contains "Installing block: macOS" 1.0.0 "$dir/CHANGELOG.md" \
+        "hoprs_1.0.0_macos_universal.dmg" "Applications" \
+        "System Settings → Privacy & Security" "Open Anyway" \
+        "xattr -dr com.apple.quarantine /Applications/hoprs.app" "Always Allow"
+    expect_contains "Installing block: Windows" 1.0.0 "$dir/CHANGELOG.md" \
+        "hoprs_1.0.0_windows_x64.msi" '"Windows protected your PC"' "More info" \
+        "Run anyway" "hoprs_1.0.0_windows_x64.zip"
+    # cargo-deb turns the first `-` of a prerelease into `~` (docker/deb-check/inside.sh).
+    expect_contains "Installing block: a prerelease's asset names" 1.0.0-rc1 \
+        "$dir/CHANGELOG.md" "sudo apt install ./hoprs_1.0.0~rc1-1_amd64.deb" \
+        "hoprs_1.0.0-rc1_macos_universal.dmg" "hoprs_1.0.0-rc1_windows_x64.msi"
+    expect_contains "Installing block: the new-builds line" 1.0.0 "$dir/CHANGELOG.md" \
+        "The Windows and macOS builds are new and not yet tried on real machines; please open an issue if something is off."
+    if got=$(release_notes 3.0.0 "$dir/CHANGELOG.md" 2>/dev/null) || [ -n "$got" ]; then
+        echo "FAIL  full notes: a missing section must fail and print nothing, got [$got]"
+        fails=$((fails + 1))
+    else
+        echo "OK    full notes: a missing section fails and prints nothing"
+    fi
+
     if [ "$fails" -ne 0 ]; then
         echo "release-notes self-test: $fails failed" >&2
         return 1
@@ -121,5 +206,5 @@ case "${1:-}" in
         echo "usage: $0 <version> [changelog] | --self-test" >&2
         exit 2
         ;;
-    *) notes "$1" "${2:-$repo/CHANGELOG.md}" ;;
+    *) release_notes "$1" "${2:-$repo/CHANGELOG.md}" ;;
 esac

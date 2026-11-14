@@ -12,7 +12,7 @@ mod shell;
 pub mod testing;
 mod watchdog;
 
-pub use auth::{AuthMethod, key_type};
+pub use auth::{AuthMethod, WINDOWS_AGENT_PIPE, key_type};
 pub use channels::{ChannelSlot, is_channel_limit, sftp_stream_channels};
 pub use config::{AuthConfig, KeySource, SshConfig};
 pub use hoprs_core::ReconnectPolicy;

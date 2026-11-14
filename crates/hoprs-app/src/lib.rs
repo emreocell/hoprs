@@ -92,13 +92,25 @@ pub fn run() -> iced::Result {
             // A close request goes to `update`: tabs saved, backend shut down, then closed.
             exit_on_close_request: false,
             icon: window_icon(),
-            platform_specific: iced::window::settings::PlatformSpecific {
-                application_id: APP_ID.to_owned(),
-                ..iced::window::settings::PlatformSpecific::default()
-            },
+            platform_specific: platform_specific(),
             ..iced::window::Settings::default()
         })
         .run()
+}
+
+/// On Linux the window's app id (Wayland `app_id`, X11 `WM_CLASS`) is what the dock
+/// matches against the `.desktop` file. iced has no such field on Windows or macOS.
+#[cfg(target_os = "linux")]
+fn platform_specific() -> iced::window::settings::PlatformSpecific {
+    iced::window::settings::PlatformSpecific {
+        application_id: APP_ID.to_owned(),
+        ..iced::window::settings::PlatformSpecific::default()
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn platform_specific() -> iced::window::settings::PlatformSpecific {
+    iced::window::settings::PlatformSpecific::default()
 }
 
 /// iced's state: the pure [`App`] plus the backend its effects run against.

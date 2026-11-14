@@ -23,10 +23,14 @@ its API/MCP), never by editing Caddy or `korego.db`.
 ## How a deploy happens
 
 `.github/workflows/site.yml`, job `deploy`, on every push to `main` that touches
-`site/` (and on manual dispatch from `main`):
+`site/` (and on manual dispatch from `main`), and again when the `Release`
+workflow succeeds (`workflow_run`, which builds `main`):
 
 1. `build` runs lint, typecheck, build, tests and uploads `site/dist`.
-2. `deploy` pipes a tar of it over SSH, pinning the server's host key:
+2. `deploy` first checks that the GitHub Release `v<facts.version>` exists and is
+   neither a draft nor a prerelease (the page links to its assets). If not, the
+   job ends green with a notice and nothing is published; the `Release` run
+   that creates it triggers the deploy. Then it pipes a tar of it over SSH, pinning the server's host key:
    `tar -C dist -c . | ssh hoprs-site@92.113.39.90 "$GITHUB_SHA"`.
 3. The forced command unpacks into a new release dir, refuses one without
    `index.html`, swaps `current` atomically and prunes to the newest 5 releases by name (never the live one).

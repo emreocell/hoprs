@@ -69,9 +69,24 @@ const NOTE_TLS_IF_AVAILABLE: &str =
 const NOTE_MASTER_PASSWORD: &str =
     "password is protected by a FileZilla master password; enter it in hoprs";
 
-/// `~/.config/filezilla/sitemanager.xml` (platform config dir).
+/// FileZilla's `sitemanager.xml`: `~/.config/filezilla/` on macOS (FileZilla
+/// ignores `~/Library/Application Support` there), the platform config dir
+/// elsewhere (`%APPDATA%\filezilla` on Windows, `~/.config/filezilla` on Linux).
 pub fn default_sitemanager_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|dir| dir.join("filezilla").join("sitemanager.xml"))
+    sitemanager_path_for(std::env::consts::OS, dirs::home_dir(), dirs::config_dir())
+}
+
+fn sitemanager_path_for(
+    os: &str,
+    home: Option<PathBuf>,
+    config: Option<PathBuf>,
+) -> Option<PathBuf> {
+    let base = if os == "macos" {
+        home?.join(".config")
+    } else {
+        config?
+    };
+    Some(base.join("filezilla").join("sitemanager.xml"))
 }
 
 /// Reads and parses a `sitemanager.xml`, refusing files over 16 MiB.
@@ -499,4 +514,50 @@ fn decode_segments(rest: &str) -> Option<Vec<&str>> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    fn p(parts: &[&str]) -> PathBuf {
+        parts.iter().collect()
+    }
+
+    #[test]
+    fn macos_uses_dot_config_under_home() {
+        let home = p(&["Users", "a"]);
+        let config = p(&["Users", "a", "Library", "Application Support"]);
+        assert_eq!(
+            sitemanager_path_for("macos", Some(home.clone()), Some(config)),
+            Some(
+                home.join(".config")
+                    .join("filezilla")
+                    .join("sitemanager.xml")
+            )
+        );
+    }
+
+    #[test]
+    fn linux_uses_config_dir() {
+        let config = p(&["home", "a", ".config"]);
+        assert_eq!(
+            sitemanager_path_for("linux", Some(p(&["home", "a"])), Some(config.clone())),
+            Some(config.join("filezilla").join("sitemanager.xml"))
+        );
+    }
+
+    #[test]
+    fn windows_uses_config_dir() {
+        let config = p(&["Users", "a", "AppData", "Roaming"]);
+        assert_eq!(
+            sitemanager_path_for("windows", Some(p(&["Users", "a"])), Some(config.clone())),
+            Some(config.join("filezilla").join("sitemanager.xml"))
+        );
+    }
+
+    #[test]
+    fn macos_without_home_is_none() {
+        assert_eq!(sitemanager_path_for("macos", None, Some(p(&["x"]))), None);
+    }
 }

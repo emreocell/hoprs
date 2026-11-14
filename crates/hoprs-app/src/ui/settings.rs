@@ -285,17 +285,21 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .editor_input
         .as_deref()
         .unwrap_or(&settings.editor_command);
+    let mut editor_field = row![
+        input(editor_value, false, |command| {
+            msg(SettingsMsg::EditorCommand(command))
+        })
+        .width(320)
+    ]
+    .spacing(theme::SPACE_SM)
+    .align_y(Alignment::Center);
+    // The setting stays a string; `system` reads as what it does.
+    if crate::settings::is_system_editor(editor_value) {
+        editor_field = editor_field.push(muted(strings::EDITOR_SYSTEM_DEFAULT));
+    }
     let mut editing = column![
         heading(strings::SETTINGS_EDITING),
-        field(
-            strings::EDITOR_COMMAND,
-            input(editor_value, false, |command| {
-                msg(SettingsMsg::EditorCommand(command))
-            })
-            .width(320)
-            .into(),
-            None
-        ),
+        field(strings::EDITOR_COMMAND, editor_field.into(), None),
         muted(strings::EDITOR_COMMAND_HINT),
     ]
     .spacing(theme::SPACE_SM);

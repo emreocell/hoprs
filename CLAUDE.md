@@ -1,6 +1,6 @@
 # hoprs
 
-Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI), open source (MIT OR Apache-2.0). Replaces FileZilla for the author: same saved-sites idea, clean UI, high performance. Repo is public (since 2026-11-14).
+Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI) for Linux, Windows and macOS, open source (MIT OR Apache-2.0). Replaces FileZilla for the author: same saved-sites idea, clean UI, high performance. Repo is public (since 2026-11-14).
 
 ## Where things are
 
@@ -15,8 +15,9 @@ Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI), open source (MIT OR Apa
 - Plan 6 (terminal, remote editing, palette, log, perf job): `docs/superpowers/plans/2026-11-13-06-terminal-polish.md`
 - Plan 7 (same-destination serialisation): `docs/superpowers/plans/2026-11-13-07-same-destination.md`
 - Plan 8 (release 1.0.0: icons, `.deb`, release workflow): `docs/superpowers/plans/2026-11-13-08-release-1.0.md`
+- Plan 10 (Windows and macOS, release 1.1.0): spec `docs/superpowers/specs/2026-11-14-windows-macos-design.md`, plan `docs/superpowers/plans/2026-11-14-10-windows-macos.md`
 - Landing page for https://hoprs.online: code in `site/` (Vite + React + Tailwind, prerendered), spec `docs/superpowers/specs/2026-11-14-landing-page-design.md`, plan `docs/superpowers/plans/2026-11-14-09-landing-page.md`, deploy notes `site/deploy/README.md`, workflow `.github/workflows/site.yml`
-- QA checklists (manual runs, NEEDS HUMAN rows with steps): `docs/qa/plan-5-checklist.md`, `docs/qa/plan-6-checklist.md`, `docs/qa/release-1.0-checklist.md`
+- QA checklists (manual runs, NEEDS HUMAN rows with steps): `docs/qa/plan-5-checklist.md`, `docs/qa/plan-6-checklist.md`, `docs/qa/release-1.0-checklist.md`, `docs/qa/release-1.1-checklist.md`
 - Performance targets, how they are measured, last numbers: `docs/perf/README.md` (`scripts/perf.sh`, `.github/workflows/perf.yml`)
 - Deferred follow-ups: `docs/superpowers/plans/2026-11-12-01-followups.md`
 
@@ -29,12 +30,14 @@ Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI), open source (MIT OR Apa
 - QA checklists `docs/qa/plan-5-checklist.md` and `docs/qa/plan-6-checklist.md` still have NEEDS HUMAN rows for the author (real input devices, a GUI editor, a 10-minute idle on the author's FTP server).
 - Deferred follow-ups: `docs/superpowers/plans/2026-11-12-01-followups.md` (per plan, sections Plan 6, 7 and 8).
 - `docs/qa/release-1.0-checklist.md` has the NEEDS HUMAN rows (install the `.deb`, icon sizes, dock grouping, uninstall keeps data).
-- **Next step:** the author runs the NEEDS HUMAN rows; then work the follow-ups (Plan 8 section first: tag-on-`main` check in `release.yml`, `actions/checkout@v5` for the Node 20 deprecation).
+- **Next step (1.0 follow-ups):** the author runs the NEEDS HUMAN rows; then work the follow-ups (Plan 8 section first: tag-on-`main` check in `release.yml`, `actions/checkout@v5` for the Node 20 deprecation).
 - Docker integration tests: `docker compose -f docker/compose.yml up -d --build --wait`, then `cargo test --workspace --all-features -- --ignored --test-threads=1`.
+- **Plan 10 (Windows + macOS, 1.1.0) is complete on branch `plan-10-windows-macos`:** version bumped to 1.1.0, docs and `docs/qa/release-1.1-checklist.md` written; ready to tag after the merge. Assets: `.deb`, universal `.dmg`, `.msi`, portable `.zip`, `SHA256SUMS`. Follow-ups: `docs/superpowers/plans/2026-11-12-01-followups.md` section Plan 10.
+- **Next step (Plan 10):** merge, tag `v1.1.0`, then the author runs the NEEDS HUMAN rows of `docs/qa/release-1.1-checklist.md`.
 
 ## Decisions already made (do not re-litigate)
 
-- Target platform v1: **Linux (Ubuntu)**. Code stays portable; tests must also pass on Windows (use `tempfile`, never literal `/tmp`).
+- Target platforms: **Linux (Ubuntu), Windows and macOS** (Plan 10 changed this; v1.0.0 was Linux-only). Tests must pass on all three (use `tempfile`, never literal `/tmp`). macOS and Windows builds are unsigned (ad-hoc signature only on macOS).
 - GUI: **iced**. Runtime: **tokio**. SSH/SFTP: `russh` + `russh-sftp`. FTP/FTPS: `suppaftp`. Terminal: `alacritty_terminal`. File watching (remote editing): `notify`.
 - Sites have a protocol: `ssh` (opens terminal, files via SFTP, or both in tabs, over one connection) or `ftp` / `ftps-explicit` / `ftps-implicit` (files). FTP is first-class, not an afterthought.
 - **Workspace = a bundle of sites**; "Open workspace" connects all of them and restores tabs. A site can be in several workspaces.

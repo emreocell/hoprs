@@ -90,6 +90,54 @@ mod tests {
     }
 
     #[test]
+    fn ico_has_the_header_and_a_256_entry() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/icon");
+        let b = std::fs::read(dir.join("hoprs.ico")).expect("hoprs.ico exists");
+        assert_eq!(&b[..4], &[0, 0, 1, 0], "ICONDIR: reserved 0, type 1");
+        let count = u16::from_le_bytes([b[4], b[5]]) as usize;
+        assert_eq!(count, 7);
+        // ICONDIRENTRY is 16 bytes; width/height 0 mean 256.
+        let widths: Vec<u32> = (0..count)
+            .map(|i| match b[6 + i * 16] {
+                0 => 256,
+                w => u32::from(w),
+            })
+            .collect();
+        assert_eq!(widths, [16, 24, 32, 48, 64, 128, 256]);
+        for i in 0..count {
+            let e = &b[6 + i * 16..6 + (i + 1) * 16];
+            let size = u32::from_le_bytes(e[8..12].try_into().unwrap()) as usize;
+            let off = u32::from_le_bytes(e[12..16].try_into().unwrap()) as usize;
+            assert_eq!(&b[off..off + 8], b"\x89PNG\r\n\x1a\n", "frame {i} is a PNG");
+            assert!(off + size <= b.len());
+        }
+    }
+
+    #[test]
+    fn icns_length_field_equals_the_file_size() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/icon");
+        let b = std::fs::read(dir.join("hoprs.icns")).expect("hoprs.icns exists");
+        assert_eq!(&b[..4], b"icns");
+        assert_eq!(
+            u32::from_be_bytes(b[4..8].try_into().unwrap()) as usize,
+            b.len()
+        );
+        // Walk the chunks: each is type(4) + length(4, includes the header) + PNG.
+        let mut types = Vec::new();
+        let mut at = 8;
+        while at < b.len() {
+            let len = u32::from_be_bytes(b[at + 4..at + 8].try_into().unwrap()) as usize;
+            assert_eq!(&b[at + 8..at + 16], b"\x89PNG\r\n\x1a\n");
+            types.push(String::from_utf8(b[at..at + 4].to_vec()).unwrap());
+            at += len;
+        }
+        assert_eq!(at, b.len());
+        for t in ["ic04", "ic05", "ic07", "ic08", "ic09", "ic10"] {
+            assert!(types.contains(&t.to_string()), "{t} present");
+        }
+    }
+
+    #[test]
     fn app_id_is_the_reverse_dns_name() {
         assert_eq!(APP_ID, "io.github.engviniciusbs.hoprs");
     }

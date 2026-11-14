@@ -51,7 +51,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -59,8 +59,22 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
+      # cfg(windows) / cfg(target_os = "macos") code is only linted where it compiles.
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # The --ignored (Docker) tests stay in `integration`, on Linux.
       - run: cargo test --workspace --all-features
+      # The release binary uses the GUI subsystem. This only proves the piped case (stdout
+      # inherited as a pipe); printing in a plain cmd window is a manual check, see
+      # docs/qa/release-1.1-checklist.md.
+      - name: hoprs.exe --version prints (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          cargo build --release -p hoprs-app
+          target/release/hoprs.exe --version | grep -q '^hoprs '
 
   integration:
     runs-on: ubuntu-latest
@@ -119,3 +133,67 @@ jobs:
         run: |
           HOPRS_BUILDER_HOME="$HOME:/tmp/.cargo:/tmp/.rustup:/src/crates/:/src/target/:/opt/cargo/:/opt/rustup/" \
             scripts/check-deb.sh "$DEB"
+
+  # Builds the universal macOS .dmg as the release will (scripts/package-macos.sh: both
+  # Apple targets with the pinned toolchain, --locked, lipo, cargo-packager's .app, ad-hoc
+  # signature, hdiutil) and checks it (scripts/check-macos.sh: both slices, signature,
+  # Info.plist, --version in each slice, no builder paths). The .dmg is kept a few days as
+  # a workflow artifact, to download and try on a Mac.
+  package-macos:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the .dmg
+        run: |
+          dmg=$(scripts/package-macos.sh)
+          echo "DMG=$dmg" >> "$GITHUB_ENV"
+      - name: Check the .dmg
+        run: scripts/check-macos.sh "$DMG"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hoprs-macos-dmg
+          path: ${{ env.DMG }}
+          retention-days: 5
+          if-no-files-found: error
+
+  # Builds the Windows .msi and portable .zip as the release will
+  # (scripts/package-windows.sh in Git Bash: the pinned toolchain, --locked, remapped
+  # paths, cargo-packager's WiX with the fixed upgrade code) and checks them on the runner
+  # (scripts/check-windows.ps1: install, --version, Start menu shortcut, reinstall,
+  # uninstall keeps %APPDATA%\hoprs, the .zip's exe, no builder paths). Both files are
+  # kept a few days as a workflow artifact, to download and try on a Windows machine.
+  package-windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the .msi and the .zip
+        shell: bash
+        run: |
+          paths=$(scripts/package-windows.sh)
+          echo "MSI=$(sed -n 1p <<<"$paths")" >> "$GITHUB_ENV"
+          echo "ZIP=$(sed -n 2p <<<"$paths")" >> "$GITHUB_ENV"
+      - name: Check the .msi and the .zip
+        shell: pwsh
+        run: scripts/check-windows.ps1 -Msi $env:MSI -Zip $env:ZIP
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hoprs-windows
+          path: |
+            ${{ env.MSI }}
+            ${{ env.ZIP }}
+          retention-days: 5
+          if-no-files-found: error

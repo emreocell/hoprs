@@ -43,6 +43,24 @@ shlex = "2.0"
 # `image` crate with every codec; `png` is the one format needed. MIT OR Apache-2.0.
 png = "0.18"
 
+# Windows: attach to the parent console so `hoprs.exe --version` prints (GUI subsystem),
+# and open remote edits with the default editor.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    # Remote editing's `system` editor: CoInitializeEx, ShellExecuteW, SW_SHOWNORMAL.
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# Windows: the icon and version info embedded into hoprs.exe (build.rs).
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 [[bin]]
 name = "hoprs"
 path = "src/main.rs"
@@ -114,3 +132,51 @@ assets = [
     ["../../LICENSE-MIT", "usr/share/doc/hoprs/", "644"],
     ["../../LICENSE-APACHE", "usr/share/doc/hoprs/", "644"],
 ]
+
+# macOS and Windows installers, built with cargo-packager (the version is pinned in the
+# scripts that call it). The package's identity comes first, shared by every platform,
+# then one table per platform. Relative paths are from this directory.
+# macOS: scripts/package-macos.sh builds the universal binary itself, asks cargo-packager
+# for the `app` format only, then signs ad hoc and makes the .dmg with hdiutil; checked
+# by scripts/check-macos.sh.
+# Windows: scripts/package-windows.sh builds the binary, then runs cargo-packager's `wix`
+# format with this table plus two overrides (the MSI version, numeric X.Y.Z; the WiX
+# template with the upgrade code below filled in), and makes the portable .zip; checked
+# by scripts/check-windows.ps1.
+[package.metadata.packager]
+product-name = "hoprs"
+identifier = "online.hoprs.hoprs"
+description = "SSH terminal, SFTP and FTP/FTPS client"
+# The same text as [package.metadata.deb] extended-description.
+long-description = """\
+hoprs is a fast, native desktop client for SSH, SFTP, FTP and FTPS. Save your sites, \
+group them into workspaces, browse local and remote files side by side, and queue \
+transfers that resume and handle conflicts. SSH sites open a terminal, a file browser, \
+or both over one connection. Credentials live in the system keyring, and sites can be \
+imported from FileZilla."""
+homepage = "https://hoprs.online"
+copyright = "hoprs developers"
+license-file = "../../LICENSE-MIT"
+# The .app takes the .icns as is (the first .icns listed); the .msi takes the first .ico
+# (Add/Remove Programs and the Start menu shortcut).
+icons = ["assets/icon/hoprs.icns", "assets/icon/hoprs.ico"]
+
+[package.metadata.packager.macos]
+# Also the binary's deployment target (MACOSX_DEPLOYMENT_TARGET in package-macos.sh).
+minimum-system-version = "11.0"
+
+[package.metadata.packager.wix]
+# Per-machine (InstallScope="perMachine", under %ProgramFiles%\hoprs): cargo-packager's
+# template, vendored with the upgrade code as a placeholder that package-windows.sh fills
+# in from [package.metadata.msi]. As checked in it is not a GUID, so a direct
+# `cargo packager -f wix` fails instead of making an .msi with another upgrade code.
+template = "../../packaging/windows/main.wxs"
+
+# Read by scripts/package-windows.sh only (cargo-packager refuses keys it does not know,
+# so this cannot live under [package.metadata.packager]).
+[package.metadata.msi]
+# The MSI UpgradeCode: what makes Windows treat every hoprs .msi as the same product, so
+# a newer one replaces the installed one instead of installing beside it. Generated once
+# (uuidgen, 2026-11-14). NEVER change it: installs made with another code would no longer
+# be upgraded or replaced by new releases.
+upgrade-code = "F7D6EEBE-DF5B-4C17-BA3B-40FAF918E8C3"

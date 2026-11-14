@@ -175,7 +175,7 @@ async fn edit_action_rules() {
     let effects = app.update(key(FileKey::Edit));
     assert_eq!(
         start_effects(&effects),
-        vec![(tab, session, "/srv/max.bin".into(), "xdg-open".into())]
+        vec![(tab, session, "/srv/max.bin".into(), "system".into())]
     );
     // Meanwhile the strip says it is opening.
     assert_eq!(app.edit_opening.len(), 1);
@@ -740,7 +740,7 @@ async fn keep_local_copies_never_deletes() {
     assert_eq!(std::fs::read(&copy).unwrap(), b"unsent");
 }
 
-/// `editor_command`: `xdg-open` by default; a typed command applies and is saved; a blank
+/// `editor_command`: `system` by default; a typed command applies and is saved; a blank
 /// one is refused inline (the last valid one stays); the file keeps it and the keys this
 /// version does not know.
 #[tokio::test]
@@ -748,8 +748,8 @@ async fn editor_setting_roundtrip() {
     use crate::settings::{self as file, EDITOR_DEFAULT};
 
     let mut app = App::new();
-    assert_eq!(app.settings.editor_command, "xdg-open");
-    assert_eq!(EDITOR_DEFAULT, "xdg-open");
+    assert_eq!(app.settings.editor_command, "system");
+    assert_eq!(EDITOR_DEFAULT, "system");
 
     let effects = app.update(Message::Settings(settings::SettingsMsg::EditorCommand(
         "code --wait".into(),
@@ -777,7 +777,7 @@ async fn editor_setting_roundtrip() {
     std::fs::write(&path, "future_key = 1\neditor_command = \"  \"\n").unwrap();
     let loaded = file::load(&path);
     assert_eq!(loaded.error, None);
-    assert_eq!(loaded.settings.editor_command, "xdg-open");
+    assert_eq!(loaded.settings.editor_command, "system");
     file::save(&path, saved).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains("editor_command = \"code --wait\""), "{text}");
@@ -786,6 +786,13 @@ async fn editor_setting_roundtrip() {
     // A file from before the setting: the default.
     assert_eq!(
         file::parse("workers_per_site = 2").unwrap().editor_command,
+        "system"
+    );
+    // A file saved by 1.0 with its default, `xdg-open`, keeps it (still a valid command).
+    assert_eq!(
+        file::parse("editor_command = \"xdg-open\"")
+            .unwrap()
+            .editor_command,
         "xdg-open"
     );
 }
