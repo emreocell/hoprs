@@ -51,7 +51,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -59,7 +59,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
+      # cfg(windows) / cfg(target_os = "macos") code is only linted where it compiles.
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # The --ignored (Docker) tests stay in `integration`, on Linux.
       - run: cargo test --workspace --all-features
 
   integration:
