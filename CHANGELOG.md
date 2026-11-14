@@ -4,7 +4,7 @@
 
 First release.
 
-- Transfer engine: persistent queue (SQLite), parallel transfers, resume after a drop or a restart, conflict handling (overwrite, skip, rename, resume) per item or for the whole batch, size and time checks, throttled progress.
+- Transfer engine: persistent queue (SQLite), parallel transfers, resume after a drop or a restart, conflict handling (ask, overwrite, overwrite if newer, skip, resume) per item or for the whole batch, size and time checks, throttled progress.
 - SSH and SFTP: agent, key, password and keyboard-interactive authentication, `known_hosts` verification, keepalive and automatic reconnection with backoff, pipelined SFTP.
 - FTP, FTPS explicit and FTPS implicit: connection pool, active and passive modes, PASV workaround for NAT, pinned server certificates, keepalive and automatic reconnection. Unencrypted FTP is labelled as such.
 - Saved sites and workspaces: a workspace is a bundle of sites; opening it connects them all and restores its tabs. Profiles are plain TOML without secrets.
