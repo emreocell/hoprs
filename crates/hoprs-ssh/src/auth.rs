@@ -321,28 +321,35 @@ impl fmt::Display for AgentEndpoint {
 
 /// The agent to use: the configured path, else `SSH_AUTH_SOCK` (`env_sock`) when not
 /// empty, else none on Unix and [`WINDOWS_AGENT_PIPE`] on Windows. On Windows every path
-/// is a pipe name.
+/// is a pipe name, and `SSH_AUTH_SOCK` counts only when it names a pipe (Git for Windows
+/// and MSYS set it to a Unix-style path that native code cannot open).
 fn agent_endpoint(configured: Option<&Path>, env_sock: Option<OsString>) -> Option<AgentEndpoint> {
-    let chosen = match configured {
-        Some(path) => Some(path.to_path_buf()),
-        None => env_sock.filter(|s| !s.is_empty()).map(PathBuf::from),
-    };
+    let env_sock = env_sock.filter(|s| !s.is_empty());
     #[cfg(windows)]
-    let endpoint = Some(AgentEndpoint::Pipe(chosen.map_or_else(
-        || WINDOWS_AGENT_PIPE.to_owned(),
-        |path| path.to_string_lossy().into_owned(),
-    )));
+    let endpoint = Some(AgentEndpoint::Pipe(match configured {
+        Some(path) => path.to_string_lossy().into_owned(),
+        None => env_sock
+            .map(|s| s.to_string_lossy().into_owned())
+            .filter(|s| s.starts_with(r"\\.\pipe\") || s.starts_with("//./pipe/"))
+            .unwrap_or_else(|| WINDOWS_AGENT_PIPE.to_owned()),
+    }));
     #[cfg(not(windows))]
-    let endpoint = chosen.map(AgentEndpoint::Socket);
+    let endpoint = configured
+        .map(Path::to_path_buf)
+        .or_else(|| env_sock.map(PathBuf::from))
+        .map(AgentEndpoint::Socket);
     endpoint
 }
+
+/// How long connecting to the agent may take before it is skipped.
+const AGENT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 type DynAgentClient = keys::agent::client::AgentClient<
     Box<dyn keys::agent::client::AgentStream + Send + Unpin + 'static>,
 >;
 
-/// Connects to the agent. One that cannot be reached is skipped (noted in
-/// `agent_skipped`), never an error: `Ok(None)`.
+/// Connects to the agent within [`AGENT_CONNECT_TIMEOUT`]. One that cannot be reached is
+/// skipped (noted in `agent_skipped`), never an error: `Ok(None)`.
 async fn connect_agent(
     endpoint: &AgentEndpoint,
     agent_skipped: &mut Vec<(String, String)>,
@@ -350,29 +357,31 @@ async fn connect_agent(
     #[cfg(any(unix, windows))]
     use russh::keys::agent::client::AgentClient;
 
-    let connected: std::result::Result<DynAgentClient, keys::Error> = match endpoint {
-        #[cfg(unix)]
-        AgentEndpoint::Socket(path) => AgentClient::connect_uds(path).await.map(|a| a.dynamic()),
-        #[cfg(windows)]
-        AgentEndpoint::Pipe(name) => AgentClient::connect_named_pipe(name)
-            .await
-            .map(|a| a.dynamic()),
-        #[allow(unreachable_patterns)]
-        _ => Err(keys::Error::IO(io::Error::from(io::ErrorKind::Unsupported))),
+    let connect = async {
+        let connected: std::result::Result<DynAgentClient, keys::Error> = match endpoint {
+            #[cfg(unix)]
+            AgentEndpoint::Socket(path) => {
+                AgentClient::connect_uds(path).await.map(|a| a.dynamic())
+            }
+            // russh retries a busy pipe without end; the timeout bounds it.
+            #[cfg(windows)]
+            AgentEndpoint::Pipe(name) => AgentClient::connect_named_pipe(name)
+                .await
+                .map(|a| a.dynamic()),
+            _ => Err(keys::Error::IO(io::Error::from(io::ErrorKind::Unsupported))),
+        };
+        connected
     };
-    match connected {
-        Ok(agent) => Ok(Some(agent)),
-        Err(e) => {
-            let reason = match &e {
-                keys::Error::IO(io) if io.kind() == io::ErrorKind::NotFound => {
-                    "no agent running".to_owned()
-                }
-                _ => format!("cannot connect: {e}"),
-            };
-            agent_skipped.push((endpoint.to_string(), reason));
-            Ok(None)
+    let reason = match tokio::time::timeout(AGENT_CONNECT_TIMEOUT, connect).await {
+        Ok(Ok(agent)) => return Ok(Some(agent)),
+        Ok(Err(keys::Error::IO(e))) if e.kind() == io::ErrorKind::NotFound => {
+            "no agent running".to_owned()
         }
-    }
+        Ok(Err(e)) => format!("cannot connect: {e}"),
+        Err(_) => "cannot connect: timed out".to_owned(),
+    };
+    agent_skipped.push((endpoint.to_string(), reason));
+    Ok(None)
 }
 
 /// Offers the agent's identities by public key, at most `MAX_AGENT_IDENTITIES` and within
@@ -398,8 +407,12 @@ async fn try_agent<H: client::Handler>(
     let Some(mut agent) = connect_agent(&endpoint, agent_skipped).await? else {
         return Ok(None);
     };
-    let Ok(identities) = agent.request_identities().await else {
-        return Ok(None);
+    let identities = match agent.request_identities().await {
+        Ok(identities) => identities,
+        Err(e) => {
+            agent_skipped.push((endpoint.to_string(), format!("cannot list identities: {e}")));
+            return Ok(None);
+        }
     };
     let user = cfg.user.as_str();
     let mut offered = 0;
@@ -779,9 +792,14 @@ mod tests {
 
     #[test]
     fn agent_endpoint_prefers_configured_then_env() {
+        // An env value each OS takes as is.
+        #[cfg(windows)]
+        let env = r"\\.\pipe\env-agent";
+        #[cfg(not(windows))]
+        let env = "/run/env.sock";
         let configured = Path::new("/run/configured.sock");
         assert_eq!(
-            agent_endpoint(Some(configured), Some(OsString::from("/run/env.sock"))),
+            agent_endpoint(Some(configured), Some(OsString::from(env))),
             Some(native_endpoint("/run/configured.sock"))
         );
         assert_eq!(
@@ -789,8 +807,30 @@ mod tests {
             Some(native_endpoint("/run/configured.sock"))
         );
         assert_eq!(
-            agent_endpoint(None, Some(OsString::from("/run/env.sock"))),
-            Some(native_endpoint("/run/env.sock"))
+            agent_endpoint(None, Some(OsString::from(env))),
+            Some(native_endpoint(env))
+        );
+    }
+
+    /// Git for Windows / MSYS set `SSH_AUTH_SOCK` to a Unix-style path: the OpenSSH pipe
+    /// is used instead. A pipe name in either slash style is kept; a configured path wins.
+    #[cfg(windows)]
+    #[test]
+    fn agent_endpoint_ignores_a_non_pipe_env_on_windows() {
+        let pipe = |name: &str| Some(AgentEndpoint::Pipe(name.to_owned()));
+        let msys = || Some(OsString::from("/tmp/ssh-XXXXabcd/agent.1234"));
+        assert_eq!(agent_endpoint(None, msys()), pipe(WINDOWS_AGENT_PIPE));
+        assert_eq!(
+            agent_endpoint(None, Some(OsString::from("//./pipe/my-agent"))),
+            pipe("//./pipe/my-agent")
+        );
+        assert_eq!(
+            agent_endpoint(None, Some(OsString::from(r"\\.\pipe\my-agent"))),
+            pipe(r"\\.\pipe\my-agent")
+        );
+        assert_eq!(
+            agent_endpoint(Some(Path::new("/tmp/configured")), msys()),
+            pipe("/tmp/configured")
         );
     }
 
