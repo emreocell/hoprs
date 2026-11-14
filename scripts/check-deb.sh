@@ -34,8 +34,10 @@ else
     exit 1
 fi
 
-# The builder's home, for the "no builder paths in the binary" stage. Run the check on
-# the machine that built the package (or pass HOPRS_BUILDER_HOME) for it to mean much.
+# The builder's paths, for the "no builder paths in the binary" stage: HOPRS_BUILDER_HOME
+# is a colon-separated list of prefixes that must not appear in the binary (default: this
+# machine's $HOME). Run the check on the machine that built the package, or pass the list
+# (the workflows pass the runner's $HOME and the container build's paths).
 # /sys is not namespaced: the container would see the host's GPU render nodes. An empty
 # /sys/class/drm makes it the GPU-less machine the check means (as a CI runner is).
 docker run --rm -v "$deb_dir:/pkg:ro" --tmpfs /sys/class/drm \

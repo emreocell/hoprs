@@ -30,15 +30,7 @@ jobs:
       - name: Tag matches the workspace version
         run: |
           tag_version=${GITHUB_REF_NAME#v}
-          crate_version=$(awk '
-            /^\[/ { section = $0; next }
-            section == "[workspace.package]" && /^version *=/ {
-              gsub(/^version *= *"|".*$/, ""); print; exit
-            }' Cargo.toml)
-          if [ -z "$crate_version" ]; then
-            echo "::error::no version in [workspace.package] of Cargo.toml"
-            exit 1
-          fi
+          crate_version=$(scripts/workspace-version.sh)
           if [ "$tag_version" != "$crate_version" ]; then
             echo "::error::tag $GITHUB_REF_NAME is version $tag_version, but [workspace.package] version in Cargo.toml is $crate_version"
             exit 1
@@ -54,8 +46,14 @@ jobs:
           deb=$(scripts/package-deb.sh)
           echo "DEB=$deb" >> "$GITHUB_ENV"
 
+      # HOPRS_BUILDER_HOME: prefixes that must not appear in the binary. The runner's
+      # $HOME, and the container build's: its HOME is /tmp (checked as /tmp/.cargo and
+      # /tmp/.rustup, since a bare /tmp is legitimately in the binary, e.g.
+      # /tmp/.X11-unix), the repository at /src, the image's toolchain in /opt.
       - name: Check the .deb on a clean Ubuntu 24.04
-        run: scripts/check-deb.sh "$DEB"
+        run: |
+          HOPRS_BUILDER_HOME="$HOME:/tmp/.cargo:/tmp/.rustup:/src/crates/:/src/target/:/opt/cargo/:/opt/rustup/" \
+            scripts/check-deb.sh "$DEB"
 
       - name: SHA256SUMS
         run: |
@@ -66,9 +64,50 @@ jobs:
           sha256sum --check SHA256SUMS
           cat SHA256SUMS
 
-      - name: Publish the release
+      # All or nothing: a draft first (invisible to users), the assets uploaded and
+      # verified against the local files, and only then made public.
+      - name: Create the draft release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/hoprs_*.deb dist/SHA256SUMS \
-            --verify-tag --title "hoprs $VERSION" --notes-file notes.md
+          prerelease=()
+          if [[ "$VERSION" == *-* ]]; then
+            prerelease=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag "${prerelease[@]}" \
+            --title "hoprs $VERSION" --notes-file notes.md
+          echo "DRAFT_CREATED=1" >> "$GITHUB_ENV"
+
+      - name: Upload and verify the assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" dist/hoprs_*.deb dist/SHA256SUMS
+          assets=$(gh release view "$GITHUB_REF_NAME" --json assets \
+            --jq '.assets[] | "\(.name) \(.size)"')
+          echo "$assets"
+          for file in dist/hoprs_*.deb dist/SHA256SUMS; do
+            name=$(basename "$file")
+            want=$(stat -c %s "$file")
+            got=$(awk -v n="$name" '$1 == n { print $2 }' <<<"$assets")
+            if [ -z "$got" ] || [ "$got" -eq 0 ] || [ "$got" -ne "$want" ]; then
+              echo "::error::asset $name: size on the release '${got:-missing}', local $want"
+              exit 1
+            fi
+          done
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false
+
+      # A failed run leaves no draft behind, so a re-run can create it again. Only a
+      # draft this run created is deleted (never a published release, never the tag).
+      - name: Delete the draft on failure
+        if: failure() && env.DRAFT_CREATED == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = "true" ]; then
+            gh release delete "$GITHUB_REF_NAME" --yes
+          fi

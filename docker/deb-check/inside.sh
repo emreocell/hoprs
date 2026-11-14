@@ -125,10 +125,13 @@ check_contents() {
 stage "package contents: exact file list and modes" check_contents
 
 # The binary must not carry the builder's paths (panic locations, debug info): no /home/
-# at all, and not the builder's own $HOME (HOPRS_BUILDER_HOME, from check-deb.sh).
+# at all, and none of the builder's own prefixes (HOPRS_BUILDER_HOME from check-deb.sh, a
+# colon-separated list: the builder's $HOME, the container build's paths, ...).
 no_builder_paths() {
-    local hits=0 pattern
-    for pattern in /home/ ${HOPRS_BUILDER_HOME:+"$HOPRS_BUILDER_HOME"}; do
+    local hits=0 pattern patterns=()
+    IFS=: read -r -a patterns <<<"${HOPRS_BUILDER_HOME:-}"
+    for pattern in /home/ "${patterns[@]}"; do
+        [ -n "$pattern" ] || continue
         if grep -qaF -- "$pattern" /usr/bin/hoprs; then
             echo "found '$pattern':"
             tr -c '[:print:]' '\n' < /usr/bin/hoprs | grep -F -- "$pattern" | head -n 5
