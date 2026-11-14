@@ -15,6 +15,7 @@ The landing page is a static build (`site/dist`) served by the author's VPS
 | KoreGo domain | `hoprs.online`: static route `/` → `/var/www/hoprs/current`, `immutablePrefix /assets/` (one-year `immutable` cache), `www` → apex redirect, force HTTPS, compression, Cloudflare-only, security headers incl. a `'self'`-only CSP |
 | TLS | Cloudflare Origin CA certificate (ECC, `hoprs.online` + `*.hoprs.online`, expires 2041-11-10), stored in KoreGo as "Cloudflare origin hoprs"; Cloudflare SSL mode is Full (strict) |
 | DNS | Cloudflare zone `hoprs.online`: `A @ → 92.113.39.90` and `CNAME www → hoprs.online`, both proxied |
+| Web Analytics | off: Cloudflare would inject its beacon script, which the CSP blocks; a Configuration Rule (`disable_rum: true`, all requests) stops the injection |
 
 KoreGo owns the Caddy config: change the domain only through KoreGo (panel or
 its API/MCP), never by editing Caddy or `korego.db`.
