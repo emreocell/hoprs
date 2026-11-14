@@ -243,8 +243,14 @@ const SNIFF_BYTES: u64 = 4096;
 pub fn delete_source(path: &Path) -> Result<()> {
     let refuse = |why: &str| Error::new(ErrorKind::Protocol, format!("not deleting: {why}"));
     // Friendly refusal for the common case; O_NOFOLLOW below closes the race.
-    if std::fs::symlink_metadata(path)?.file_type().is_symlink() {
+    let meta = std::fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() {
         return Err(refuse("the path is a symlink"));
+    }
+    // Before opening: Windows refuses to open a directory (PermissionDenied) instead
+    // of opening it as Unix does.
+    if !meta.is_file() {
+        return Err(refuse("not a regular file"));
     }
     let mut file = open_nofollow(path)?;
     if !file.metadata()?.is_file() {
