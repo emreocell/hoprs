@@ -28,7 +28,7 @@ its API/MCP), never by editing Caddy or `korego.db`.
 2. `deploy` pipes a tar of it over SSH, pinning the server's host key:
    `tar -C dist -c . | ssh hoprs-site@92.113.39.90 "$GITHUB_SHA"`.
 3. The forced command unpacks into a new release dir, refuses one without
-   `index.html`, swaps `current` atomically and prunes to 5 releases.
+   `index.html`, swaps `current` atomically and prunes to the newest 5 releases by name (never the live one).
 4. The job fetches `https://hoprs.online/` and checks for the `<h1>`.
 
 The key can do nothing else: any other command, or none, prints the usage line

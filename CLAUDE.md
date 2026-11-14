@@ -22,7 +22,7 @@ Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI), open source (MIT OR Apa
 
 ## Current status (2026-11-14)
 
-- Landing page for https://hoprs.online is on branch `plan-9-landing-page` (Cloudflare zone, VPS via KoreGo).
+- Landing page is live at https://hoprs.online, deployed by `.github/workflows/site.yml` on push to `main` (VPS via KoreGo, Cloudflare in front; see `site/deploy/README.md`).
 - Plans 1–7 merged to `main` (v1 feature-complete): core + transfer engine, SSH/SFTP, FTP/FTPS, vault + FileZilla import, the iced app, Plan 6 (terminal tabs over the site's SSH connection, remote editing with re-upload on save, Ctrl+K palette, technical log panel, idle-drop fixes, perf job) Plan 7 (one writer per destination) and Plan 8 (release 1.0.0: `.deb` packaging, icon, `.desktop`, release workflow).
 - **v1.0.0 released (2026-11-14):** tag `v1.0.0` on `342ff80`, GitHub Release with `hoprs_1.0.0-1_amd64.deb` + `SHA256SUMS` (checksum verified after download).
 - `perf.yml` first ran green on `main` (2026-11-13): startup 84 ms, idle 33 MB, 100k rows p95 0.58 ms, SFTP 1 GiB 0.99x `scp`; small files are known gaps (FTP 1.003x, SFTP 2.0x `lftp`). Numbers and method: `docs/perf/README.md`.

@@ -79,7 +79,7 @@ export function startField(canvas: HTMLCanvasElement, opts: { cols: number; onLo
     const dpr = Math.min(DPR_CAP, window.devicePixelRatio || 1);
     const fontSize = parseFloat(getComputedStyle(canvas).fontSize) || 16;
     // Whole device pixels per cell keep the glyphs crisp.
-    const cellW = Math.max(2, Math.round(fontSize * ADVANCE * dpr));
+    const cellW = Math.max(2, Math.ceil(fontSize * ADVANCE * dpr));
     const cellH = Math.max(3, Math.round(cellW * CELL_ASPECT));
     const height = canvas.parentElement?.clientHeight || canvas.clientHeight || 400;
     const rows = Math.max(1, Math.ceil((height * dpr) / cellH));
