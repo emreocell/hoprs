@@ -5,7 +5,7 @@ export const faq = [
   { q: "Is plain FTP allowed?", a: "Yes. It is labelled ftp (unencrypted). FTPS, explicit and implicit, is supported too." },
   { q: "Does it import from FileZilla?", a: "Yes. It reads sitemanager.xml and reports what was imported and what was skipped." },
   { q: "Does it collect data?", a: "No. It has no accounts and talks only to the servers you add." },
-  { q: "How do I uninstall it?", a: "On Linux, run sudo apt remove hoprs. On macOS, drag hoprs out of Applications; on Windows, remove it in Installed apps. Your data stays; to remove it too, delete ~/.config/hoprs and ~/.local/share/hoprs, and the keyring entries whose service starts with hoprs/." },
+  { q: "How do I uninstall it?", a: "Linux: sudo apt remove hoprs. macOS: drag hoprs out of Applications. Windows: remove it in Installed apps. Your data stays; to remove it too, delete ~/.config/hoprs and ~/.local/share/hoprs (Linux), ~/Library/Application Support/hoprs (macOS) or %APPDATA%\\hoprs (Windows), and the keyring entries whose service starts with hoprs/." },
   { q: "How do I report a bug?", a: "Open an issue on GitHub. Report vulnerabilities privately through GitHub security advisories." },
 ];
 

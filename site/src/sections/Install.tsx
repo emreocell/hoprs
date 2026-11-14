@@ -88,6 +88,9 @@ export default function Install() {
           <li>The app is not notarized. On first launch, right-click hoprs and choose Open, then Open again.</li>
           <li>If macOS still blocks it, open System Settings, Privacy &amp; Security, and choose Open Anyway.</li>
         </ol>
+        <p className="small muted">
+          Check it with <a href={facts.sumsUrl}>SHA256SUMS</a>.
+        </p>
       </div>
       <div
         role="tabpanel"
@@ -105,6 +108,9 @@ export default function Install() {
           <li>Run the installer, or unzip the portable build anywhere.</li>
           <li>The app is not signed. If SmartScreen says Windows protected your PC, choose More info, then Run anyway.</li>
         </ol>
+        <p className="small muted">
+          Check it with <a href={facts.sumsUrl}>SHA256SUMS</a>.
+        </p>
       </div>
     </section>
   );

@@ -19,6 +19,7 @@ it.skipIf(!existsSync(indexPath))(
     for (const url of [facts.debUrl, facts.dmgUrl, facts.msiUrl, facts.zipUrl]) expect(html).toContain(`href="${url}"`);
     // The prerender pre-selects Linux: the hero button is the .deb.
     expect(html).toMatch(new RegExp(`class="btn btn-primary" href="${facts.debUrl}">Download \\.deb<`));
+    expect(html).toContain(".os-panel[hidden] { display: grid !important; }");
     for (const { q } of faq) expect(html).toContain(q);
     expect(html).toContain('<link rel="canonical" href="https://hoprs.online/">');
   },
