@@ -1,0 +1,27 @@
+# Profile seeded into the capture container's ~/.config/hoprs (site/scripts/capture/run.sh).
+# Both hosts resolve to the Docker test servers (docker/compose.yml) through --add-host.
+version = 1
+
+[[site]]
+id = "0b6f6c1e-5a3d-4c1e-9f61-2f4f1d7a9c01"
+name = "build server"
+host = "build.example"
+port = 2222
+user = "alice"
+protocol = "ssh"
+remote_dir = "/home/alice/web-app"
+local_dir = "/home/dev/projects/web-app"
+
+[site.ssh]
+use_agent = false
+key_file = "/home/dev/.ssh/id_ed25519"
+open_as = "both"
+
+[[site]]
+id = "0b6f6c1e-5a3d-4c1e-9f61-2f4f1d7a9c02"
+name = "static files"
+host = "files.example"
+port = 2121
+user = "frank"
+protocol = "ftps-explicit"
+remote_dir = "/"

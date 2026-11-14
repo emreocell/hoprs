@@ -1,5 +1,7 @@
 # hoprs
 
+Website: https://hoprs.online
+
 A fast, native SSH, SFTP, FTP and FTPS desktop client for Linux, written in Rust.
 
 hoprs keeps the idea that made FileZilla useful (a list of saved sites you open with one
