@@ -53,3 +53,11 @@ export function staticField(cols: number, rows: number, seed: number): string[] 
   }
   return out;
 }
+
+/**
+ * Where an ambient stroke starts across the canvas (0..1): right of the text column (45% to 90% of what is
+ * on screen), scaled to the visible fraction of the canvas so narrow screens, which clip half of it, see it.
+ */
+export function ambientSpawnX(rand: number, visible: number): number {
+  return visible * (0.45 + Math.min(1, Math.max(0, rand)) * 0.45);
+}

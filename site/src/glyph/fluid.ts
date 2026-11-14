@@ -14,16 +14,22 @@ const DYE_FADE = 1.6;
 
 export function program(gl: GL, frag: string): Program {
   const p = gl.createProgram()!;
-  for (const [type, src] of [
+  const shaders = ([
     [gl.VERTEX_SHADER, VERT],
     [gl.FRAGMENT_SHADER, frag],
-  ] as const) {
+  ] as const).map(([type, src]) => {
     const s = gl.createShader(type)!;
     gl.shaderSource(s, src);
     gl.compileShader(s);
     gl.attachShader(p, s);
-  }
+    return s;
+  });
   gl.linkProgram(p);
+  // The linked program keeps the code; the shader objects are not needed any more.
+  for (const s of shaders) {
+    gl.detachShader(p, s);
+    gl.deleteShader(s);
+  }
   if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p) ?? "link failed");
   const u: Uniforms = {};
   const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS) as number;
@@ -69,8 +75,11 @@ export type Fluid = {
   dispose(): void;
 };
 
-export function createFluid(gl: GL, w: number, h: number): Fluid {
-  const progs = {
+export type FluidPrograms = Record<"splat" | "advect" | "divergence" | "scale" | "pressure" | "gradient", Program>;
+
+/** Compiles the solver's passes; once per context, shared by every grid size. */
+export function fluidPrograms(gl: GL): FluidPrograms {
+  return {
     splat: program(gl, SPLAT),
     advect: program(gl, ADVECT),
     divergence: program(gl, DIVERGENCE),
@@ -78,6 +87,10 @@ export function createFluid(gl: GL, w: number, h: number): Fluid {
     pressure: program(gl, PRESSURE),
     gradient: program(gl, GRADIENT),
   };
+}
+
+/** The solver's render targets for one grid size. dispose() frees the targets, not the shared programs. */
+export function createFluid(gl: GL, progs: FluidPrograms, w: number, h: number): Fluid {
   const velocity = pair(gl, w, h);
   const dye = pair(gl, w, h);
   const pressure = pair(gl, w, h);
@@ -178,7 +191,6 @@ export function createFluid(gl: GL, w: number, h: number): Fluid {
         gl.deleteTexture(t.tex);
         gl.deleteFramebuffer(t.fb);
       }
-      for (const pr of Object.values(progs)) gl.deleteProgram(pr.p);
       gl.deleteVertexArray(vao);
     },
   };

@@ -1,7 +1,7 @@
 // The animated hero field: a fluid stirred by the pointer, shown as hoprs' vocabulary in a grey ramp.
 import { buildAtlas } from "./atlas";
-import { CELL_ASPECT, FIELD_SEED, restLit } from "./field";
-import { createFluid, program, type Fluid } from "./fluid";
+import { ambientSpawnX, CELL_ASPECT, FIELD_SEED, restLit } from "./field";
+import { createFluid, fluidPrograms, program, type Fluid, type FluidPrograms } from "./fluid";
 import { DISPLAY } from "./shaders";
 import { GLYPH_SET, glyphAt } from "./vocabulary";
 
@@ -33,7 +33,8 @@ function readRamp(): Float32Array<ArrayBuffer> {
   return ramp;
 }
 
-type Layout = { cols: number; rows: number; cellW: number; cellH: number; dpr: number };
+// visible: the fraction of the canvas width on screen (the slot clips the rest; half on narrow screens).
+type Layout = { cols: number; rows: number; cellW: number; cellH: number; dpr: number; visible: number };
 
 export function startField(canvas: HTMLCanvasElement, opts: { cols: number; onLost: () => void }): () => void {
   const { cols, onLost } = opts;
@@ -59,6 +60,7 @@ export function startField(canvas: HTMLCanvasElement, opts: { cols: number; onLo
   let last = 0;
   let layout: Layout | null = null;
   let fluid: Fluid | null = null;
+  let solver: FluidPrograms | null = null;
   let display: ReturnType<typeof program> | null = null;
   let atlasTex: WebGLTexture | null = null;
   let cellsTex: WebGLTexture | null = null;
@@ -85,7 +87,9 @@ export function startField(canvas: HTMLCanvasElement, opts: { cols: number; onLo
     canvas.height = rows * cellH;
     canvas.style.width = `${(cols * cellW) / dpr}px`;
     canvas.style.height = `${(rows * cellH) / dpr}px`;
-    return { cols, rows, cellW, cellH, dpr };
+    const width = canvas.parentElement?.clientWidth || (cols * cellW) / dpr;
+    const visible = Math.min(1, width / ((cols * cellW) / dpr));
+    return { cols, rows, cellW, cellH, dpr, visible };
   };
 
   const texture = (filter: number) => {
@@ -124,7 +128,7 @@ export function startField(canvas: HTMLCanvasElement, opts: { cols: number; onLo
     const simH = Math.max(16, Math.round((SIM_COLS * canvas.height) / canvas.width));
     if (!fluid || fluid.h !== simH) {
       fluid?.dispose();
-      fluid = createFluid(gl, SIM_COLS, simH);
+      fluid = createFluid(gl, solver!, SIM_COLS, simH);
     }
   };
 
@@ -192,7 +196,7 @@ export function startField(canvas: HTMLCanvasElement, opts: { cols: number; onLo
       const speed = 0.25 + Math.random() * 0.2;
       stroke = {
         t0: now,
-        x: 0.45 + Math.random() * 0.45,
+        x: ambientSpawnX(Math.random(), layout!.visible),
         y: 0.15 + Math.random() * 0.7,
         vx: Math.cos(a) * speed * (canvas.height / canvas.width),
         vy: Math.sin(a) * speed,
@@ -252,6 +256,16 @@ export function startField(canvas: HTMLCanvasElement, opts: { cols: number; onLo
     window.removeEventListener("resize", onResize);
     document.removeEventListener("visibilitychange", onVisibility);
     canvas.removeEventListener("webglcontextlost", onContextLost);
+    // Free the GPU side and hand the context back (browsers keep only ~16 live).
+    if (!gl.isContextLost()) {
+      fluid?.dispose();
+      for (const pr of [...Object.values(solver ?? {}), display]) if (pr) gl.deleteProgram(pr.p);
+      for (const t of [atlasTex, cellsTex]) if (t) gl.deleteTexture(t);
+      if (vao) gl.deleteVertexArray(vao);
+      gl.getExtension("WEBGL_lose_context")?.loseContext();
+    }
+    fluid = solver = display = null;
+    atlasTex = cellsTex = vao = null;
   };
   function onContextLost() {
     stop();
@@ -272,6 +286,7 @@ export function startField(canvas: HTMLCanvasElement, opts: { cols: number; onLo
       if (stopped) return;
       try {
         ramp = readRamp();
+        solver = fluidPrograms(gl);
         display = program(gl, DISPLAY);
         vao = gl.createVertexArray();
         schedule();
