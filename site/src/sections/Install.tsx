@@ -85,8 +85,8 @@ export default function Install() {
         </p>
         <ol className="steps">
           <li>Open the disk image and drag hoprs to Applications.</li>
-          <li>The app is not notarized. On first launch, right-click hoprs and choose Open, then Open again.</li>
-          <li>If macOS still blocks it, open System Settings, Privacy &amp; Security, and choose Open Anyway.</li>
+          <li>The app is not notarized. Open hoprs once, then go to System Settings, Privacy &amp; Security, and choose Open Anyway.</li>
+          <li>Or, in Terminal: <code>xattr -dr com.apple.quarantine /Applications/hoprs.app</code></li>
         </ol>
         <p className="small muted">
           Check it with <a href={facts.sumsUrl}>SHA256SUMS</a>.

@@ -748,6 +748,8 @@ pub const EDITOR_COMMAND: &str = "Editor";
 /// find `.cmd` shims from a bare name.
 pub const EDITOR_COMMAND_HINT: &str = if cfg!(windows) {
     "system opens remote files in the system default editor. Or type a command; the file's path is added last. For example: notepad++.exe, code.cmd --wait."
+} else if cfg!(target_os = "macos") {
+    "system opens remote files in the system default editor. Or type a command; the file's path is added last. For example: open -W -a \"Visual Studio Code\" (a full path also works)."
 } else {
     "system opens remote files in the system default editor. Or type a command; the file's path is added last. For example: gedit, code --wait."
 };

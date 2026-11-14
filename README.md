@@ -48,7 +48,7 @@ it, in one quiet window that opens in under 100 ms and idles at about 33 MB.
   destination at once.
 - **Remote editing:** open a remote file in your editor; every save is uploaded, and if the
   file changed on the server you choose what happens instead of losing either side.
-- **Credentials in the system keyring** (Secret Service). Site files hold no secrets.
+- **Credentials in the system keyring** (Secret Service, macOS Keychain, Windows Credential Manager). Site files hold no secrets.
   `ssh-agent` is supported and preferred.
 - **Encrypted backup:** export and import all sites, workspaces and passwords in one file
   (Argon2id and XChaCha20-Poly1305).
@@ -122,6 +122,8 @@ and exits.
 4. **Keychain:** hoprs keeps passwords in the macOS Keychain. After each update macOS asks
    for Keychain access again (an ad-hoc signature changes with every build); choose
    "Always Allow".
+5. **Known issue:** quit with the window's close button. Cmd+Q and Dock, Quit skip the
+   unsent-edits prompt and do not save open tabs.
 
 The `.dmg` is one universal build for Apple Silicon and Intel Macs.
 
@@ -153,9 +155,10 @@ The `.dmg` is one universal build for Apple Silicon and Intel Macs.
 
 Uninstalling never touches your data or your saved passwords (see
 [Where your data lives](#where-your-data-lives)). To remove them too, delete the folders
-listed there, and the keyring entries whose service starts with `hoprs/` (one per site):
-in Seahorse ("Passwords and Keys") on Linux, Keychain Access on macOS, Credential Manager on
-Windows.
+listed there, and the keyring entries for service `hoprs/<site-id>` (up to two per site, a
+password and a key passphrase): in Seahorse ("Passwords and Keys") on Linux, Keychain Access
+on macOS. On Windows, Credential Manager shows them as `password.hoprs/<site-id>` and
+`key-passphrase.hoprs/<site-id>`.
 
 ## First steps
 

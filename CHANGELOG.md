@@ -12,6 +12,7 @@ hoprs now ships for macOS and Windows as well as Linux.
 - Command palette: Cmd+K on macOS (Ctrl+K elsewhere); in a focused terminal Ctrl+Shift+K everywhere.
 - FileZilla import also reads `~/.config/filezilla` on macOS and `%APPDATA%\FileZilla` on Windows.
 - Your data lives in `~/Library/Application Support/hoprs` on macOS and `%APPDATA%\hoprs` on Windows. Uninstalling never removes it or the saved passwords.
+- Known issue, macOS: quit with the window's close button. Cmd+Q and Dock → Quit skip the unsent-edits prompt and do not save open tabs.
 - Release workflow: builds on three runners and publishes all or nothing; a manual run is a dry run. The website's download buttons follow the visitor's system and go live only once the release is published.
 
 ## 1.0.0 — 2026-11-14

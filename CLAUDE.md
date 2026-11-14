@@ -32,8 +32,7 @@ Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI) for Linux, Windows and m
 - `docs/qa/release-1.0-checklist.md` has the NEEDS HUMAN rows (install the `.deb`, icon sizes, dock grouping, uninstall keeps data).
 - **Next step (1.0 follow-ups):** the author runs the NEEDS HUMAN rows; then work the follow-ups (Plan 8 section first: tag-on-`main` check in `release.yml`, `actions/checkout@v5` for the Node 20 deprecation).
 - Docker integration tests: `docker compose -f docker/compose.yml up -d --build --wait`, then `cargo test --workspace --all-features -- --ignored --test-threads=1`.
-
-- **Plan 10 (Windows + macOS, 1.1.0) is complete on branch `plan-10-windows-macos`:** version bumped to 1.1.0, docs and `docs/qa/release-1.1-checklist.md` written; ready to tag after the merge (the controller updates this line after the release). Assets: `.deb`, universal `.dmg`, `.msi`, portable `.zip`, `SHA256SUMS`. Follow-ups: `docs/superpowers/plans/2026-11-12-01-followups.md` section Plan 10.
+- **Plan 10 (Windows + macOS, 1.1.0) is complete on branch `plan-10-windows-macos`:** version bumped to 1.1.0, docs and `docs/qa/release-1.1-checklist.md` written; ready to tag after the merge. Assets: `.deb`, universal `.dmg`, `.msi`, portable `.zip`, `SHA256SUMS`. Follow-ups: `docs/superpowers/plans/2026-11-12-01-followups.md` section Plan 10.
 - **Next step (Plan 10):** merge, tag `v1.1.0`, then the author runs the NEEDS HUMAN rows of `docs/qa/release-1.1-checklist.md`.
 
 ## Decisions already made (do not re-litigate)

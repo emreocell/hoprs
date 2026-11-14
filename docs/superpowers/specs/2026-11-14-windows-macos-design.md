@@ -223,7 +223,7 @@ Windows or macOS fails.
 3. The site deploys only when `v<version>` is published and not a prerelease, plus once
    after each successful release. Cost: one more trigger in `site.yml`.
 4. Dry runs through `workflow_dispatch` instead of rc tags; rc tags still work, MSI
-   version is numeric `X.Y.Z`. Cost: an rc → final upgrade on Windows needs an uninstall.
+   version is numeric `X.Y.Z`. Cost: none for rc → final upgrades, because the MSI sets `AllowSameVersionUpgrades="yes"`; a real older → newer upgrade is only tested once an older build exists (see the Plan 10 follow-ups).
 5. macOS asks for Keychain access again after each update, because an ad-hoc signature
    changes with every build. Accepted: one line in the README, the release notes and the
    QA checklist ("click Always Allow"). Cost: a prompt per saved password per update,

@@ -114,13 +114,13 @@ impl Default for Settings {
     }
 }
 
-/// Whether `command` can be the editor command: something besides blanks.
 /// Whether the editor setting `command` means the OS's default editor: `system`, trimmed,
 /// in any case.
 pub fn is_system_editor(command: &str) -> bool {
     command.trim().eq_ignore_ascii_case(SYSTEM_EDITOR)
 }
 
+/// Whether `command` can be the editor command: something besides blanks.
 pub fn valid_editor(command: &str) -> bool {
     !command.trim().is_empty()
 }

@@ -42,7 +42,7 @@ artifacts before that). Download from the Release page, never from a build folde
    and opens. Also: double-click `hoprs.exe` shows no console window.
 4. **Keyring save and read.** Add an ssh site with "Save password", close hoprs, reopen,
    connect. Expect: no password prompt. macOS: the entry is in Keychain Access under
-   `hoprs/<site-id>`. Windows: Credential Manager, Windows Credentials, same name. Linux:
+   `hoprs/<site-id>`. Windows: Credential Manager, Windows Credentials, `password.hoprs/<site-id>`. Linux:
    Seahorse.
 5. **Keychain "Always Allow" after an update (macOS).** With 1.1.0 installed and a saved
    password, install the next build over it, open a saved site. Expect: Keychain asks once
@@ -78,3 +78,7 @@ artifacts before that). Download from the Release page, never from a build folde
     `main`: `git tag v1.1.0 && git push origin v1.1.0`. Expect a published (not draft, not
     prerelease) Release with the five assets and the notes from `CHANGELOG.md`, and the
     site deploying afterwards with the three download tabs working.
+14. **Cmd+Q with unsent edits (macOS).** Open a remote file, save a change while the
+    connection is cut (or the edit is otherwise unsent), keep a few tabs open, then press
+    Cmd+Q. Expected today: the app quits without the unsent-edits prompt and without
+    restoring the tabs next time. Report what happens (known issue, see the CHANGELOG).
