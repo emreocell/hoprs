@@ -139,6 +139,10 @@ assets = [
 # macOS: scripts/package-macos.sh builds the universal binary itself, asks cargo-packager
 # for the `app` format only, then signs ad hoc and makes the .dmg with hdiutil; checked
 # by scripts/check-macos.sh.
+# Windows: scripts/package-windows.sh builds the binary, then runs cargo-packager's `wix`
+# format with this table plus two overrides (the MSI version, numeric X.Y.Z; the WiX
+# template with the upgrade code below filled in), and makes the portable .zip; checked
+# by scripts/check-windows.ps1.
 [package.metadata.packager]
 product-name = "hoprs"
 identifier = "online.hoprs.hoprs"
@@ -153,9 +157,26 @@ imported from FileZilla."""
 homepage = "https://hoprs.online"
 copyright = "hoprs developers"
 license-file = "../../LICENSE-MIT"
-# The .app takes the .icns as is (the first .icns listed).
-icons = ["assets/icon/hoprs.icns"]
+# The .app takes the .icns as is (the first .icns listed); the .msi takes the first .ico
+# (Add/Remove Programs and the Start menu shortcut).
+icons = ["assets/icon/hoprs.icns", "assets/icon/hoprs.ico"]
 
 [package.metadata.packager.macos]
 # Also the binary's deployment target (MACOSX_DEPLOYMENT_TARGET in package-macos.sh).
 minimum-system-version = "11.0"
+
+[package.metadata.packager.wix]
+# Per-machine (InstallScope="perMachine", under %ProgramFiles%\hoprs): cargo-packager's
+# template, vendored with the upgrade code as a placeholder that package-windows.sh fills
+# in from [package.metadata.msi]. As checked in it is not a GUID, so a direct
+# `cargo packager -f wix` fails instead of making an .msi with another upgrade code.
+template = "../../packaging/windows/main.wxs"
+
+# Read by scripts/package-windows.sh only (cargo-packager refuses keys it does not know,
+# so this cannot live under [package.metadata.packager]).
+[package.metadata.msi]
+# The MSI UpgradeCode: what makes Windows treat every hoprs .msi as the same product, so
+# a newer one replaces the installed one instead of installing beside it. Generated once
+# (uuidgen, 2026-11-14). NEVER change it: installs made with another code would no longer
+# be upgraded or replaced by new releases.
+upgrade-code = "F7D6EEBE-DF5B-4C17-BA3B-40FAF918E8C3"
