@@ -5,13 +5,22 @@ import { FIELD_COLS, FIELD_SEED, staticField } from "./field";
 const STATIC_ROWS = 80;
 const STATIC_TEXT = staticField(FIELD_COLS, STATIC_ROWS, FIELD_SEED).join("\n");
 
-/** Whether the animated field may run: motion allowed, WebGL2 with a float colour buffer, and IntersectionObserver. */
+// GL drawn on the CPU: the fluid would cost every frame on the main thread, so the static field stays.
+const SOFTWARE_GL = /swiftshader|llvmpipe|softpipe|software|basic render/i;
+
+/**
+ * Whether the animated field may run: motion allowed, IntersectionObserver, and hardware WebGL2 with a float
+ * colour buffer. The probe context is released before returning.
+ */
 function canAnimate(): boolean {
   if (typeof window.matchMedia !== "function" || typeof window.IntersectionObserver !== "function") return false;
   if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return false;
-  const gl = document.createElement("canvas").getContext("webgl2");
+  const gl = document.createElement("canvas").getContext("webgl2", { failIfMajorPerformanceCaveat: true });
   if (!gl) return false;
-  const ok = !!(gl.getExtension("EXT_color_buffer_float") || gl.getExtension("EXT_color_buffer_half_float"));
+  const info = gl.getExtension("WEBGL_debug_renderer_info");
+  const renderer = String(gl.getParameter(info ? info.UNMASKED_RENDERER_WEBGL : gl.RENDERER) ?? "");
+  const ok =
+    !SOFTWARE_GL.test(renderer) && !!(gl.getExtension("EXT_color_buffer_float") || gl.getExtension("EXT_color_buffer_half_float"));
   gl.getExtension("WEBGL_lose_context")?.loseContext();
   return ok;
 }

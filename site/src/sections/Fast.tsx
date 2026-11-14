@@ -2,9 +2,9 @@ import { facts } from "../facts";
 
 const { perf } = facts;
 const rows = [
-  { value: `${perf.startupMs} ms`, note: "to open the window" },
+  { value: `${perf.startupMs} ms`, note: "to the first frame" },
   { value: `${perf.idleMb} MB`, note: "memory at idle" },
-  { value: `${perf.rowsP95Ms} ms`, note: `p95 frame, ${perf.rows.toLocaleString("en-US").replace(",", " ")} rows` },
+  { value: `${perf.rowsP95Ms} ms`, note: `p95 view and layout, ${perf.rows.toLocaleString("en-US").replaceAll(",", "\u00a0")} rows` },
   { value: `${perf.sftpVsScp} x scp`, note: "SFTP, 1 GiB at 50 ms RTT" },
 ];
 
@@ -14,7 +14,7 @@ export default function Fast() {
       <h2 id="fast-title">Light on memory, quick on the wire.</h2>
       <ul className="well out" aria-label="Measured performance">
         {rows.map((r) => (
-          <li key={r.note}>
+          <li key={r.value}>
             <span className="out-value num">{r.value}</span>
             <span className="out-note"># {r.note}</span>
           </li>

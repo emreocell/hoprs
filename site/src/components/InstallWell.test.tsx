@@ -46,12 +46,12 @@ it("copy writes all lines joined by newline", async () => {
   render(<InstallWell tabs={tabs} />);
   await user.click(screen.getByRole("button", { name: "Copy" }));
   expect(writeText).toHaveBeenCalledWith(aptText);
-  expect(screen.getByRole("button", { name: "Copied" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Copied" }).dataset.state).toBe("copied");
   expect(screen.getByRole("status").textContent).toBe("Copied");
   act(() => {
     vi.advanceTimersByTime(1400);
   });
-  expect(screen.getByRole("button", { name: "Copy" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Copy" }).dataset.state).toBeUndefined();
 });
 
 it("falls back to selecting the text", async () => {
@@ -61,6 +61,19 @@ it("falls back to selecting the text", async () => {
   await user.click(screen.getByRole("button", { name: "Copy" }));
   expect(window.getSelection()?.toString()).toBe(aptText);
   expect(screen.getByRole("status").textContent).toBe("Press Ctrl+C to copy");
+});
+
+it("keeps the Ctrl+C notice until the next interaction", async () => {
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+  setClipboard(undefined);
+  render(<InstallWell tabs={tabs} />);
+  await user.click(screen.getByRole("button", { name: "Copy" }));
+  act(() => {
+    vi.advanceTimersByTime(10_000);
+  });
+  expect(screen.getByRole("status").textContent).toBe("Press Ctrl+C to copy");
+  await user.keyboard("{Control>}c{/Control}");
+  expect(screen.getByRole("status").textContent).toBe("");
 });
 
 it("falls back when the clipboard API is missing", async () => {

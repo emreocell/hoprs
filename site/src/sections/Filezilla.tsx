@@ -1,4 +1,7 @@
-const lines: { kind: " " | "+" | "-" | "@"; text: string }[] = [
+type Kind = " " | "+" | "@";
+const kindClass: Record<Kind, string> = { " ": "diff-ctx", "+": "diff-add", "@": "diff-meta" };
+
+const lines: { kind: Kind; text: string }[] = [
   { kind: "@", text: "@@ sitemanager.xml @@" },
   { kind: " ", text: "saved sites, one click to open" },
   { kind: "+", text: "imports sitemanager.xml, with a report of what was skipped" },
@@ -15,7 +18,7 @@ export default function Filezilla() {
         <code>
           <span className="diff-meta">--- a/filezilla{"\n"}+++ b/hoprs{"\n"}</span>
           {lines.map((l) => (
-            <span key={l.text} className={`diff-line diff-${l.kind === "+" ? "add" : l.kind === "@" ? "meta" : "ctx"}`}>
+            <span key={l.text} className={`diff-line ${kindClass[l.kind]}`}>
               {l.kind === "@" ? l.text : `${l.kind} ${l.text}`}
               {"\n"}
             </span>

@@ -4,6 +4,7 @@ import type { KeyboardEvent } from "react";
 export type InstallTab = { id: string; label: string; lines: string[] };
 type Notice = "" | "Copied" | "Press Ctrl+C to copy";
 
+// "Copied" fades after a moment; the Ctrl+C hint stays until the next key press or click.
 const RESET_MS = 1400;
 
 export function InstallWell({ tabs }: { tabs: InstallTab[] }) {
@@ -16,10 +17,22 @@ export function InstallWell({ tabs }: { tabs: InstallTab[] }) {
 
   useEffect(() => () => clearTimeout(timer.current), []);
 
+  const fallback = notice === "Press Ctrl+C to copy";
+  useEffect(() => {
+    if (!fallback) return;
+    const clear = () => setNotice("");
+    document.addEventListener("keydown", clear);
+    document.addEventListener("pointerdown", clear);
+    return () => {
+      document.removeEventListener("keydown", clear);
+      document.removeEventListener("pointerdown", clear);
+    };
+  }, [fallback]);
+
   const announce = (next: Notice) => {
     setNotice(next);
     clearTimeout(timer.current);
-    timer.current = setTimeout(() => setNotice(""), RESET_MS);
+    if (next === "Copied") timer.current = setTimeout(() => setNotice(""), RESET_MS);
   };
 
   const select = (id: string) => {
@@ -85,7 +98,7 @@ export function InstallWell({ tabs }: { tabs: InstallTab[] }) {
             </button>
           ))}
         </div>
-        <button type="button" className="install-copy" onClick={copy}>
+        <button type="button" className="install-copy" data-state={copied ? "copied" : undefined} onClick={copy}>
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
             {copied ? (
               <path d="M3 8.5l3.5 3.5L13 4.5" />

@@ -1,7 +1,10 @@
 /* Hallmark · shape: single page · genre: atmospheric · theme: terminal (by request, palette and type from the hoprs app) · job: try · draw: hoprs-1
  * hero: committed · nav: slim · footer: plain · imagery: the product · signature: figures printed as a tool's output
- * axes: dark/mono+sans/neutral · posture: committed · contrast: pass · fold: pass · v2.0.0 */
-/* Hallmark · pre-emit critique: P3 H3 E3 S3 R3 V3 · weakest: scaffold only, no page yet, sections come in Task 2 */
+ * axes: dark/mono+sans/neutral · posture: committed · contrast: open (40, the static glyph fallback) · fold: pass · v2.0.0 */
+/* Hallmark · pre-emit critique: P3 H3 E3 S3 R3 V3 · weakest: the static glyph fallback is decoration set under 4.5:1 (gate 40) */
+/* Hallmark · sweep: Floor 1 FAIL (40 on pre.glyph-pre, aria-hidden decoration, ruling pending) · Reflex 2 waived (22, 77) · finish-review: in-thread, fix, 1 open (40) */
+/* Hallmark · waive 22 · every neutral token is oklch(L 0 0) · the palette is the hoprs app's own near-black and white, chroma 0 as the app draws it */
+/* Hallmark · waive 77 · the diff, install and FAQ wells stop at 48rem · they read as a terminal at about 90 columns; wider, the FileZilla diff and the install commands stretch into lines nobody reads */
 @import "tailwindcss";
 @import "./tokens.css";
 @import "./base.css";
@@ -33,11 +36,14 @@ html, body { overflow-x: clip; background: var(--color-paper); }
 .small { font-size: var(--text-sm); }
 .wordmark { display: inline-flex; align-items: center; gap: var(--space-xs); font-family: var(--font-display); font-weight: 500; text-decoration: none; min-height: 44px; }
 .nav-row, .footer-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-md); padding-block: var(--space-sm); }
-.nav-links { display: flex; align-items: center; gap: var(--space-lg); font-size: var(--text-sm); }
+.nav-links { display: flex; flex-wrap: wrap; align-items: center; gap: 0 var(--space-lg); font-size: var(--text-sm); }
 .nav-links a { display: inline-flex; align-items: center; min-height: 44px; }
 .footer { border-top: 1px solid var(--color-rule); margin-top: var(--section-gap-s); padding-block: var(--space-lg); }
 
-.hero { position: relative; isolation: isolate; padding-block: var(--space-xl) var(--space-2xl); }
+/* The hero fills most of the first screen (the stamp's committed posture); the main shot follows below the fold,
+ * a section gap under it. 68px is the nav row (44px links + 2 x 12px padding). */
+.hero { position: relative; isolation: isolate; display: grid; align-content: center; min-height: calc(88svh - 68px); padding-block: var(--space-xl); }
+@media (max-width: 40rem) { .hero { min-height: 0; } }
 .glyph-field { position: absolute; inset: 0; z-index: -1; pointer-events: none; background: none; }
 /* The glyph field: 130 cells across (JetBrains Mono advances 0.6em, cells 1.85 times as tall as wide).
  * Dim under the text column so the headline reads; full strength to the right. Masks read alpha only. */
@@ -46,9 +52,10 @@ html, body { overflow-x: clip; background: var(--color-paper); }
 .glyph-field:has(> .glyph-canvas[data-ready]) > .glyph-pre { visibility: hidden; }
 @media (max-width: 40rem) {
   .glyph-field { --glyph-mask: linear-gradient(color-mix(in srgb, var(--color-ink) 42%, transparent) 0 100%); }
-  .glyph-pre, .glyph-canvas { font-size: calc(100cqw / 39); }
+  /* At least 12px: legible-size glyphs on phones (they are most of the page's characters). */
+  .glyph-pre, .glyph-canvas { font-size: max(12px, calc(100cqw / 39)); }
 }
-.hero-body { display: grid; gap: var(--space-lg); justify-items: start; }
+.intro { display: grid; gap: var(--space-lg); justify-items: start; }
 .actions { display: flex; flex-wrap: wrap; gap: var(--space-sm); }
 .btn { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding-inline: var(--space-lg); border-radius: var(--radius); font-family: var(--font-display); font-size: var(--text-sm); text-decoration: none; border: 1px solid var(--color-rule-2); transition: background var(--dur-micro) var(--ease-out); }
 .btn-primary { background: var(--color-accent); color: var(--color-accent-ink); border-color: var(--color-accent); }
@@ -56,7 +63,9 @@ html, body { overflow-x: clip; background: var(--color-paper); }
 .btn-secondary { background: transparent; color: var(--color-ink); }
 .btn-secondary:hover { background: var(--color-accent-wash); }
 
-.shot { width: 100%; margin: var(--space-xl) 0 0; aspect-ratio: 16 / 10; border: 1px solid var(--color-rule); border-radius: var(--radius); }
+.shot { width: 100%; margin: var(--space-xl) 0 0; aspect-ratio: 16 / 10; border: 1px solid var(--color-rule); border-radius: var(--radius); overflow: hidden; background: var(--color-paper-2); }
+.hero-shot .shot { margin-top: var(--section-gap-s); }
+.shot img { width: 100%; height: 100%; object-fit: cover; object-position: top left; }
 
 .section { padding-block: var(--section-gap-s) 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-lg); justify-items: start; }
 .well { margin: 0; width: 100%; max-width: 48rem; padding: var(--space-md) var(--space-lg); background: var(--color-paper-2); border: 1px solid var(--color-rule); border-radius: var(--radius); font-family: var(--font-display); font-size: var(--text-sm); line-height: 1.7; overflow-x: auto; }
@@ -65,6 +74,8 @@ html, body { overflow-x: clip; background: var(--color-paper); }
 .out-value { min-width: 9ch; font-size: var(--text-xl); color: var(--color-ink); }
 .out-note { color: var(--color-muted); }
 .diff { white-space: pre; }
+/* Lines as wide as the longest one, so the added-line wash runs under all the text when the well scrolls. */
+.diff code { display: block; width: max-content; min-width: 100%; }
 .diff-line { display: block; }
 .diff-meta { color: var(--color-muted); }
 .diff-add { color: var(--color-ink); background: var(--color-accent-wash); }
@@ -75,9 +86,10 @@ html, body { overflow-x: clip; background: var(--color-paper); }
 .faq details { border-bottom: 1px solid var(--color-rule); }
 .faq summary { display: flex; align-items: center; min-height: 48px; padding-block: var(--space-xs); cursor: pointer; font-family: var(--font-display); }
 .faq details p { padding-bottom: var(--space-md); color: var(--color-ink-2); }
+.faq details:not([open]) > p { display: none; }
 
 /* Install well */
-.install-well { width: 100%; max-width: 48rem; min-width: 0; display: grid; gap: var(--space-xs); }
+.install-well { width: 100%; max-width: 48rem; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-xs); }
 .install-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-sm); }
 .install-tabs { display: flex; gap: var(--space-xs); }
 .install-tab, .install-copy { display: inline-flex; align-items: center; gap: var(--space-xs); min-height: 44px; padding-inline: var(--space-md); background: transparent; color: var(--color-muted); border: 0; border-bottom: 2px solid transparent; border-radius: 0; font-family: var(--font-display); font-size: var(--text-sm); cursor: pointer; transition: color 0s steps(1), background 0s steps(1), border-color 0s steps(1); }
@@ -86,7 +98,7 @@ html, body { overflow-x: clip; background: var(--color-paper); }
 .install-tab[aria-selected="true"] { color: var(--color-ink); border-bottom-color: var(--color-accent); }
 .install-tab:focus-visible, .install-copy:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
 .install-copy { border: 1px solid var(--color-rule-2); border-radius: var(--radius); color: var(--color-ink); }
-.install-copy:disabled { color: var(--color-rule-2); cursor: not-allowed; }
+.install-copy[data-state="copied"] { color: var(--color-ink); border-color: var(--color-accent); background: var(--color-accent-wash); }
 .install-pre { display: flex; gap: var(--space-sm); max-width: 100%; overflow-x: auto; }
 .install-pre code { white-space: pre; font: inherit; }
 .install-prompts { display: flex; flex-direction: column; color: var(--color-muted); user-select: none; }

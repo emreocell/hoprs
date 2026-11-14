@@ -17,6 +17,7 @@ import { GlyphField } from "./GlyphField";
 
 let reduced = false;
 let gl: object | null = null;
+let renderer = "ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0)";
 const raf = vi.fn((cb: FrameRequestCallback) => setTimeout(() => cb(performance.now()), 16) as unknown as number);
 const caf = vi.fn((id: number) => clearTimeout(id));
 
@@ -29,7 +30,12 @@ class FakeIO {
 beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   reduced = false;
-  gl = { getExtension: () => ({ loseContext: () => {} }) };
+  renderer = "ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0)";
+  gl = {
+    RENDERER: 0x1f01,
+    getExtension: (name: string) => (name === "WEBGL_debug_renderer_info" ? { UNMASKED_RENDERER_WEBGL: 0x9246 } : { loseContext: () => {} }),
+    getParameter: () => renderer,
+  };
   raf.mockClear();
   vi.stubGlobal("requestAnimationFrame", raf);
   vi.stubGlobal("cancelAnimationFrame", caf);
@@ -82,3 +88,21 @@ it("context loss shows the static field", async () => {
   await act(() => vi.advanceTimersByTimeAsync(200));
   expect(raf.mock.calls.length).toBe(calls);
 });
+
+it("asks the probe for a context that fails on a major performance caveat", async () => {
+  render(<GlyphField />);
+  await act(() => vi.advanceTimersByTimeAsync(100));
+  expect(HTMLCanvasElement.prototype.getContext).toHaveBeenCalledWith("webgl2", { failIfMajorPerformanceCaveat: true });
+});
+
+it.each(["ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero)), SwiftShader driver)", "llvmpipe (LLVM 19.1.1, 256 bits)", "Microsoft Basic Render Driver"])(
+  "a software renderer keeps the static field: %s",
+  async (name) => {
+    renderer = name;
+    const { container } = render(<GlyphField />);
+    await act(() => vi.advanceTimersByTimeAsync(100));
+    expect(container.querySelector("canvas")).toBeNull();
+    expect(pre(container)).not.toBeNull();
+    expect(raf).not.toHaveBeenCalled();
+  },
+);
