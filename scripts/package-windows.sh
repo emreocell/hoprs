@@ -8,9 +8,10 @@
 #    for the toolchain rust-toolchain.toml pins;
 # 2. `cargo build --release --locked -p hoprs-app --target x86_64-pc-windows-msvc`, with
 #    the builder's paths ($HOME, $CARGO_HOME, the repository) remapped out of the binary,
-#    as package-deb.sh does, cl.exe told to trim them from the C code's __FILE__
-#    strings (aws-lc), and the linker told to record only the .pdb's file name
-#    (by default it embeds the .pdb's full path, which is inside the repository);
+#    as package-deb.sh does, and trimmed by cl.exe from the C code's __FILE__ strings
+#    (aws-lc); the C runtime linked statically (no VC++ redistributable needed); and the
+#    linker told to record only the .pdb's file name (by default it embeds the .pdb's
+#    full path, which is inside the repository);
 # 3. cargo-packager's `wix` format makes the per-machine .msi from
 #    [package.metadata.packager] in crates/hoprs-app/Cargo.toml, with two overrides:
 #    the MSI version is the numeric X.Y.Z of the workspace version (an .msi has no
@@ -95,10 +96,12 @@ for path in "$home_w" "$repo_w" "$cargo_home_w"; do
         exit 1
     fi
 done
+# +crt-static: the C runtime is linked in (cc then builds the C code, aws-lc, with /MT),
+# so hoprs.exe imports no VCRUNTIME140.dll and runs without the VC++ redistributable.
 # /PDBALTPATH:%_PDB%: the executable names its .pdb by file name only.
 export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$home_w=/build \
 --remap-path-prefix=$repo_w=/hoprs --remap-path-prefix=$cargo_home_w=/cargo \
--Clink-arg=/PDBALTPATH:%_PDB%"
+-Ctarget-feature=+crt-static -Clink-arg=/PDBALTPATH:%_PDB%"
 # The C code built by cc (aws-lc-sys, under CARGO_HOME) is out of rustc's reach: its
 # __FILE__ strings (aws-lc's error records) would keep the full source paths. cl.exe
 # trims them with -d1trimfile:<prefix>\ (most specific prefix first); the `-` form,

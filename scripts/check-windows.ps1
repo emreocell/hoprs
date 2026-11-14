@@ -9,13 +9,14 @@ Usage (on Windows, as an administrator: the .msi installs per machine):
 
 Checks, in order: the asset names; a file in %APPDATA%\hoprs before the install;
 `msiexec /i` (quiet, verbose log) exits 0; %ProgramFiles%\hoprs\hoprs.exe prints
-`hoprs <version>`; the Start menu shortcut points at it; Add/Remove Programs has one
-per-machine (HKLM) entry with the MSI version (numeric X.Y.Z); reinstalling the same .msi
-with REINSTALL=ALL REINSTALLMODE=vomus exits 0 (the upgrade path); `msiexec /x` exits 0;
-the exe, the shortcut and the entry are gone while the file in %APPDATA%\hoprs is still
-there; the .zip holds exactly hoprs.exe, LICENSE-MIT, LICENSE-APACHE and README.txt, and
-its hoprs.exe prints the same version; no builder paths in that exe (-BuilderPaths,
-default: this machine's %USERPROFILE% and the repository). Prints OK per check, throws
+`hoprs <version>` and imports no VC++ runtime DLL (VCRUNTIME*, MSVCP*: the CRT is
+linked statically, nothing to install first); the Start menu and desktop shortcuts point
+at it; Add/Remove Programs has one per-machine (HKLM) entry with the MSI version
+(numeric X.Y.Z); reinstalling the same .msi with REINSTALL=ALL REINSTALLMODE=vomus exits
+0 (the upgrade path); `msiexec /x` exits 0; the exe, the shortcuts and the entry are gone
+while the file in %APPDATA%\hoprs is still there; the .zip holds exactly hoprs.exe,
+LICENSE-MIT, LICENSE-APACHE and README.txt, and its hoprs.exe prints the same version and
+imports no VC++ runtime DLL; no builder paths in that exe (-BuilderPaths, default: this machine's %USERPROFILE% and the repository). Prints OK per check, throws
 with the first failing one (exit code 1).
 #>
 param(
@@ -66,6 +67,38 @@ function Show-LogTail([string]$log) {
     }
 }
 
+# Where $needle occurs in the file (ignoring case), each as the printable ASCII string
+# around it (up to 5, 300 characters each), to tell which part of the build put it there.
+# Latin-1 maps each byte to one character, so IndexOf finds ASCII strings in a binary.
+function Find-Strings([string]$file, [string]$needle) {
+    $text = [System.Text.Encoding]::Latin1.GetString([System.IO.File]::ReadAllBytes($file))
+    $found = @()
+    $at = 0
+    while ($found.Count -lt 5) {
+        $at = $text.IndexOf($needle, $at, [System.StringComparison]::OrdinalIgnoreCase)
+        if ($at -lt 0) { break }
+        $start = $at
+        while ($start -gt 0 -and $text[$start - 1] -ge ' ' -and $text[$start - 1] -le '~') { $start-- }
+        $end = $at + $needle.Length
+        while ($end -lt $text.Length -and $text[$end] -ge ' ' -and $text[$end] -le '~') { $end++ }
+        $found += "'$($text.Substring($start, [Math]::Min($end - $start, 300)))'"
+        $at = $end
+    }
+    return $found
+}
+
+# The VC++ runtime DLLs the exe imports: their names (VCRUNTIME140.dll, MSVCP140.dll,
+# ...) sit in its import table as plain ASCII. Matched as whole DLL names, so a source
+# path such as ...\vcruntime\src\... in the static CRT does not count. The 2015-2022
+# redistributable is not on every Windows: package-windows.sh links the CRT statically
+# (+crt-static), so there must be none.
+function Check-NoVcRuntime([string]$exe, [string]$which) {
+    $text = [System.Text.Encoding]::Latin1.GetString([System.IO.File]::ReadAllBytes($exe))
+    $hits = @([regex]::Matches($text, '(?i)\b(vcruntime|msvcp)[0-9a-z_]*\.dll\b') |
+        ForEach-Object { $_.Value } | Sort-Object -Unique)
+    Check "$which imports no VC++ runtime DLL (VCRUNTIME*, MSVCP*)" ($hits.Count -eq 0) "found $($hits -join ', ')"
+}
+
 # The exe's --version, through a pipe: a GUI-subsystem program started from PowerShell
 # is otherwise not waited for, and its output is lost.
 function Get-VersionLine([string]$exe) {
@@ -96,14 +129,17 @@ Check "asset name $(Split-Path -Leaf $Zip)" ((Split-Path -Leaf $Zip) -eq "hoprs_
 $installDir = Join-Path $env:ProgramFiles 'hoprs'
 $installedExe = Join-Path $installDir 'hoprs.exe'
 $shortcut = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\hoprs\hoprs.lnk'
+# A per-machine install puts the desktop shortcut on the all-users (Public) desktop.
+$desktopShortcut = Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'hoprs.lnk'
 $dataDir = Join-Path $env:APPDATA 'hoprs'
 $keep = Join-Path $dataDir 'keep.txt'
 $work = Join-Path ([System.IO.Path]::GetTempPath()) "hoprs-check-$([guid]::NewGuid())"
-New-Item -ItemType Directory -Path $work | Out-Null
 
+# Before $work is created: nothing to clean up yet if this throws.
 if (Test-Path $installedExe) {
     Fail 'no hoprs installed before the check' "$installedExe exists"
 }
+New-Item -ItemType Directory -Path $work | Out-Null
 
 $createdDataDir = -not (Test-Path $dataDir)
 $installed = $false
@@ -122,10 +158,14 @@ try {
     Check "installed $installedExe" (Test-Path $installedExe -PathType Leaf)
     $line = Get-VersionLine $installedExe
     Check "installed hoprs.exe --version prints 'hoprs $version'" ($line -eq "hoprs $version") "got '$line'"
+    Check-NoVcRuntime $installedExe 'installed hoprs.exe'
 
     Check "Start menu shortcut $shortcut" (Test-Path $shortcut -PathType Leaf)
     $target = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut).TargetPath
     Check 'Start menu shortcut targets the installed hoprs.exe' ($target -ieq $installedExe) "targets '$target'"
+    Check "desktop shortcut $desktopShortcut" (Test-Path $desktopShortcut -PathType Leaf)
+    $target = (New-Object -ComObject WScript.Shell).CreateShortcut($desktopShortcut).TargetPath
+    Check 'desktop shortcut targets the installed hoprs.exe' ($target -ieq $installedExe) "targets '$target'"
 
     $entries = @(Get-ArpEntries)
     Check 'one Add/Remove Programs entry' ($entries.Count -eq 1) "found $($entries.Count)"
@@ -148,6 +188,7 @@ try {
 
     Check 'hoprs.exe gone after the uninstall' (-not (Test-Path $installedExe))
     Check 'Start menu shortcut gone after the uninstall' (-not (Test-Path $shortcut))
+    Check 'desktop shortcut gone after the uninstall' (-not (Test-Path $desktopShortcut))
     Check 'Add/Remove Programs entry gone after the uninstall' (@(Get-ArpEntries).Count -eq 0) "found $(@(Get-ArpEntries).Count)"
     $kept = (Test-Path $keep) -and ((Get-Content $keep -Raw).Trim() -eq $marker)
     Check "user data kept by the uninstall: $keep" $kept
@@ -163,28 +204,14 @@ try {
     $line = Get-VersionLine $zipExe
     Check ".zip's hoprs.exe --version prints 'hoprs $version'" ($line -eq "hoprs $version") "got '$line'"
 
-    # Latin-1 maps each byte to one character, so IndexOf finds ASCII paths in the binary.
+    Check-NoVcRuntime $zipExe ".zip's hoprs.exe"
+
     # Both separators: rustc and the C compilers record paths either way.
-    $text = [System.Text.Encoding]::Latin1.GetString([System.IO.File]::ReadAllBytes($zipExe))
-    # Each hit is reported with the printable string around it (up to 5 per path form),
-    # to tell which part of the build recorded it.
     $hits = @()
     foreach ($path in $BuilderPaths) {
         if (-not $path) { continue }
         foreach ($form in @($path, $path.Replace('\', '/'))) {
-            $at = 0
-            $shown = 0
-            while ($shown -lt 5) {
-                $at = $text.IndexOf($form, $at, [System.StringComparison]::OrdinalIgnoreCase)
-                if ($at -lt 0) { break }
-                $start = $at
-                while ($start -gt 0 -and $text[$start - 1] -ge ' ' -and $text[$start - 1] -le '~') { $start-- }
-                $end = $at + $form.Length
-                while ($end -lt $text.Length -and $text[$end] -ge ' ' -and $text[$end] -le '~') { $end++ }
-                $hits += "'$($text.Substring($start, [Math]::Min($end - $start, 300)))'"
-                $shown++
-                $at = $end
-            }
+            $hits += @(Find-Strings $zipExe $form)
         }
     }
     Check "no builder paths in hoprs.exe ($($BuilderPaths -join ', '))" ($hits.Count -eq 0) "found $($hits -join '; ')"
