@@ -1,8 +1,10 @@
 /* Hallmark · shape: single page · genre: atmospheric · theme: terminal (by request, palette and type from the hoprs app) · job: try · draw: hoprs-1
  * hero: committed · nav: slim · footer: plain · imagery: the product · signature: figures printed as a tool's output
- * axes: dark/mono+sans/neutral · posture: committed · contrast: open (40, the static glyph fallback) · fold: pass · v2.0.0 */
-/* Hallmark · pre-emit critique: P3 H3 E3 S3 R3 V3 · weakest: the static glyph fallback is decoration set under 4.5:1 (gate 40) */
-/* Hallmark · sweep: Floor 1 FAIL (40 on pre.glyph-pre, aria-hidden decoration, ruling pending) · Reflex 2 waived (22, 77) · finish-review: in-thread, fix, 1 open (40) */
+ * axes: dark/mono+sans/neutral · posture: committed · contrast: pass (40 answered: aria-hidden decorative pre, WCAG 1.4.3) · fold: pass · v2.0.0 */
+/* Hallmark · pre-emit critique: P3 H3 E3 S3 R3 V3 · weakest: the lower third of the hero is glyph field only, a quiet band before the shot */
+/* Hallmark · sweep: Floor 0 FAIL (40 answered, 58 answered) · Reflex 2 waived (22, 77) · finish-review: in-thread, fix, 0 open */
+/* Hallmark · answered 40 · the static glyph pre is aria-hidden decoration under the hero text; WCAG 1.4.3 exempts pure decoration from contrast */
+/* Hallmark · answered 58 · closed <details> answers are not visible words */
 /* Hallmark · waive 22 · every neutral token is oklch(L 0 0) · the palette is the hoprs app's own near-black and white, chroma 0 as the app draws it */
 /* Hallmark · waive 77 · the diff, install and FAQ wells stop at 48rem · they read as a terminal at about 90 columns; wider, the FileZilla diff and the install commands stretch into lines nobody reads */
 @import "tailwindcss";
@@ -86,7 +88,6 @@ html, body { overflow-x: clip; background: var(--color-paper); }
 .faq details { border-bottom: 1px solid var(--color-rule); }
 .faq summary { display: flex; align-items: center; min-height: 48px; padding-block: var(--space-xs); cursor: pointer; font-family: var(--font-display); }
 .faq details p { padding-bottom: var(--space-md); color: var(--color-ink-2); }
-.faq details:not([open]) > p { display: none; }
 
 /* Install well */
 .install-well { width: 100%; max-width: 48rem; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-xs); }
