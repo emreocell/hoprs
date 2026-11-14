@@ -6,7 +6,8 @@
 @import "./tokens.css";
 @import "./base.css";
 
-/* Tailwind reads the tokens from tokens.css; nothing is declared twice. */
+/* Tailwind reads the tokens from tokens.css; nothing is declared twice.
+ * The aliases below resolve only because tokens.css's unlayered :root outranks Tailwind's @layer theme. */
 @theme inline {
   --color-paper: var(--color-paper);
   --color-paper-2: var(--color-paper-2);
@@ -26,3 +27,42 @@
 }
 
 html, body { overflow-x: clip; background: var(--color-paper); }
+
+/* Page layout. Colour and type come from tokens only. */
+.muted { color: var(--color-muted); }
+.small { font-size: var(--text-sm); }
+.wordmark { display: inline-flex; align-items: center; gap: var(--space-xs); font-family: var(--font-display); font-weight: 500; text-decoration: none; min-height: 44px; }
+.nav-row, .footer-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-md); padding-block: var(--space-sm); }
+.nav-links { display: flex; align-items: center; gap: var(--space-lg); font-size: var(--text-sm); }
+.nav-links a { display: inline-flex; align-items: center; min-height: 44px; }
+.footer { border-top: 1px solid var(--color-rule); margin-top: var(--section-gap-s); padding-block: var(--space-lg); }
+
+.hero { position: relative; isolation: isolate; padding-block: var(--space-xl) var(--space-2xl); }
+.glyph-field { position: absolute; inset: 0; z-index: -1; pointer-events: none; background: none; }
+.hero-body { display: grid; gap: var(--space-lg); justify-items: start; }
+.actions { display: flex; flex-wrap: wrap; gap: var(--space-sm); }
+.btn { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding-inline: var(--space-lg); border-radius: var(--radius); font-family: var(--font-display); font-size: var(--text-sm); text-decoration: none; border: 1px solid var(--color-rule-2); transition: background var(--dur-micro) var(--ease-out); }
+.btn-primary { background: var(--color-accent); color: var(--color-accent-ink); border-color: var(--color-accent); }
+.btn-primary:hover { background: var(--color-ink-2); }
+.btn-secondary { background: transparent; color: var(--color-ink); }
+.btn-secondary:hover { background: var(--color-accent-wash); }
+
+.shot { width: 100%; margin: var(--space-xl) 0 0; aspect-ratio: 16 / 10; border: 1px solid var(--color-rule); border-radius: var(--radius); }
+
+.section { padding-block: var(--section-gap-s) 0; display: grid; gap: var(--space-lg); justify-items: start; }
+.well { margin: 0; width: 100%; max-width: 48rem; padding: var(--space-md) var(--space-lg); background: var(--color-paper-2); border: 1px solid var(--color-rule); border-radius: var(--radius); font-family: var(--font-display); font-size: var(--text-sm); line-height: 1.7; overflow-x: auto; }
+.out { list-style: none; display: grid; gap: var(--space-xs); }
+.out li { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-xs) var(--space-lg); }
+.out-value { min-width: 9ch; font-size: var(--text-xl); color: var(--color-ink); }
+.out-note { color: var(--color-muted); }
+.diff { white-space: pre; }
+.diff-line { display: block; }
+.diff-meta { color: var(--color-muted); }
+.diff-add { color: var(--color-ink); background: var(--color-accent-wash); }
+.diff-ctx { color: var(--color-ink-2); }
+.cmd { color: var(--color-ink); }
+
+.faq { width: 100%; max-width: 48rem; border-top: 1px solid var(--color-rule); }
+.faq details { border-bottom: 1px solid var(--color-rule); }
+.faq summary { display: flex; align-items: center; min-height: 48px; padding-block: var(--space-xs); cursor: pointer; font-family: var(--font-display); }
+.faq details p { padding-bottom: var(--space-md); color: var(--color-ink-2); }
