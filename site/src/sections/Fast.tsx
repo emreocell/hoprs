@@ -1,5 +1,5 @@
 import { facts } from "../facts";
-import { formatNumber, useLang, useT } from "../i18n";
+import { formatDate, formatNumber, useLang, useT } from "../i18n";
 
 const { perf } = facts;
 
@@ -25,7 +25,7 @@ export default function Fast() {
         ))}
       </ul>
       <p className="muted small">
-        {t.measuredOn} <time dateTime={perf.measuredOn}>{perf.measuredOn}</time>.{" "}
+        {t.measuredOn} <time dateTime={perf.measuredOn}>{formatDate(lang, perf.measuredOn)}</time>.{" "}
         <a href={facts.perfDocUrl}>{t.how}</a>
       </p>
     </section>

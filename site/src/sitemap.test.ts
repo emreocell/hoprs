@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { expect, it } from "vitest";
+import { facts } from "./facts";
 
 const file = resolve(process.cwd(), "dist/sitemap.xml");
 const XHTML = "http://www.w3.org/1999/xhtml";
@@ -16,7 +17,7 @@ it.skipIf(!existsSync(file))("dist/sitemap.xml parses and lists both pages with 
     "https://hoprs.online/pt-br/",
   ]);
   for (const u of urls) {
-    expect(u.getElementsByTagName("lastmod")[0]?.textContent).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(u.getElementsByTagName("lastmod")[0]?.textContent).toBe(facts.releaseDate);
     const links = [...u.getElementsByTagNameNS(XHTML, "link")].map((l) => [l.getAttribute("hreflang"), l.getAttribute("href")]);
     expect(links).toEqual([
       ["en", "https://hoprs.online/"],

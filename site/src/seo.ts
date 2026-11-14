@@ -2,10 +2,13 @@
 // facts.ts, so they never drift from the page. Pure functions: scripts/prerender.tsx writes them.
 import { downloads, systems } from "./downloads";
 import { facts } from "./facts";
-import { dicts, formatNumber, langs, otherLang, pagePath } from "./i18n";
+import { dicts, formatDate, formatNumber, langs, otherLang, pagePath } from "./i18n";
 import type { Lang } from "./i18n";
 
 export const pageUrl = (lang: Lang) => `${facts.siteUrl}${pagePath[lang]}`;
+// One WebSite and one SoftwareApplication, whichever page describes them: both pages share these @ids.
+export const siteId = `${facts.siteUrl}/#website`;
+export const appId = `${facts.siteUrl}/#app`;
 const abs = (path: string) => `${facts.siteUrl}${path}`;
 const ogImage = { url: abs("/og.png"), width: 1200, height: 630 };
 const shots = ["/shots/main.png", "/shots/split.png"];
@@ -25,24 +28,24 @@ export function jsonLd(lang: Lang): object {
     "@graph": [
       {
         "@type": "WebSite",
-        "@id": `${url}#website`,
+        "@id": siteId,
         name: "hoprs",
-        url,
-        inLanguage: lang,
+        url: pageUrl("en"),
+        inLanguage: [...langs],
         description: t.meta.description,
       },
       {
         "@type": "SoftwareApplication",
-        "@id": `${url}#app`,
+        "@id": appId,
         name: "hoprs",
         description: t.meta.description,
-        url,
+        url: pageUrl("en"),
         applicationCategory: "DeveloperApplication",
         operatingSystem: "Linux, macOS, Windows",
         softwareVersion: facts.version,
         datePublished: facts.releaseDate,
         downloadUrl: downloadUrls,
-        installUrl: `${url}#install`,
+        installUrl: `${pageUrl("en")}#install`,
         releaseNotes: facts.changelogUrl,
         license: [facts.licenseUrl, facts.apacheLicenseUrl],
         isAccessibleForFree: true,
@@ -63,6 +66,8 @@ export function jsonLd(lang: Lang): object {
         "@id": `${url}#faq`,
         url,
         inLanguage: lang,
+        isPartOf: { "@id": siteId },
+        about: { "@id": appId },
         mainEntity: t.faq.items.map(({ q, a }) => ({
           "@type": "Question",
           name: q,
@@ -149,9 +154,9 @@ ${systems.map((os) => `- [${downloads[os].name} ${downloads[os].ext}](${download
 
 - ${t.connection.lead}
 - SSH with a terminal; files over SFTP, FTP and FTPS (explicit and implicit). Plain FTP is allowed and labelled ftp (unencrypted).
-- Passwords: ${t.faq.items[2].a}
-- Data collection: ${t.faq.items[5].a}
-- Measured on a GitHub Actions runner (${perf.measuredOn}): ${n(perf.startupMs)} ms to the first frame, ${n(perf.idleMb)} MB memory at idle, ${n(perf.rowsP95Ms)} ms p95 view and layout for ${n(perf.rows)} rows, SFTP 1 GiB at 50 ms RTT at ${n(perf.sftpVsScp)} x scp. Method: ${facts.perfDocUrl}
+- Passwords are kept in the system keyring: Secret Service on Linux, Keychain on macOS, Credential Manager on Windows. Site files hold no secrets.
+- No accounts and no data collection: it talks only to the servers you add.
+- Measured on a GitHub Actions runner (${formatDate("en", perf.measuredOn)}): ${n(perf.startupMs)} ms to the first frame, ${n(perf.idleMb)} MB memory at idle, ${n(perf.rowsP95Ms)} ms p95 view and layout for ${n(perf.rows)} rows, SFTP 1 GiB at 50 ms RTT at ${n(perf.sftpVsScp)} x scp. Method: ${facts.perfDocUrl}
 
 ## Compared with FileZilla
 

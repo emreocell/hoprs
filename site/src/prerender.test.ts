@@ -40,6 +40,9 @@ describe.skipIf(!built).each([
     expect(html).toContain(`<link rel="icon" href="/favicon.ico" sizes="32x32" />`);
     expect(html).toContain(`<link rel="apple-touch-icon" href="/apple-touch-icon.png" />`);
     expect(html).not.toContain("app-head");
+    // The fallback title and description of index.html are gone: one of each, in this language.
+    expect(html.match(/<title>/g)?.length).toBe(1);
+    expect(html.match(/<meta name="description"/g)?.length).toBe(1);
     // Asset URLs stay absolute, so /pt-br/ loads the same bundle.
     expect(html).toMatch(/<script type="module" crossorigin src="\/assets\/[^"]+\.js"><\/script>/);
   });
@@ -72,9 +75,15 @@ describe.skipIf(!built).each([
     const rendered = html.match(/<details>/g)?.length;
     expect((faqPage.mainEntity as unknown[]).length).toBe(rendered);
     expect((faqPage.mainEntity as { name: string }[])[0].name).toBe(t.faq.items[0].q);
+    // One WebSite and one app across both pages; the FAQ is per page and language.
     const site = graph.find((n) => n["@type"] === "WebSite")!;
-    expect(site.url).toBe(pageUrl(lang));
-    expect(site.inLanguage).toBe(lang);
+    expect(site["@id"]).toBe("https://hoprs.online/#website");
+    expect(site.url).toBe("https://hoprs.online/");
+    expect(app["@id"]).toBe("https://hoprs.online/#app");
+    expect(app.url).toBe("https://hoprs.online/");
+    expect(app.description).toBe(t.meta.description);
+    expect(faqPage.url).toBe(pageUrl(lang));
+    expect(faqPage.inLanguage).toBe(lang);
   });
 });
 

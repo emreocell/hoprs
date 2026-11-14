@@ -69,6 +69,8 @@ html, body { overflow-x: clip; background: var(--color-paper); }
 /* System marks on the download buttons and the Install tabs: one text size, the label's colour. */
 .btn { gap: var(--space-xs); }
 .os-logo { flex: none; width: 1em; height: 1em; }
+/* A touch larger on the hero buttons, where Tux would otherwise blur into a blob at text size. */
+.hero .btn .os-logo { width: 1.15em; height: 1.15em; }
 
 .shot { width: 100%; margin: var(--space-xl) 0 0; aspect-ratio: 16 / 10; border: 1px solid var(--color-rule); border-radius: var(--radius); overflow: hidden; background: var(--color-paper-2); }
 .hero-shot .shot { margin-top: var(--section-gap-s); }

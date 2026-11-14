@@ -3,6 +3,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { render } from "../src/entry-server";
 import { langs, pagePath } from "../src/i18n";
+import { facts } from "../src/facts";
 import { headHtml, llmsTxt, sitemapXml } from "../src/seo";
 
 const dist = new URL("../dist/", import.meta.url);
@@ -18,6 +19,9 @@ function swap(html: string, marker: string | RegExp, value: string): string {
 for (const lang of langs) {
   let html = template;
   html = swap(html, '<html lang="en">', `<html lang="${lang}">`);
+  // The fallback title and description (for `npm run dev`) give way to the language's own tags.
+  html = swap(html, /\n\s*<title>hoprs<\/title>/, "");
+  html = swap(html, /\n\s*<meta name="description" [^>]*>/, "");
   html = swap(html, /<!-- app-head:[^>]*-->/, headHtml(lang));
   html = swap(html, '<div id="root"></div>', `<div id="root">${render(lang)}</div>`);
   const dir = new URL(`.${pagePath[lang]}`, dist);
@@ -26,7 +30,7 @@ for (const lang of langs) {
   console.log(`prerendered dist${pagePath[lang]}index.html (${lang})`);
 }
 
-// lastmod: the build date (UTC).
-writeFileSync(new URL("sitemap.xml", dist), sitemapXml(new Date().toISOString().slice(0, 10)));
+// lastmod: the current release's date, so a rebuild alone never claims new content.
+writeFileSync(new URL("sitemap.xml", dist), sitemapXml(facts.releaseDate));
 writeFileSync(new URL("llms.txt", dist), llmsTxt());
 console.log("wrote dist/sitemap.xml and dist/llms.txt");
