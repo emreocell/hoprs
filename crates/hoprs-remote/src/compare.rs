@@ -84,6 +84,9 @@ pub struct Summary {
     pub differences: usize,
     /// The run stopped early (the progress receiver or the resume sender went away).
     pub partial: bool,
+    /// The run ended because the `stop` signal turned `true` (always with `partial`): no new
+    /// listing started after it, listings in flight finished and were discarded.
+    pub stopped: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -186,8 +189,14 @@ fn join_rel(parent: &str, name: &str) -> RelPath {
 /// Listing errors on a root fail the call; on a subfolder they become [`Status::Unreadable`]
 /// differences and the walk goes on. When a side reaches `options.limit` the walk sends
 /// [`Progress::LimitReached`] and waits until `resume` turns `true`, then continues without a
-/// limit (a `resume` that is `true` from the start means no limit). Dropping the returned future
-/// cancels the run.
+/// limit (a `resume` that is `true` from the start means no limit).
+///
+/// `stop` is the cooperative cancel: once it turns `true` no new listing starts, listings in
+/// flight finish (dropping a listing midway can force an FTP session to reconnect) and their
+/// results are discarded, and the call returns `Ok` with [`Summary::stopped`] set. A dropped
+/// `stop` sender never stops the run. Dropping the returned future also cancels the run, but
+/// abruptly: use it only when the session is going away.
+#[allow(clippy::too_many_arguments)] // the two signals are separate channels, see the docs
 pub async fn compare(
     local: Arc<dyn RemoteFs>,
     local_root: RemotePath,
@@ -196,6 +205,7 @@ pub async fn compare(
     options: CompareOptions,
     progress: mpsc::UnboundedSender<Progress>,
     mut resume: watch::Receiver<bool>,
+    mut stop: watch::Receiver<bool>,
 ) -> Result<Summary> {
     let local_sem = Semaphore::new(options.concurrency_a.max(1));
     let remote_sem = Semaphore::new(options.concurrency_b.max(1));
@@ -210,6 +220,7 @@ pub async fn compare(
         identical: 0,
         differences: 0,
         partial: false,
+        stopped: false,
     };
     let (mut seen_l, mut seen_r) = (0usize, 0usize);
     let mut last_seen_sent = 0usize;
@@ -226,6 +237,9 @@ pub async fn compare(
     let send = |p: Progress| progress.send(p).is_ok();
 
     loop {
+        if *stop.borrow() {
+            return stopped(summary, &mut inflight).await;
+        }
         while !paused && inflight.len() < width {
             let Some(pair) = pending.pop_front() else {
                 break;
@@ -241,9 +255,23 @@ pub async fn compare(
                     summary.partial = true;
                     return Ok(summary);
                 }
-                if resume.wait_for(|v| *v).await.is_err() {
-                    summary.partial = true;
-                    return Ok(summary);
+                let stop_signal = async {
+                    if stop.wait_for(|v| *v).await.is_err() {
+                        std::future::pending::<()>().await;
+                    }
+                };
+                // `Some(resumed)` or `None` for a stop; the guard is not held across an await.
+                let outcome = tokio::select! {
+                    resumed = resume.wait_for(|v| *v) => Some(resumed.is_ok()),
+                    () = stop_signal => None,
+                };
+                match outcome {
+                    Some(true) => {}
+                    Some(false) => {
+                        summary.partial = true;
+                        return Ok(summary);
+                    }
+                    None => return stopped(summary, &mut inflight).await,
                 }
                 limit = None;
                 paused = false;
@@ -252,6 +280,10 @@ pub async fn compare(
             break;
         };
 
+        if *stop.borrow() {
+            // Finished after the stop: discarded.
+            return stopped(summary, &mut inflight).await;
+        }
         let Listed {
             pair,
             local: l,
@@ -382,6 +414,18 @@ pub async fn compare(
         local: seen_l,
         remote: seen_r,
     });
+    Ok(summary)
+}
+
+/// Ends a stopped run: lets the listings in flight finish (never drops one midway) and
+/// discards what they return.
+async fn stopped<F: std::future::Future>(
+    mut summary: Summary,
+    inflight: &mut FuturesUnordered<F>,
+) -> Result<Summary> {
+    while inflight.next().await.is_some() {}
+    summary.partial = true;
+    summary.stopped = true;
     Ok(summary)
 }
 
@@ -533,7 +577,8 @@ mod tests {
     ) -> Result<Run> {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let (_resume_tx, resume) = watch::channel(false);
-        let summary = compare(a, p("/"), b, p("/"), options, tx, resume).await?;
+        let (_stop_tx, stop) = watch::channel(false);
+        let summary = compare(a, p("/"), b, p("/"), options, tx, resume, stop).await?;
         let mut events = Vec::new();
         while let Ok(e) = rx.try_recv() {
             events.push(e);
@@ -750,6 +795,7 @@ mod tests {
         let (la, lb) = (Arc::new(Probe::new(a)), Arc::new(Probe::new(b)));
         let (tx, mut rx) = mpsc::unbounded_channel();
         let (resume_tx, resume) = watch::channel(false);
+        let (_stop_tx, stop) = watch::channel(false);
         let o = CompareOptions {
             limit: Some(3),
             concurrency_a: 1,
@@ -758,7 +804,7 @@ mod tests {
         };
         let (a2, b2) = (la.clone(), lb.clone());
         let task =
-            tokio::spawn(async move { compare(a2, p("/"), b2, p("/"), o, tx, resume).await });
+            tokio::spawn(async move { compare(a2, p("/"), b2, p("/"), o, tx, resume, stop).await });
         loop {
             if let Progress::LimitReached { local, remote } = rx.recv().await.unwrap() {
                 assert_eq!((local, remote), (3, 3));
@@ -788,14 +834,99 @@ mod tests {
         let pa = Arc::new(pa);
         let (tx, _rx) = mpsc::unbounded_channel();
         let (_rt, resume) = watch::channel(false);
+        let (_st, stop) = watch::channel(false);
         {
-            let fut = compare(pa.clone(), p("/"), Arc::new(b), p("/"), opts(), tx, resume);
+            let fut = compare(
+                pa.clone(),
+                p("/"),
+                Arc::new(b),
+                p("/"),
+                opts(),
+                tx,
+                resume,
+                stop,
+            );
             let _ = tokio::time::timeout(Duration::from_millis(2500), fut).await;
         }
         let seen = pa.listings().len();
         assert!((2..6).contains(&seen), "{seen}");
         tokio::time::sleep(Duration::from_secs(30)).await;
         assert_eq!(pa.listings().len(), seen);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_lets_the_inflight_listing_finish_and_starts_no_more() {
+        let (a, b) = (MemFs::new(), MemFs::new());
+        for s in [&a, &b] {
+            s.add_file("/d1/f", b"x", t(0));
+            s.add_file("/d2/f", b"x", t(0));
+            s.add_file("/d3/f", b"x", t(0));
+        }
+        a.add_file("/d1/extra", b"x", t(0));
+        let mut pa = Probe::new(a);
+        pa.delay = Duration::from_secs(1);
+        let (pa, pb) = (Arc::new(pa), Arc::new(Probe::new(b)));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (_resume_tx, resume) = watch::channel(false);
+        let (stop_tx, stop) = watch::channel(false);
+        let o = CompareOptions {
+            concurrency_a: 1,
+            concurrency_b: 1,
+            ..Default::default()
+        };
+        let (a2, b2) = (pa.clone(), pb.clone());
+        let task =
+            tokio::spawn(async move { compare(a2, p("/"), b2, p("/"), o, tx, resume, stop).await });
+        // The root listing is in flight (it takes 1 s).
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(pa.listings(), vec!["/".to_string()]);
+        stop_tx.send(true).unwrap();
+        let summary = task.await.unwrap().unwrap();
+        assert!(summary.stopped && summary.partial);
+        // The in-flight listing completed (not dropped) and nothing started after it.
+        assert_eq!(pa.listings(), vec!["/".to_string()]);
+        assert_eq!(pa.active.load(Ordering::SeqCst), 0);
+        // Its result was discarded.
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn stop_while_paused_returns() {
+        let (a, b) = (MemFs::new(), MemFs::new());
+        for s in [&a, &b] {
+            s.add_file("/d1/f", b"x", t(0));
+            s.add_file("/top", b"x", t(0));
+        }
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (_resume_tx, resume) = watch::channel(false);
+        let (stop_tx, stop) = watch::channel(false);
+        let o = CompareOptions {
+            limit: Some(2),
+            concurrency_a: 1,
+            concurrency_b: 1,
+            ..Default::default()
+        };
+        let task = tokio::spawn(async move {
+            compare(
+                Arc::new(a),
+                p("/"),
+                Arc::new(b),
+                p("/"),
+                o,
+                tx,
+                resume,
+                stop,
+            )
+            .await
+        });
+        loop {
+            if let Progress::LimitReached { .. } = rx.recv().await.unwrap() {
+                break;
+            }
+        }
+        stop_tx.send(true).unwrap();
+        let summary = task.await.unwrap().unwrap();
+        assert!(summary.stopped);
     }
 
     #[tokio::test]

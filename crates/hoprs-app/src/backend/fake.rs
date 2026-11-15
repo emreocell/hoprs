@@ -71,7 +71,7 @@ use hoprs_core::{
     WorkspaceId,
 };
 use hoprs_import::{ImportOptions, ImportReport};
-use hoprs_remote::{MemFs, RemoteFs};
+use hoprs_remote::{CompareOptions, MemFs, Progress, RemoteFs, Summary};
 use hoprs_transfer::{ConflictPolicy, Event, TransferId, TransferItem, TransferSpec};
 use hoprs_vault::{BackupImportReport, ExportReport, ImportMode, UnreadableEntry};
 use secrecy::{ExposeSecret, SecretString};
@@ -81,8 +81,8 @@ use super::broker::{PromptKind, PromptRequest};
 use super::edit::{EditManager, EditSession, Launcher, UploadMode};
 use super::shells::{ShellControl, Shells, shell_closed};
 use super::{
-    AuthMethod, BackendApi, BrokerEvent, ConnectError, ConnectResult, Connected, ControlOp,
-    DeleteTarget, EditChoice, EditEvent, EditId, EditSummary, KeptEdit, KnownHostEntry,
+    AuthMethod, BackendApi, BrokerEvent, CompareSignals, ConnectError, ConnectResult, Connected,
+    ControlOp, DeleteTarget, EditChoice, EditEvent, EditId, EditSummary, KeptEdit, KnownHostEntry,
     ProfileSnapshot, PromptAnswer, PromptId, SessionId, ShellId, ShellOutput, Side,
     TransferSnapshot, WorkspaceTabs,
 };
@@ -257,6 +257,19 @@ struct State {
     fake_shells: HashMap<ShellId, Arc<FakeShell>>,
     /// The next `open_shell` calls fail with these.
     open_shell_failures: VecDeque<Error>,
+    /// The scripted outcomes of the next `compare` calls (none: a real walk over the
+    /// `MemFs`es).
+    compare_scripts: VecDeque<CompareScript>,
+    /// Every `compare` call: session, local root, remote root.
+    compare_calls: Vec<(SessionId, RemotePath, RemotePath)>,
+}
+
+/// What a scripted `compare` does: sends `progress`, optionally waits on `hold`
+/// (until its sender is used or dropped, or a stop), then returns `result`.
+struct CompareScript {
+    progress: Vec<Progress>,
+    hold: Option<watch::Receiver<()>>,
+    result: Result<Summary>,
 }
 
 impl Default for FakeBackend {
@@ -388,6 +401,29 @@ impl FakeBackend {
     /// unavailable.
     pub fn lock_keyring(&self) {
         self.state().keyring_locked = true;
+    }
+
+    /// Scripts the next `compare` call: `progress` is sent, then the call returns
+    /// `result`. With a hold, the call waits first until the returned sender sends (or
+    /// is dropped), or until it is stopped (then it returns a stopped summary).
+    pub fn script_compare(
+        &self,
+        progress: Vec<Progress>,
+        result: Result<Summary>,
+        hold: bool,
+    ) -> Option<watch::Sender<()>> {
+        let (tx, rx) = watch::channel(());
+        self.state().compare_scripts.push_back(CompareScript {
+            progress,
+            hold: hold.then_some(rx),
+            result,
+        });
+        hold.then_some(tx)
+    }
+
+    /// The `compare` calls made: session, local root, remote root.
+    pub fn compare_calls(&self) -> Vec<(SessionId, RemotePath, RemotePath)> {
+        self.state().compare_calls.clone()
     }
 
     /// The remote side of `site` (shared with the backend: fill it in the test).
@@ -1015,6 +1051,54 @@ impl BackendApi for FakeBackend {
         mode: u32,
     ) -> Result<()> {
         self.fs(session, side)?.chmod(&path, mode).await
+    }
+
+    async fn compare(
+        &self,
+        session: SessionId,
+        local_root: RemotePath,
+        remote_root: RemotePath,
+        options: CompareOptions,
+        progress: mpsc::UnboundedSender<Progress>,
+        signals: CompareSignals,
+    ) -> Result<Summary> {
+        let site = self
+            .session_site(session)
+            .ok_or_else(super::sessions::closed)?;
+        let script = {
+            let mut state = self.state();
+            state
+                .compare_calls
+                .push((session, local_root.clone(), remote_root.clone()));
+            state.compare_scripts.pop_front()
+        };
+        if let Some(script) = script {
+            for item in script.progress {
+                let _ = progress.send(item);
+            }
+            if let Some(mut hold) = script.hold {
+                // Waits for the test to resume or stop (like a paused or running walk).
+                let mut stop = signals.stop.clone();
+                tokio::select! {
+                    _ = hold.changed() => {}
+                    _ = stop.wait_for(|v| *v) => {
+                        return Ok(Summary { identical: 0, differences: 0, partial: true, stopped: true });
+                    }
+                }
+            }
+            return script.result;
+        }
+        hoprs_remote::compare(
+            Arc::new(self.local_fs()),
+            local_root,
+            Arc::new(self.remote_fs(&site)),
+            remote_root,
+            options,
+            progress,
+            signals.resume,
+            signals.stop,
+        )
+        .await
     }
 
     async fn enqueue(&self, spec: TransferSpec) -> Result<TransferId> {

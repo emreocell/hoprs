@@ -269,7 +269,7 @@ impl Link {
     }
 }
 
-fn closed() -> Error {
+pub(super) fn closed() -> Error {
     Error::coded(ErrorKind::NotFound, "session-closed", "Session closed")
 }
 

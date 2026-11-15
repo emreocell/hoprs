@@ -59,6 +59,7 @@ pub enum PickTarget {
 }
 
 pub mod actions;
+pub mod compare;
 pub mod dialogs;
 pub mod edit;
 pub mod files;
@@ -74,6 +75,7 @@ pub mod terminal;
 pub mod transfers;
 
 pub use actions::FileAction;
+pub use compare::{CompareMsg, CompareRunId};
 pub use dialogs::{Dialog, DialogMsg, Dialogs, FailureAction, KnownHostsFix, KnownHostsMsg, Typed};
 pub use edit::EditMsg;
 pub use files::{FileKey, Mods, PaneMsg, RequestId};
@@ -198,6 +200,8 @@ pub enum Message {
     ToggleQueue,
     /// Something in the technical log panel, or its poll.
     Log(LogMsg),
+    /// A folder comparison's progress or end ([`compare`]).
+    Compare(CompareMsg),
     /// The Ctrl+K palette: open, typed into, run or closed ([`palette`]).
     Palette(PaletteMsg),
     /// The sidebar filter changed.
@@ -439,6 +443,39 @@ pub enum Effect {
     DeleteSite(SiteId),
     SaveWorkspace(Workspace),
     DeleteWorkspace(WorkspaceId),
+    /// Starts a comparison of the local folder `local_root` with the remote folder
+    /// `remote_root` of `session`; reports as [`Message::Compare`] (progress, then one
+    /// `Finished`). `options.concurrency_*` are set by the backend; a run id is
+    /// used once per tab.
+    #[allow(dead_code)] // built by Task 5's compare state machine
+    Compare {
+        tab: TabId,
+        run: CompareRunId,
+        session: SessionId,
+        local_root: RemotePath,
+        remote_root: RemotePath,
+        options: hoprs_remote::CompareOptions,
+    },
+    /// Lets a run that stopped at the limit continue without one.
+    #[allow(dead_code)] // built by Task 5's compare state machine
+    CompareResume {
+        tab: TabId,
+        run: CompareRunId,
+    },
+    /// Cooperative cancel (folder change, Stop, auto-off): no new listing starts, the one
+    /// in flight finishes, and the run ends with `Finished(Ok(stopped))`.
+    #[allow(dead_code)] // built by Task 5's compare state machine
+    CompareCancel {
+        tab: TabId,
+        run: CompareRunId,
+    },
+    /// Abrupt cancel for a closed tab or a gone session: drops the run's future (an FTP
+    /// session may reconnect) and its registry entry; no `Finished` follows.
+    #[allow(dead_code)] // built by Task 5's compare state machine
+    CompareAbort {
+        tab: TabId,
+        run: CompareRunId,
+    },
     /// Connects the sites in parallel with one secret batch; one
     /// [`Message::SiteConnected`] per site, as each finishes.
     ConnectSites(Vec<SiteId>),
@@ -850,6 +887,7 @@ impl App {
         match msg {
             Message::ToggleQueue => self.queue_open = !self.queue_open,
             Message::Log(msg) => return self.log_msg(msg),
+            Message::Compare(msg) => return self.compare_msg(msg),
             Message::Palette(msg) => return self.palette_msg(msg),
             Message::WindowResized(width) => self.window_width = width,
             Message::FilterSites(filter) => self.site_filter = filter,

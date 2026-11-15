@@ -9,7 +9,7 @@ use std::time::Duration;
 use futures_util::{Stream, StreamExt, stream};
 use hoprs_core::{Error, ErrorKind, RemotePath, Site, SiteId, WorkspaceId};
 use hoprs_transfer::{Event, TransferSpec};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 
 use hoprs_import::ImportOptions;
 use hoprs_vault::ImportMode;
@@ -18,11 +18,12 @@ use secrecy::SecretString;
 use crate::app::edit::{EditsFor, FLUSH_LIMIT, Settle, Settled};
 use crate::app::terminal::ShellSignal;
 use crate::app::{
-    EditMsg, Effect, FileAction, Message, PickTarget, ProfileOp, RequestId, TabId, TerminalMsg,
+    CompareMsg, CompareRunId, EditMsg, Effect, FileAction, Message, PickTarget, ProfileOp,
+    RequestId, TabId, TerminalMsg,
 };
 use crate::backend::{
-    BackendApi, KeptEdit, KnownHostEntry, PromptAnswer, PromptId, SessionId, ShellId, ShellOutput,
-    Side, WorkspaceTabs,
+    BackendApi, CompareSignals, KeptEdit, KnownHostEntry, PromptAnswer, PromptId, SessionId,
+    ShellId, ShellOutput, Side, WorkspaceTabs,
 };
 use crate::settings::Settings;
 use crate::ui::site_form::PasswordChange;
@@ -123,6 +124,50 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
                     Task::done(Message::Key { key, shift })
                 }
             })
+        }
+        Effect::Compare {
+            tab,
+            run,
+            session,
+            local_root,
+            remote_root,
+            options,
+        } => {
+            let key = compare_key(&backend, tab, run);
+            let stream = compare_run(
+                backend,
+                key,
+                (tab, run),
+                session,
+                local_root,
+                remote_root,
+                options,
+            );
+            let (task, handle) = Task::run(stream, |m| m).abortable();
+            if let Some(entry) = compare_runs().get_mut(&key) {
+                entry.abort = Some(handle);
+            }
+            task
+        }
+        Effect::CompareResume { tab, run } => {
+            if let Some(entry) = compare_runs().get(&compare_key(&backend, tab, run)) {
+                let _ = entry.resume.send(true);
+            }
+            Task::none()
+        }
+        Effect::CompareCancel { tab, run } => {
+            if let Some(entry) = compare_runs().get(&compare_key(&backend, tab, run)) {
+                let _ = entry.stop.send(true);
+            }
+            Task::none()
+        }
+        Effect::CompareAbort { tab, run } => {
+            if let Some(entry) = compare_runs().remove(&compare_key(&backend, tab, run))
+                && let Some(handle) = entry.abort
+            {
+                handle.abort();
+            }
+            Task::none()
         }
         Effect::Enqueue(specs) => Task::perform(enqueue_all(backend, specs), Message::Enqueued),
         Effect::Control { id, op } => Task::perform(
@@ -895,6 +940,82 @@ pub fn engine_messages(
     stream::once(std::future::ready(Message::QueueResync)).chain(events)
 }
 
+/// A running comparison's handles.
+struct CompareRun {
+    resume: watch::Sender<bool>,
+    stop: watch::Sender<bool>,
+    /// Set right after the task is made; aborting drops the run's future.
+    abort: Option<iced::task::Handle>,
+}
+
+type CompareKey = (usize, TabId, CompareRunId);
+
+/// The running comparisons, by backend (its address, so tests with their own backends
+/// never meet), tab and run. An entry leaves when the run ends or is aborted.
+fn compare_runs()
+-> std::sync::MutexGuard<'static, std::collections::HashMap<CompareKey, CompareRun>> {
+    static RUNS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<CompareKey, CompareRun>>,
+    > = std::sync::OnceLock::new();
+    RUNS.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn compare_key(backend: &Arc<dyn BackendApi>, tab: TabId, run: CompareRunId) -> CompareKey {
+    (Arc::as_ptr(backend).cast::<()>() as usize, tab, run)
+}
+
+/// One comparison: its progress as it comes, then [`CompareMsg::Finished`] (last). The
+/// run's signals are registered before the first message, so a cancel sent right after
+/// the effect always finds them.
+pub fn compare_run(
+    backend: Arc<dyn BackendApi>,
+    key: CompareKey,
+    (tab, run): (TabId, CompareRunId),
+    session: SessionId,
+    local_root: RemotePath,
+    remote_root: RemotePath,
+    options: hoprs_remote::CompareOptions,
+) -> impl Stream<Item = Message> + Send + 'static {
+    let (resume_tx, resume) = watch::channel(false);
+    let (stop_tx, stop) = watch::channel(false);
+    compare_runs().insert(
+        key,
+        CompareRun {
+            resume: resume_tx,
+            stop: stop_tx,
+            abort: None,
+        },
+    );
+    let (tx, rx) = mpsc::unbounded_channel();
+    let done = async move {
+        let signals = CompareSignals { resume, stop };
+        let result = backend
+            .compare(session, local_root, remote_root, options, tx, signals)
+            .await;
+        compare_runs().remove(&key);
+        Message::Compare(CompareMsg::Finished { tab, run, result })
+    };
+    // The progress sender lives in the run, so the progress stream ends with it, before
+    // the final message.
+    let progress = stream::unfold(rx, move |mut rx| async move {
+        rx.recv().await.map(|progress| {
+            (
+                Message::Compare(CompareMsg::Progress { tab, run, progress }),
+                rx,
+            )
+        })
+    });
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    let driver = stream::once(async move {
+        let _ = result_tx.send(done.await);
+    })
+    .filter_map(|()| std::future::ready(None));
+    let last = stream::once(result_rx).filter_map(|r| std::future::ready(r.ok()));
+    stream::select(driver, progress.chain(last))
+}
+
 /// Runs one file operation: a delete's progress as it goes, then
 /// [`Message::FileOpDone`] (last).
 pub fn file_op(
@@ -1048,5 +1169,223 @@ fn open_with_system(dir: &Path) -> Result<(), Error> {
         )
         .arg("opener", opener)
         .with_detail(status.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod compare_tests {
+    use super::*;
+    use crate::backend::fake::FakeBackend;
+    use hoprs_core::Protocol;
+    use hoprs_remote::{CompareOptions, Progress, Status, Summary};
+    use std::time::SystemTime;
+
+    const TAB: TabId = TabId(7);
+
+    fn p(path: &str) -> RemotePath {
+        RemotePath::new(path).unwrap()
+    }
+
+    /// A fake backend with one connected site, and the stream of a run on it.
+    async fn setup() -> (Arc<FakeBackend>, SessionId) {
+        let site = Site::new("s", "h", "u", Protocol::Ssh);
+        let fake = Arc::new(FakeBackend::new().with_site(site.clone()));
+        let session = fake.connect(site.id).await.unwrap().session;
+        (fake, session)
+    }
+
+    fn start(
+        fake: &Arc<FakeBackend>,
+        session: SessionId,
+        run: u64,
+        options: CompareOptions,
+    ) -> std::pin::Pin<Box<dyn Stream<Item = Message> + Send>> {
+        let backend: Arc<dyn BackendApi> = fake.clone();
+        let run = CompareRunId(run);
+        let key = compare_key(&backend, TAB, run);
+        Box::pin(compare_run(
+            backend,
+            key,
+            (TAB, run),
+            session,
+            p("/l"),
+            p("/r"),
+            options,
+        ))
+    }
+
+    fn effect(fake: &Arc<FakeBackend>, effect: Effect) {
+        let backend: Arc<dyn BackendApi> = fake.clone();
+        let _ = run(backend, effect);
+    }
+
+    fn finished(msg: Message) -> Result<Summary, Error> {
+        match msg {
+            Message::Compare(CompareMsg::Finished { tab, result, .. }) => {
+                assert_eq!(tab, TAB);
+                result
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn runs_a_comparison_over_the_session_and_the_local_fs() {
+        let (fake, session) = setup().await;
+        let site = fake.session_site(session).unwrap();
+        let t = SystemTime::UNIX_EPOCH;
+        fake.local_fs().add_file("/l/same", b"x", t);
+        fake.local_fs().add_file("/l/only-here", b"x", t);
+        fake.remote_fs(&site).add_file("/r/same", b"x", t);
+        fake.remote_fs(&site).add_file("/r/only-there", b"x", t);
+
+        let messages: Vec<Message> = start(&fake, session, 1, CompareOptions::default())
+            .collect()
+            .await;
+        let (last, progress) = messages.split_last().unwrap();
+        let found: Vec<(String, Status)> = progress
+            .iter()
+            .filter_map(|m| match m {
+                Message::Compare(CompareMsg::Progress {
+                    run,
+                    progress: Progress::Found(d),
+                    ..
+                }) => {
+                    assert_eq!(*run, CompareRunId(1));
+                    Some((d.path.clone(), d.status.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                ("only-here".to_string(), Status::OnlyLocal),
+                ("only-there".to_string(), Status::OnlyRemote),
+            ]
+        );
+        let summary = finished(last.clone()).unwrap();
+        assert_eq!((summary.identical, summary.differences), (1, 2));
+        assert!(!summary.partial && !summary.stopped);
+        assert_eq!(fake.compare_calls(), vec![(session, p("/l"), p("/r"))]);
+        let backend: Arc<dyn BackendApi> = fake.clone();
+        assert!(!compare_runs().contains_key(&compare_key(&backend, TAB, CompareRunId(1))));
+    }
+
+    #[tokio::test]
+    async fn resume_after_the_limit_completes_the_run() {
+        let (fake, session) = setup().await;
+        let site = fake.session_site(session).unwrap();
+        let t = SystemTime::UNIX_EPOCH;
+        for root in ["/l", "/r"] {
+            for name in ["d1/f", "d2/f", "top"] {
+                if root == "/l" {
+                    fake.local_fs().add_file(&format!("{root}/{name}"), b"x", t);
+                } else {
+                    fake.remote_fs(&site)
+                        .add_file(&format!("{root}/{name}"), b"x", t);
+                }
+            }
+        }
+        let options = CompareOptions {
+            limit: Some(3),
+            ..Default::default()
+        };
+        let mut stream = start(&fake, session, 2, options);
+        loop {
+            match stream.next().await.expect("the run has not ended") {
+                Message::Compare(CompareMsg::Progress {
+                    progress: Progress::LimitReached { .. },
+                    ..
+                }) => break,
+                Message::Compare(CompareMsg::Progress { .. }) => {}
+                other => panic!("{other:?}"),
+            }
+        }
+        effect(
+            &fake,
+            Effect::CompareResume {
+                tab: TAB,
+                run: CompareRunId(2),
+            },
+        );
+        let last = loop {
+            let message = stream.next().await.expect("Finished comes last");
+            if matches!(message, Message::Compare(CompareMsg::Finished { .. })) {
+                break message;
+            }
+        };
+        let summary = finished(last).unwrap();
+        assert!(!summary.partial);
+        assert_eq!(summary.identical, 3);
+        assert!(
+            stream.next().await.is_none(),
+            "Finished is the last message"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_stops_cooperatively_and_ends_with_a_stopped_result() {
+        let (fake, session) = setup().await;
+        // The scripted run sends one item, then waits until stopped.
+        let _hold = fake.script_compare(
+            vec![Progress::Seen {
+                local: 1,
+                remote: 1,
+            }],
+            Err(Error::new(ErrorKind::Network, "not reached")),
+            true,
+        );
+        let mut stream = start(&fake, session, 3, CompareOptions::default());
+        assert!(matches!(
+            stream.next().await,
+            Some(Message::Compare(CompareMsg::Progress { .. }))
+        ));
+        effect(
+            &fake,
+            Effect::CompareCancel {
+                tab: TAB,
+                run: CompareRunId(3),
+            },
+        );
+        let summary = finished(stream.next().await.unwrap()).unwrap();
+        assert!(summary.stopped && summary.partial);
+        assert!(stream.next().await.is_none());
+        let backend: Arc<dyn BackendApi> = fake.clone();
+        assert!(!compare_runs().contains_key(&compare_key(&backend, TAB, CompareRunId(3))));
+    }
+
+    #[tokio::test]
+    async fn abort_drops_the_entry_and_no_finished_follows() {
+        let (fake, session) = setup().await;
+        let _hold = fake.script_compare(
+            Vec::new(),
+            Ok(Summary {
+                identical: 0,
+                differences: 0,
+                partial: false,
+                stopped: false,
+            }),
+            true,
+        );
+        let backend: Arc<dyn BackendApi> = fake.clone();
+        let run = CompareRunId(4);
+        let key = compare_key(&backend, TAB, run);
+        let _stream = start(&fake, session, 4, CompareOptions::default());
+        assert!(compare_runs().contains_key(&key));
+        effect(&fake, Effect::CompareAbort { tab: TAB, run });
+        assert!(!compare_runs().contains_key(&key));
+    }
+
+    #[tokio::test]
+    async fn a_closed_session_ends_with_the_session_closed_error() {
+        let (fake, session) = setup().await;
+        fake.close(session).await;
+        let messages: Vec<Message> = start(&fake, session, 5, CompareOptions::default())
+            .collect()
+            .await;
+        assert_eq!(messages.len(), 1);
+        let error = finished(messages.into_iter().next().unwrap()).unwrap_err();
+        assert_eq!(error.code, Some("session-closed"));
     }
 }
