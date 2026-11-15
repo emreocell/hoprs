@@ -177,3 +177,214 @@ terminal-search-no-match = No match
 shell-exited-code = Shell exited (code { $code })
 # The shell ended and the server sent no exit code.
 shell-exited = Shell exited
+
+## File panes
+local = Local
+col-name = Name
+col-size = Size
+col-modified = Modified
+col-permissions = Permissions
+sort-ascending = ↑
+sort-descending = ↓
+# The row that goes up one folder.
+parent-dir = ..
+# After a folder name, and between breadcrumb segments.
+path-separator = /
+# The breadcrumb's first segment for the home folder.
+home-dir = ~
+# The size column of a folder.
+no-size = -
+empty-folder = This folder is empty
+reconnect = Reconnect
+# Units of [`crate::ui::format::size`], base 1024.
+size-unit-b = B
+size-unit-kb = KB
+size-unit-mb = MB
+size-unit-gb = GB
+size-unit-tb = TB
+size-unit-pb = PB
+size-unit-eb = EB
+# Short month names for file dates.
+month-1 = Jan
+month-2 = Feb
+month-3 = Mar
+month-4 = Apr
+month-5 = May
+month-6 = Jun
+month-7 = Jul
+month-8 = Aug
+month-9 = Sep
+month-10 = Oct
+month-11 = Nov
+month-12 = Dec
+
+## Queue
+transfers = Transfers
+queue-active = Active
+queue-queued = Queued
+queue-failed = Failed
+queue-done = Done
+queue-hide = Hide
+queue-show = Show
+no-transfers = No transfers
+no-transfers-hint = Select files and press Upload or Download, drag them to the other pane, or drop them here.
+queue-loading = Loading transfers…
+nothing-active = Nothing running
+nothing-queued = Nothing waiting
+nothing-failed = No failures
+nothing-done = Nothing finished yet
+# Removes done, skipped, cancelled and failed rows (the engine's `clear_finished`).
+clear-finished = Clear finished and failed
+# [`CLEAR_FINISHED`] in a narrow window.
+clear-finished-short = Clear finished
+
+## Technical log panel
+log = Log
+log-error = Error
+log-warn = Warn
+log-info = Info
+log-debug = Debug
+filter-log = Filter log
+# Copies the lines the filters show (all of them without a filter).
+copy-shown = Copy shown
+clear = Clear
+clear-hint = Empties this panel only; new lines keep coming.
+log-level-hint = Shows lines at least this severe. Only info and above are recorded unless hoprs starts with RUST_LOG (for example RUST_LOG=debug).
+no-log-lines = Nothing logged yet
+no-log-matches = No lines match
+# The log panel's count: "1 line", "120 lines".
+log-lines =
+    { $count ->
+        [one] { $count } line
+       *[other] { $count } lines
+    }
+upload-arrow = ↑
+download-arrow = ↓
+waiting-for-worker = Waiting for a worker
+starting = Starting…
+# A folder whose files are being copied.
+transferring = Transferring…
+# A failed row the user dismissed (still failed in the engine; Retry stays).
+dismissed = Dismissed
+paused = Paused
+cancelled = Cancelled
+transfer-done = Done
+file-exists = File exists —
+overwrite = Overwrite
+resume = Resume
+skip = Skip
+pause = Pause
+# The engine also makes the answer its policy for every later conflict of this run.
+apply-to-all = Apply to all (this session)
+site-paused = Paused — connection lost
+drop-needs-site = Open a connected site to drop files into it
+drop-pane-busy = The remote folder is busy or not listed yet; drop again in a moment
+drop-unsupported = Can't upload this path
+# After the total speed: " total, 4 workers".
+total-workers =
+    { $workers ->
+        [one] total, { $workers } worker
+       *[other] total, { $workers } workers
+    }
+policy-ask = ask
+policy-overwrite = overwrite
+policy-skip = skip
+policy-overwrite-if-newer = overwrite if newer
+policy-resume = resume
+# In the queue head once an answer went "to all": "Conflicts: overwrite (this session)".
+session-policy = Conflicts: { $name } (this session)
+policy-if-newer = if newer
+# The same in a narrow window, as a short mono tag: "overwrite: session".
+session-policy-tag = { $name }: session
+# The queue database could not be opened: the engine runs on an in-memory queue.
+queue-unavailable = Transfer queue unavailable: { $reason }. Transfers this session won't survive a restart.
+skip-exists = exists
+skip-not-newer = not newer
+skip-already-complete = already complete
+# "Skipped: exists".
+skipped = Skipped: { $reason }
+
+## Status bar
+not-connected = Not connected
+
+## Status bar and connection states
+connecting = Connecting…
+connected = Connected
+waiting-for-you = Waiting for you
+closing = Saving tabs and closing…
+close-workspace = Close tabs
+reconnecting-now = Reconnecting…
+# A workspace's saved folder is gone; the pane shows a folder above it instead.
+saved-folder-gone = The saved folder { $saved } is gone; showing the nearest folder instead.
+# "Reconnecting (2/5)".
+reconnecting = Reconnecting ({ $attempt }/{ $of })
+# "Disconnected — Connection lost".
+disconnected = Disconnected — { $reason }
+# How an SSH session logged in: "ed25519 via ssh-agent", "rsa key", "password"...
+auth-none = no authentication
+auth-agent = { $key_type } via ssh-agent
+auth-key-file = { $key_type } key
+auth-password = password
+auth-keyboard-interactive = keyboard-interactive
+# An FTP site's security, in place of a login method.
+ftp-auth-ftp = FTP (unencrypted)
+ftp-auth-ftps-explicit = FTPS explicit
+ftp-auth-ftps-implicit = FTPS implicit
+# "3 of 3 sites in Shop".
+workspace-status = { $connected } of { $sites } in { $name }
+
+## File actions
+new-folder = New folder
+rename = Rename
+permissions = Permissions…
+# Short toolbar labels for the narrowest panes (`ui::fit::Toolbar::Narrow`).
+new-folder-short = Folder
+permissions-short = Perms…
+key-new-folder = F7
+key-rename = F2
+key-delete = Del
+key-edit = F4
+upload = Upload
+download = Download
+key-transfer = Ctrl ↵
+# The name a new folder starts with.
+new-folder-name = New folder
+name-empty = The name can't be empty
+name-invalid = The name can't contain / or be . or ..
+name-invalid-windows = The name can't contain \ on this disk
+name-spaces = The name can't start or end with a space
+mixed-permissions = Mixed permissions: showing the first item's
+name-taken = Something with this name is already here
+dismiss = Dismiss
+creating-folder = Creating folder…
+renaming = Renaming…
+changing-permissions = Changing permissions…
+delete-folders-note = Folders are deleted with everything in them.
+permissions-title = Permissions
+perm-owner = Owner
+perm-group = Group
+perm-others = Others
+perm-read = Read
+perm-write = Write
+perm-execute = Execute
+perm-octal = Octal
+octal-invalid = Three or four digits from 0 to 7
+apply = Apply
+# "Delete report.pdf?", "Delete 3 items?".
+delete-question-one = Delete { $name }?
+delete-question-many = Delete { $count } items?
+# "and 4 more".
+and-more = and { $count } more
+# "Deleting… 12 items".
+deleting =
+    { $done ->
+        [0] Deleting…
+        [1] Deleting… 1 item
+       *[other] Deleting… { $done } items
+    }
+# A delete that stopped after removing some items.
+deleted-then =
+    { $done ->
+        [1] Deleted 1 item, then: { $error }
+       *[other] Deleted { $done } items, then: { $error }
+    }

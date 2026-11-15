@@ -279,7 +279,7 @@ async fn drop_from_os_targets_remote_dir() {
     assert!(effects.is_empty());
     assert_eq!(
         app.queue.error.as_ref().map(|e| e.message.as_str()),
-        Some(strings::DROP_NEEDS_SITE)
+        Some(strings::drop_needs_site())
     );
     assert!(app.queue_open);
     app.update(Message::Queue(QueueMsg::DismissError));
@@ -327,7 +327,7 @@ async fn drop_from_os_targets_remote_dir() {
     assert!(no_enqueue(&effects));
     assert_eq!(
         app.queue.error.as_ref().map(|e| e.message.as_str()),
-        Some(strings::DROP_PANE_BUSY)
+        Some(strings::drop_pane_busy())
     );
     app.update(Message::Queue(QueueMsg::DismissError));
 
@@ -457,7 +457,7 @@ fn queue_tabs_partition_states() {
     assert_eq!(ids(&app.queue.rows_in(QueueTab::Queued)), [2]);
     assert_eq!(ids(&app.queue.rows_in(QueueTab::Failed)), [5]);
     assert_eq!(ids(&app.queue.rows_in(QueueTab::Done)), [6, 7, 8]);
-    assert_eq!(strings::queue_tab(strings::QUEUE_DONE, 3), "Done 3");
+    assert_eq!(strings::queue_tab(strings::queue_done(), 3), "Done 3");
 
     // Each state's buttons.
     let actions = |id| app.queue.actions(app.queue.row(TransferId(id)).unwrap());
@@ -723,7 +723,7 @@ async fn conflict_inline_apply_to_all() {
     ));
     assert!(app.form.is_none(), "no modal");
     // The label says the answer lasts for the session (the engine makes it its policy).
-    assert_eq!(strings::APPLY_TO_ALL, "Apply to all (this session)");
+    assert_eq!(strings::apply_to_all(), "Apply to all (this session)");
     assert_eq!(
         app.queue.session_policy(),
         None,

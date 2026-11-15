@@ -137,7 +137,7 @@ fn line(edit: &RemoteEdit) -> Element<'_, Message> {
             let choose = |choice| (!busy).then(|| edit_msg(EditMsg::Resolve { id, choice }));
             head = head
                 .push(small_button(
-                    strings::OVERWRITE,
+                    strings::overwrite(),
                     choose(EditChoice::Overwrite),
                     false,
                 ))
@@ -394,7 +394,7 @@ pub fn kept_notice(app: &App) -> Option<Element<'_, Message>> {
             text(strings::kept_notice(notice.count)).size(theme::TEXT_XS),
             container(path_text(notice.dir.display().to_string())).width(Length::Fill),
             small_button(
-                strings::DISMISS,
+                strings::dismiss(),
                 Some(edit_msg(EditMsg::DismissKept)),
                 false
             ),

@@ -10,13 +10,13 @@ use crate::ui::strings;
 
 /// `68 B`, `4.1 KB`, `812 KB`, `38 MB`: base 1024, one decimal below 10.
 pub fn size(bytes: u64) -> String {
-    let units = strings::SIZE_UNITS;
+    const UNITS: usize = 7;
     if bytes < 1024 {
-        return format!("{bytes} {}", units[0]);
+        return format!("{bytes} {}", strings::size_unit(0));
     }
     let mut value = bytes as f64;
     let mut unit = 0;
-    while value >= 1024.0 && unit + 1 < units.len() {
+    while value >= 1024.0 && unit + 1 < UNITS {
         value /= 1024.0;
         unit += 1;
     }
@@ -26,21 +26,21 @@ pub fn size(bytes: u64) -> String {
     } else {
         value.round()
     };
-    if shown >= 1024.0 && unit + 1 < units.len() {
+    if shown >= 1024.0 && unit + 1 < UNITS {
         value /= 1024.0;
         unit += 1;
         shown = (value * 10.0).round() / 10.0;
     }
     if shown < 10.0 {
-        format!("{shown:.1} {}", units[unit])
+        format!("{shown:.1} {}", strings::size_unit(unit))
     } else {
-        format!("{shown:.0} {}", units[unit])
+        format!("{shown:.0} {}", strings::size_unit(unit))
     }
 }
 
 /// `11 Nov 14:02` in `this_year`, `02 Oct 2024` otherwise.
 pub fn date(at: NaiveDateTime, this_year: i32) -> String {
-    let month = strings::MONTHS[at.month0() as usize];
+    let month = strings::month(at.month0());
     if at.year() == this_year {
         format!(
             "{:02} {month} {:02}:{:02}",
@@ -161,6 +161,7 @@ mod tests {
         assert_eq!(permissions(EntryKind::File, Some(0)), "----------");
         // FTP servers may give no mode at all.
         assert_eq!(permissions(EntryKind::File, None), "");
-        assert_eq!(strings::MONTHS.len(), 12);
+        assert_eq!(strings::month(0), "Jan");
+        assert_eq!(strings::month(11), "Dec");
     }
 }

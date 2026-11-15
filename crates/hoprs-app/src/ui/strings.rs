@@ -393,94 +393,236 @@ pub fn shell_exited(code: Option<u32>) -> String {
 }
 
 // File panes.
-pub const LOCAL: &str = "Local";
-pub const COL_NAME: &str = "Name";
-pub const COL_SIZE: &str = "Size";
-pub const COL_MODIFIED: &str = "Modified";
-pub const COL_PERMISSIONS: &str = "Permissions";
-pub const SORT_ASCENDING: &str = "↑";
-pub const SORT_DESCENDING: &str = "↓";
+pub fn local() -> &'static str {
+    tr("local")
+}
+pub fn col_name() -> &'static str {
+    tr("col-name")
+}
+pub fn col_size() -> &'static str {
+    tr("col-size")
+}
+pub fn col_modified() -> &'static str {
+    tr("col-modified")
+}
+pub fn col_permissions() -> &'static str {
+    tr("col-permissions")
+}
+pub fn sort_ascending() -> &'static str {
+    tr("sort-ascending")
+}
+pub fn sort_descending() -> &'static str {
+    tr("sort-descending")
+}
 /// The row that goes up one folder.
-pub const PARENT_DIR: &str = "..";
+pub fn parent_dir() -> &'static str {
+    tr("parent-dir")
+}
 /// After a folder name, and between breadcrumb segments.
-pub const PATH_SEPARATOR: &str = "/";
+pub fn path_separator() -> &'static str {
+    tr("path-separator")
+}
 /// The breadcrumb's first segment for the home folder.
-pub const HOME_DIR: &str = "~";
+pub fn home_dir() -> &'static str {
+    tr("home-dir")
+}
 /// The size column of a folder.
-pub const NO_SIZE: &str = "-";
-pub const EMPTY_FOLDER: &str = "This folder is empty";
-pub const RECONNECT: &str = "Reconnect";
+pub fn no_size() -> &'static str {
+    tr("no-size")
+}
+pub fn empty_folder() -> &'static str {
+    tr("empty-folder")
+}
+pub fn reconnect() -> &'static str {
+    tr("reconnect")
+}
 /// Units of [`crate::ui::format::size`], base 1024.
-pub const SIZE_UNITS: [&str; 7] = ["B", "KB", "MB", "GB", "TB", "PB", "EB"];
+pub fn size_unit(i: usize) -> &'static str {
+    match i {
+        0 => tr("size-unit-b"),
+        1 => tr("size-unit-kb"),
+        2 => tr("size-unit-mb"),
+        3 => tr("size-unit-gb"),
+        4 => tr("size-unit-tb"),
+        5 => tr("size-unit-pb"),
+        6 => tr("size-unit-eb"),
+        _ => "",
+    }
+}
 /// Short month names for file dates.
-pub const MONTHS: [&str; 12] = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-];
+pub fn month(m0: u32) -> &'static str {
+    match m0 {
+        0 => tr("month-1"),
+        1 => tr("month-2"),
+        2 => tr("month-3"),
+        3 => tr("month-4"),
+        4 => tr("month-5"),
+        5 => tr("month-6"),
+        6 => tr("month-7"),
+        7 => tr("month-8"),
+        8 => tr("month-9"),
+        9 => tr("month-10"),
+        10 => tr("month-11"),
+        11 => tr("month-12"),
+        _ => "",
+    }
+}
 
 // Queue.
-pub const TRANSFERS: &str = "Transfers";
-pub const QUEUE_ACTIVE: &str = "Active";
-pub const QUEUE_QUEUED: &str = "Queued";
-pub const QUEUE_FAILED: &str = "Failed";
-pub const QUEUE_DONE: &str = "Done";
-pub const QUEUE_HIDE: &str = "Hide";
-pub const QUEUE_SHOW: &str = "Show";
-pub const NO_TRANSFERS: &str = "No transfers";
-pub const NO_TRANSFERS_HINT: &str =
-    "Select files and press Upload or Download, drag them to the other pane, or drop them here.";
-pub const QUEUE_LOADING: &str = "Loading transfers…";
-pub const NOTHING_ACTIVE: &str = "Nothing running";
-pub const NOTHING_QUEUED: &str = "Nothing waiting";
-pub const NOTHING_FAILED: &str = "No failures";
-pub const NOTHING_DONE: &str = "Nothing finished yet";
+pub fn transfers() -> &'static str {
+    tr("transfers")
+}
+pub fn queue_active() -> &'static str {
+    tr("queue-active")
+}
+pub fn queue_queued() -> &'static str {
+    tr("queue-queued")
+}
+pub fn queue_failed() -> &'static str {
+    tr("queue-failed")
+}
+pub fn queue_done() -> &'static str {
+    tr("queue-done")
+}
+pub fn queue_hide() -> &'static str {
+    tr("queue-hide")
+}
+pub fn queue_show() -> &'static str {
+    tr("queue-show")
+}
+pub fn no_transfers() -> &'static str {
+    tr("no-transfers")
+}
+pub fn no_transfers_hint() -> &'static str {
+    tr("no-transfers-hint")
+}
+pub fn queue_loading() -> &'static str {
+    tr("queue-loading")
+}
+pub fn nothing_active() -> &'static str {
+    tr("nothing-active")
+}
+pub fn nothing_queued() -> &'static str {
+    tr("nothing-queued")
+}
+pub fn nothing_failed() -> &'static str {
+    tr("nothing-failed")
+}
+pub fn nothing_done() -> &'static str {
+    tr("nothing-done")
+}
 /// Removes done, skipped, cancelled and failed rows (the engine's `clear_finished`).
-pub const CLEAR_FINISHED: &str = "Clear finished and failed";
+pub fn clear_finished() -> &'static str {
+    tr("clear-finished")
+}
 /// [`CLEAR_FINISHED`] in a narrow window.
-pub const CLEAR_FINISHED_SHORT: &str = "Clear finished";
+pub fn clear_finished_short() -> &'static str {
+    tr("clear-finished-short")
+}
 // Technical log panel.
-pub const LOG: &str = "Log";
-pub const LOG_ERROR: &str = "Error";
-pub const LOG_WARN: &str = "Warn";
-pub const LOG_INFO: &str = "Info";
-pub const LOG_DEBUG: &str = "Debug";
-pub const FILTER_LOG: &str = "Filter log";
+pub fn log() -> &'static str {
+    tr("log")
+}
+pub fn log_error() -> &'static str {
+    tr("log-error")
+}
+pub fn log_warn() -> &'static str {
+    tr("log-warn")
+}
+pub fn log_info() -> &'static str {
+    tr("log-info")
+}
+pub fn log_debug() -> &'static str {
+    tr("log-debug")
+}
+pub fn filter_log() -> &'static str {
+    tr("filter-log")
+}
 /// Copies the lines the filters show (all of them without a filter).
-pub const COPY_SHOWN: &str = "Copy shown";
-pub const CLEAR: &str = "Clear";
-pub const CLEAR_HINT: &str = "Empties this panel only; new lines keep coming.";
-pub const LOG_LEVEL_HINT: &str = "Shows lines at least this severe. Only info and above are recorded unless hoprs starts with RUST_LOG (for example RUST_LOG=debug).";
-pub const NO_LOG_LINES: &str = "Nothing logged yet";
-pub const NO_LOG_MATCHES: &str = "No lines match";
+pub fn copy_shown() -> &'static str {
+    tr("copy-shown")
+}
+pub fn clear() -> &'static str {
+    tr("clear")
+}
+pub fn clear_hint() -> &'static str {
+    tr("clear-hint")
+}
+pub fn log_level_hint() -> &'static str {
+    tr("log-level-hint")
+}
+pub fn no_log_lines() -> &'static str {
+    tr("no-log-lines")
+}
+pub fn no_log_matches() -> &'static str {
+    tr("no-log-matches")
+}
 
 /// The log panel's count: "1 line", "120 lines".
 pub fn log_lines(n: usize) -> String {
-    count(n, "line", "lines")
+    tr_args("log-lines", &[("count", n.into())])
 }
 
-pub const UPLOAD_ARROW: &str = "↑";
-pub const DOWNLOAD_ARROW: &str = "↓";
-pub const WAITING_FOR_WORKER: &str = "Waiting for a worker";
-pub const STARTING: &str = "Starting…";
+pub fn upload_arrow() -> &'static str {
+    tr("upload-arrow")
+}
+pub fn download_arrow() -> &'static str {
+    tr("download-arrow")
+}
+pub fn waiting_for_worker() -> &'static str {
+    tr("waiting-for-worker")
+}
+pub fn starting() -> &'static str {
+    tr("starting")
+}
 /// A folder whose files are being copied.
-pub const TRANSFERRING: &str = "Transferring…";
+pub fn transferring() -> &'static str {
+    tr("transferring")
+}
 /// A failed row the user dismissed (still failed in the engine; Retry stays).
-pub const DISMISSED: &str = "Dismissed";
-pub const PAUSED: &str = "Paused";
-pub const CANCELLED: &str = "Cancelled";
-pub const TRANSFER_DONE: &str = "Done";
-pub const SKIPPED: &str = "Skipped";
-pub const FILE_EXISTS: &str = "File exists —";
-pub const OVERWRITE: &str = "Overwrite";
-pub const RESUME: &str = "Resume";
-pub const SKIP: &str = "Skip";
-pub const PAUSE: &str = "Pause";
+pub fn dismissed() -> &'static str {
+    tr("dismissed")
+}
+pub fn paused() -> &'static str {
+    tr("paused")
+}
+pub fn cancelled() -> &'static str {
+    tr("cancelled")
+}
+pub fn transfer_done() -> &'static str {
+    tr("transfer-done")
+}
+pub fn file_exists() -> &'static str {
+    tr("file-exists")
+}
+pub fn overwrite() -> &'static str {
+    tr("overwrite")
+}
+pub fn resume() -> &'static str {
+    tr("resume")
+}
+pub fn skip() -> &'static str {
+    tr("skip")
+}
+pub fn pause() -> &'static str {
+    tr("pause")
+}
 /// The engine also makes the answer its policy for every later conflict of this run.
-pub const APPLY_TO_ALL: &str = "Apply to all (this session)";
-pub const SITE_PAUSED: &str = "Paused — connection lost";
-pub const DROP_NEEDS_SITE: &str = "Open a connected site to drop files into it";
-pub const DROP_PANE_BUSY: &str =
-    "The remote folder is busy or not listed yet; drop again in a moment";
-pub const DROP_UNSUPPORTED: &str = "Can't upload this path";
+pub fn apply_to_all() -> &'static str {
+    tr("apply-to-all")
+}
+pub fn site_paused() -> &'static str {
+    tr("site-paused")
+}
+pub fn drop_needs_site() -> &'static str {
+    tr("drop-needs-site")
+}
+pub fn drop_pane_busy() -> &'static str {
+    tr("drop-pane-busy")
+}
+pub fn drop_unsupported() -> &'static str {
+    tr("drop-unsupported")
+}
 
 /// A queue tab: "Active 3".
 pub fn queue_tab(label: &str, count: usize) -> String {
@@ -494,11 +636,11 @@ pub fn speed(bytes_per_sec: u64) -> String {
 
 /// After the total speed: " total, 4 workers".
 pub fn total_workers(workers: usize) -> String {
-    if workers == 1 {
-        " total, 1 worker".to_owned()
-    } else {
-        format!(" total, {workers} workers")
-    }
+    // The leading space is part of the text (it follows the speed); Fluent trims it, so it is added here.
+    format!(
+        " {}",
+        tr_args("total-workers", &[("workers", workers.into())])
+    )
 }
 
 /// "51%".
@@ -519,62 +661,92 @@ pub fn bytes_and_speed(done: u64, bytes_per_sec: u64) -> String {
 pub fn session_policy(policy: hoprs_transfer::ConflictPolicy) -> String {
     use hoprs_transfer::ConflictPolicy::*;
     let name = match policy {
-        Ask => "ask",
-        Overwrite => "overwrite",
-        Skip => "skip",
-        OverwriteIfNewer => "overwrite if newer",
-        Resume => "resume",
+        Ask => tr("policy-ask"),
+        Overwrite => tr("policy-overwrite"),
+        Skip => tr("policy-skip"),
+        OverwriteIfNewer => tr("policy-overwrite-if-newer"),
+        Resume => tr("policy-resume"),
     };
-    format!("Conflicts: {name} (this session)")
+    tr_args("session-policy", &[("name", name.into())])
 }
 
 /// The same in a narrow window, as a short mono tag: "overwrite: session".
 pub fn session_policy_tag(policy: hoprs_transfer::ConflictPolicy) -> String {
     use hoprs_transfer::ConflictPolicy::*;
     let name = match policy {
-        Ask => "ask",
-        Overwrite => "overwrite",
-        Skip => "skip",
-        OverwriteIfNewer => "if newer",
-        Resume => "resume",
+        Ask => tr("policy-ask"),
+        Overwrite => tr("policy-overwrite"),
+        Skip => tr("policy-skip"),
+        OverwriteIfNewer => tr("policy-if-newer"),
+        Resume => tr("policy-resume"),
     };
-    format!("{name}: session")
+    tr_args("session-policy-tag", &[("name", name.into())])
 }
 
 /// The queue database could not be opened: the engine runs on an in-memory queue.
 pub fn queue_unavailable(reason: &str) -> String {
-    format!("Transfer queue unavailable: {reason}. Transfers this session won't survive a restart.")
+    tr_args("queue-unavailable", &[("reason", reason.into())])
+}
+
+/// A skip reason the engine stored, in the user's language; an unknown one passes through.
+pub fn skip_reason(raw: &str) -> String {
+    match raw {
+        "exists" => tr("skip-exists").to_owned(),
+        "not newer" => tr("skip-not-newer").to_owned(),
+        "already complete" => tr("skip-already-complete").to_owned(),
+        other => other.to_owned(),
+    }
 }
 
 /// "Skipped: exists".
 pub fn skipped(reason: &str) -> String {
-    format!("{SKIPPED}: {reason}")
+    tr_args(
+        "skipped",
+        &[("reason", skip_reason(reason).as_str().into())],
+    )
 }
 
 // Status bar.
-pub const NOT_CONNECTED: &str = "Not connected";
+pub fn not_connected() -> &'static str {
+    tr("not-connected")
+}
 
 // Status bar and connection states.
-pub const CONNECTING: &str = "Connecting…";
-pub const CONNECTED: &str = "Connected";
-pub const WAITING_FOR_YOU: &str = "Waiting for you";
-pub const CLOSING: &str = "Saving tabs and closing…";
-pub const CLOSE_WORKSPACE: &str = "Close tabs";
-pub const RECONNECTING_NOW: &str = "Reconnecting…";
+pub fn connecting() -> &'static str {
+    tr("connecting")
+}
+pub fn connected() -> &'static str {
+    tr("connected")
+}
+pub fn waiting_for_you() -> &'static str {
+    tr("waiting-for-you")
+}
+pub fn closing() -> &'static str {
+    tr("closing")
+}
+pub fn close_workspace() -> &'static str {
+    tr("close-workspace")
+}
+pub fn reconnecting_now() -> &'static str {
+    tr("reconnecting-now")
+}
 
 /// A workspace's saved folder is gone; the pane shows a folder above it instead.
 pub fn saved_folder_gone(saved: &str) -> String {
-    format!("The saved folder {saved} is gone; showing the nearest folder instead.")
+    tr_args("saved-folder-gone", &[("saved", saved.into())])
 }
 
 /// "Reconnecting (2/5)".
 pub fn reconnecting(attempt: u32, of: u32) -> String {
-    format!("Reconnecting ({attempt}/{of})")
+    tr_args(
+        "reconnecting",
+        &[("attempt", attempt.into()), ("of", of.into())],
+    )
 }
 
 /// "Disconnected — Connection lost".
 pub fn disconnected(reason: &str) -> String {
-    format!("Disconnected — {reason}")
+    tr_args("disconnected", &[("reason", reason.into())])
 }
 
 /// `user@host:port`.
@@ -586,11 +758,13 @@ pub fn endpoint(user: &str, host: &str, port: u16) -> String {
 pub fn ssh_auth(method: &hoprs_ssh::AuthMethod) -> String {
     use hoprs_ssh::AuthMethod;
     match method {
-        AuthMethod::None => "no authentication".to_owned(),
-        AuthMethod::Agent { key_type } => format!("{key_type} via ssh-agent"),
-        AuthMethod::KeyFile { key_type } => format!("{key_type} key"),
-        AuthMethod::Password => "password".to_owned(),
-        AuthMethod::KeyboardInteractive => "keyboard-interactive".to_owned(),
+        AuthMethod::None => tr("auth-none").to_owned(),
+        AuthMethod::Agent { key_type } => tr_args("auth-agent", &[("key_type", key_type.into())]),
+        AuthMethod::KeyFile { key_type } => {
+            tr_args("auth-key-file", &[("key_type", key_type.into())])
+        }
+        AuthMethod::Password => tr("auth-password").to_owned(),
+        AuthMethod::KeyboardInteractive => tr("auth-keyboard-interactive").to_owned(),
     }
 }
 
@@ -599,54 +773,129 @@ pub fn ftp_auth(protocol: hoprs_core::Protocol) -> Option<&'static str> {
     use hoprs_core::Protocol;
     match protocol {
         Protocol::Ssh => None,
-        Protocol::Ftp => Some("FTP (unencrypted)"),
-        Protocol::FtpsExplicit => Some("FTPS explicit"),
-        Protocol::FtpsImplicit => Some("FTPS implicit"),
+        Protocol::Ftp => Some(tr("ftp-auth-ftp")),
+        Protocol::FtpsExplicit => Some(tr("ftp-auth-ftps-explicit")),
+        Protocol::FtpsImplicit => Some(tr("ftp-auth-ftps-implicit")),
     }
 }
 
 /// "3 of 3 sites in Shop".
 pub fn workspace_status(connected: usize, total: usize, name: &str) -> String {
-    format!("{connected} of {} in {name}", site_count(total))
+    tr_args(
+        "workspace-status",
+        &[
+            ("connected", connected.into()),
+            ("sites", site_count(total).as_str().into()),
+            ("name", name.into()),
+        ],
+    )
 }
 
 // File actions.
-pub const NEW_FOLDER: &str = "New folder";
-pub const RENAME: &str = "Rename";
-pub const PERMISSIONS: &str = "Permissions…";
+pub fn new_folder() -> &'static str {
+    tr("new-folder")
+}
+pub fn rename() -> &'static str {
+    tr("rename")
+}
+pub fn permissions() -> &'static str {
+    tr("permissions")
+}
 /// Short toolbar labels for the narrowest panes (`ui::fit::Toolbar::Narrow`).
-pub const NEW_FOLDER_SHORT: &str = "Folder";
-pub const PERMISSIONS_SHORT: &str = "Perms…";
-pub const KEY_NEW_FOLDER: &str = "F7";
-pub const KEY_RENAME: &str = "F2";
-pub const KEY_DELETE: &str = "Del";
-pub const KEY_EDIT: &str = "F4";
-pub const UPLOAD: &str = "Upload";
-pub const DOWNLOAD: &str = "Download";
-pub const KEY_TRANSFER: &str = "Ctrl ↵";
+pub fn new_folder_short() -> &'static str {
+    tr("new-folder-short")
+}
+pub fn permissions_short() -> &'static str {
+    tr("permissions-short")
+}
+pub fn key_new_folder() -> &'static str {
+    tr("key-new-folder")
+}
+pub fn key_rename() -> &'static str {
+    tr("key-rename")
+}
+pub fn key_delete() -> &'static str {
+    tr("key-delete")
+}
+pub fn key_edit() -> &'static str {
+    tr("key-edit")
+}
+pub fn upload() -> &'static str {
+    tr("upload")
+}
+pub fn download() -> &'static str {
+    tr("download")
+}
+pub fn key_transfer() -> &'static str {
+    tr("key-transfer")
+}
 /// The name a new folder starts with.
-pub const NEW_FOLDER_NAME: &str = "New folder";
-pub const NAME_EMPTY: &str = "The name can't be empty";
-pub const NAME_INVALID: &str = "The name can't contain / or be . or ..";
-pub const NAME_INVALID_WINDOWS: &str = "The name can't contain \\ on this disk";
-pub const NAME_SPACES: &str = "The name can't start or end with a space";
-pub const MIXED_PERMISSIONS: &str = "Mixed permissions: showing the first item's";
-pub const NAME_TAKEN: &str = "Something with this name is already here";
-pub const DISMISS: &str = "Dismiss";
-pub const CREATING_FOLDER: &str = "Creating folder…";
-pub const RENAMING: &str = "Renaming…";
-pub const CHANGING_PERMISSIONS: &str = "Changing permissions…";
-pub const DELETE_FOLDERS_NOTE: &str = "Folders are deleted with everything in them.";
-pub const PERMISSIONS_TITLE: &str = "Permissions";
-pub const PERM_OWNER: &str = "Owner";
-pub const PERM_GROUP: &str = "Group";
-pub const PERM_OTHERS: &str = "Others";
-pub const PERM_READ: &str = "Read";
-pub const PERM_WRITE: &str = "Write";
-pub const PERM_EXECUTE: &str = "Execute";
-pub const PERM_OCTAL: &str = "Octal";
-pub const OCTAL_INVALID: &str = "Three or four digits from 0 to 7";
-pub const APPLY: &str = "Apply";
+pub fn new_folder_name() -> &'static str {
+    tr("new-folder-name")
+}
+pub fn name_empty() -> &'static str {
+    tr("name-empty")
+}
+pub fn name_invalid() -> &'static str {
+    tr("name-invalid")
+}
+pub fn name_invalid_windows() -> &'static str {
+    tr("name-invalid-windows")
+}
+pub fn name_spaces() -> &'static str {
+    tr("name-spaces")
+}
+pub fn mixed_permissions() -> &'static str {
+    tr("mixed-permissions")
+}
+pub fn name_taken() -> &'static str {
+    tr("name-taken")
+}
+pub fn dismiss() -> &'static str {
+    tr("dismiss")
+}
+pub fn creating_folder() -> &'static str {
+    tr("creating-folder")
+}
+pub fn renaming() -> &'static str {
+    tr("renaming")
+}
+pub fn changing_permissions() -> &'static str {
+    tr("changing-permissions")
+}
+pub fn delete_folders_note() -> &'static str {
+    tr("delete-folders-note")
+}
+pub fn permissions_title() -> &'static str {
+    tr("permissions-title")
+}
+pub fn perm_owner() -> &'static str {
+    tr("perm-owner")
+}
+pub fn perm_group() -> &'static str {
+    tr("perm-group")
+}
+pub fn perm_others() -> &'static str {
+    tr("perm-others")
+}
+pub fn perm_read() -> &'static str {
+    tr("perm-read")
+}
+pub fn perm_write() -> &'static str {
+    tr("perm-write")
+}
+pub fn perm_execute() -> &'static str {
+    tr("perm-execute")
+}
+pub fn perm_octal() -> &'static str {
+    tr("perm-octal")
+}
+pub fn octal_invalid() -> &'static str {
+    tr("octal-invalid")
+}
+pub fn apply() -> &'static str {
+    tr("apply")
+}
 /// How many names a confirmation lists before "and N more".
 pub const LISTED_NAMES: usize = 5;
 
@@ -658,32 +907,27 @@ pub fn numbered(name: &str, n: u32) -> String {
 /// "Delete report.pdf?", "Delete 3 items?".
 pub fn delete_question(names: &[&str]) -> String {
     match names {
-        [one] => format!("Delete {one}?"),
-        many => format!("Delete {} items?", many.len()),
+        [one] => tr_args("delete-question-one", &[("name", (*one).into())]),
+        many => tr_args("delete-question-many", &[("count", many.len().into())]),
     }
 }
 
 /// "and 4 more".
 pub fn and_more(n: usize) -> String {
-    format!("and {n} more")
+    tr_args("and-more", &[("count", n.into())])
 }
 
 /// "Deleting… 12 items".
 pub fn deleting(done: u64) -> String {
-    match done {
-        0 => "Deleting…".to_owned(),
-        1 => "Deleting… 1 item".to_owned(),
-        n => format!("Deleting… {n} items"),
-    }
+    tr_args("deleting", &[("done", done.into())])
 }
 
 /// A delete that stopped after removing some items.
 pub fn deleted_then(done: u64, error: &str) -> String {
-    if done == 1 {
-        format!("Deleted 1 item, then: {error}")
-    } else {
-        format!("Deleted {done} items, then: {error}")
-    }
+    tr_args(
+        "deleted-then",
+        &[("done", done.into()), ("error", error.into())],
+    )
 }
 
 // Security and credential dialogs.
@@ -1082,5 +1326,136 @@ mod tests {
             "Shell encerrado (código 130)"
         );
         assert_eq!(pt("shell-exited", &[]), "Shell encerrado");
+    }
+
+    #[test]
+    fn pt_br_log_lines_and_total_workers() {
+        for (n, want) in [(0usize, "0 linhas"), (1, "1 linha"), (2, "2 linhas")] {
+            assert_eq!(pt("log-lines", &[("count", n.into())]), want);
+        }
+        for (n, want) in [
+            (0usize, "no total, 0 workers"),
+            (1, "no total, 1 worker"),
+            (4, "no total, 4 workers"),
+        ] {
+            assert_eq!(pt("total-workers", &[("workers", n.into())]), want);
+        }
+    }
+
+    #[test]
+    fn total_workers_keeps_its_leading_space() {
+        assert_eq!(super::total_workers(1), " total, 1 worker");
+        assert_eq!(super::total_workers(4), " total, 4 workers");
+    }
+
+    #[test]
+    fn pt_br_session_policy_and_queue_texts() {
+        assert_eq!(
+            pt("session-policy", &[("name", "sobrescrever".into())]),
+            "Conflitos: sobrescrever (nesta sessão)"
+        );
+        assert_eq!(
+            pt("session-policy-tag", &[("name", "se mais novo".into())]),
+            "se mais novo: sessão"
+        );
+        assert!(
+            pt("queue-unavailable", &[("reason", "disco cheio".into())]).contains("disco cheio")
+        );
+        assert_eq!(
+            pt("saved-folder-gone", &[("saved", "/srv".into())]),
+            "A pasta salva /srv não existe mais; mostrando a pasta mais próxima."
+        );
+    }
+
+    #[test]
+    fn pt_br_skip_reasons_translate_and_unknown_ones_pass_through() {
+        let cat = Catalog::new(Language::PtBr);
+        assert_eq!(cat.tr("skip-exists"), "já existe");
+        assert_eq!(cat.tr("skip-not-newer"), "não é mais novo");
+        assert_eq!(cat.tr("skip-already-complete"), "já está completo");
+        assert_eq!(
+            pt("skipped", &[("reason", "já existe".into())]),
+            "Ignorado: já existe"
+        );
+        // English process language: known reasons read as before, others unchanged.
+        assert_eq!(super::skip_reason("exists"), "exists");
+        assert_eq!(super::skip_reason("not newer"), "not newer");
+        assert_eq!(super::skip_reason("already complete"), "already complete");
+        assert_eq!(super::skip_reason("disk full"), "disk full");
+        assert_eq!(super::skipped("disk full"), "Skipped: disk full");
+    }
+
+    #[test]
+    fn pt_br_status_and_auth_texts() {
+        assert_eq!(
+            pt(
+                "reconnecting",
+                &[("attempt", 2u32.into()), ("of", 5u32.into())]
+            ),
+            "Reconectando (2/5)"
+        );
+        assert_eq!(
+            pt("disconnected", &[("reason", "queda".into())]),
+            "Desconectado — queda"
+        );
+        assert_eq!(
+            pt("auth-agent", &[("key_type", "ed25519".into())]),
+            "ed25519 via ssh-agent"
+        );
+        assert_eq!(
+            pt("auth-key-file", &[("key_type", "rsa".into())]),
+            "chave rsa"
+        );
+        assert_eq!(
+            pt(
+                "workspace-status",
+                &[
+                    ("connected", 2usize.into()),
+                    ("sites", "3 sites".into()),
+                    ("name", "Loja".into())
+                ]
+            ),
+            "2 de 3 sites em Loja"
+        );
+    }
+
+    #[test]
+    fn pt_br_delete_texts() {
+        assert_eq!(
+            pt("delete-question-one", &[("name", "a.txt".into())]),
+            "Excluir a.txt?"
+        );
+        assert_eq!(
+            pt("delete-question-many", &[("count", 3usize.into())]),
+            "Excluir 3 itens?"
+        );
+        assert_eq!(pt("and-more", &[("count", 4usize.into())]), "e mais 4");
+        for (n, want) in [
+            (0u64, "Excluindo…"),
+            (1, "Excluindo… 1 item"),
+            (12, "Excluindo… 12 itens"),
+        ] {
+            assert_eq!(pt("deleting", &[("done", n.into())]), want);
+        }
+        let then = |n: u64| {
+            pt(
+                "deleted-then",
+                &[("done", n.into()), ("error", "negado".into())],
+            )
+        };
+        assert_eq!(then(0), "0 itens excluídos; depois: negado");
+        assert_eq!(then(1), "1 item excluído; depois: negado");
+        assert_eq!(then(2), "2 itens excluídos; depois: negado");
+    }
+
+    #[test]
+    fn pt_br_size_units_and_months() {
+        let cat = Catalog::new(Language::PtBr);
+        assert_eq!(cat.tr("size-unit-kb"), "KB");
+        let months: Vec<_> = (1..=12).map(|n| cat.tr(&format!("month-{n}"))).collect();
+        assert_eq!(
+            months.join(" "),
+            "jan fev mar abr mai jun jul ago set out nov dez"
+        );
     }
 }

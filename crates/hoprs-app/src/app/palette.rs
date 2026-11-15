@@ -418,7 +418,7 @@ impl App {
         if self.reconnect_message(tab).is_some() {
             out.push(Entry::action(
                 PaletteItem::Reconnect(tab.id),
-                strings::RECONNECT,
+                strings::reconnect(),
                 None,
             ));
         }
@@ -461,18 +461,26 @@ impl App {
         };
         out.push(key(
             FileKey::NewFolder,
-            strings::NEW_FOLDER,
-            strings::KEY_NEW_FOLDER,
+            strings::new_folder(),
+            strings::key_new_folder(),
         ));
         if !pane.selected_entries().is_empty() {
-            out.push(key(FileKey::Rename, strings::RENAME, strings::KEY_RENAME));
-            out.push(key(FileKey::Delete, strings::delete(), strings::KEY_DELETE));
+            out.push(key(
+                FileKey::Rename,
+                strings::rename(),
+                strings::key_rename(),
+            ));
+            out.push(key(
+                FileKey::Delete,
+                strings::delete(),
+                strings::key_delete(),
+            ));
         }
         if matches!(self.edit_target(index, side), Some(Ok(_))) {
             out.push(key(
                 FileKey::Edit,
                 strings::palette_edit(),
-                strings::KEY_EDIT,
+                strings::key_edit(),
             ));
         }
         if !self.transfer_specs(index, side).is_empty() {
@@ -480,7 +488,7 @@ impl App {
                 Side::Local => strings::palette_upload(),
                 Side::Remote => strings::palette_download(),
             };
-            out.push(key(FileKey::Transfer, label, strings::KEY_TRANSFER));
+            out.push(key(FileKey::Transfer, label, strings::key_transfer()));
         }
     }
 

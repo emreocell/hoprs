@@ -182,7 +182,7 @@ pub fn map_key(
 pub fn view<'a>(app: &'a App, tab: &'a Tab, terminal: &'a TerminalTab) -> Element<'a, Message> {
     let body: Element<'a, Message> = match app.conn(&tab.site).state {
         TabState::Failed(_) => crate::ui::files::not_connected(app, tab),
-        TabState::Connecting => centered(text(strings::CONNECTING).color(palette().muted)),
+        TabState::Connecting => centered(text(strings::connecting()).color(palette().muted)),
         TabState::Connected(_) => {
             // An ended shell takes no keys (its cursor is an outline).
             let focused = app.terminal_has_keyboard(tab);

@@ -114,11 +114,11 @@ impl App {
             .and_then(|id| self.tab_index(id))
             .filter(|&i| self.tabs[i].is_files() && self.tab_session(i).is_some());
         let Some(index) = connected else {
-            self.queue_error(Error::new(ErrorKind::NotFound, strings::DROP_NEEDS_SITE));
+            self.queue_error(Error::new(ErrorKind::NotFound, strings::drop_needs_site()));
             return Vec::new();
         };
         if !self.can_act(index, Side::Remote) {
-            self.queue_error(Error::new(ErrorKind::Conflict, strings::DROP_PANE_BUSY));
+            self.queue_error(Error::new(ErrorKind::Conflict, strings::drop_pane_busy()));
             return Vec::new();
         }
         let local = local_path(path);
@@ -128,7 +128,7 @@ impl App {
             .map(str::to_owned);
         let (Some(local), Some(name)) = (local, name) else {
             self.queue_error(
-                Error::new(ErrorKind::Io, strings::DROP_UNSUPPORTED)
+                Error::new(ErrorKind::Io, strings::drop_unsupported())
                     .with_detail(path.display().to_string()),
             );
             return Vec::new();

@@ -305,7 +305,7 @@ fn workspace<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
     // The open workspace can be closed: its tabs are saved, then closed.
     let actions = if app.open_workspace.as_ref() == Some(&ws.id) {
         actions.push(
-            button(text(strings::CLOSE_WORKSPACE).size(theme::TEXT_XS))
+            button(text(strings::close_workspace()).size(theme::TEXT_XS))
                 .padding(Padding::from([0.0, theme::SPACE_2XS]))
                 .style(theme::button_text)
                 .on_press(Message::CloseWorkspace(ws.id.clone())),

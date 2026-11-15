@@ -499,7 +499,7 @@ fn export_actions(backup: &Backup) -> Element<'_, Message> {
     if backup.confirm_overwrite {
         return confirm_with(
             strings::EXPORT_OVERWRITE_CONFIRM,
-            strings::OVERWRITE,
+            strings::overwrite(),
             backup_msg(BackupMsg::ConfirmOverwrite),
             backup_msg(BackupMsg::CancelOverwrite),
         );

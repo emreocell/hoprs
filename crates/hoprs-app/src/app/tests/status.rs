@@ -87,7 +87,7 @@ async fn status_texts_for_each_state() {
 
     // Nothing open: only the state.
     let line = status::line(&app);
-    assert_eq!(line.state, strings::NOT_CONNECTED);
+    assert_eq!(line.state, strings::not_connected());
     assert_eq!(
         (line.endpoint, line.auth, line.workspace),
         (None, None, None)
@@ -470,7 +470,7 @@ async fn close_request_saves_then_shuts_down_in_order() {
     assert_eq!(tabs.len(), 2);
     assert_eq!(tabs[0].1[0].remote_dir.as_deref(), Some("/var/www"));
     assert!(app.closing);
-    assert_eq!(status::line(&app).state, strings::CLOSING);
+    assert_eq!(status::line(&app).state, strings::closing());
     // (A second request while closing force-closes: see
     // `panicking_shutdown_and_second_request_still_exit`.)
 

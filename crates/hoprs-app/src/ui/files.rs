@@ -40,14 +40,14 @@ pub fn breadcrumb_segments(path: &RemotePath, home: Option<&RemotePath>) -> Vec<
     let (mut crumbs, rest) = match home {
         Some(home) => (
             vec![Crumb {
-                label: strings::HOME_DIR.to_owned(),
+                label: strings::home_dir().to_owned(),
                 target: home.clone(),
             }],
             &path.as_str()[home.as_str().len()..],
         ),
         None => (
             vec![Crumb {
-                label: strings::PATH_SEPARATOR.to_owned(),
+                label: strings::path_separator().to_owned(),
                 target: RemotePath::root(),
             }],
             path.as_str(),
@@ -180,7 +180,7 @@ pub fn view<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> {
         .map_or(strings::site_missing(), |s| s.name.as_str());
     let this_year = format::current_year();
     let panes = row![
-        pane(app, tab, Side::Local, strings::LOCAL, this_year),
+        pane(app, tab, Side::Local, strings::local(), this_year),
         rule::vertical(theme::HAIRLINE).style(theme::rule_1px),
         pane(app, tab, Side::Remote, site_name, this_year),
     ]
@@ -234,7 +234,7 @@ pub(crate) fn lost_banner<'a>(app: &'a App, tab: &'a Tab) -> Option<Element<'a, 
         Banner::Lost(error) => error,
         Banner::Reconnecting => {
             return Some(
-                container(text(strings::RECONNECTING_NOW).color(palette().muted))
+                container(text(strings::reconnecting_now()).color(palette().muted))
                     .width(Length::Fill)
                     .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_MD]))
                     .style(theme::pane_bar)
@@ -264,9 +264,9 @@ pub(crate) fn lost_banner<'a>(app: &'a App, tab: &'a Tab) -> Option<Element<'a, 
         );
     }
     let label = if conn.reconnecting {
-        strings::RECONNECTING_NOW
+        strings::reconnecting_now()
     } else {
-        strings::RECONNECT
+        strings::reconnect()
     };
     let reconnect = button(text(label))
         .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
@@ -315,7 +315,7 @@ fn pane<'a>(
             // `..` stays reachable from an empty folder.
             pane.has_up()
                 .then(|| file_row(tab.id, side, pane, 0, this_year, focused, cols)),
-            centered(text(strings::EMPTY_FOLDER).color(palette().muted).into()),
+            centered(text(strings::empty_folder()).color(palette().muted).into()),
         ]
         .into(),
         PaneStatus::Failed(error) => failed(error, msg(PaneMsg::Retry)),
@@ -389,7 +389,7 @@ fn path_bar<'a>(
         // The root "/" is itself the separator before the first folder.
         if i > 0 && !(i == 1 && crumb_is_root(&pane.path, home)) {
             crumbs = crumbs.push(
-                text(strings::PATH_SEPARATOR)
+                text(strings::path_separator())
                     .font(theme::MONO)
                     .size(theme::TEXT_MONO)
                     .color(p.rule_2),
@@ -450,9 +450,9 @@ fn header<'a>(
     let p = palette();
     let sortable = |label: &'static str, key: SortKey, width: Length, right: bool| {
         let arrow = (pane.sort.key == key).then_some(if pane.sort.descending {
-            strings::SORT_DESCENDING
+            strings::sort_descending()
         } else {
-            strings::SORT_ASCENDING
+            strings::sort_ascending()
         });
         let mut label = row![text(label).font(theme::INTER_MEDIUM).size(theme::TEXT_XS)]
             .spacing(theme::SPACE_2XS);
@@ -471,9 +471,9 @@ fn header<'a>(
             .on_press(msg(PaneMsg::Sort(key)))
     };
     let mut cells = row![
-        sortable(strings::COL_NAME, SortKey::Name, Length::Fill, false),
+        sortable(strings::col_name(), SortKey::Name, Length::Fill, false),
         sortable(
-            strings::COL_SIZE,
+            strings::col_size(),
             SortKey::Size,
             Length::Fixed(SIZE_WIDTH),
             true
@@ -481,7 +481,7 @@ fn header<'a>(
     ];
     if cols.modified {
         cells = cells.push(sortable(
-            strings::COL_MODIFIED,
+            strings::col_modified(),
             SortKey::Modified,
             Length::Fixed(MODIFIED_WIDTH),
             false,
@@ -490,7 +490,7 @@ fn header<'a>(
     if cols.permissions {
         cells = cells.push(
             container(
-                text(strings::COL_PERMISSIONS)
+                text(strings::col_permissions())
                     .font(theme::INTER_MEDIUM)
                     .size(theme::TEXT_XS)
                     .color(p.muted),
@@ -561,7 +561,7 @@ fn file_row<'a>(
     let (name, is_dir, size, modified, permissions) = match pane.row(index) {
         None => return space().height(ROW_HEIGHT).into(),
         Some(Row::Up) => (
-            strings::PARENT_DIR,
+            strings::parent_dir(),
             true,
             String::new(),
             String::new(),
@@ -573,7 +573,7 @@ fn file_row<'a>(
                 entry.name.as_str(),
                 is_dir,
                 if is_dir {
-                    strings::NO_SIZE.to_owned()
+                    strings::no_size().to_owned()
                 } else {
                     format::size(entry.size)
                 },
@@ -602,7 +602,7 @@ fn file_row<'a>(
     ];
     if is_dir && !up {
         name_cell = name_cell.push(
-            text(strings::PATH_SEPARATOR)
+            text(strings::path_separator())
                 .font(theme::MONO)
                 .size(theme::TEXT_MONO)
                 .color(p.muted),
@@ -734,7 +734,7 @@ pub(crate) fn not_connected<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Messa
         TabState::Failed(failure) => Some(failure),
         TabState::Connecting | TabState::Connected(_) => None,
     };
-    let mut body = column![text(strings::NOT_CONNECTED).font(theme::INTER_SEMIBOLD)]
+    let mut body = column![text(strings::not_connected()).font(theme::INTER_SEMIBOLD)]
         .spacing(theme::SPACE_XS)
         .align_x(Alignment::Center);
     if let Some(failure) = failure {
@@ -759,7 +759,7 @@ pub(crate) fn not_connected<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Messa
     for action in app.failure_actions(tab) {
         let (label, style, on_press): (_, fn(&iced::Theme, _) -> _, _) = match action {
             FailureAction::Reconnect => (
-                strings::RECONNECT,
+                strings::reconnect(),
                 theme::button_outline,
                 Message::ConnectSite(tab.site.clone()),
             ),

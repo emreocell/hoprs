@@ -103,7 +103,7 @@ fn session_tab<'a>(app: &'a App, index: usize, tab: &'a Tab) -> Element<'a, Mess
         .on_press(Message::CloseTab(tab.id));
     // The site's transfers stopped on a lost connection, until they run again.
     let paused = app.queue.site_paused(&tab.site).map(|_| {
-        text(strings::SITE_PAUSED)
+        text(strings::site_paused())
             .size(theme::TEXT_TAG)
             .color(p.error)
             .wrapping(text::Wrapping::None)

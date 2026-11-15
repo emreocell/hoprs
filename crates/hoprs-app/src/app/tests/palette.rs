@@ -180,10 +180,10 @@ async fn palette_lists_context_actions() {
     for label in [
         strings::new_terminal_tab(),
         strings::new_files_tab(),
-        strings::RECONNECT,
+        strings::reconnect(),
         strings::palette_close_tab(),
         strings::palette_open_workspace(),
-        strings::NEW_FOLDER,
+        strings::new_folder(),
         strings::palette_paste(),
     ] {
         assert!(entry(&entries, label).is_none(), "{label}: {entries:?}");
@@ -229,16 +229,16 @@ async fn palette_lists_context_actions() {
     assert_eq!(find.shortcut, Some(strings::palette_key_find()));
     // Nothing selected in the terminal: no Copy. No file actions in a terminal tab.
     assert!(entry(&entries, strings::palette_copy()).is_none());
-    assert!(entry(&entries, strings::NEW_FOLDER).is_none());
-    assert!(entry(&entries, strings::RECONNECT).is_none(), "connected");
+    assert!(entry(&entries, strings::new_folder()).is_none());
+    assert!(entry(&entries, strings::reconnect()).is_none(), "connected");
 
     // The files tab: its focused pane's actions, each with its key; Rename and Delete
     // need a selection.
     app.update(Message::SelectTab(1));
     let entries = all(&app);
-    let new_folder = entry(&entries, strings::NEW_FOLDER).expect("new folder");
-    assert_eq!(new_folder.shortcut, Some(strings::KEY_NEW_FOLDER));
-    assert!(entry(&entries, strings::RENAME).is_none());
+    let new_folder = entry(&entries, strings::new_folder()).expect("new folder");
+    assert_eq!(new_folder.shortcut, Some(strings::key_new_folder()));
+    assert!(entry(&entries, strings::rename()).is_none());
     assert!(entry(&entries, strings::palette_paste()).is_none());
     app.update(Message::Key {
         key: FileKey::SwitchPane,
@@ -246,25 +246,25 @@ async fn palette_lists_context_actions() {
     });
     app.update(pane_msg(files, Side::Remote, PaneMsg::Click(0)));
     let entries = all(&app);
-    let rename = entry(&entries, strings::RENAME).expect("rename");
+    let rename = entry(&entries, strings::rename()).expect("rename");
     assert_eq!(
         (rename.item.clone(), rename.shortcut),
         (
             PaletteItem::FileKey(FileKey::Rename, Side::Remote),
-            Some(strings::KEY_RENAME)
+            Some(strings::key_rename())
         )
     );
     assert_eq!(
         entry(&entries, strings::delete()).and_then(|e| e.shortcut),
-        Some(strings::KEY_DELETE)
+        Some(strings::key_delete())
     );
     assert_eq!(
         entry(&entries, strings::palette_edit()).and_then(|e| e.shortcut),
-        Some(strings::KEY_EDIT)
+        Some(strings::key_edit())
     );
     assert_eq!(
         entry(&entries, strings::palette_download()).and_then(|e| e.shortcut),
-        Some(strings::KEY_TRANSFER)
+        Some(strings::key_transfer())
     );
 
     // The connection is lost: Reconnect, and no new tab on a dead session.
@@ -276,7 +276,7 @@ async fn palette_lists_context_actions() {
     });
     let entries = all(&app);
     assert_eq!(
-        entry(&entries, strings::RECONNECT).map(|e| e.item.clone()),
+        entry(&entries, strings::reconnect()).map(|e| e.item.clone()),
         Some(PaletteItem::Reconnect(files))
     );
     assert!(entry(&entries, strings::new_terminal_tab()).is_none());
@@ -633,7 +633,7 @@ async fn empty_query_reaches_sites_workspaces_and_settings() {
     // The tab's own actions first, at most 5.
     let context = groups.iter().take_while(|g| **g == Group::Action).count();
     assert_eq!(context, 5, "{:?}", labels(&results));
-    assert_eq!(results[0].label, strings::NEW_FOLDER);
+    assert_eq!(results[0].label, strings::new_folder());
     // Then the other tabs (not the active one), at most 3.
     let tabs: Vec<&Entry> = results.iter().filter(|e| e.group == Group::Tab).collect();
     assert_eq!(tabs.len(), 3, "{:?}", labels(&results));

@@ -31,9 +31,9 @@ pub fn toolbar<'a>(
     let compact = !form.hints();
     let short = form.short_labels();
     let (new_folder, permissions) = if short {
-        (strings::NEW_FOLDER_SHORT, strings::PERMISSIONS_SHORT)
+        (strings::new_folder_short(), strings::permissions_short())
     } else {
-        (strings::NEW_FOLDER, strings::PERMISSIONS)
+        (strings::new_folder(), strings::permissions())
     };
     let Some(pane) = tab.pane(side) else {
         return space().into();
@@ -67,8 +67,8 @@ pub fn toolbar<'a>(
             .on_press_maybe(enabled.then(|| msg(pane_msg)))
     };
     let transfer = match side {
-        Side::Local => strings::UPLOAD,
-        Side::Remote => strings::DOWNLOAD,
+        Side::Local => strings::upload(),
+        Side::Remote => strings::download(),
     };
     let mut bar = row![];
     // Edit (remote): the selected file, or why it can't be (the hint, on the right).
@@ -77,7 +77,7 @@ pub fn toolbar<'a>(
     if !(compact && pane.busy.is_some()) {
         bar = bar.push(action(
             transfer,
-            Some(strings::KEY_TRANSFER),
+            Some(strings::key_transfer()),
             tab.can_transfer(conn, side),
             PaneMsg::Transfer,
         ));
@@ -88,23 +88,23 @@ pub fn toolbar<'a>(
             .push(full_label_tip(
                 action(
                     new_folder,
-                    Some(strings::KEY_NEW_FOLDER),
+                    Some(strings::key_new_folder()),
                     can,
                     PaneMsg::NewFolder,
                 ),
                 short,
-                strings::NEW_FOLDER,
-                Some(strings::KEY_NEW_FOLDER),
+                strings::new_folder(),
+                Some(strings::key_new_folder()),
             ))
             .push(action(
-                strings::RENAME,
-                Some(strings::KEY_RENAME),
+                strings::rename(),
+                Some(strings::key_rename()),
                 some,
                 PaneMsg::Rename,
             ))
             .push(action(
                 strings::delete(),
-                Some(strings::KEY_DELETE),
+                Some(strings::key_delete()),
                 some,
                 PaneMsg::Delete,
             ));
@@ -112,7 +112,7 @@ pub fn toolbar<'a>(
             bar = bar.push(full_label_tip(
                 action(permissions, None, chmod, PaneMsg::Permissions),
                 short,
-                strings::PERMISSIONS,
+                strings::permissions(),
                 None,
             ));
         }
@@ -120,10 +120,10 @@ pub fn toolbar<'a>(
     bar = bar.push(space().width(Length::Fill));
     if let Some(busy) = &pane.busy {
         let label = match busy.kind {
-            BusyKind::NewFolder => strings::CREATING_FOLDER.to_owned(),
-            BusyKind::Rename => strings::RENAMING.to_owned(),
+            BusyKind::NewFolder => strings::creating_folder().to_owned(),
+            BusyKind::Rename => strings::renaming().to_owned(),
             BusyKind::Delete => strings::deleting(busy.done),
-            BusyKind::Permissions => strings::CHANGING_PERMISSIONS.to_owned(),
+            BusyKind::Permissions => strings::changing_permissions().to_owned(),
         };
         bar = bar.push(
             text(label)
@@ -186,7 +186,7 @@ fn edit_action<'a>(
     .spacing(theme::SPACE_2XS);
     if !compact {
         content = content.push(
-            text(strings::KEY_EDIT)
+            text(strings::key_edit())
                 .font(theme::MONO)
                 .size(theme::TEXT_TAG)
                 .color(p.rule_2),
@@ -251,7 +251,7 @@ fn note_bar(note: &str, dismiss: Message) -> Element<'_, Message> {
             .size(theme::TEXT_XS)
             .color(palette().muted)
             .width(Length::Fill),
-        button(text(strings::DISMISS).size(theme::TEXT_XS))
+        button(text(strings::dismiss()).size(theme::TEXT_XS))
             .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
             .style(theme::button_text)
             .on_press(dismiss),
@@ -320,7 +320,7 @@ pub fn error_bar(error: &Error, dismiss: Message) -> Element<'_, Message> {
     }
     bar(row![
         lines,
-        button(text(strings::DISMISS).size(theme::TEXT_XS))
+        button(text(strings::dismiss()).size(theme::TEXT_XS))
             .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
             .style(theme::button_text)
             .on_press(dismiss),
@@ -347,7 +347,7 @@ fn confirm_delete<'a>(
         ];
         if entry.kind == EntryKind::Dir {
             name = name.push(
-                text(strings::PATH_SEPARATOR)
+                text(strings::path_separator())
                     .font(theme::MONO)
                     .size(theme::TEXT_MONO)
                     .color(p.muted),
@@ -370,7 +370,7 @@ fn confirm_delete<'a>(
     .width(Length::Fill);
     if entries.iter().any(|e| e.kind == EntryKind::Dir) {
         lines = lines.push(
-            text(strings::DELETE_FOLDERS_NOTE)
+            text(strings::delete_folders_note())
                 .size(theme::TEXT_XS)
                 .color(p.muted),
         );
@@ -404,15 +404,15 @@ fn permissions<'a>(
     const BOX: f32 = 72.0;
     let mut grid = column![row![
         label("", WHO),
-        label(strings::PERM_READ, BOX),
-        label(strings::PERM_WRITE, BOX),
-        label(strings::PERM_EXECUTE, BOX),
+        label(strings::perm_read(), BOX),
+        label(strings::perm_write(), BOX),
+        label(strings::perm_execute(), BOX),
     ]]
     .spacing(theme::SPACE_2XS);
     for (who, bits) in [
-        strings::PERM_OWNER,
-        strings::PERM_GROUP,
-        strings::PERM_OTHERS,
+        strings::perm_owner(),
+        strings::perm_group(),
+        strings::perm_others(),
     ]
     .into_iter()
     .zip(PERMISSION_BITS)
@@ -430,7 +430,7 @@ fn permissions<'a>(
         }
         grid = grid.push(line);
     }
-    let mut names = row![text(strings::PERMISSIONS_TITLE).size(theme::TEXT_SM)]
+    let mut names = row![text(strings::permissions_title()).size(theme::TEXT_SM)]
         .spacing(theme::SPACE_XS)
         .align_y(Alignment::Center);
     for name in dialog.names.iter().take(strings::LISTED_NAMES) {
@@ -452,13 +452,13 @@ fn permissions<'a>(
     }
     if dialog.mixed {
         names = names.push(
-            text(strings::MIXED_PERMISSIONS)
+            text(strings::mixed_permissions())
                 .size(theme::TEXT_XS)
                 .color(p.muted),
         );
     }
     let mut octal = column![
-        text(strings::PERM_OCTAL)
+        text(strings::perm_octal())
             .size(theme::TEXT_XS)
             .color(p.muted),
         text_input("", &dialog.octal)
@@ -473,7 +473,7 @@ fn permissions<'a>(
     .spacing(theme::SPACE_2XS);
     if dialog.invalid {
         octal = octal.push(
-            text(strings::OCTAL_INVALID)
+            text(strings::octal_invalid())
                 .size(theme::TEXT_XS)
                 .color(p.error),
         );
@@ -481,7 +481,7 @@ fn permissions<'a>(
     bar(column![
         row![
             container(names.wrap()).width(Length::Fill),
-            button(text(strings::APPLY).font(theme::INTER_SEMIBOLD))
+            button(text(strings::apply()).font(theme::INTER_SEMIBOLD))
                 .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_MD]))
                 .style(theme::button_primary)
                 .on_press_maybe((!dialog.invalid).then(|| msg(PaneMsg::ApplyPermissions))),
