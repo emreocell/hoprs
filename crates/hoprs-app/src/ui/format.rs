@@ -6,13 +6,20 @@ use std::time::SystemTime;
 use chrono::{DateTime, Datelike, Local, NaiveDateTime, Timelike};
 use hoprs_core::EntryKind;
 
+use crate::i18n::{self, Language};
 use crate::ui::strings;
 
 /// `68 B`, `4.1 KB`, `812 KB`, `38 MB`: base 1024, one decimal below 10.
 pub fn size(bytes: u64) -> String {
+    size_in(i18n::language(), bytes)
+}
+
+/// [`size`] in a given language: the decimal separator follows it (`4,1 KB` in pt-BR).
+pub fn size_in(lang: Language, bytes: u64) -> String {
+    let unit_name = |unit| strings::size_unit_in(lang, unit);
     const UNITS: usize = 7;
     if bytes < 1024 {
-        return format!("{bytes} {}", strings::size_unit(0));
+        return format!("{bytes} {}", unit_name(0));
     }
     let mut value = bytes as f64;
     let mut unit = 0;
@@ -32,15 +39,25 @@ pub fn size(bytes: u64) -> String {
         shown = (value * 10.0).round() / 10.0;
     }
     if shown < 10.0 {
-        format!("{shown:.1} {}", strings::size_unit(unit))
+        let number = format!("{shown:.1}");
+        let number = match lang {
+            Language::En => number,
+            Language::PtBr => number.replace('.', ","),
+        };
+        format!("{number} {}", unit_name(unit))
     } else {
-        format!("{shown:.0} {}", strings::size_unit(unit))
+        format!("{shown:.0} {}", unit_name(unit))
     }
 }
 
 /// `11 Nov 14:02` in `this_year`, `02 Oct 2024` otherwise.
 pub fn date(at: NaiveDateTime, this_year: i32) -> String {
-    let month = strings::month(at.month0());
+    date_in(i18n::language(), at, this_year)
+}
+
+/// [`date`] in a given language (`11 nov 14:02` in pt-BR).
+pub fn date_in(lang: Language, at: NaiveDateTime, this_year: i32) -> String {
+    let month = strings::month_in(lang, at.month0());
     if at.year() == this_year {
         format!(
             "{:02} {month} {:02}:{:02}",
@@ -161,7 +178,31 @@ mod tests {
         assert_eq!(permissions(EntryKind::File, Some(0)), "----------");
         // FTP servers may give no mode at all.
         assert_eq!(permissions(EntryKind::File, None), "");
-        assert_eq!(strings::month(0), "Jan");
-        assert_eq!(strings::month(11), "Dec");
+        assert_eq!(strings::month_in(Language::En, 0), "Jan");
+        assert_eq!(strings::month_in(Language::En, 11), "Dec");
+    }
+
+    #[test]
+    fn pt_br_sizes_and_dates() {
+        use Language::{En, PtBr};
+        assert_eq!(size_in(PtBr, 4198), "4,1 KB");
+        assert_eq!(size_in(PtBr, 812 * 1024), "812 KB");
+        assert_eq!(size_in(PtBr, 68), "68 B");
+        assert_eq!(size_in(PtBr, 5 * 1024u64.pow(3) / 2), "2,5 GB");
+        assert_eq!(size_in(En, 4198), "4.1 KB");
+        assert_eq!(date_in(PtBr, at(2026, 11, 11, 14, 2), 2026), "11 nov 14:02");
+        assert_eq!(date_in(PtBr, at(2024, 10, 2, 9, 11), 2026), "02 out 2024");
+        assert_eq!(date_in(En, at(2026, 11, 11, 14, 2), 2026), "11 Nov 14:02");
+        // The active language is untouched by the explicit ones.
+        assert_eq!(size(4198), "4.1 KB");
+    }
+
+    #[test]
+    fn active_language_drives_the_public_functions() {
+        i18n::set_language(Language::PtBr);
+        assert_eq!(size(4198), "4,1 KB");
+        assert_eq!(date(at(2026, 2, 3, 4, 5), 2026), "03 fev 04:05");
+        assert_eq!(strings::speed(4198), "4,1 KB/s");
+        i18n::set_language(Language::En);
     }
 }

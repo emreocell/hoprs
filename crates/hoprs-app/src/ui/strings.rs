@@ -436,34 +436,36 @@ pub fn empty_folder() -> &'static str {
 pub fn reconnect() -> &'static str {
     tr("reconnect")
 }
-/// Units of [`crate::ui::format::size`], base 1024.
-pub fn size_unit(i: usize) -> &'static str {
+/// Units of [`crate::ui::format::size`], base 1024, in `lang`.
+pub fn size_unit_in(lang: crate::i18n::Language, i: usize) -> &'static str {
+    let cat = crate::i18n::catalog_for(lang);
     match i {
-        0 => tr("size-unit-b"),
-        1 => tr("size-unit-kb"),
-        2 => tr("size-unit-mb"),
-        3 => tr("size-unit-gb"),
-        4 => tr("size-unit-tb"),
-        5 => tr("size-unit-pb"),
-        6 => tr("size-unit-eb"),
+        0 => cat.tr("size-unit-b"),
+        1 => cat.tr("size-unit-kb"),
+        2 => cat.tr("size-unit-mb"),
+        3 => cat.tr("size-unit-gb"),
+        4 => cat.tr("size-unit-tb"),
+        5 => cat.tr("size-unit-pb"),
+        6 => cat.tr("size-unit-eb"),
         _ => "",
     }
 }
-/// Short month names for file dates.
-pub fn month(m0: u32) -> &'static str {
+/// Short month names for file dates, in `lang`.
+pub fn month_in(lang: crate::i18n::Language, m0: u32) -> &'static str {
+    let cat = crate::i18n::catalog_for(lang);
     match m0 {
-        0 => tr("month-1"),
-        1 => tr("month-2"),
-        2 => tr("month-3"),
-        3 => tr("month-4"),
-        4 => tr("month-5"),
-        5 => tr("month-6"),
-        6 => tr("month-7"),
-        7 => tr("month-8"),
-        8 => tr("month-9"),
-        9 => tr("month-10"),
-        10 => tr("month-11"),
-        11 => tr("month-12"),
+        0 => cat.tr("month-1"),
+        1 => cat.tr("month-2"),
+        2 => cat.tr("month-3"),
+        3 => cat.tr("month-4"),
+        4 => cat.tr("month-5"),
+        5 => cat.tr("month-6"),
+        6 => cat.tr("month-7"),
+        7 => cat.tr("month-8"),
+        8 => cat.tr("month-9"),
+        9 => cat.tr("month-10"),
+        10 => cat.tr("month-11"),
+        11 => cat.tr("month-12"),
         _ => "",
     }
 }
@@ -1757,7 +1759,7 @@ mod tests {
         );
         assert_eq!(
             pt("dialogs-waiting", &[("count", 1usize.into())]),
-            "Mais 1 aguardando"
+            "Mais 1 na fila"
         );
     }
 

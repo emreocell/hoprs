@@ -355,7 +355,7 @@ label-account = Conta
 label-key-type = Tipo de chave
 label-fingerprint = Impressão digital (SHA-256)
 label-reason = Motivo
-label-trusted-before = Confiado antes
+label-trusted-before = Confiado anteriormente
 label-presented-now = Apresentado agora
 label-key-file = Chave
 password-title = Senha
@@ -368,7 +368,7 @@ connect = Conectar
 unlock = Desbloquear
 continue = Continuar
 # Under a dialog, when others wait behind it: "1 more waiting".
-dialogs-waiting = Mais { $count } aguardando
+dialogs-waiting = Mais { $count } na fila
 # The warning of a host known with other key types.
 other-key-types = Este host é conhecido com outro tipo de chave ({ $types }). Alguém pode estar se passando por ele.
 # Why a certificate needs the user's decision.
@@ -520,7 +520,7 @@ edit-too-large = Não é possível editar arquivos com mais de 50 MB
 waiting-for-connection = Aguardando a conexão…
 remote-may-be-truncated = A cópia do servidor pode ficar incompleta até lá.
 changed-on-server = Alterado no servidor desde que você o abriu
-keep-remote = Manter a remota
+keep-remote = Manter a versão remota
 save-a-copy = Salvar uma cópia
 reload-in-editor = Agora é a versão do servidor: recarregue-a no editor.
 upload-and-close = Fazer upload das alterações pendentes e fechar

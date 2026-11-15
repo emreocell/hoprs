@@ -286,6 +286,7 @@ total-workers =
         [one] total, { $workers } worker
        *[other] total, { $workers } workers
     }
+# `policy-*` (lowercase) read inline in sentences; `settings-policy-*` (capitalised) are the settings picker's options.
 policy-ask = ask
 policy-overwrite = overwrite
 policy-skip = skip

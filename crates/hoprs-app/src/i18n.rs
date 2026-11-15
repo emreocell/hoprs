@@ -368,7 +368,7 @@ impl Catalog {
     }
 }
 
-fn catalog_for(lang: Language) -> &'static Catalog {
+pub(crate) fn catalog_for(lang: Language) -> &'static Catalog {
     static EN: OnceLock<Catalog> = OnceLock::new();
     static PT_BR: OnceLock<Catalog> = OnceLock::new();
     match lang {
