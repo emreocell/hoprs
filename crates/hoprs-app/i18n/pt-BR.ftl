@@ -264,6 +264,8 @@ queue-unavailable = Fila de transferências indisponível: { $reason }. As trans
 skip-exists = já existe
 skip-not-newer = não é mais recente
 skip-already-complete = já está completo
+skip-by-user = pulada por você
+skip-symlink = links simbólicos não são seguidos
 skipped = Ignorada: { $reason }
 
 ## Status bar
@@ -392,7 +394,7 @@ known-hosts-line = Linha { $line } do known_hosts
 remove-known-hosts-question =
     { $lines ->
     [1] Remover 1 linha de { $host } do known_hosts? Na próxima conexão, o hoprs pede que você confie na nova chave.
-   *[other] Remover { $lines } linhas de { $host } do known_hosts? Na próxima conexão, o hoprs pede que você confie na nova chave.
+   *[other] Remover { $lines_text } linhas de { $host } do known_hosts? Na próxima conexão, o hoprs pede que você confie na nova chave.
     }
 # The warning for lines that also name other hosts.
 also-covers-one-host = A linha { $line } também cobre outros hosts (um padrão ou uma lista de nomes): removê-la esquece esta chave para eles também.

@@ -845,7 +845,7 @@ mod tests {
             match c {
                 '"' => return Some(out),
                 '\\' => match chars.next()? {
-                    '\n' => {
+                    c if c == '\n' || (c == '\r' && chars.peek() == Some(&'\n')) => {
                         while chars.peek().is_some_and(|c| c.is_whitespace()) {
                             chars.next();
                         }
@@ -1041,5 +1041,14 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn string_literal_accepts_a_crlf_line_continuation() {
+        assert_eq!(
+            string_literal("\"ab\\\r\n      cd\" x").as_deref(),
+            Some("abcd")
+        );
+        assert_eq!(string_literal("\"ab\\\n   cd\"").as_deref(), Some("abcd"));
     }
 }

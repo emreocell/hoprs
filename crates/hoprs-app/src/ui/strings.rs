@@ -175,7 +175,10 @@ pub fn unreadable_name(name: Option<&str>, file: &str, index: usize) -> String {
         Some(name) => name.to_owned(),
         None => tr_args(
             "unreadable-name-fallback",
-            &[("number", (index + 1).into()), ("file", file.into())],
+            &[
+                ("number", (index + 1).to_string().as_str().into()),
+                ("file", file.into()),
+            ],
         ),
     }
 }
@@ -387,7 +390,10 @@ pub fn terminal_search_no_match() -> &'static str {
 /// "Shell exited (code N)", or without a code when the server sent none.
 pub fn shell_exited(code: Option<u32>) -> String {
     match code {
-        Some(code) => tr_args("shell-exited-code", &[("code", code.into())]),
+        Some(code) => tr_args(
+            "shell-exited-code",
+            &[("code", code.to_string().as_str().into())],
+        ),
         None => tr("shell-exited").to_owned(),
     }
 }
@@ -715,6 +721,8 @@ pub fn skip_reason(raw: &str) -> String {
         "exists" => tr("skip-exists").to_owned(),
         "not newer" => tr("skip-not-newer").to_owned(),
         "already complete" => tr("skip-already-complete").to_owned(),
+        "skipped by user" => tr("skip-by-user").to_owned(),
+        "symlinks are not followed" => tr("skip-symlink").to_owned(),
         other => other.to_owned(),
     }
 }
@@ -761,7 +769,10 @@ pub fn saved_folder_gone(saved: &str) -> String {
 pub fn reconnecting(attempt: u32, of: u32) -> String {
     tr_args(
         "reconnecting",
-        &[("attempt", attempt.into()), ("of", of.into())],
+        &[
+            ("attempt", attempt.to_string().as_str().into()),
+            ("of", of.to_string().as_str().into()),
+        ],
     )
 }
 
@@ -1082,20 +1093,30 @@ pub fn no_known_hosts_entry() -> &'static str {
 }
 /// "known_hosts line 3".
 pub fn known_hosts_line(line: usize) -> String {
-    tr_args("known-hosts-line", &[("line", line.into())])
+    tr_args(
+        "known-hosts-line",
+        &[("line", line.to_string().as_str().into())],
+    )
 }
 /// The removal question: "Remove 2 lines for [h]:2222 from known_hosts? …".
 pub fn remove_known_hosts_question(lines: usize, host: &str) -> String {
     tr_args(
         "remove-known-hosts-question",
-        &[("lines", lines.into()), ("host", host.into())],
+        &[
+            ("lines", lines.into()),
+            ("lines_text", lines.to_string().as_str().into()),
+            ("host", host.into()),
+        ],
     )
 }
 /// The warning for lines that also name other hosts.
 pub fn also_covers_other_hosts(lines: &[usize]) -> String {
     let list: Vec<String> = lines.iter().map(ToString::to_string).collect();
     match lines {
-        [line] => tr_args("also-covers-one-host", &[("line", (*line).into())]),
+        [line] => tr_args(
+            "also-covers-one-host",
+            &[("line", line.to_string().as_str().into())],
+        ),
         _ => tr_args(
             "also-covers-other-hosts",
             &[("lines", list.join(", ").as_str().into())],
@@ -1627,7 +1648,23 @@ mod tests {
     }
 
     fn pt(key: &str, args: &[(&str, crate::i18n::Arg)]) -> String {
-        Catalog::new(Language::PtBr).tr_args(key, args)
+        crate::i18n::catalog_for(Language::PtBr).tr_args(key, args)
+    }
+
+    #[test]
+    fn identifier_numbers_are_not_grouped() {
+        assert_eq!(super::known_hosts_line(1234), "known_hosts line 1234");
+        assert_eq!(
+            pt("known-hosts-line", &[("line", "1234".into())]),
+            "Linha 1234 do known_hosts"
+        );
+        assert_eq!(
+            super::shell_exited(Some(3221225477)),
+            "Shell exited (code 3221225477)"
+        );
+        assert!(super::remove_known_hosts_question(1234, "h").contains("Remove 1234 lines"));
+        assert!(super::also_covers_other_hosts(&[1234]).starts_with("Line 1234 "));
+        assert!(super::unreadable_name(None, "f", 1233).contains("1234"));
     }
 
     #[test]
@@ -1720,6 +1757,13 @@ mod tests {
             "Ignorada: já existe"
         );
         // English process language: known reasons read as before, others unchanged.
+        assert_eq!(cat.tr("skip-by-user"), "pulada por você");
+        assert_eq!(cat.tr("skip-symlink"), "links simbólicos não são seguidos");
+        assert_eq!(super::skip_reason("skipped by user"), "skipped by user");
+        assert_eq!(
+            super::skip_reason("symlinks are not followed"),
+            "symlinks are not followed"
+        );
         assert_eq!(super::skip_reason("exists"), "exists");
         assert_eq!(super::skip_reason("not newer"), "not newer");
         assert_eq!(super::skip_reason("already complete"), "already complete");
@@ -1820,7 +1864,11 @@ mod tests {
             assert_eq!(
                 pt(
                     "remove-known-hosts-question",
-                    &[("lines", n.into()), ("host", "[h]:2222".into())]
+                    &[
+                        ("lines", n.into()),
+                        ("lines_text", n.to_string().as_str().into()),
+                        ("host", "[h]:2222".into())
+                    ]
                 ),
                 want
             );

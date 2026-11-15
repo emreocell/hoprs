@@ -22,7 +22,7 @@ Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI) for Linux, Windows and m
 - Performance targets, how they are measured, last numbers: `docs/perf/README.md` (`scripts/perf.sh`, `.github/workflows/perf.yml`)
 - Deferred follow-ups: `docs/superpowers/plans/2026-11-12-01-followups.md`
 
-## Current status (2026-11-14)
+## Current status (2026-11-15)
 
 - Landing page is live at https://hoprs.online, deployed by `.github/workflows/site.yml` on push to `main` (VPS via KoreGo, Cloudflare in front; see `site/deploy/README.md`).
 - Plans 1–7 merged to `main` (v1 feature-complete): core + transfer engine, SSH/SFTP, FTP/FTPS, vault + FileZilla import, the iced app, Plan 6 (terminal tabs over the site's SSH connection, remote editing with re-upload on save, Ctrl+K palette, technical log panel, idle-drop fixes, perf job) Plan 7 (one writer per destination) and Plan 8 (release 1.0.0: `.deb` packaging, icon, `.desktop`, release workflow).
@@ -35,7 +35,6 @@ Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI) for Linux, Windows and m
 - Docker integration tests: `docker compose -f docker/compose.yml up -d --build --wait`, then `cargo test --workspace --all-features -- --ignored --test-threads=1`.
 - **v1.1.0 released (2026-11-14), Plan 10 merged (PR #11):** tag `v1.1.0` on `1f06850`, GitHub Release with `.deb`, universal `.dmg`, `.msi`, portable `.zip` and `SHA256SUMS` (checksums verified after download); the site switched to 1.1.0 through the post-release deploy. Follow-ups: `docs/superpowers/plans/2026-11-12-01-followups.md` section Plan 10.
 - **Next step (Plan 10):** the author runs the NEEDS HUMAN rows of `docs/qa/release-1.1-checklist.md` on real Windows and macOS machines (the macOS Cmd+Q known issue first).
-
 - **Plan 11 (pt-BR UI)** is on branch `app-i18n-pt-br` (PR pending); then the author runs the NEEDS HUMAN rows of `docs/qa/i18n-checklist.md`.
 
 ## Decisions already made (do not re-litigate)

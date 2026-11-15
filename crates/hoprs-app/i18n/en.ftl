@@ -300,6 +300,8 @@ queue-unavailable = Transfer queue unavailable: { $reason }. Transfers this sess
 skip-exists = exists
 skip-not-newer = not newer
 skip-already-complete = already complete
+skip-by-user = skipped by user
+skip-symlink = symlinks are not followed
 # "Skipped: exists".
 skipped = Skipped: { $reason }
 
@@ -441,7 +443,7 @@ known-hosts-line = known_hosts line { $line }
 remove-known-hosts-question =
     { $lines ->
     [1] Remove 1 line for { $host } from known_hosts? The next connect asks you to trust the new key.
-   *[other] Remove { $lines } lines for { $host } from known_hosts? The next connect asks you to trust the new key.
+   *[other] Remove { $lines_text } lines for { $host } from known_hosts? The next connect asks you to trust the new key.
     }
 # The warning for lines that also name other hosts.
 also-covers-one-host = Line { $line } also covers other hosts (a pattern or a list of names): removing it forgets this key for them too.

@@ -49,8 +49,6 @@ pub const PTY_RESERVE: usize = 3;
 /// The SFTP metadata channel.
 const METADATA_CHANNELS: usize = 1;
 
-const LIMIT_MESSAGE: &str = "Too many channels on this connection";
-
 /// The error for a channel past `limit` (ours or the server's).
 pub(crate) fn too_many_channels(limit: usize) -> Error {
     Error::coded(
@@ -63,7 +61,7 @@ pub(crate) fn too_many_channels(limit: usize) -> Error {
 
 /// Whether `error` is the "Too many channels" error of a channel open.
 pub fn is_channel_limit(error: &Error) -> bool {
-    error.kind == ErrorKind::Protocol && error.message.starts_with(LIMIT_MESSAGE)
+    error.code == Some("ssh-too-many-channels")
 }
 
 /// How many SFTP stream channels fit under `max_channels` beside the metadata channel and
