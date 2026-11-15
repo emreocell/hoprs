@@ -1,8 +1,16 @@
 //! Every user-visible string, in one place (i18n-ready). Sentence case.
 
-pub const APP_TITLE: &str = "hoprs";
-pub const ALREADY_RUNNING: &str = "hoprs is already running";
-pub const CANNOT_OPEN_PROFILES: &str = "Cannot open the saved sites";
+use crate::i18n::{tr, tr_args};
+
+pub fn app_title() -> &'static str {
+    tr("app-title")
+}
+pub fn already_running() -> &'static str {
+    tr("already-running")
+}
+pub fn cannot_open_profiles() -> &'static str {
+    tr("cannot-open-profiles")
+}
 
 // Top bar.
 pub const BRAND: &str = "hoprs";
@@ -60,11 +68,7 @@ pub fn cannot_open_folder(reason: &str) -> String {
 
 /// "1 site", "3 sites".
 pub fn site_count(n: usize) -> String {
-    if n == 1 {
-        "1 site".to_owned()
-    } else {
-        format!("{n} sites")
-    }
+    tr_args("site-count", &[("count", n.into())])
 }
 
 /// A workspace's count: "3 sites", or "2 of 3 sites" when some are missing.

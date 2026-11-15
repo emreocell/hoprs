@@ -42,6 +42,14 @@ shlex = "2.0"
 # Decodes the embedded window icon. iced's own `image` feature would pull in the whole
 # `image` crate with every codec; `png` is the one format needed. MIT OR Apache-2.0.
 png = "0.18"
+# The app's text catalogs (Fluent): messages, plurals and number formatting per language.
+# MIT OR Apache-2.0.
+fluent-bundle = "0.16"
+# Walks the catalogs' syntax tree in the key/variable parity test (already in
+# fluent-bundle's tree). MIT OR Apache-2.0.
+fluent-syntax = "0.12"
+# Language identifiers for the Fluent bundles. MIT OR Apache-2.0.
+unic-langid = "0.9"
 
 # Windows: attach to the parent console so `hoprs.exe --version` prints (GUI subsystem),
 # and open remote edits with the default editor.

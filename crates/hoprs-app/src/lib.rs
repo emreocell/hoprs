@@ -11,6 +11,7 @@ mod backend;
 pub mod bench;
 pub mod cli;
 mod effects;
+mod i18n;
 mod icon;
 mod logbuf;
 mod probe;
@@ -66,7 +67,7 @@ pub fn run() -> iced::Result {
     let _instance = match acquire_first_instance_lock(&instance_lock_paths()) {
         Ok(Some(lock)) => Some(lock),
         Ok(None) => {
-            println!("{}", ui::strings::ALREADY_RUNNING);
+            println!("{}", ui::strings::already_running());
             std::process::exit(0);
         }
         Err(err) => {
@@ -78,7 +79,7 @@ pub fn run() -> iced::Result {
 
     iced::application(move || boot(log.clone(), probe), update, view)
         .subscription(subscription)
-        .title(ui::strings::APP_TITLE)
+        .title(ui::strings::app_title())
         .theme(|_: &Hoprs| ui::theme::theme())
         .settings(iced::Settings {
             fonts: ui::theme::FONTS.map(Cow::Borrowed).to_vec(),
@@ -135,7 +136,7 @@ fn boot(log: logbuf::LogBuffer, probe: Option<probe::Probe>) -> (Hoprs, Task<Roo
         Err(err) => {
             // No profiles, no app: there is nothing to show yet without them.
             tracing::error!(%err, "cannot open the profiles");
-            eprintln!("{}: {err}", ui::strings::CANNOT_OPEN_PROFILES);
+            eprintln!("{}: {err}", ui::strings::cannot_open_profiles());
             std::process::exit(1);
         }
     };
