@@ -148,6 +148,7 @@ fn file_key(named: Named) -> Option<FileKey> {
         Named::Delete => FileKey::Delete,
         Named::F4 => FileKey::Edit,
         Named::Escape => FileKey::Escape,
+        Named::Space => FileKey::Space,
         _ => return None,
     })
 }
@@ -195,7 +196,11 @@ pub fn view<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> {
     if let Some(strip) = crate::ui::edits::strip(app, tab) {
         col = col.push(strip).push(hrule());
     }
-    col.push(panes).into()
+    let col = col.push(panes);
+    match crate::ui::compare::view(app, tab) {
+        Some(panel) => col.push(panel).into(),
+        None => col.into(),
+    }
 }
 
 /// What the bar across a connected tab says, if anything.

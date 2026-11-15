@@ -748,6 +748,7 @@ async fn editor_setting_roundtrip() {
     use crate::settings::{self as file, EDITOR_DEFAULT};
 
     let mut app = App::new();
+    app.form = Some(Form::Settings);
     assert_eq!(app.settings.editor_command, "system");
     assert_eq!(EDITOR_DEFAULT, "system");
 
@@ -1431,6 +1432,7 @@ async fn compare_settings_messages_save() {
             .is_empty()
     );
 
+    app.form = Some(Form::Settings);
     let effects = app.update(Message::Settings(settings::SettingsMsg::CompareIgnore(
         " a, ,*.log ".into(),
     )));

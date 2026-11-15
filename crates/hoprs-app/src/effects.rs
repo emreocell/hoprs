@@ -103,6 +103,13 @@ pub fn run(
                 y: Some(offset_y),
             },
         ),
+        Effect::ScrollCompare { tab, offset_y } => iced::widget::operation::scroll_to(
+            crate::ui::compare::scroll_id(tab),
+            iced::widget::operation::AbsoluteOffset {
+                x: None,
+                y: Some(offset_y),
+            },
+        ),
         // Never cancelled either: the result finds its pane by `op`, or is dropped.
         Effect::FileOp {
             tab,

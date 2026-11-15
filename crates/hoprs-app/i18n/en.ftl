@@ -609,7 +609,7 @@ settings-editing = Remote editing
 settings-compare = Folder compare
 settings-compare-auto = Compare folders automatically
 settings-compare-ignore = Ignore when comparing
-settings-compare-ignore-hint = Names separated by commas. * matches any run of characters, for example *.log.
+settings-compare-ignore-hint = Names separated by commas. * matches any run of characters, for example *.log. An empty field ignores nothing.
 # "Upload failed: Permission denied".
 upload-failed = Upload failed: { $reason }
 # "Your version was saved to <path>".
@@ -795,3 +795,48 @@ error-edit-unmatched-quote = The editor command has an unmatched quote
 error-edit-no-editor = No editor command is set
 error-edit-cannot-start-editor = Cannot start the editor
 error-edit-path-refused = This remote path cannot be edited locally
+
+# The folder compare panel (between the panes and the queue).
+compare-button = Compare
+compare-title = Differences
+compare-auto = Compare automatically
+compare-close = Close the differences panel
+compare-collapse = Collapse
+compare-expand = Expand
+compare-group-only-local = Only on this computer ({ $count })
+compare-group-only-remote = Only on the server ({ $count })
+compare-group-different = Different ({ $count })
+compare-group-unreadable = Could not read ({ $count })
+compare-local-newer = Local is newer
+compare-remote-newer = Server is newer
+compare-size-differs = Size differs
+compare-kind-differs = File vs folder
+compare-unreadable = Could not read: { $error }
+compare-queued = Queued
+compare-tip-local = This computer: { $when }
+compare-tip-remote = Server: { $when }
+compare-upload-selected = Upload selected
+compare-download-selected = Download selected
+compare-identical =
+    { $count ->
+    [1] 1 identical
+   *[other] { $count } identical
+    }
+compare-all-identical =
+    { $count ->
+    [1] The two folders are identical (1 item)
+   *[other] The two folders are identical ({ $count } items)
+    }
+compare-running =
+    { $count ->
+    [1] Comparing… 1 item
+   *[other] Comparing… { $count } items
+    }
+compare-paused = { $count } items seen so far; the list is partial.
+compare-continue = Compare everything
+compare-stop = Stop
+compare-stopped = Comparison stopped: { $error }
+compare-partial = Stopped; the list is partial.
+compare-again = Compare again
+compare-roots = { $local } ↔ { $remote }
+compare-ellipsis = …

@@ -489,6 +489,7 @@ mod tests {
         "language-pt-br",
         // Product names, symbols and shortcut labels.
         "brand",
+        "compare-ellipsis",
         "go-to-anything-key",
         "palette-key-copy",
         "palette-key-paste",

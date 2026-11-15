@@ -499,6 +499,11 @@ pub enum Effect {
         side: Side,
         offset_y: f32,
     },
+    /// Scrolls the differences panel's list to `offset_y` (the keyboard cursor).
+    ScrollCompare {
+        tab: TabId,
+        offset_y: f32,
+    },
     /// A new folder, rename, delete or chmod in one pane; progress comes back as
     /// [`Message::FileOpProgress`], the end as [`Message::FileOpDone`]. The remote side
     /// needs `session`.
@@ -852,6 +857,9 @@ impl App {
         // Typed backup passwords never outlive the settings page, however it was left.
         if !matches!(self.form, Some(Form::Settings)) {
             self.backup.forget_passwords();
+            // The same for the typed fields: the next visit starts from what is saved.
+            self.compare_ignore_input = None;
+            self.editor_input = None;
         }
         // The center now shows another tab (or a tab instead of a form): its lists'
         // scrollables must match the offsets the panes remember.

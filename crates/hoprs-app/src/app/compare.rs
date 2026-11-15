@@ -20,7 +20,7 @@ use hoprs_transfer::TransferId;
 
 use super::files::Listing;
 use super::settings::SettingsMsg;
-use super::{App, Effect, Message, TabId};
+use super::{App, Effect, FileKey, Message, TabId};
 use crate::backend::Side;
 
 /// How long the panes must stay unchanged before an automatic run starts.
@@ -84,6 +84,14 @@ pub enum Group {
 }
 
 impl Group {
+    /// The order the panel shows the groups in.
+    pub const ORDER: [Group; 4] = [
+        Group::OnlyLocal,
+        Group::OnlyRemote,
+        Group::Different,
+        Group::Unreadable,
+    ];
+
     pub fn of(status: &Status) -> Self {
         match status {
             Status::OnlyLocal => Group::OnlyLocal,
@@ -105,6 +113,42 @@ impl Row {
     /// Whether the checkbox works: not an unreadable folder, and not queued or done.
     pub fn selectable(&self) -> bool {
         self.group() != Group::Unreadable && matches!(self.state, RowState::Idle)
+    }
+
+    /// Whether the panel can send this item to the server: it exists locally, is not a
+    /// symlink, and is not a file against a folder.
+    pub fn can_upload(&self) -> bool {
+        self.transferable() && self.diff.local.is_some()
+    }
+
+    /// Whether the panel can fetch this item from the server (see [`Row::can_upload`]).
+    pub fn can_download(&self) -> bool {
+        self.transferable() && self.diff.remote.is_some()
+    }
+
+    /// Some transfer exists for the item: not unreadable, not a symlink, not a file
+    /// against a folder.
+    pub fn transferable(&self) -> bool {
+        !matches!(
+            self.diff.status,
+            Status::Unreadable { .. } | Status::KindDiffers
+        ) && self.diff.kind != hoprs_core::EntryKind::Symlink
+    }
+}
+
+/// The panel's scroll offset that shows `row` (a line of the grouped list), moving the
+/// least from the current one.
+fn scroll_to_show(state: &CompareState, row: usize) -> f32 {
+    use crate::ui::compare::{BODY_HEIGHT, line_of};
+    use crate::ui::virtual_list::ROW_HEIGHT;
+    let top = line_of(state, row) as f32 * ROW_HEIGHT;
+    let offset = state.offset_y;
+    if top < offset {
+        top
+    } else if top + ROW_HEIGHT > offset + BODY_HEIGHT {
+        top + ROW_HEIGHT - BODY_HEIGHT
+    } else {
+        offset
     }
 }
 
@@ -141,12 +185,64 @@ pub struct CompareState {
     /// The listing a file operation's refresh asked for: it neither cancels nor re-arms
     /// anything.
     pub quiet_request: Option<super::RequestId>,
+    /// The panel is folded to its head (like the queue).
+    pub collapsed: bool,
+    /// The keyboard drives the panel (a click in it), not a pane.
+    pub focused: bool,
+    /// The keyboard's row (index into `rows`).
+    pub cursor: Option<usize>,
+    /// The rows' scroll offset, as the list last reported it.
+    pub offset_y: f32,
 }
 
 impl CompareState {
     /// Whether a run is walking or paused (a cancel is due).
     fn active(&self) -> bool {
         matches!(self.phase, Phase::Running { .. } | Phase::Paused { .. })
+    }
+
+    /// The row indices in the order the panel shows them: grouped (only here, only on the
+    /// server, different, unreadable), each group in arrival order.
+    pub fn order(&self) -> Vec<usize> {
+        let mut order = Vec::with_capacity(self.rows.len());
+        for group in Group::ORDER {
+            order.extend(
+                self.rows
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, row)| row.group() == group)
+                    .map(|(i, _)| i),
+            );
+        }
+        order
+    }
+
+    /// Whether the panel is on screen: a run is on or ended and the cross was not pressed.
+    /// The wait before an automatic run shows nothing unless the last result is still there.
+    pub fn visible(&self) -> bool {
+        !self.hidden
+            && match self.phase {
+                Phase::Idle => false,
+                Phase::Debouncing => self.roots.is_some(),
+                _ => true,
+            }
+    }
+
+    /// The selected rows the panel can send to the server / fetch from it.
+    pub fn selected_uploads(&self) -> impl Iterator<Item = usize> + '_ {
+        self.rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.selected && r.selectable() && r.can_upload())
+            .map(|(i, _)| i)
+    }
+
+    pub fn selected_downloads(&self) -> impl Iterator<Item = usize> + '_ {
+        self.rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.selected && r.selectable() && r.can_download())
+            .map(|(i, _)| i)
     }
 
     /// Invalidates pending debounces and cancels the current run, if any (the effect to
@@ -197,6 +293,17 @@ pub enum CompareMsg {
     SelectGroup { tab: TabId, group: Group, on: bool },
     /// Double-click on a row: the panes go to the item (Task 7).
     Open { tab: TabId, index: usize },
+    /// "Upload selected" (Task 7 queues the transfers).
+    UploadSelected { tab: TabId },
+    /// "Download selected" (Task 7 queues the transfers).
+    DownloadSelected { tab: TabId },
+    /// The head's Collapse / Expand.
+    ToggleCollapsed { tab: TabId },
+    /// A press in the panel: the keyboard drives it from now on; `cursor` is the row
+    /// pressed, if any.
+    Focus { tab: TabId, cursor: Option<usize> },
+    /// The rows' list scrolled.
+    Scrolled { tab: TabId, offset_y: f32 },
 }
 
 impl App {
@@ -286,6 +393,7 @@ impl App {
                     .and_then(|i| self.tabs[i].compare_mut())
                     && let Some(row) = state.rows.get_mut(index)
                     && row.selectable()
+                    && row.transferable()
                 {
                     row.selected = on;
                 }
@@ -299,7 +407,7 @@ impl App {
                     for row in state
                         .rows
                         .iter_mut()
-                        .filter(|r| r.group() == group && r.selectable())
+                        .filter(|r| r.group() == group && r.selectable() && r.transferable())
                     {
                         row.selected = on;
                     }
@@ -308,6 +416,91 @@ impl App {
             }
             // Task 7: the panes go to the item.
             CompareMsg::Open { .. } => Vec::new(),
+            // Task 7: queue the selected rows' transfers.
+            CompareMsg::UploadSelected { .. } | CompareMsg::DownloadSelected { .. } => Vec::new(),
+            CompareMsg::ToggleCollapsed { tab } => {
+                if let Some(state) = self
+                    .files_tab_index(tab)
+                    .and_then(|i| self.tabs[i].compare_mut())
+                {
+                    state.collapsed = !state.collapsed;
+                }
+                Vec::new()
+            }
+            CompareMsg::Focus { tab, cursor } => {
+                if let Some(state) = self
+                    .files_tab_index(tab)
+                    .and_then(|i| self.tabs[i].compare_mut())
+                {
+                    state.focused = true;
+                    if cursor.is_some_and(|c| c < state.rows.len()) {
+                        state.cursor = cursor;
+                    }
+                }
+                Vec::new()
+            }
+            CompareMsg::Scrolled { tab, offset_y } => {
+                if let Some(state) = self
+                    .files_tab_index(tab)
+                    .and_then(|i| self.tabs[i].compare_mut())
+                {
+                    state.offset_y = offset_y;
+                }
+                Vec::new()
+            }
+        }
+    }
+
+    /// A key while the panel has the keyboard (a click in it): arrows move the row cursor,
+    /// Space toggles its checkbox, Enter opens it, Escape and Tab give the keyboard back to
+    /// the panes. `None` when the panel does not have the keyboard.
+    pub(super) fn compare_key(&mut self, index: usize, key: FileKey) -> Option<Vec<Effect>> {
+        let tab = self.tabs[index].id;
+        let state = self.tabs[index].compare_mut()?;
+        if !state.focused || !state.visible() || state.collapsed {
+            return None;
+        }
+        let order = state.order();
+        let at = state
+            .cursor
+            .and_then(|c| order.iter().position(|&i| i == c));
+        let moved = match key {
+            FileKey::Up => Some(at.map_or(0, |p| p.saturating_sub(1))),
+            FileKey::Down => Some(at.map_or(0, |p| (p + 1).min(order.len().saturating_sub(1)))),
+            FileKey::Home => Some(0),
+            FileKey::End => Some(order.len().saturating_sub(1)),
+            _ => None,
+        };
+        if let Some(position) = moved {
+            if let Some(&row) = order.get(position) {
+                state.cursor = Some(row);
+                return Some(vec![Effect::ScrollCompare {
+                    tab,
+                    offset_y: scroll_to_show(state, row),
+                }]);
+            }
+            return Some(Vec::new());
+        }
+        match key {
+            FileKey::Space => {
+                if let Some(cursor) = state.cursor
+                    && let Some(row) = state.rows.get_mut(cursor)
+                    && row.selectable()
+                    && row.transferable()
+                {
+                    row.selected = !row.selected;
+                }
+                Some(Vec::new())
+            }
+            FileKey::Enter => Some(match state.cursor {
+                Some(row) => self.compare_msg(CompareMsg::Open { tab, index: row }),
+                None => Vec::new(),
+            }),
+            FileKey::Escape | FileKey::SwitchPane => {
+                state.focused = false;
+                Some(Vec::new())
+            }
+            _ => Some(Vec::new()),
         }
     }
 

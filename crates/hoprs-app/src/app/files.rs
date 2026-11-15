@@ -360,6 +360,8 @@ pub enum FileKey {
     Delete,
     /// F4: edit the remote file in the editor.
     Edit,
+    /// Space: toggles the differences panel's row (the panes ignore it).
+    Space,
     /// Closes the inline editor, confirmation or dialog (or the error bar).
     Escape,
     /// Ctrl+Enter: the selection to the other pane's folder.
@@ -478,6 +480,14 @@ impl App {
             return Vec::new();
         };
         let mods = self.mods;
+        // A press or action in a pane gives it the keyboard back from the differences panel.
+        if !matches!(
+            msg,
+            PaneMsg::Scrolled { .. } | PaneMsg::PointerIn | PaneMsg::PointerOut
+        ) && let Some(state) = self.tabs[index].compare_mut()
+        {
+            state.focused = false;
+        }
         let Some(pane) = self.tabs[index].pane_mut(side) else {
             return Vec::new();
         };
@@ -733,6 +743,9 @@ impl App {
         else {
             return Vec::new();
         };
+        if let Some(effects) = self.compare_key(index, key) {
+            return effects;
+        }
         let tab = &mut self.tabs[index];
         let Some(files) = tab.files_mut() else {
             return Vec::new();
@@ -802,6 +815,8 @@ impl App {
                     None => Vec::new(),
                 };
             }
+            // The differences panel's key; the panes have none for it.
+            FileKey::Space => return Vec::new(),
             FileKey::SwitchPane
             | FileKey::NewFolder
             | FileKey::Rename

@@ -700,3 +700,125 @@ async fn a_failed_suppressed_listing_ends_the_suppression() {
     let after = settle_all(&mut app, &fake, run_listings(&fake, &next).await).await;
     assert_eq!(debounces(&after).len(), 1);
 }
+
+#[tokio::test]
+async fn collapse_focus_and_scroll_are_the_panels_own_state() {
+    let (mut app, _fake, _a, tab, run) = running().await;
+    app.update(found(tab, run, "a"));
+    assert!(!state(&app).collapsed && !state(&app).focused);
+    app.update(msg(CompareMsg::ToggleCollapsed { tab }));
+    assert!(state(&app).collapsed);
+    app.update(msg(CompareMsg::ToggleCollapsed { tab }));
+    assert!(!state(&app).collapsed);
+    app.update(msg(CompareMsg::Focus {
+        tab,
+        cursor: Some(0),
+    }));
+    assert!(state(&app).focused);
+    assert_eq!(state(&app).cursor, Some(0));
+    app.update(msg(CompareMsg::Scrolled {
+        tab,
+        offset_y: 60.0,
+    }));
+    assert_eq!(state(&app).offset_y, 60.0);
+    // A press in a pane gives the keyboard back to the panes.
+    app.update(Message::Pane {
+        tab,
+        side: Side::Local,
+        msg: PaneMsg::Focus,
+    });
+    assert!(!state(&app).focused);
+    // The panel's transfer buttons are no-ops until Task 7.
+    assert!(
+        app.update(msg(CompareMsg::UploadSelected { tab }))
+            .is_empty()
+    );
+    assert!(
+        app.update(msg(CompareMsg::DownloadSelected { tab }))
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn keyboard_moves_in_group_order_and_space_toggles() {
+    let (mut app, _fake, _a, tab, run) = running().await;
+    // Arrival order: different, only-local, only-remote; shown: only-local, only-remote,
+    // different.
+    for (path, status) in [
+        ("diff", Status::SizeDiffers),
+        ("local", Status::OnlyLocal),
+        ("remote", Status::OnlyRemote),
+    ] {
+        app.update(msg(CompareMsg::Progress {
+            tab,
+            run,
+            progress: Progress::Found(Difference {
+                path: path.into(),
+                kind: hoprs_core::EntryKind::File,
+                status,
+                local: None,
+                remote: None,
+                entries_inside: None,
+            }),
+        }));
+    }
+    assert_eq!(state(&app).order(), vec![1, 2, 0]);
+    // Not focused: the panel takes no keys.
+    assert!(app.compare_key(0, FileKey::Down).is_none());
+    app.update(msg(CompareMsg::Focus { tab, cursor: None }));
+    let down = |app: &mut App| {
+        let effects = app.update(Message::Key {
+            key: FileKey::Down,
+            shift: false,
+        });
+        assert!(matches!(&effects[..], [Effect::ScrollCompare { .. }]));
+    };
+    down(&mut app);
+    assert_eq!(state(&app).cursor, Some(1));
+    down(&mut app);
+    down(&mut app);
+    assert_eq!(state(&app).cursor, Some(0));
+    down(&mut app);
+    assert_eq!(state(&app).cursor, Some(0), "stops at the end");
+    app.update(Message::Key {
+        key: FileKey::Up,
+        shift: false,
+    });
+    assert_eq!(state(&app).cursor, Some(2));
+    app.update(Message::Key {
+        key: FileKey::Space,
+        shift: false,
+    });
+    assert!(state(&app).rows[2].selected);
+    app.update(Message::Key {
+        key: FileKey::Space,
+        shift: false,
+    });
+    assert!(!state(&app).rows[2].selected);
+    // Tab leaves the panel instead of switching panes.
+    let focus = app.tabs[0].focus();
+    app.update(Message::Key {
+        key: FileKey::SwitchPane,
+        shift: false,
+    });
+    assert!(!state(&app).focused);
+    assert_eq!(app.tabs[0].focus(), focus);
+}
+
+#[tokio::test]
+async fn leaving_settings_without_closing_clears_the_typed_fields() {
+    let mut app = App::new();
+    app.form = Some(Form::Settings);
+    app.compare_ignore_input = Some("a, b".into());
+    app.editor_input = Some("code".into());
+    app.update(Message::Modifiers(Mods::default()));
+    assert_eq!(
+        app.compare_ignore_input.as_deref(),
+        Some("a, b"),
+        "still open"
+    );
+    app.form = None;
+    app.update(Message::Modifiers(Mods::default()));
+    assert_eq!(app.compare_ignore_input, None);
+    assert_eq!(app.editor_input, None);
+}
