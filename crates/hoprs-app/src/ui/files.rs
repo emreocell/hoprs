@@ -252,7 +252,7 @@ pub(crate) fn lost_banner<'a>(app: &'a App, tab: &'a Tab) -> Option<Element<'a, 
         }
     };
     let p = palette();
-    let mut reason = row![text(strings::disconnected(&error.message)).color(p.error)]
+    let mut reason = row![text(strings::disconnected(&strings::error(error))).color(p.error)]
         .spacing(theme::SPACE_XS)
         .align_y(Alignment::Center);
     if let Some(detail) = &error.detail {
@@ -704,7 +704,7 @@ fn failed(error: &Error, retry: Message) -> Element<'_, Message> {
     let p = palette();
     centered(
         column![
-            text(&error.message).color(p.error),
+            text(strings::error(error)).color(p.error),
             error.detail.as_ref().map(|detail| {
                 text(detail)
                     .font(theme::MONO)
@@ -738,7 +738,7 @@ pub(crate) fn not_connected<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Messa
         .spacing(theme::SPACE_XS)
         .align_x(Alignment::Center);
     if let Some(failure) = failure {
-        body = body.push(text(&failure.error.message).color(p.error));
+        body = body.push(text(strings::error(&failure.error)).color(p.error));
         if let Some(detail) = &failure.error.detail {
             body = body.push(
                 text(detail)

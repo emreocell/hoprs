@@ -212,10 +212,18 @@ fn conflict_from_json(json: &str) -> Result<ConflictInfo> {
     })
 }
 
-/// A stored error code as the `&'static str` `Error::code` holds. Each distinct code is
-/// leaked once, so the leak is bounded by the codes ever stored (those of the binaries
-/// that wrote the file).
+/// A stored error code as the `&'static str` `Error::code` holds. Each distinct value read
+/// from the file is leaked once (so the leak is bounded by the distinct codes the file
+/// holds, not only those of this binary); a value that is not a kebab-case ASCII code of
+/// at most 64 bytes reads as no code, which also bounds what a damaged file can leak.
 fn intern_code(s: &str) -> Option<&'static str> {
+    let valid = !s.is_empty()
+        && s.len() <= 64
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    if !valid {
+        return None;
+    }
     static CODES: Mutex<Option<HashMap<String, &'static str>>> = Mutex::new(None);
     let mut guard = CODES.lock().ok()?;
     let codes = guard.get_or_insert_with(HashMap::new);
@@ -1184,6 +1192,25 @@ mod tests {
         );
         assert_eq!(e.message, "Cannot reach h");
         assert_eq!(e.detail.as_deref(), Some("refused"));
+    }
+
+    #[test]
+    fn invalid_stored_codes_read_as_no_code() {
+        let mut s = QueueStore::open_in_memory().unwrap();
+        let id = new_item(&mut s);
+        let err = Error::coded(ErrorKind::Io, "io-test-code", "Broken");
+        s.set_state(id, &TransferState::Failed(err)).unwrap();
+        let long = "a".repeat(65);
+        for bad in ["Has Space", "UPPER", "", long.as_str(), "snow\u{2603}"] {
+            s.conn
+                .execute("UPDATE transfers SET error_code = ?1", [bad])
+                .unwrap();
+            let TransferState::Failed(e) = s.get(id).unwrap().unwrap().state else {
+                panic!("not failed");
+            };
+            assert_eq!(e.code, None, "{bad}");
+            assert_eq!(e.message, "Broken");
+        }
     }
 
     #[test]

@@ -39,7 +39,7 @@ pub fn edit_line_parts(edit: &RemoteEdit) -> (String, String, String) {
             editing(after)
         }
         EditStatus::Failed { error, truncated } => {
-            let mut after = format!(": {}", strings::upload_failed(&error.message));
+            let mut after = format!(": {}", strings::upload_failed(&strings::error(error)));
             if *truncated {
                 after.push(' ');
                 after.push_str(strings::remote_may_be_truncated());
@@ -155,7 +155,7 @@ fn line(edit: &RemoteEdit) -> Element<'_, Message> {
                 ));
             if let Some(error) = error {
                 details = details.push(
-                    text(error.message.clone())
+                    text(strings::error(error))
                         .size(theme::TEXT_XS)
                         .color(p.error),
                 );
@@ -269,7 +269,7 @@ fn question_body<'a>(
     }
     if let Some(error) = &question.error {
         body = body.push(
-            text(error.message.clone())
+            text(strings::error(error))
                 .size(theme::TEXT_XS)
                 .color(p.error),
         );

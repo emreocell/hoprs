@@ -1576,6 +1576,38 @@ mod tests {
     use crate::i18n::{Catalog, Language};
     use hoprs_core::{Error, ErrorKind};
 
+    /// Views must show a core `Error` through `strings::error`, never its raw `message`.
+    #[test]
+    fn views_show_errors_through_strings_error() {
+        fn scan(dir: &std::path::Path, hits: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    scan(&path, hits);
+                    continue;
+                }
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                // The log panel stays English; strings.rs holds this very test.
+                if !name.ends_with(".rs") || name == "log.rs" || name == "strings.rs" {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).unwrap();
+                for (n, line) in source.lines().enumerate() {
+                    // `banner.message` is already composed text, not a core error.
+                    if line.contains(".message") && !line.contains("banner.message") {
+                        hits.push(format!("{name}:{}: {}", n + 1, line.trim()));
+                    }
+                }
+            }
+        }
+        let mut hits = Vec::new();
+        scan(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui"),
+            &mut hits,
+        );
+        assert!(hits.is_empty(), "route through strings::error: {hits:#?}");
+    }
+
     #[test]
     fn error_text_uses_translation_then_message() {
         let en = "error-dns = Cannot resolve { $host }\nerror-bare = Bare\n";
