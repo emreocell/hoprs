@@ -466,7 +466,28 @@ pub fn tr_args(key: &str, args: &[(&str, Arg)]) -> String {
 mod tests {
     use super::*;
 
-    const SAME_IN_BOTH: &[&str] = &["app-title", "language-english", "language-pt-br"];
+    const SAME_IN_BOTH: &[&str] = &[
+        "app-title",
+        "language-english",
+        "language-pt-br",
+        // Product names, symbols and shortcut labels.
+        "brand",
+        "go-to-anything-key",
+        "palette-key-copy",
+        "palette-key-paste",
+        "palette-key-find",
+        "ssh-options",
+        "ftp-options",
+        "close-tab",
+        // Terms kept in English, or words that are the same in Portuguese.
+        "palette-group-site",
+        "palette-group-workspace",
+        "palette-kind-terminal",
+        "workspaces",
+        "field-host",
+        "workspace-sites",
+        "open-as-terminal",
+    ];
 
     fn parse(source: &str) -> ast::Resource<&str> {
         ast::Resource::default_from(source)
@@ -491,15 +512,16 @@ mod tests {
     #[test]
     fn en_and_pt_br_parse_without_errors() {
         for (name, source) in [("en", EN_SRC), ("pt-BR", PT_BR_SRC)] {
-            if let Err((_, errors)) = FluentResource::try_new(source.to_owned()) {
+            let resource = match FluentResource::try_new(source.to_owned()) {
+                Ok(resource) => resource,
+                Err((_, errors)) => panic!("{name}.ftl: {errors:?}"),
+            };
+            // Adding to a bundle fails on a duplicate message id.
+            let mut bundle =
+                FluentBundle::new_concurrent(vec![Language::En.tag().parse().unwrap()]);
+            if let Err(errors) = bundle.add_resource(resource) {
                 panic!("{name}.ftl: {errors:?}");
             }
-            let mut bundle = bundle(Language::En, source);
-            assert!(
-                bundle
-                    .add_resource(FluentResource::try_new(String::new()).unwrap())
-                    .is_ok()
-            );
         }
     }
 
@@ -594,13 +616,20 @@ mod tests {
         let source = include_str!("ui/strings.rs");
         let en = variables(EN_SRC);
         let mut found = 0;
-        for call in ["tr(\"", "tr_args(\""] {
+        for call in ["tr", "tr_args"] {
             for (at, _) in source.match_indices(call) {
                 let before = source[..at].chars().next_back();
                 if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
                     continue;
                 }
-                let rest = &source[at + call.len()..];
+                // `(`, then optional whitespace (rustfmt wraps long calls), then the quote.
+                let rest = source[at + call.len()..].strip_prefix('(');
+                let Some(rest) = rest.map(str::trim_start) else {
+                    continue;
+                };
+                let Some(rest) = rest.strip_prefix('"') else {
+                    continue;
+                };
                 let key = &rest[..rest.find('"').expect("closing quote")];
                 assert!(
                     en.contains_key(key),

@@ -65,7 +65,7 @@ fn muted<'a>(label: &'a str, size: f32) -> Element<'a, Message> {
 fn top_bar(app: &App) -> Element<'_, Message> {
     let brand = container(
         row![
-            text(strings::BRAND)
+            text(strings::brand())
                 .size(theme::TEXT_MD)
                 .font(theme::INTER_SEMIBOLD),
             muted(strings::VERSION, theme::TEXT_XS),
@@ -85,8 +85,8 @@ fn top_bar(app: &App) -> Element<'_, Message> {
         button(
             container(
                 row![
-                    text(strings::GO_TO_ANYTHING),
-                    container(text(strings::GO_TO_ANYTHING_KEY).size(theme::TEXT_XS))
+                    text(strings::go_to_anything()),
+                    container(text(strings::go_to_anything_key()).size(theme::TEXT_XS))
                         .padding(Padding::ZERO.left(theme::SPACE_2XS).right(theme::SPACE_2XS))
                         .style(theme::kbd),
                 ]
@@ -129,8 +129,8 @@ fn center(app: &App) -> Element<'_, Message> {
     }
     container(
         column![
-            text(strings::NO_SESSION_TITLE).font(theme::INTER_SEMIBOLD),
-            muted(strings::NO_SESSION_HINT, theme::TEXT_SM),
+            text(strings::no_session_title()).font(theme::INTER_SEMIBOLD),
+            muted(strings::no_session_hint(), theme::TEXT_SM),
         ]
         .spacing(theme::SPACE_2XS)
         .align_x(Alignment::Center),

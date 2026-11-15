@@ -113,7 +113,7 @@ pub fn content(dialog: &Dialog) -> Content {
         PromptKind::Password { user, .. } => Content {
             title: strings::PASSWORD_TITLE.to_owned(),
             rows: vec![(strings::LABEL_ACCOUNT, format!("{user}@{}", request.key))],
-            fields: vec![(strings::FIELD_PASSWORD.to_owned(), false)],
+            fields: vec![(strings::field_password().to_owned(), false)],
             ..base
         },
         PromptKind::Passphrase { path } => Content {
@@ -244,7 +244,7 @@ pub fn view(dialog: &Dialog) -> Element<'_, Message> {
 /// credential: Cancel as text, then the action in white.
 fn buttons<'a>(action: &'a str, decision: bool) -> Element<'a, Message> {
     let pad = Padding::from([theme::SPACE_2XS, theme::SPACE_MD]);
-    let cancel = button(text(strings::CANCEL).font(theme::INTER_SEMIBOLD))
+    let cancel = button(text(strings::cancel()).font(theme::INTER_SEMIBOLD))
         .padding(pad)
         .on_press(msg(DialogMsg::Cancel));
     let row = if decision {
@@ -340,7 +340,7 @@ pub fn host_key_changed_body<'a>(app: &'a App, tab: &'a Tab) -> iced::widget::Co
                 Message::RestartSession(tab.id),
             ),
             FailureAction::EditSite => (
-                strings::EDIT_SITE,
+                strings::edit_site(),
                 theme::button_text,
                 Message::EditSite(tab.site.clone()),
             ),
@@ -408,7 +408,7 @@ fn confirm<'a>(
                 .padding(pad)
                 .style(theme::button_primary)
                 .on_press(fix(KnownHostsMsg::Confirm)),
-            button(text(strings::KEEP))
+            button(text(strings::keep()))
                 .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
                 .style(theme::button_text)
                 .on_press(fix(KnownHostsMsg::Cancel)),

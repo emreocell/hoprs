@@ -170,7 +170,7 @@ async fn new_site_validation() {
     // Empty host: nothing is saved, the error shows inline.
     assert!(type_site(&mut app, SiteFormMsg::Save).is_empty());
     let errors = site_form(&mut app).errors.clone().unwrap();
-    assert_eq!(errors.host, Some(strings::HOST_REQUIRED));
+    assert_eq!(errors.host, Some(strings::host_required()));
     assert_eq!(errors.port, None, "the default port is valid");
 
     // Port 0 and non-numbers are refused; the errors follow the typing.
@@ -178,7 +178,7 @@ async fn new_site_validation() {
     type_site(&mut app, SiteFormMsg::Port("0".into()));
     let errors = site_form(&mut app).errors.clone().unwrap();
     assert_eq!(errors.host, None);
-    assert_eq!(errors.port, Some(strings::PORT_INVALID));
+    assert_eq!(errors.port, Some(strings::port_invalid()));
     assert!(type_site(&mut app, SiteFormMsg::Save).is_empty());
     type_site(&mut app, SiteFormMsg::Port("70000".into()));
     assert!(type_site(&mut app, SiteFormMsg::Save).is_empty());
@@ -688,7 +688,7 @@ async fn workspace_form_keeps_file_order_and_unknown_entries() {
     let Some(Form::Workspace(f)) = &app.form else {
         panic!()
     };
-    assert_eq!(f.name_error, Some(strings::NAME_REQUIRED));
+    assert_eq!(f.name_error, Some(strings::name_required()));
     app.update(form(WorkspaceFormMsg::Name("New".into())));
     app.update(form(WorkspaceFormMsg::ToggleSite(c.id.clone(), true)));
     app.update(form(WorkspaceFormMsg::ToggleSite(a.id.clone(), true)));

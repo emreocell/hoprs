@@ -103,7 +103,7 @@ pub fn toolbar<'a>(
                 PaneMsg::Rename,
             ))
             .push(action(
-                strings::DELETE,
+                strings::delete(),
                 Some(strings::KEY_DELETE),
                 some,
                 PaneMsg::Delete,
@@ -377,11 +377,11 @@ fn confirm_delete<'a>(
     }
     bar(row![
         lines,
-        button(text(strings::DELETE).font(theme::INTER_SEMIBOLD))
+        button(text(strings::delete()).font(theme::INTER_SEMIBOLD))
             .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_MD]))
             .style(theme::button_primary)
             .on_press(msg(PaneMsg::ConfirmDelete)),
-        button(text(strings::KEEP))
+        button(text(strings::keep()))
             .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
             .style(theme::button_text)
             .on_press(msg(PaneMsg::CancelAction)),
@@ -485,7 +485,7 @@ fn permissions<'a>(
                 .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_MD]))
                 .style(theme::button_primary)
                 .on_press_maybe((!dialog.invalid).then(|| msg(PaneMsg::ApplyPermissions))),
-            button(text(strings::CANCEL))
+            button(text(strings::cancel()))
                 .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
                 .style(theme::button_text)
                 .on_press(msg(PaneMsg::CancelAction)),

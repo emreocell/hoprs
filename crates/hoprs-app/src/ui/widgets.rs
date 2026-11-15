@@ -11,7 +11,7 @@ use crate::ui::theme::{self, palette};
 
 /// The in-place delete confirmation.
 pub fn confirm<'a>(question: &'a str, yes: Message, no: Message) -> Element<'a, Message> {
-    confirm_with(question, strings::DELETE, yes, no)
+    confirm_with(question, strings::delete(), yes, no)
 }
 
 /// An in-place confirmation whose action is `action` ("Delete", "Replace"…).
@@ -28,7 +28,7 @@ pub fn confirm_with<'a>(
                 .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_MD]))
                 .style(theme::button_primary)
                 .on_press(yes),
-            button(text(strings::KEEP))
+            button(text(strings::keep()))
                 .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
                 .style(theme::button_text)
                 .on_press(no),

@@ -13,57 +13,143 @@ pub fn cannot_open_profiles() -> &'static str {
 }
 
 // Top bar.
-pub const BRAND: &str = "hoprs";
+pub fn brand() -> &'static str {
+    tr("brand")
+}
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const NO_SESSIONS: &str = "No open sessions";
-pub const GO_TO_ANYTHING: &str = "Go to anything";
-pub const GO_TO_ANYTHING_KEY: &str = "Ctrl K";
+pub fn no_sessions() -> &'static str {
+    tr("no-sessions")
+}
+pub fn go_to_anything() -> &'static str {
+    tr("go-to-anything")
+}
+pub fn go_to_anything_key() -> &'static str {
+    tr("go-to-anything-key")
+}
 
 // The Ctrl+K palette.
-pub const PALETTE_PLACEHOLDER: &str = "Go to a tab, site or workspace, or run an action";
-pub const PALETTE_WORKSPACES_PLACEHOLDER: &str = "Open workspace";
-pub const PALETTE_NO_RESULTS: &str = "No matches";
-pub const PALETTE_GROUP_ACTION: &str = "Action";
-pub const PALETTE_GROUP_TAB: &str = "Tab";
-pub const PALETTE_GROUP_SITE: &str = "Site";
-pub const PALETTE_GROUP_WORKSPACE: &str = "Workspace";
-pub const PALETTE_KIND_TERMINAL: &str = "terminal";
-pub const PALETTE_KIND_FILES: &str = "files";
-pub const PALETTE_TOGGLE_QUEUE: &str = "Toggle queue";
-pub const PALETTE_TOGGLE_LOG: &str = "Toggle log";
-pub const PALETTE_CLOSE_TAB: &str = "Close tab";
-pub const PALETTE_OPEN_WORKSPACE: &str = "Open workspace…";
-pub const PALETTE_EDIT: &str = "Edit in editor";
-pub const PALETTE_UPLOAD: &str = "Upload selection";
-pub const PALETTE_DOWNLOAD: &str = "Download selection";
-pub const PALETTE_COPY: &str = "Copy";
-pub const PALETTE_PASTE: &str = "Paste";
-pub const PALETTE_FIND: &str = "Find in scrollback";
-pub const PALETTE_KEY_COPY: &str = "Ctrl Shift C";
-pub const PALETTE_KEY_PASTE: &str = "Ctrl Shift V";
-pub const PALETTE_KEY_FIND: &str = "Ctrl Shift F";
+pub fn palette_placeholder() -> &'static str {
+    tr("palette-placeholder")
+}
+pub fn palette_workspaces_placeholder() -> &'static str {
+    tr("palette-workspaces-placeholder")
+}
+pub fn palette_no_results() -> &'static str {
+    tr("palette-no-results")
+}
+pub fn palette_group_action() -> &'static str {
+    tr("palette-group-action")
+}
+pub fn palette_group_tab() -> &'static str {
+    tr("palette-group-tab")
+}
+pub fn palette_group_site() -> &'static str {
+    tr("palette-group-site")
+}
+pub fn palette_group_workspace() -> &'static str {
+    tr("palette-group-workspace")
+}
+pub fn palette_kind_terminal() -> &'static str {
+    tr("palette-kind-terminal")
+}
+pub fn palette_kind_files() -> &'static str {
+    tr("palette-kind-files")
+}
+pub fn palette_toggle_queue() -> &'static str {
+    tr("palette-toggle-queue")
+}
+pub fn palette_toggle_log() -> &'static str {
+    tr("palette-toggle-log")
+}
+pub fn palette_close_tab() -> &'static str {
+    tr("palette-close-tab")
+}
+pub fn palette_open_workspace() -> &'static str {
+    tr("palette-open-workspace")
+}
+pub fn palette_edit() -> &'static str {
+    tr("palette-edit")
+}
+pub fn palette_upload() -> &'static str {
+    tr("palette-upload")
+}
+pub fn palette_download() -> &'static str {
+    tr("palette-download")
+}
+pub fn palette_copy() -> &'static str {
+    tr("palette-copy")
+}
+pub fn palette_paste() -> &'static str {
+    tr("palette-paste")
+}
+pub fn palette_find() -> &'static str {
+    tr("palette-find")
+}
+pub fn palette_key_copy() -> &'static str {
+    tr("palette-key-copy")
+}
+pub fn palette_key_paste() -> &'static str {
+    tr("palette-key-paste")
+}
+pub fn palette_key_find() -> &'static str {
+    tr("palette-key-find")
+}
 
 // Sidebar.
-pub const FILTER_SITES: &str = "Filter sites";
-pub const WORKSPACES: &str = "Workspaces";
-pub const ALL_SITES: &str = "All sites";
-pub const NEW: &str = "+ New";
-pub const NO_WORKSPACES: &str = "No workspaces yet";
-pub const NO_SITES: &str = "No sites yet";
-pub const IMPORT_FILEZILLA: &str = "Import from FileZilla";
-pub const SETTINGS: &str = "Settings";
-pub const NEW_SITE: &str = "New site";
-pub const NO_MATCHES: &str = "No matching sites";
-pub const OPEN_WORKSPACE: &str = "Open workspace";
-pub const EDIT: &str = "Edit";
-pub const SITE_MISSING: &str = "Site missing";
-pub const CANNOT_LOAD_SITES: &str = "Can't load the saved sites";
-pub const RETRY: &str = "Retry";
-pub const UNREADABLE_ENTRY: &str = "Can't read this entry (written by a newer hoprs?)";
-pub const OPEN_PROFILE_FOLDER: &str = "Open sites.toml folder";
+pub fn filter_sites() -> &'static str {
+    tr("filter-sites")
+}
+pub fn workspaces() -> &'static str {
+    tr("workspaces")
+}
+pub fn all_sites() -> &'static str {
+    tr("all-sites")
+}
+pub fn new() -> &'static str {
+    tr("new")
+}
+pub fn no_workspaces() -> &'static str {
+    tr("no-workspaces")
+}
+pub fn no_sites() -> &'static str {
+    tr("no-sites")
+}
+pub fn import_filezilla() -> &'static str {
+    tr("import-filezilla")
+}
+pub fn settings() -> &'static str {
+    tr("settings")
+}
+pub fn new_site() -> &'static str {
+    tr("new-site")
+}
+pub fn no_matches() -> &'static str {
+    tr("no-matches")
+}
+pub fn open_workspace() -> &'static str {
+    tr("open-workspace")
+}
+pub fn edit() -> &'static str {
+    tr("edit")
+}
+pub fn site_missing() -> &'static str {
+    tr("site-missing")
+}
+pub fn cannot_load_sites() -> &'static str {
+    tr("cannot-load-sites")
+}
+pub fn retry() -> &'static str {
+    tr("retry")
+}
+pub fn unreadable_entry() -> &'static str {
+    tr("unreadable-entry")
+}
+pub fn open_profile_folder() -> &'static str {
+    tr("open-profile-folder")
+}
 /// Opening the profile folder failed.
 pub fn cannot_open_folder(reason: &str) -> String {
-    format!("Can't open the folder: {reason}")
+    tr_args("cannot-open-folder", &[("reason", reason.into())])
 }
 
 /// "1 site", "3 sites".
@@ -76,7 +162,10 @@ pub fn workspace_site_count(present: usize, total: usize) -> String {
     if present == total {
         site_count(total)
     } else {
-        format!("{present} of {}", site_count(total))
+        tr_args(
+            "workspace-site-count-partial",
+            &[("present", present.into()), ("total", total.into())],
+        )
     }
 }
 
@@ -84,94 +173,222 @@ pub fn workspace_site_count(present: usize, total: usize) -> String {
 pub fn unreadable_name(name: Option<&str>, file: &str, index: usize) -> String {
     match name {
         Some(name) => name.to_owned(),
-        None => format!("Entry {} in {file}", index + 1),
+        None => tr_args(
+            "unreadable-name-fallback",
+            &[("number", (index + 1).into()), ("file", file.into())],
+        ),
     }
 }
 
 // Site form.
-pub const SITE_FORM_NEW: &str = "New site";
-pub const SITE_FORM_EDIT: &str = "Edit site";
-pub const FIELD_NAME: &str = "Name";
-pub const FIELD_NAME_HINT: &str = "Defaults to the host";
-pub const FIELD_HOST: &str = "Host";
-pub const FIELD_PORT: &str = "Port";
-pub const FIELD_USER: &str = "User";
-pub const FIELD_PROTOCOL: &str = "Protocol";
-pub const FIELD_PASSWORD: &str = "Password";
-pub const PASSWORD_OPTIONAL: &str = "Optional";
-pub const PASSWORD_REPLACE: &str = "Type to replace";
-pub const PASSWORD_SAVED: &str = "Saved in the system keyring";
-pub const FORGET_PASSWORD: &str = "Forget the saved password";
-pub const SSH_OPTIONS: &str = "SSH";
-pub const USE_AGENT: &str = "Use ssh-agent";
-pub const KEY_FILE: &str = "Key file";
-pub const KEY_FILE_HINT: &str = "Path to a private key (optional)";
-pub const OPEN_AS: &str = "Open as";
-pub const OPEN_AS_TERMINAL: &str = "Terminal";
-pub const OPEN_AS_FILES: &str = "Files";
-pub const OPEN_AS_BOTH: &str = "Terminal and files";
-pub const FTP_OPTIONS: &str = "FTP";
-pub const FTP_MODE: &str = "Transfer mode";
-pub const FTP_PASSIVE: &str = "Passive";
-pub const FTP_ACTIVE: &str = "Active";
-pub const NAT_WORKAROUND: &str = "Ignore the passive address the server sends (NAT)";
-pub const START_FOLDERS: &str = "Start folders";
-pub const REMOTE_DIR: &str = "Remote folder";
-pub const LOCAL_DIR: &str = "Local folder";
-pub const FOLDER_HINT: &str = "Optional";
-pub const HOST_REQUIRED: &str = "Host is required";
-pub const PORT_INVALID: &str = "Port must be a number from 1 to 65535";
-pub const SAVE: &str = "Save";
-pub const SAVING: &str = "Saving…";
-pub const CANCEL: &str = "Cancel";
-pub const DELETE: &str = "Delete";
-pub const KEEP: &str = "Keep";
-pub const DELETE_SITE_CONFIRM: &str =
-    "Delete this site? It leaves every workspace and its saved password is deleted.";
+pub fn site_form_new() -> &'static str {
+    tr("site-form-new")
+}
+pub fn site_form_edit() -> &'static str {
+    tr("site-form-edit")
+}
+pub fn field_name() -> &'static str {
+    tr("field-name")
+}
+pub fn field_name_hint() -> &'static str {
+    tr("field-name-hint")
+}
+pub fn field_host() -> &'static str {
+    tr("field-host")
+}
+pub fn field_port() -> &'static str {
+    tr("field-port")
+}
+pub fn field_user() -> &'static str {
+    tr("field-user")
+}
+pub fn field_protocol() -> &'static str {
+    tr("field-protocol")
+}
+pub fn field_password() -> &'static str {
+    tr("field-password")
+}
+pub fn password_optional() -> &'static str {
+    tr("password-optional")
+}
+pub fn password_replace() -> &'static str {
+    tr("password-replace")
+}
+pub fn password_saved() -> &'static str {
+    tr("password-saved")
+}
+pub fn forget_password() -> &'static str {
+    tr("forget-password")
+}
+pub fn ssh_options() -> &'static str {
+    tr("ssh-options")
+}
+pub fn use_agent() -> &'static str {
+    tr("use-agent")
+}
+pub fn key_file() -> &'static str {
+    tr("key-file")
+}
+pub fn key_file_hint() -> &'static str {
+    tr("key-file-hint")
+}
+pub fn open_as() -> &'static str {
+    tr("open-as")
+}
+pub fn open_as_terminal() -> &'static str {
+    tr("open-as-terminal")
+}
+pub fn open_as_files() -> &'static str {
+    tr("open-as-files")
+}
+pub fn open_as_both() -> &'static str {
+    tr("open-as-both")
+}
+pub fn ftp_options() -> &'static str {
+    tr("ftp-options")
+}
+pub fn ftp_mode() -> &'static str {
+    tr("ftp-mode")
+}
+pub fn ftp_passive() -> &'static str {
+    tr("ftp-passive")
+}
+pub fn ftp_active() -> &'static str {
+    tr("ftp-active")
+}
+pub fn nat_workaround() -> &'static str {
+    tr("nat-workaround")
+}
+pub fn start_folders() -> &'static str {
+    tr("start-folders")
+}
+pub fn remote_dir() -> &'static str {
+    tr("remote-dir")
+}
+pub fn local_dir() -> &'static str {
+    tr("local-dir")
+}
+pub fn folder_hint() -> &'static str {
+    tr("folder-hint")
+}
+pub fn host_required() -> &'static str {
+    tr("host-required")
+}
+pub fn port_invalid() -> &'static str {
+    tr("port-invalid")
+}
+pub fn save() -> &'static str {
+    tr("save")
+}
+pub fn saving() -> &'static str {
+    tr("saving")
+}
+pub fn cancel() -> &'static str {
+    tr("cancel")
+}
+pub fn delete() -> &'static str {
+    tr("delete")
+}
+pub fn keep() -> &'static str {
+    tr("keep")
+}
+pub fn delete_site_confirm() -> &'static str {
+    tr("delete-site-confirm")
+}
 
 // Workspace form.
-pub const WORKSPACE_FORM_NEW: &str = "New workspace";
-pub const WORKSPACE_FORM_EDIT: &str = "Edit workspace";
-pub const WORKSPACE_SITES: &str = "Sites";
-pub const WORKSPACE_NO_SITES: &str = "No sites yet. Create a site first.";
-pub const NAME_REQUIRED: &str = "Name is required";
-pub const DELETE_WORKSPACE_CONFIRM: &str = "Delete this workspace? Its sites are kept.";
+pub fn workspace_form_new() -> &'static str {
+    tr("workspace-form-new")
+}
+pub fn workspace_form_edit() -> &'static str {
+    tr("workspace-form-edit")
+}
+pub fn workspace_sites() -> &'static str {
+    tr("workspace-sites")
+}
+pub fn workspace_no_sites() -> &'static str {
+    tr("workspace-no-sites")
+}
+pub fn name_required() -> &'static str {
+    tr("name-required")
+}
+pub fn delete_workspace_confirm() -> &'static str {
+    tr("delete-workspace-confirm")
+}
 
 // Center.
-pub const NO_SESSION_TITLE: &str = "No session open";
-pub const NO_SESSION_HINT: &str = "Pick a site in the sidebar to connect.";
-pub const KEYRING_UNAVAILABLE: &str =
-    "The system keyring was unavailable, so the saved password was not used.";
-pub const EDIT_SITE: &str = "Edit site";
+pub fn no_session_title() -> &'static str {
+    tr("no-session-title")
+}
+pub fn no_session_hint() -> &'static str {
+    tr("no-session-hint")
+}
+pub fn keyring_unavailable() -> &'static str {
+    tr("keyring-unavailable")
+}
+pub fn edit_site() -> &'static str {
+    tr("edit-site")
+}
 
 // Tabs.
-pub const CLOSE_TAB: &str = "×";
+pub fn close_tab() -> &'static str {
+    tr("close-tab")
+}
 /// The tab strip's actions on a connected SSH tab: another tab on its session.
-pub const NEW_TERMINAL_TAB: &str = "New terminal tab";
-pub const NEW_FILES_TAB: &str = "New files tab";
-/// A terminal tab until the terminal itself lands (Plan 6 Task 4).
-/// The terminal tab (Plan 6 Task 4).
-pub const TERMINAL_OVERFLOWED: &str = "Output was too fast and the shell was closed";
-pub const TERMINAL_REOPEN: &str = "Reopen";
-pub const TERMINAL_RESTART: &str = "Restart shell";
-pub const TERMINAL_SHELL_CLOSED: &str = "Shell closed";
-pub const TERMINAL_OPEN_FAILED: &str = "Can't open a shell";
-pub const TERMINAL_RETRY: &str = "Retry";
-pub const TERMINAL_WAITING_FOR_CONNECTION: &str = "Waiting for the connection";
-pub const TERMINAL_INPUT_DROPPED: &str =
-    "Some input was dropped: the shell was not taking it fast enough";
+pub fn new_terminal_tab() -> &'static str {
+    tr("new-terminal-tab")
+}
+pub fn new_files_tab() -> &'static str {
+    tr("new-files-tab")
+}
+pub fn terminal_overflowed() -> &'static str {
+    tr("terminal-overflowed")
+}
+pub fn terminal_reopen() -> &'static str {
+    tr("terminal-reopen")
+}
+pub fn terminal_restart() -> &'static str {
+    tr("terminal-restart")
+}
+pub fn terminal_shell_closed() -> &'static str {
+    tr("terminal-shell-closed")
+}
+pub fn terminal_open_failed() -> &'static str {
+    tr("terminal-open-failed")
+}
+pub fn terminal_retry() -> &'static str {
+    tr("terminal-retry")
+}
+pub fn terminal_waiting_for_connection() -> &'static str {
+    tr("terminal-waiting-for-connection")
+}
+pub fn terminal_input_dropped() -> &'static str {
+    tr("terminal-input-dropped")
+}
 /// Written into the scrollback when a new shell starts after a reconnect.
-pub const TERMINAL_RECONNECTED: &str = "— reconnected —";
-pub const TERMINAL_SEARCH_PLACEHOLDER: &str = "Search scrollback";
-pub const TERMINAL_SEARCH_NEXT: &str = "Next";
-pub const TERMINAL_SEARCH_PREVIOUS: &str = "Previous";
-pub const TERMINAL_SEARCH_CLOSE: &str = "Close";
-pub const TERMINAL_SEARCH_NO_MATCH: &str = "No match";
+pub fn terminal_reconnected() -> &'static str {
+    tr("terminal-reconnected")
+}
+pub fn terminal_search_placeholder() -> &'static str {
+    tr("terminal-search-placeholder")
+}
+pub fn terminal_search_next() -> &'static str {
+    tr("terminal-search-next")
+}
+pub fn terminal_search_previous() -> &'static str {
+    tr("terminal-search-previous")
+}
+pub fn terminal_search_close() -> &'static str {
+    tr("terminal-search-close")
+}
+pub fn terminal_search_no_match() -> &'static str {
+    tr("terminal-search-no-match")
+}
 /// "Shell exited (code N)", or without a code when the server sent none.
 pub fn shell_exited(code: Option<u32>) -> String {
     match code {
-        Some(code) => format!("Shell exited (code {code})"),
-        None => "Shell exited".to_owned(),
+        Some(code) => tr_args("shell-exited-code", &[("code", code.into())]),
+        None => tr("shell-exited").to_owned(),
     }
 }
 
@@ -816,5 +1033,54 @@ pub fn delete_site_edits(n: usize) -> String {
         format!(
             "{n} files of this site are open for editing: their unsent changes will be kept as recovered copies, never deleted."
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::i18n::{Catalog, Language};
+
+    fn pt(key: &str, args: &[(&str, crate::i18n::Arg)]) -> String {
+        Catalog::new(Language::PtBr).tr_args(key, args)
+    }
+
+    #[test]
+    fn pt_br_site_count_forms() {
+        for (n, want) in [(0usize, "0 sites"), (1, "1 site"), (2, "2 sites")] {
+            assert_eq!(pt("site-count", &[("count", n.into())]), want);
+        }
+    }
+
+    #[test]
+    fn pt_br_workspace_site_count_partial() {
+        let partial = |present: usize, total: usize| {
+            pt(
+                "workspace-site-count-partial",
+                &[("present", present.into()), ("total", total.into())],
+            )
+        };
+        assert_eq!(partial(0, 1), "0 de 1 site");
+        assert_eq!(partial(1, 2), "1 de 2 sites");
+        assert_eq!(partial(2, 3), "2 de 3 sites");
+    }
+
+    #[test]
+    fn pt_br_unreadable_name_and_folder_and_shell() {
+        assert_eq!(
+            pt(
+                "unreadable-name-fallback",
+                &[("number", 3usize.into()), ("file", "sites.toml".into())]
+            ),
+            "Entrada 3 em sites.toml"
+        );
+        assert_eq!(
+            pt("cannot-open-folder", &[("reason", "negado".into())]),
+            "Não foi possível abrir a pasta: negado"
+        );
+        assert_eq!(
+            pt("shell-exited-code", &[("code", 130u32.into())]),
+            "Shell encerrado (código 130)"
+        );
+        assert_eq!(pt("shell-exited", &[]), "Shell encerrado");
     }
 }

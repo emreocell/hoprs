@@ -254,22 +254,22 @@ impl TerminalTab {
             ShellEnd::Exited(code) => (
                 strings::shell_exited(*code),
                 None,
-                strings::TERMINAL_RESTART,
+                strings::terminal_restart(),
             ),
             ShellEnd::Overflowed => (
-                strings::TERMINAL_OVERFLOWED.to_owned(),
+                strings::terminal_overflowed().to_owned(),
                 None,
-                strings::TERMINAL_REOPEN,
+                strings::terminal_reopen(),
             ),
             ShellEnd::Closed => (
-                strings::TERMINAL_SHELL_CLOSED.to_owned(),
+                strings::terminal_shell_closed().to_owned(),
                 None,
-                strings::TERMINAL_RESTART,
+                strings::terminal_restart(),
             ),
             ShellEnd::Failed(error) => (
-                format!("{}: {}", strings::TERMINAL_OPEN_FAILED, error.message),
+                format!("{}: {}", strings::terminal_open_failed(), error.message),
                 error.detail.clone(),
-                strings::TERMINAL_RETRY,
+                strings::terminal_retry(),
             ),
             ShellEnd::Lost => return None,
         };
@@ -482,7 +482,10 @@ impl App {
                 terminal.shell = ShellState::Open(shell);
                 let mut effects = Vec::new();
                 if std::mem::take(&mut terminal.reconnected) {
-                    let line = format!("\r\n\x1b[0;2m{}\x1b[0m\r\n", strings::TERMINAL_RECONNECTED);
+                    let line = format!(
+                        "\r\n\x1b[0;2m{}\x1b[0m\r\n",
+                        strings::terminal_reconnected()
+                    );
                     effects.extend(terminal.feed(tab, line.as_bytes()));
                 }
                 // The widget measured itself while the shell opened.

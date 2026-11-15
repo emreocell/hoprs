@@ -265,7 +265,7 @@ fn queue_row<'a>(app: &'a App, row: &'a QueueRow) -> Element<'a, Message> {
         .align_y(Alignment::Center);
     let site = app
         .site(&item.spec.site)
-        .map_or(strings::SITE_MISSING, |s| s.name.as_str());
+        .map_or(strings::site_missing(), |s| s.name.as_str());
     let cell = |content: Element<'a, Message>, width: Length, right: bool| {
         container(content)
             .width(width)
@@ -343,8 +343,8 @@ fn queue_row<'a>(app: &'a App, row: &'a QueueRow) -> Element<'a, Message> {
         let label = match action {
             RowAction::Pause => strings::PAUSE,
             RowAction::Resume | RowAction::Resolve(ResolveAction::Resume) => strings::RESUME,
-            RowAction::Cancel => strings::CANCEL,
-            RowAction::Retry => strings::RETRY,
+            RowAction::Cancel => strings::cancel(),
+            RowAction::Retry => strings::retry(),
             RowAction::Dismiss => strings::DISMISS,
             RowAction::Resolve(ResolveAction::Skip) => strings::SKIP,
             RowAction::Resolve(ResolveAction::Overwrite) => strings::OVERWRITE,

@@ -38,7 +38,7 @@ pub fn protocol_tag(site: &Site) -> &'static str {
 
 pub fn view(app: &App) -> Element<'_, Message> {
     let search = container(
-        text_input(strings::FILTER_SITES, &app.site_filter)
+        text_input(strings::filter_sites(), &app.site_filter)
             .on_input(Message::FilterSites)
             .padding(Padding::from([0.0, theme::SPACE_XS]))
             .size(theme::TEXT_SM)
@@ -48,11 +48,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
     .padding(theme::SPACE_SM);
 
     let footer = row![
-        button(text(strings::IMPORT_FILEZILLA).size(theme::TEXT_XS))
+        button(text(strings::import_filezilla()).size(theme::TEXT_XS))
             .padding(0)
             .style(theme::button_text)
             .on_press(Message::OpenImport),
-        button(text(strings::SETTINGS).size(theme::TEXT_XS))
+        button(text(strings::settings()).size(theme::TEXT_XS))
             .padding(0)
             .style(theme::button_text)
             .on_press(Message::OpenSettings),
@@ -65,11 +65,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
             group_rule(),
             container(
                 column![
-                    text(strings::CANNOT_LOAD_SITES).color(palette().error),
+                    text(strings::cannot_load_sites()).color(palette().error),
                     text(&error.message)
                         .size(theme::TEXT_XS)
                         .color(palette().muted),
-                    action(strings::RETRY, Message::ReloadProfiles),
+                    action(strings::retry(), Message::ReloadProfiles),
                 ]
                 .spacing(theme::SPACE_2XS)
             )
@@ -126,7 +126,7 @@ fn group<'a>(title: &'a str, on_new: Message, body: Element<'a, Message>) -> Ele
     let head = row![
         text(title).size(theme::TEXT_XS).color(palette().muted),
         space::horizontal(),
-        button(text(strings::NEW).size(theme::TEXT_XS))
+        button(text(strings::new()).size(theme::TEXT_XS))
             .padding(Padding::from([0.0, theme::SPACE_2XS]))
             .style(theme::button_text)
             .on_press(on_new),
@@ -167,7 +167,7 @@ fn site_row(site: &Site, edit: bool) -> Element<'_, Message> {
     }
     row![
         open,
-        button(text(strings::EDIT).size(theme::TEXT_XS))
+        button(text(strings::edit()).size(theme::TEXT_XS))
             .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_2XS]))
             .style(theme::button_text)
             .on_press(Message::EditSite(site.id.clone())),
@@ -211,15 +211,15 @@ fn workspaces(app: &App) -> Element<'_, Message> {
         })
         .collect();
     let body: Element<'_, Message> = if app.workspaces.is_empty() {
-        note(strings::NO_WORKSPACES)
+        note(strings::no_workspaces())
     } else if visible.is_empty() {
-        note(strings::NO_MATCHES)
+        note(strings::no_matches())
     } else {
         column(visible.into_iter().map(|ws| workspace(app, ws)))
             .spacing(theme::SPACE_3XS)
             .into()
     };
-    group(strings::WORKSPACES, Message::NewWorkspace, body)
+    group(strings::workspaces(), Message::NewWorkspace, body)
 }
 
 fn workspace<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
@@ -262,7 +262,7 @@ fn workspace<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
         match app.site(&entry.site) {
             Some(site) => site_row(site, false),
             None => container(
-                text(strings::SITE_MISSING)
+                text(strings::site_missing())
                     .size(theme::TEXT_SM)
                     .color(palette().error),
             )
@@ -284,7 +284,7 @@ fn workspace<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
     );
 
     let open_button = button(
-        container(text(strings::OPEN_WORKSPACE).font(theme::INTER_SEMIBOLD))
+        container(text(strings::open_workspace()).font(theme::INTER_SEMIBOLD))
             .center_x(Length::Fill)
             .center_y(Length::Fill),
     )
@@ -295,7 +295,7 @@ fn workspace<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
     .on_press(Message::OpenWorkspace(ws.id.clone()));
     let actions = row![
         open_button,
-        button(text(strings::EDIT).size(theme::TEXT_XS))
+        button(text(strings::edit()).size(theme::TEXT_XS))
             .padding(Padding::from([0.0, theme::SPACE_2XS]))
             .style(theme::button_text)
             .on_press(Message::EditWorkspace(ws.id.clone())),
@@ -329,23 +329,23 @@ fn all_sites(app: &App) -> Element<'_, Message> {
     let body: Element<'_, Message> = if app.sites.is_empty() {
         container(
             column![
-                text(strings::NO_SITES)
+                text(strings::no_sites())
                     .size(theme::TEXT_SM)
                     .color(palette().muted),
-                action(strings::NEW_SITE, Message::NewSite),
+                action(strings::new_site(), Message::NewSite),
             ]
             .spacing(theme::SPACE_2XS),
         )
         .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_MD]))
         .into()
     } else if visible.is_empty() {
-        note(strings::NO_MATCHES)
+        note(strings::no_matches())
     } else {
         container(column(visible.into_iter().map(|site| site_row(site, true))))
             .padding(Padding::from([0.0, theme::SPACE_XS]))
             .into()
     };
-    group(strings::ALL_SITES, Message::NewSite, body)
+    group(strings::all_sites(), Message::NewSite, body)
 }
 
 /// Entries kept on disk but unreadable here, and the way to look at the file.
@@ -356,7 +356,7 @@ fn unreadable(app: &App) -> Element<'_, Message> {
         list = list.push(
             column![
                 text(name).font(theme::MONO).size(theme::TEXT_MONO),
-                text(strings::UNREADABLE_ENTRY)
+                text(strings::unreadable_entry())
                     .size(theme::TEXT_XS)
                     .color(palette().error),
             ]
@@ -364,7 +364,7 @@ fn unreadable(app: &App) -> Element<'_, Message> {
         );
     }
     list = list.push(action(
-        strings::OPEN_PROFILE_FOLDER,
+        strings::open_profile_folder(),
         Message::OpenProfileFolder,
     ));
     if let Some(error) = &app.sidebar_error {

@@ -177,7 +177,7 @@ pub fn text_focused() -> impl Operation<bool> {
 pub fn view<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> {
     let site_name = app
         .site(&tab.site)
-        .map_or(strings::SITE_MISSING, |s| s.name.as_str());
+        .map_or(strings::site_missing(), |s| s.name.as_str());
     let this_year = format::current_year();
     let panes = row![
         pane(app, tab, Side::Local, strings::LOCAL, this_year),
@@ -711,7 +711,7 @@ fn failed(error: &Error, retry: Message) -> Element<'_, Message> {
                     .size(theme::TEXT_MONO)
                     .color(p.muted)
             }),
-            button(text(strings::RETRY))
+            button(text(strings::retry()))
                 .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
                 .style(theme::button_outline)
                 .on_press(retry),
@@ -749,7 +749,7 @@ pub(crate) fn not_connected<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Messa
         }
         if failure.keyring_unavailable {
             body = body.push(
-                text(strings::KEYRING_UNAVAILABLE)
+                text(strings::keyring_unavailable())
                     .size(theme::TEXT_XS)
                     .color(p.muted),
             );
@@ -764,7 +764,7 @@ pub(crate) fn not_connected<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Messa
                 Message::ConnectSite(tab.site.clone()),
             ),
             FailureAction::EditSite => (
-                strings::EDIT_SITE,
+                strings::edit_site(),
                 theme::button_text,
                 Message::EditSite(tab.site.clone()),
             ),

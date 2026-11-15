@@ -126,7 +126,7 @@ impl WorkspaceForm {
                     return WorkspaceFormOutcome::Nothing;
                 }
                 let Some(workspace) = self.build(sites) else {
-                    self.name_error = Some(strings::NAME_REQUIRED);
+                    self.name_error = Some(strings::name_required());
                     return WorkspaceFormOutcome::Nothing;
                 };
                 self.busy = true;
@@ -160,12 +160,12 @@ fn msg(m: WorkspaceFormMsg) -> Message {
 
 pub fn view<'a>(form: &'a WorkspaceForm, sites: &'a [Site]) -> Element<'a, Message> {
     let title = if form.editing {
-        strings::WORKSPACE_FORM_EDIT
+        strings::workspace_form_edit()
     } else {
-        strings::WORKSPACE_FORM_NEW
+        strings::workspace_form_new()
     };
     let name = field(
-        strings::FIELD_NAME,
+        strings::field_name(),
         text_input("", &form.name)
             .on_input(|v| msg(WorkspaceFormMsg::Name(v)))
             .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
@@ -176,7 +176,7 @@ pub fn view<'a>(form: &'a WorkspaceForm, sites: &'a [Site]) -> Element<'a, Messa
     );
 
     let list: Element<'a, Message> = if sites.is_empty() {
-        text(strings::WORKSPACE_NO_SITES)
+        text(strings::workspace_no_sites())
             .size(theme::TEXT_SM)
             .color(palette().muted)
             .into()
@@ -204,7 +204,7 @@ pub fn view<'a>(form: &'a WorkspaceForm, sites: &'a [Site]) -> Element<'a, Messa
 
     let actions: Element<'a, Message> = if form.confirm_delete {
         confirm(
-            strings::DELETE_WORKSPACE_CONFIRM,
+            strings::delete_workspace_confirm(),
             msg(WorkspaceFormMsg::ConfirmDelete),
             msg(WorkspaceFormMsg::CancelDelete),
         )
@@ -212,16 +212,16 @@ pub fn view<'a>(form: &'a WorkspaceForm, sites: &'a [Site]) -> Element<'a, Messa
         let mut buttons = row![
             button(
                 text(if form.busy {
-                    strings::SAVING
+                    strings::saving()
                 } else {
-                    strings::SAVE
+                    strings::save()
                 })
                 .font(theme::INTER_SEMIBOLD)
             )
             .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_MD]))
             .style(theme::button_primary)
             .on_press_maybe((!form.busy).then(|| msg(WorkspaceFormMsg::Save))),
-            button(text(strings::CANCEL))
+            button(text(strings::cancel()))
                 .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
                 .style(theme::button_text)
                 .on_press(msg(WorkspaceFormMsg::Cancel)),
@@ -231,7 +231,7 @@ pub fn view<'a>(form: &'a WorkspaceForm, sites: &'a [Site]) -> Element<'a, Messa
         .spacing(theme::SPACE_XS);
         if form.editing {
             buttons = buttons.push(
-                button(text(strings::DELETE))
+                button(text(strings::delete()))
                     .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
                     .style(theme::button_text)
                     .on_press_maybe((!form.busy).then(|| msg(WorkspaceFormMsg::Delete))),
@@ -244,7 +244,7 @@ pub fn view<'a>(form: &'a WorkspaceForm, sites: &'a [Site]) -> Element<'a, Messa
         text(title).size(theme::TEXT_MD).font(theme::INTER_SEMIBOLD),
         name,
         iced::widget::rule::horizontal(theme::HAIRLINE).style(theme::rule_1px),
-        text(strings::WORKSPACE_SITES)
+        text(strings::workspace_sites())
             .size(theme::TEXT_XS)
             .font(theme::INTER_SEMIBOLD),
         list,

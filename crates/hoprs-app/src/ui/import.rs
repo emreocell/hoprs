@@ -159,7 +159,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 failure(flow.error.as_ref()),
                 row![
                     primary(strings::NEXT, Some(msg(ImportMsg::Next))),
-                    secondary(strings::CANCEL, Some(msg(ImportMsg::Close))),
+                    secondary(strings::cancel(), Some(msg(ImportMsg::Close))),
                 ]
                 .spacing(theme::SPACE_XS)
                 .align_y(Alignment::Center),

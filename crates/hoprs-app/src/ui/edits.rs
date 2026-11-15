@@ -124,7 +124,7 @@ fn line(edit: &RemoteEdit) -> Element<'_, Message> {
     match &edit.status {
         EditStatus::Failed { .. } => {
             head = head.push(small_button(
-                strings::RETRY,
+                strings::retry(),
                 Some(edit_msg(EditMsg::Retry(id))),
                 false,
             ));
@@ -285,7 +285,7 @@ fn question_body<'a>(
         row![
             small_button(labels[0], on(CloseAnswer::Upload), true),
             small_button(labels[1], on(CloseAnswer::Keep), false),
-            small_button(strings::CANCEL, on(CloseAnswer::Cancel), false),
+            small_button(strings::cancel(), on(CloseAnswer::Cancel), false),
         ]
     }
     .spacing(theme::SPACE_XS)

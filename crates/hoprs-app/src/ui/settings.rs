@@ -507,7 +507,7 @@ fn export_actions(backup: &Backup) -> Element<'_, Message> {
     let idle = !backup.running() && !backup.export_checking;
     row![
         primary(strings::EXPORT, idle.then(|| backup_msg(BackupMsg::Export))),
-        plain(strings::CANCEL, Some(backup_msg(BackupMsg::Cancel))),
+        plain(strings::cancel(), Some(backup_msg(BackupMsg::Cancel))),
     ]
     .spacing(theme::SPACE_XS)
     .align_y(Alignment::Center)
@@ -539,7 +539,7 @@ fn restore_panel(backup: &Backup) -> Element<'_, Message> {
                 strings::RESTORE,
                 (!running).then(|| backup_msg(BackupMsg::Restore))
             ),
-            plain(strings::CANCEL, Some(backup_msg(BackupMsg::Cancel))),
+            plain(strings::cancel(), Some(backup_msg(BackupMsg::Cancel))),
         ]
         .spacing(theme::SPACE_XS)
         .align_y(Alignment::Center)
