@@ -70,6 +70,9 @@ pub fn palette_open_workspace() -> &'static str {
 pub fn palette_edit() -> &'static str {
     tr("palette-edit")
 }
+pub fn palette_compare_folders() -> &'static str {
+    tr("palette-compare-folders")
+}
 pub fn palette_upload() -> &'static str {
     tr("palette-upload")
 }

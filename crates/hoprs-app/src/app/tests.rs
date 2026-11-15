@@ -1054,7 +1054,13 @@ async fn stale_listing_is_ignored() {
     assert!(app.update(old.into_iter().next().unwrap()).is_empty());
     assert_eq!(app.pane_status(0, Side::Remote), PaneStatus::Loading);
     assert!(app.tabs[0].remote().entries.is_empty());
-    assert!(app.update(new.into_iter().next().unwrap()).is_empty());
+    // The latest listing is the one that applies (and, both panes listed, schedules the
+    // automatic folder compare).
+    let applied = app.update(new.into_iter().next().unwrap());
+    assert!(
+        applied.iter().all(|e| matches!(e, Effect::Later { .. })),
+        "{applied:?}"
+    );
     assert_eq!(entry_names(&app, 0, Side::Remote), ["fresh.txt"]);
     assert!(app.update(up.into_iter().next().unwrap()).is_empty());
     assert_eq!(app.tabs[0].remote().path, rpath("/srv/new"));
@@ -1395,6 +1401,7 @@ fn window_resize_is_remembered() {
     assert_eq!(app.window_width, 960.0);
 }
 
+mod compare;
 mod dialogs;
 mod edit;
 mod file_actions;

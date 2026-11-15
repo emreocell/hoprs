@@ -43,6 +43,7 @@ palette-toggle-log = Mostrar ou ocultar o log
 palette-close-tab = Fechar aba
 palette-open-workspace = Abrir workspace…
 palette-edit = Abrir no editor
+palette-compare-folders = Comparar pastas
 palette-upload = Fazer upload da seleção
 palette-download = Fazer download da seleção
 palette-copy = Copiar

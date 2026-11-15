@@ -28,7 +28,9 @@
 
 use hoprs_core::{SiteId, TabKind, WorkspaceId};
 
-use super::{App, Effect, FailureAction, FileKey, LogMsg, Message, Tab, TabId, TabState};
+use super::{
+    App, CompareMsg, Effect, FailureAction, FileKey, LogMsg, Message, Tab, TabId, TabState,
+};
 use crate::app::terminal::TerminalMsg;
 use crate::backend::Side;
 use crate::ui::strings;
@@ -158,6 +160,7 @@ fn empty_query_order(entries: Vec<Entry>, active: Option<TabId>) -> Vec<Entry> {
             | PaletteItem::Copy(_)
             | PaletteItem::Paste(_)
             | PaletteItem::Find(_)
+            | PaletteItem::Compare(_)
             | PaletteItem::Reconnect(_)
             | PaletteItem::NewTerminalTab(_)
             | PaletteItem::NewFilesTab(_)
@@ -215,6 +218,8 @@ pub enum PaletteItem {
     Copy(TabId),
     Paste(TabId),
     Find(TabId),
+    /// Compares the files tab's two folders.
+    Compare(TabId),
 }
 
 /// The group of a row, shown as a muted tag.
@@ -411,6 +416,13 @@ impl App {
         if self.form.is_none() {
             if tab.is_files() {
                 self.pane_actions(index, out);
+                if self.tab_session(index).is_some() {
+                    out.push(Entry::action(
+                        PaletteItem::Compare(tab.id),
+                        strings::palette_compare_folders(),
+                        None,
+                    ));
+                }
             } else {
                 self.terminal_actions(index, out);
             }
@@ -576,6 +588,7 @@ impl App {
                 tab: *tab,
                 msg: TerminalMsg::Paste,
             },
+            PaletteItem::Compare(tab) => Message::Compare(CompareMsg::Start { tab: *tab }),
             PaletteItem::Find(tab) => Message::Terminal {
                 tab: *tab,
                 msg: TerminalMsg::OpenSearch,

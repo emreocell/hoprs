@@ -23,7 +23,7 @@ use hoprs_core::{
     WorkspaceId,
 };
 use hoprs_import::{ImportOptions, ImportReport};
-use hoprs_remote::{CompareOptions, Progress, RemoteFs, Summary};
+use hoprs_remote::{CompareOptions, CompareSignals, Progress, RemoteFs, Summary};
 pub use hoprs_ssh::known_hosts::KnownHostEntry;
 pub use hoprs_ssh::{AuthMethod, ShellOutput};
 use hoprs_transfer::{
@@ -310,23 +310,13 @@ pub trait BackendApi: Send + Sync {
     fn set_keepalive(&self, secs: u64);
 }
 
-/// A remote listing asked without a session.
-/// The two ways to steer a running [`BackendApi::compare`].
-#[derive(Debug, Clone)]
-pub struct CompareSignals {
-    /// Turns `true` to continue after [`Progress::LimitReached`] (and to lift the limit).
-    pub resume: watch::Receiver<bool>,
-    /// Turns `true` to stop cooperatively: no new listing starts, the one in flight
-    /// finishes, and the call returns `Ok` with `stopped` set. Never drop the future to
-    /// cancel (that can force an FTP reconnect); that is for a closed tab or session.
-    pub stop: watch::Receiver<bool>,
-}
-
 /// The concurrent listings per side for a session's protocol: `(local, remote)`.
 pub fn compare_concurrency(protocol: hoprs_core::Protocol) -> (usize, usize) {
     match protocol {
         hoprs_core::Protocol::Ssh => (4, 4),
-        _ => (4, 1),
+        hoprs_core::Protocol::Ftp
+        | hoprs_core::Protocol::FtpsExplicit
+        | hoprs_core::Protocol::FtpsImplicit => (4, 1),
     }
 }
 
@@ -724,8 +714,7 @@ impl BackendApi for Backend {
             remote_root,
             options,
             progress,
-            signals.resume,
-            signals.stop,
+            signals,
         )
         .await
     }

@@ -447,7 +447,6 @@ pub enum Effect {
     /// `remote_root` of `session`; reports as [`Message::Compare`] (progress, then one
     /// `Finished`). `options.concurrency_*` are set by the backend; a run id is
     /// used once per tab.
-    #[allow(dead_code)] // built by Task 5's compare state machine
     Compare {
         tab: TabId,
         run: CompareRunId,
@@ -457,21 +456,18 @@ pub enum Effect {
         options: hoprs_remote::CompareOptions,
     },
     /// Lets a run that stopped at the limit continue without one.
-    #[allow(dead_code)] // built by Task 5's compare state machine
     CompareResume {
         tab: TabId,
         run: CompareRunId,
     },
     /// Cooperative cancel (folder change, Stop, auto-off): no new listing starts, the one
     /// in flight finishes, and the run ends with `Finished(Ok(stopped))`.
-    #[allow(dead_code)] // built by Task 5's compare state machine
     CompareCancel {
         tab: TabId,
         run: CompareRunId,
     },
     /// Abrupt cancel for a closed tab or a gone session: drops the run's future (an FTP
     /// session may reconnect) and its registry entry; no `Finished` follows.
-    #[allow(dead_code)] // built by Task 5's compare state machine
     CompareAbort {
         tab: TabId,
         run: CompareRunId,

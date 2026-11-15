@@ -55,6 +55,7 @@ palette-toggle-log = Toggle log
 palette-close-tab = Close tab
 palette-open-workspace = Open workspace…
 palette-edit = Edit in editor
+palette-compare-folders = Compare folders
 palette-upload = Upload selection
 palette-download = Download selection
 palette-copy = Copy

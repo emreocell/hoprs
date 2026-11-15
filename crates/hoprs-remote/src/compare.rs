@@ -89,6 +89,16 @@ pub struct Summary {
     pub stopped: bool,
 }
 
+/// The two ways to steer a running [`compare`].
+#[derive(Debug, Clone)]
+pub struct CompareSignals {
+    /// Turns `true` to continue after [`Progress::LimitReached`] (and to lift the limit).
+    pub resume: watch::Receiver<bool>,
+    /// Turns `true` to stop cooperatively: no new listing starts, the one in flight
+    /// finishes, and the call returns `Ok` with [`Summary::stopped`] set.
+    pub stop: watch::Receiver<bool>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CompareOptions {
     /// Names to skip on both sides at any depth (`*` matches any run of characters).
@@ -196,7 +206,6 @@ fn join_rel(parent: &str, name: &str) -> RelPath {
 /// results are discarded, and the call returns `Ok` with [`Summary::stopped`] set. A dropped
 /// `stop` sender never stops the run. Dropping the returned future also cancels the run, but
 /// abruptly: use it only when the session is going away.
-#[allow(clippy::too_many_arguments)] // the two signals are separate channels, see the docs
 pub async fn compare(
     local: Arc<dyn RemoteFs>,
     local_root: RemotePath,
@@ -204,9 +213,12 @@ pub async fn compare(
     remote_root: RemotePath,
     options: CompareOptions,
     progress: mpsc::UnboundedSender<Progress>,
-    mut resume: watch::Receiver<bool>,
-    mut stop: watch::Receiver<bool>,
+    signals: CompareSignals,
 ) -> Result<Summary> {
+    let CompareSignals {
+        mut resume,
+        mut stop,
+    } = signals;
     let local_sem = Semaphore::new(options.concurrency_a.max(1));
     let remote_sem = Semaphore::new(options.concurrency_b.max(1));
     let width = options.concurrency_a.max(options.concurrency_b).max(1);
@@ -578,7 +590,16 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let (_resume_tx, resume) = watch::channel(false);
         let (_stop_tx, stop) = watch::channel(false);
-        let summary = compare(a, p("/"), b, p("/"), options, tx, resume, stop).await?;
+        let summary = compare(
+            a,
+            p("/"),
+            b,
+            p("/"),
+            options,
+            tx,
+            CompareSignals { resume, stop },
+        )
+        .await?;
         let mut events = Vec::new();
         while let Ok(e) = rx.try_recv() {
             events.push(e);
@@ -803,8 +824,18 @@ mod tests {
             ..Default::default()
         };
         let (a2, b2) = (la.clone(), lb.clone());
-        let task =
-            tokio::spawn(async move { compare(a2, p("/"), b2, p("/"), o, tx, resume, stop).await });
+        let task = tokio::spawn(async move {
+            compare(
+                a2,
+                p("/"),
+                b2,
+                p("/"),
+                o,
+                tx,
+                CompareSignals { resume, stop },
+            )
+            .await
+        });
         loop {
             if let Progress::LimitReached { local, remote } = rx.recv().await.unwrap() {
                 assert_eq!((local, remote), (3, 3));
@@ -843,8 +874,7 @@ mod tests {
                 p("/"),
                 opts(),
                 tx,
-                resume,
-                stop,
+                CompareSignals { resume, stop },
             );
             let _ = tokio::time::timeout(Duration::from_millis(2500), fut).await;
         }
@@ -875,8 +905,18 @@ mod tests {
             ..Default::default()
         };
         let (a2, b2) = (pa.clone(), pb.clone());
-        let task =
-            tokio::spawn(async move { compare(a2, p("/"), b2, p("/"), o, tx, resume, stop).await });
+        let task = tokio::spawn(async move {
+            compare(
+                a2,
+                p("/"),
+                b2,
+                p("/"),
+                o,
+                tx,
+                CompareSignals { resume, stop },
+            )
+            .await
+        });
         // The root listing is in flight (it takes 1 s).
         tokio::time::sleep(Duration::from_millis(500)).await;
         assert_eq!(pa.listings(), vec!["/".to_string()]);
@@ -914,8 +954,7 @@ mod tests {
                 p("/"),
                 o,
                 tx,
-                resume,
-                stop,
+                CompareSignals { resume, stop },
             )
             .await
         });

@@ -157,7 +157,11 @@ impl App {
             }
             _ => None,
         };
-        let lost = matches!(state, ConnectionState::Disconnected(_));
+        let dropped = match &state {
+            ConnectionState::Disconnected(error) => Some(error.clone()),
+            _ => None,
+        };
+        let lost = dropped.is_some();
         let down = state != ConnectionState::Connected;
         if auth.is_some() {
             conn.auth = auth;
@@ -177,6 +181,12 @@ impl App {
             None if lost => self.reconnect_for_held(&site).into_iter().collect(),
             None => Vec::new(),
         };
+        // A comparison on the dropped session stops with the reason.
+        if let Some(error) = &dropped {
+            for index in self.tabs_of(&site) {
+                effects.extend(self.compare_session_gone(index, error));
+            }
+        }
         if !back {
             return effects;
         }

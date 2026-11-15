@@ -22,15 +22,19 @@ use crate::app::{
     RequestId, TabId, TerminalMsg,
 };
 use crate::backend::{
-    BackendApi, CompareSignals, KeptEdit, KnownHostEntry, PromptAnswer, PromptId, SessionId,
-    ShellId, ShellOutput, Side, WorkspaceTabs,
+    BackendApi, KeptEdit, KnownHostEntry, PromptAnswer, PromptId, SessionId, ShellId, ShellOutput,
+    Side, WorkspaceTabs,
 };
 use crate::settings::Settings;
 use crate::ui::site_form::PasswordChange;
 use crate::ui::{dialogs, files, strings, tabs};
 
 /// Runs one effect against the backend.
-pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> {
+pub fn run(
+    backend: Arc<dyn BackendApi>,
+    runs: &CompareRuns,
+    effect: Effect,
+) -> iced::Task<Message> {
     use iced::Task;
     match effect {
         Effect::LoadProfiles(request) => {
@@ -133,10 +137,9 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
             remote_root,
             options,
         } => {
-            let key = compare_key(&backend, tab, run);
             let stream = compare_run(
                 backend,
-                key,
+                runs.clone(),
                 (tab, run),
                 session,
                 local_root,
@@ -144,25 +147,25 @@ pub fn run(backend: Arc<dyn BackendApi>, effect: Effect) -> iced::Task<Message> 
                 options,
             );
             let (task, handle) = Task::run(stream, |m| m).abortable();
-            if let Some(entry) = compare_runs().get_mut(&key) {
+            if let Some(entry) = runs.lock().get_mut(&(tab, run)) {
                 entry.abort = Some(handle);
             }
             task
         }
         Effect::CompareResume { tab, run } => {
-            if let Some(entry) = compare_runs().get(&compare_key(&backend, tab, run)) {
+            if let Some(entry) = runs.lock().get(&(tab, run)) {
                 let _ = entry.resume.send(true);
             }
             Task::none()
         }
         Effect::CompareCancel { tab, run } => {
-            if let Some(entry) = compare_runs().get(&compare_key(&backend, tab, run)) {
+            if let Some(entry) = runs.lock().get(&(tab, run)) {
                 let _ = entry.stop.send(true);
             }
             Task::none()
         }
         Effect::CompareAbort { tab, run } => {
-            if let Some(entry) = compare_runs().remove(&compare_key(&backend, tab, run))
+            if let Some(entry) = runs.lock().remove(&(tab, run))
                 && let Some(handle) = entry.abort
             {
                 handle.abort();
@@ -948,22 +951,28 @@ struct CompareRun {
     abort: Option<iced::task::Handle>,
 }
 
-type CompareKey = (usize, TabId, CompareRunId);
+/// The running comparisons by tab and run, owned by the app's shell (so a registry never
+/// outlives it, and tests with their own never meet). An entry leaves when the run ends or
+/// is aborted.
+#[derive(Clone, Default)]
+pub struct CompareRuns(
+    Arc<std::sync::Mutex<std::collections::HashMap<(TabId, CompareRunId), CompareRun>>>,
+);
 
-/// The running comparisons, by backend (its address, so tests with their own backends
-/// never meet), tab and run. An entry leaves when the run ends or is aborted.
-fn compare_runs()
--> std::sync::MutexGuard<'static, std::collections::HashMap<CompareKey, CompareRun>> {
-    static RUNS: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<CompareKey, CompareRun>>,
-    > = std::sync::OnceLock::new();
-    RUNS.get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
+impl CompareRuns {
+    fn lock(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<(TabId, CompareRunId), CompareRun>>
+    {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
-fn compare_key(backend: &Arc<dyn BackendApi>, tab: TabId, run: CompareRunId) -> CompareKey {
-    (Arc::as_ptr(backend).cast::<()>() as usize, tab, run)
+    #[cfg(test)]
+    fn contains(&self, tab: TabId, run: CompareRunId) -> bool {
+        self.lock().contains_key(&(tab, run))
+    }
 }
 
 /// One comparison: its progress as it comes, then [`CompareMsg::Finished`] (last). The
@@ -971,7 +980,7 @@ fn compare_key(backend: &Arc<dyn BackendApi>, tab: TabId, run: CompareRunId) -> 
 /// the effect always finds them.
 pub fn compare_run(
     backend: Arc<dyn BackendApi>,
-    key: CompareKey,
+    runs: CompareRuns,
     (tab, run): (TabId, CompareRunId),
     session: SessionId,
     local_root: RemotePath,
@@ -980,8 +989,8 @@ pub fn compare_run(
 ) -> impl Stream<Item = Message> + Send + 'static {
     let (resume_tx, resume) = watch::channel(false);
     let (stop_tx, stop) = watch::channel(false);
-    compare_runs().insert(
-        key,
+    runs.lock().insert(
+        (tab, run),
         CompareRun {
             resume: resume_tx,
             stop: stop_tx,
@@ -990,11 +999,11 @@ pub fn compare_run(
     );
     let (tx, rx) = mpsc::unbounded_channel();
     let done = async move {
-        let signals = CompareSignals { resume, stop };
+        let signals = hoprs_remote::CompareSignals { resume, stop };
         let result = backend
             .compare(session, local_root, remote_root, options, tx, signals)
             .await;
-        compare_runs().remove(&key);
+        runs.lock().remove(&(tab, run));
         Message::Compare(CompareMsg::Finished { tab, run, result })
     };
     // The progress sender lives in the run, so the progress stream ends with it, before
@@ -1196,16 +1205,16 @@ mod compare_tests {
 
     fn start(
         fake: &Arc<FakeBackend>,
+        runs: &CompareRuns,
         session: SessionId,
         run: u64,
         options: CompareOptions,
     ) -> std::pin::Pin<Box<dyn Stream<Item = Message> + Send>> {
         let backend: Arc<dyn BackendApi> = fake.clone();
         let run = CompareRunId(run);
-        let key = compare_key(&backend, TAB, run);
         Box::pin(compare_run(
             backend,
-            key,
+            runs.clone(),
             (TAB, run),
             session,
             p("/l"),
@@ -1214,9 +1223,9 @@ mod compare_tests {
         ))
     }
 
-    fn effect(fake: &Arc<FakeBackend>, effect: Effect) {
+    fn effect(fake: &Arc<FakeBackend>, runs: &CompareRuns, effect: Effect) {
         let backend: Arc<dyn BackendApi> = fake.clone();
-        let _ = run(backend, effect);
+        let _ = run(backend, runs, effect);
     }
 
     fn finished(msg: Message) -> Result<Summary, Error> {
@@ -1232,6 +1241,7 @@ mod compare_tests {
     #[tokio::test]
     async fn runs_a_comparison_over_the_session_and_the_local_fs() {
         let (fake, session) = setup().await;
+        let runs = CompareRuns::default();
         let site = fake.session_site(session).unwrap();
         let t = SystemTime::UNIX_EPOCH;
         fake.local_fs().add_file("/l/same", b"x", t);
@@ -1239,7 +1249,7 @@ mod compare_tests {
         fake.remote_fs(&site).add_file("/r/same", b"x", t);
         fake.remote_fs(&site).add_file("/r/only-there", b"x", t);
 
-        let messages: Vec<Message> = start(&fake, session, 1, CompareOptions::default())
+        let messages: Vec<Message> = start(&fake, &runs, session, 1, CompareOptions::default())
             .collect()
             .await;
         let (last, progress) = messages.split_last().unwrap();
@@ -1268,13 +1278,13 @@ mod compare_tests {
         assert_eq!((summary.identical, summary.differences), (1, 2));
         assert!(!summary.partial && !summary.stopped);
         assert_eq!(fake.compare_calls(), vec![(session, p("/l"), p("/r"))]);
-        let backend: Arc<dyn BackendApi> = fake.clone();
-        assert!(!compare_runs().contains_key(&compare_key(&backend, TAB, CompareRunId(1))));
+        assert!(!runs.contains(TAB, CompareRunId(1)));
     }
 
     #[tokio::test]
     async fn resume_after_the_limit_completes_the_run() {
         let (fake, session) = setup().await;
+        let runs = CompareRuns::default();
         let site = fake.session_site(session).unwrap();
         let t = SystemTime::UNIX_EPOCH;
         for root in ["/l", "/r"] {
@@ -1291,7 +1301,7 @@ mod compare_tests {
             limit: Some(3),
             ..Default::default()
         };
-        let mut stream = start(&fake, session, 2, options);
+        let mut stream = start(&fake, &runs, session, 2, options);
         loop {
             match stream.next().await.expect("the run has not ended") {
                 Message::Compare(CompareMsg::Progress {
@@ -1304,6 +1314,7 @@ mod compare_tests {
         }
         effect(
             &fake,
+            &runs,
             Effect::CompareResume {
                 tab: TAB,
                 run: CompareRunId(2),
@@ -1327,6 +1338,7 @@ mod compare_tests {
     #[tokio::test]
     async fn cancel_stops_cooperatively_and_ends_with_a_stopped_result() {
         let (fake, session) = setup().await;
+        let runs = CompareRuns::default();
         // The scripted run sends one item, then waits until stopped.
         let _hold = fake.script_compare(
             vec![Progress::Seen {
@@ -1336,13 +1348,14 @@ mod compare_tests {
             Err(Error::new(ErrorKind::Network, "not reached")),
             true,
         );
-        let mut stream = start(&fake, session, 3, CompareOptions::default());
+        let mut stream = start(&fake, &runs, session, 3, CompareOptions::default());
         assert!(matches!(
             stream.next().await,
             Some(Message::Compare(CompareMsg::Progress { .. }))
         ));
         effect(
             &fake,
+            &runs,
             Effect::CompareCancel {
                 tab: TAB,
                 run: CompareRunId(3),
@@ -1351,13 +1364,13 @@ mod compare_tests {
         let summary = finished(stream.next().await.unwrap()).unwrap();
         assert!(summary.stopped && summary.partial);
         assert!(stream.next().await.is_none());
-        let backend: Arc<dyn BackendApi> = fake.clone();
-        assert!(!compare_runs().contains_key(&compare_key(&backend, TAB, CompareRunId(3))));
+        assert!(!runs.contains(TAB, CompareRunId(3)));
     }
 
     #[tokio::test]
     async fn abort_drops_the_entry_and_no_finished_follows() {
         let (fake, session) = setup().await;
+        let runs = CompareRuns::default();
         let _hold = fake.script_compare(
             Vec::new(),
             Ok(Summary {
@@ -1368,20 +1381,19 @@ mod compare_tests {
             }),
             true,
         );
-        let backend: Arc<dyn BackendApi> = fake.clone();
         let run = CompareRunId(4);
-        let key = compare_key(&backend, TAB, run);
-        let _stream = start(&fake, session, 4, CompareOptions::default());
-        assert!(compare_runs().contains_key(&key));
-        effect(&fake, Effect::CompareAbort { tab: TAB, run });
-        assert!(!compare_runs().contains_key(&key));
+        let _stream = start(&fake, &runs, session, 4, CompareOptions::default());
+        assert!(runs.contains(TAB, run));
+        effect(&fake, &runs, Effect::CompareAbort { tab: TAB, run });
+        assert!(!runs.contains(TAB, run));
     }
 
     #[tokio::test]
     async fn a_closed_session_ends_with_the_session_closed_error() {
         let (fake, session) = setup().await;
+        let runs = CompareRuns::default();
         fake.close(session).await;
-        let messages: Vec<Message> = start(&fake, session, 5, CompareOptions::default())
+        let messages: Vec<Message> = start(&fake, &runs, session, 5, CompareOptions::default())
             .collect()
             .await;
         assert_eq!(messages.len(), 1);

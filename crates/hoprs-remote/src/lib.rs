@@ -23,7 +23,8 @@ mod sftp;
 pub mod testing;
 
 pub use compare::{
-    CompareOptions, CompareSide, Difference, Progress, RelPath, Status, Summary, compare, ignored,
+    CompareOptions, CompareSide, CompareSignals, Difference, Progress, RelPath, Status, Summary,
+    compare, ignored,
 };
 pub use connection::Connection;
 pub use ftp::{

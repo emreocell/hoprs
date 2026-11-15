@@ -392,6 +392,14 @@ impl App {
         if !self.tabs[index].is_files() {
             return Vec::new();
         }
+        // The folders are about to be read again: a comparison of the old ones stops.
+        let mut effects = self.compare_folders_changing(index);
+        effects.extend(self.list_pane(index, side));
+        effects
+    }
+
+    /// The listing effects of [`request_listing`](Self::request_listing).
+    fn list_pane(&mut self, index: usize, side: Side) -> Vec<Effect> {
         let request_id = RequestId(self.next_id());
         let session = self.tab_session(index);
         let tab = &mut self.tabs[index];
@@ -619,7 +627,9 @@ impl App {
             }
         }
         if listed {
-            self.select_new_entry(index, side)
+            let mut effects = self.select_new_entry(index, side);
+            effects.extend(self.compare_after_listing(index));
+            effects
         } else {
             Vec::new()
         }

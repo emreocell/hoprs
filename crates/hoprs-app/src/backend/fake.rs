@@ -71,7 +71,7 @@ use hoprs_core::{
     WorkspaceId,
 };
 use hoprs_import::{ImportOptions, ImportReport};
-use hoprs_remote::{CompareOptions, MemFs, Progress, RemoteFs, Summary};
+use hoprs_remote::{CompareOptions, CompareSignals, MemFs, Progress, RemoteFs, Summary};
 use hoprs_transfer::{ConflictPolicy, Event, TransferId, TransferItem, TransferSpec};
 use hoprs_vault::{BackupImportReport, ExportReport, ImportMode, UnreadableEntry};
 use secrecy::{ExposeSecret, SecretString};
@@ -81,8 +81,8 @@ use super::broker::{PromptKind, PromptRequest};
 use super::edit::{EditManager, EditSession, Launcher, UploadMode};
 use super::shells::{ShellControl, Shells, shell_closed};
 use super::{
-    AuthMethod, BackendApi, BrokerEvent, CompareSignals, ConnectError, ConnectResult, Connected,
-    ControlOp, DeleteTarget, EditChoice, EditEvent, EditId, EditSummary, KeptEdit, KnownHostEntry,
+    AuthMethod, BackendApi, BrokerEvent, ConnectError, ConnectResult, Connected, ControlOp,
+    DeleteTarget, EditChoice, EditEvent, EditId, EditSummary, KeptEdit, KnownHostEntry,
     ProfileSnapshot, PromptAnswer, PromptId, SessionId, ShellId, ShellOutput, Side,
     TransferSnapshot, WorkspaceTabs,
 };
@@ -1095,8 +1095,7 @@ impl BackendApi for FakeBackend {
             remote_root,
             options,
             progress,
-            signals.resume,
-            signals.stop,
+            signals,
         )
         .await
     }
