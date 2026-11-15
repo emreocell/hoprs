@@ -822,3 +822,22 @@ async fn leaving_settings_without_closing_clears_the_typed_fields() {
     assert_eq!(app.compare_ignore_input, None);
     assert_eq!(app.editor_input, None);
 }
+
+#[tokio::test]
+async fn a_new_run_and_hide_release_the_panels_keyboard() {
+    let (mut app, _fake, _a, tab, run) = running().await;
+    app.update(found(tab, run, "a"));
+    app.update(msg(CompareMsg::Focus {
+        tab,
+        cursor: Some(0),
+    }));
+    app.update(msg(CompareMsg::Hide { tab }));
+    assert!(!state(&app).focused);
+    assert_eq!(state(&app).cursor, None);
+    app.update(msg(CompareMsg::Start { tab }));
+    app.update(msg(CompareMsg::Focus { tab, cursor: None }));
+    assert!(state(&app).focused);
+    app.update(msg(CompareMsg::Start { tab }));
+    assert!(!state(&app).focused);
+    assert_eq!(state(&app).cursor, None);
+}

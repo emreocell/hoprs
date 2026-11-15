@@ -139,7 +139,7 @@ impl Row {
 /// The panel's scroll offset that shows `row` (a line of the grouped list), moving the
 /// least from the current one.
 fn scroll_to_show(state: &CompareState, row: usize) -> f32 {
-    use crate::ui::compare::{BODY_HEIGHT, line_of};
+    use crate::ui::compare::{MIN_BODY_HEIGHT as BODY_HEIGHT, line_of};
     use crate::ui::virtual_list::ROW_HEIGHT;
     let top = line_of(state, row) as f32 * ROW_HEIGHT;
     let offset = state.offset_y;
@@ -372,6 +372,8 @@ impl App {
                     state.identical = 0;
                     state.phase = Phase::Idle;
                     state.hidden = true;
+                    state.focused = false;
+                    state.cursor = None;
                 }
                 effects
             }
@@ -599,6 +601,8 @@ impl App {
         state.rows.clear();
         state.identical = 0;
         state.hidden = false;
+        state.focused = false;
+        state.cursor = None;
         state.suppress_auto = false;
         let options = CompareOptions {
             ignore,

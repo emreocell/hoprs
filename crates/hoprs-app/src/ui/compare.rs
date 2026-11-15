@@ -22,8 +22,23 @@ use crate::ui::theme::{self, palette};
 use crate::ui::virtual_list::{self, ROW_HEIGHT};
 use crate::ui::{format, strings};
 
-/// The rows' region: four lines (the panes above keep their room).
-pub const BODY_HEIGHT: f32 = 4.0 * ROW_HEIGHT;
+/// The fewest lines the rows' region shows (a group header counts as one).
+pub const MIN_BODY_LINES: usize = 4;
+/// The most lines it shows, however tall the window.
+pub const MAX_BODY_LINES: usize = 10;
+/// The region's smallest height.
+pub const MIN_BODY_HEIGHT: f32 = MIN_BODY_LINES as f32 * ROW_HEIGHT;
+/// The head and the foot with their rules.
+const CHROME_HEIGHT: f32 = 2.0 * QUEUE_HEAD_HEIGHT + 3.0 * theme::HAIRLINE;
+
+/// The rows' region height for a tab area `area` px tall: the panel (head, rows, foot)
+/// takes at most 35% of it, so the panes keep their room; between
+/// [`MIN_BODY_LINES`] and [`MAX_BODY_LINES`] whole lines.
+pub fn body_height(area: f32) -> f32 {
+    let room = (area * 0.35 - CHROME_HEIGHT) / ROW_HEIGHT;
+    let lines = (room.floor().max(0.0) as usize).clamp(MIN_BODY_LINES, MAX_BODY_LINES);
+    lines as f32 * ROW_HEIGHT
+}
 const STATUS_WIDTH: f32 = 148.0;
 const SIZES_WIDTH: f32 = 128.0;
 
@@ -214,7 +229,11 @@ pub struct Footer {
 /// selected / Download selected are enabled.
 pub fn footer(state: &CompareState) -> Footer {
     let (text, actions) = match &state.phase {
-        Phase::Idle | Phase::Debouncing => (strings::compare_running(0), vec![Act::Stop]),
+        // The wait before a run keeps the last result on screen: its summary, no buttons.
+        Phase::Idle | Phase::Debouncing => (
+            strings::compare_identical(state.identical as usize),
+            Vec::new(),
+        ),
         Phase::Running { seen } => (strings::compare_running(seen.0 + seen.1), vec![Act::Stop]),
         Phase::Paused { seen } => (
             strings::compare_paused(seen.0 + seen.1),
@@ -243,7 +262,7 @@ pub fn footer(state: &CompareState) -> Footer {
 }
 
 /// The panel, when the tab shows one.
-pub fn view<'a>(app: &'a App, tab: &'a Tab) -> Option<Element<'a, Message>> {
+pub fn view<'a>(app: &'a App, tab: &'a Tab, area: f32) -> Option<Element<'a, Message>> {
     let state = tab.compare().filter(|s| s.visible())?;
     let id = tab.id;
     let p = palette();
@@ -321,6 +340,8 @@ pub fn view<'a>(app: &'a App, tab: &'a Tab) -> Option<Element<'a, Message>> {
     .height(QUEUE_HEAD_HEIGHT)
     .padding(Padding::ZERO.left(theme::SPACE_MD).right(theme::SPACE_SM));
 
+    let foot_content = footer(state);
+    let lines = lines(state);
     let mut region = column![
         rule::horizontal(theme::HAIRLINE).style(theme::rule_strong),
         top,
@@ -328,27 +349,32 @@ pub fn view<'a>(app: &'a App, tab: &'a Tab) -> Option<Element<'a, Message>> {
     if !state.collapsed {
         region = region
             .push(rule::horizontal(theme::HAIRLINE).style(theme::rule_1px))
-            .push(body(tab, state))
+            .push(body(tab, state, &foot_content, lines, body_height(area)))
             .push(rule::horizontal(theme::HAIRLINE).style(theme::rule_1px))
-            .push(foot(id, state, compact));
+            .push(foot(id, foot_content, compact));
     }
     Some(container(region).width(Length::Fill).into())
 }
 
-fn body<'a>(tab: &'a Tab, state: &'a CompareState) -> Element<'a, Message> {
+fn body<'a>(
+    tab: &'a Tab,
+    state: &'a CompareState,
+    footer: &Footer,
+    lines: Vec<Line>,
+    max_height: f32,
+) -> Element<'a, Message> {
     let id = tab.id;
-    if let Some(identical) = footer(state).all_identical {
+    if let Some(identical) = footer.all_identical.clone() {
         return container(text(identical).color(palette().muted))
             .padding(Padding::from([theme::SPACE_SM, theme::SPACE_MD]))
             .width(Length::Fill)
             .into();
     }
-    let lines = lines(state);
     if lines.is_empty() {
         // Running with nothing found yet.
         return space().height(ROW_HEIGHT).into();
     }
-    let height = (lines.len() as f32 * ROW_HEIGHT).min(BODY_HEIGHT);
+    let height = (lines.len() as f32 * ROW_HEIGHT).min(max_height);
     let this_year = format::current_year();
     let list = virtual_list::view(
         scroll_id(id),
@@ -481,9 +507,8 @@ fn diff_row<'a>(
         .into()
 }
 
-fn foot(id: TabId, state: &CompareState, compact: bool) -> Element<'_, Message> {
+fn foot(id: TabId, f: Footer, compact: bool) -> Element<'static, Message> {
     let p = palette();
-    let f = footer(state);
     let button_of = |label: &'static str, on: Option<CompareMsg>| {
         button(
             text(label)
@@ -815,6 +840,26 @@ mod tests {
         let mut one = state(Vec::new());
         one.identical = 1;
         assert_eq!(footer(&one).text, "1 identical");
+    }
+
+    #[test]
+    fn debouncing_keeps_the_previous_summary() {
+        let mut s = mixed();
+        s.phase = Phase::Debouncing;
+        let f = footer(&s);
+        assert_eq!(f.text, "1,204 identical");
+        assert!(f.actions.is_empty());
+    }
+
+    #[test]
+    fn body_height_grows_with_the_window() {
+        // 1280x800: the tab area is ~690 px; the panes keep their room.
+        assert_eq!(body_height(690.0), 5.0 * ROW_HEIGHT);
+        assert_eq!(body_height(300.0), MIN_BODY_HEIGHT);
+        // 1280x1000.
+        assert_eq!(body_height(890.0), 7.0 * ROW_HEIGHT);
+        assert_eq!(body_height(5000.0), MAX_BODY_LINES as f32 * ROW_HEIGHT);
+        assert!(body_height(0.0) >= MIN_BODY_HEIGHT);
     }
 
     #[test]
