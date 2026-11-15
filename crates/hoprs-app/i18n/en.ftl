@@ -388,3 +388,245 @@ deleted-then =
         [1] Deleted 1 item, then: { $error }
        *[other] Deleted { $done } items, then: { $error }
     }
+
+## Security and credential dialogs
+host-key-title = Unknown host key
+host-key-intro = hoprs has not connected to this server before. Check the fingerprint with its administrator before you trust it.
+trust-and-connect = Trust and connect
+cert-untrusted-title = Untrusted certificate
+cert-untrusted-intro = The server's certificate can't be verified. Check the fingerprint with its administrator before you trust it.
+cert-changed-title = Certificate changed
+cert-changed-intro = The server's certificate is not the one you trusted before. Someone may be intercepting the connection.
+trust-certificate = Trust this certificate
+label-host = Host
+label-account = Account
+label-key-type = Key type
+label-fingerprint = Fingerprint (SHA-256)
+label-reason = Reason
+label-trusted-before = Trusted before
+label-presented-now = Presented now
+label-key-file = Key
+password-title = Password
+passphrase-title = Key passphrase
+field-passphrase = Passphrase
+kbd-title = Authentication
+save-in-keyring = Save in the system keyring
+save-in-keyring-hint = Saved only once the connection succeeds
+connect = Connect
+unlock = Unlock
+continue = Continue
+# Under a dialog, when others wait behind it: "1 more waiting".
+dialogs-waiting = { $count } more waiting
+# The warning of a host known with other key types.
+other-key-types = This host is known with a different key type ({ $types }). Someone may be impersonating it.
+# Why a certificate needs the user's decision.
+cert-reason-expired = Expired
+cert-reason-not-yet-valid = Not valid yet
+cert-reason-wrong-name = Issued for a different name
+cert-reason-unknown-issuer = Unknown authority (self-signed or untrusted issuer)
+
+## Changed host key, in the tab
+host-key-changed-title = The host key has changed
+host-key-changed-body = The server presented a different key than the one recorded for it. That happens when the server was reinstalled, or when someone intercepts the connection. hoprs won't connect while the old entry is in known_hosts.
+host-key-changed-session-body = The server presented a different key than the one this session verified when it connected. That happens when the server was reinstalled, or when someone intercepts the connection. A new session checks the key against known_hosts again.
+remove-old-entry = Remove the old entry…
+close-and-reconnect = Close and reconnect
+reading-known-hosts = Reading known_hosts…
+removing-known-hosts = Removing…
+remove = Remove
+connect-again = Connect again
+no-known-hosts-entry = known_hosts has no entry for this host any more. Connect again to check the new key.
+# "known_hosts line 3".
+known-hosts-line = known_hosts line { $line }
+# The removal question: "Remove 2 lines for [h]:2222 from known_hosts? …".
+remove-known-hosts-question =
+    { $lines ->
+    [1] Remove 1 line for { $host } from known_hosts? The next connect asks you to trust the new key.
+   *[other] Remove { $lines } lines for { $host } from known_hosts? The next connect asks you to trust the new key.
+    }
+# The warning for lines that also name other hosts.
+also-covers-one-host = Line { $line } also covers other hosts (a pattern or a list of names): removing it forgets this key for them too.
+also-covers-other-hosts = Lines { $lines } also cover other hosts (patterns or lists of names): removing them forgets these keys for them too.
+# A connected tab whose site's host or port changed (an edit, a restore).
+site-endpoint-changed = The site's host or port changed: this session was closed. Reconnect to use the new settings.
+
+## Import from FileZilla
+import-title = Import from FileZilla
+import-step-file = 1  File
+import-step-folders = 2  Folders
+import-step-report = 3  Report
+import-file-label = FileZilla's site manager file
+import-file-hint = Usually sitemanager.xml in FileZilla's configuration folder. Passwords go to the system keyring.
+import-path-required = Choose the sitemanager.xml file
+choose-file = Choose…
+next = Next
+back = Back
+import-folders-question = Turn FileZilla folders into workspaces?
+import-folders-hint = Yes: one workspace per folder, named by its path, with the folder's sites. No: the folder path goes in front of each site name ("Work/Alpha").
+import-folders-yes = Yes, make workspaces
+import-folders-no = No, keep them in the names
+import-running = Importing…
+import-imported = Imported
+import-skipped = Skipped
+import-workspaces-created = Workspaces created
+import-workspaces-not-created = Workspaces not created
+import-failures = Failures
+import-none = None
+import-failed-keep-source = Some entries could not be saved: keep sitemanager.xml and import again once fixed.
+import-passwords-keep-source = The keyring refused the passwords of these sites: keep sitemanager.xml, it still has them.
+delete-sitemanager = Delete sitemanager.xml
+delete-sitemanager-confirm = Delete FileZilla's sitemanager.xml? FileZilla will no longer have these sites.
+deleting-sitemanager = Deleting…
+sitemanager-deleted = sitemanager.xml deleted
+done = Done
+pick-sitemanager = Choose FileZilla's sitemanager.xml
+pick-filter-xml = XML files
+
+## Settings
+settings-title = Settings
+settings-transfers = Transfers
+settings-workers = Workers per site
+settings-workers-hint = Parallel transfers per site, 1 to 16. Applies to the next connections.
+settings-policy = When a file already exists
+settings-policy-hint = Applies to the next transfers. Ask shows the choice in the queue.
+settings-keepalive = Keepalive
+settings-keepalive-hint = How often an idle connection is checked, so servers and routers keep it open. Applies to the next connections.
+# A keepalive interval: "30 s".
+seconds = { $secs } s
+settings-unreadable = settings.toml can't be read, so the defaults apply. Changes last until hoprs closes and are not saved, to keep the file as it is: fix or delete it to save settings.
+settings-save-failed = Can't save settings.toml
+settings-terminal = Terminal
+settings-font-size = Font size
+settings-scrollback = Scrollback lines
+settings-scrollback-hint = Applies to terminals opened from now on.
+settings-theme = Theme
+theme-hoprs-dark = hoprs dark
+settings-policy-ask = Ask
+settings-policy-overwrite = Overwrite
+settings-policy-skip = Skip
+settings-policy-overwrite-if-newer = Overwrite if newer
+settings-policy-resume = Resume
+decrease = −
+increase = +
+
+## Backup
+backup = Backup
+backup-hint = One encrypted file with every site, workspace and saved password. Keep the password: without it the backup can't be opened.
+export-backup = Export backup…
+restore-backup = Restore backup…
+backup-file = File
+backup-password = Password
+backup-password-confirm = Password again
+backup-path-required = Choose a file
+backup-password-required = Enter a password
+backup-passwords-differ = The passwords don't match
+export = Export
+export-overwrite-confirm = This file already exists. Overwrite it with the new backup?
+restore = Restore
+exporting = Encrypting the backup… this takes a few seconds
+restoring = Decrypting the backup… this takes a few seconds
+restore-mode = Mode
+restore-merge = Merge
+restore-merge-hint = Adds what is new; sites and workspaces you have stay.
+restore-replace = Replace
+restore-replace-hint = Everything becomes the backup: sites, workspaces and passwords not in it are removed.
+restore-replace-confirm = Replace every site, workspace and saved password with the backup's?
+replace = Replace
+export-failed = The backup was not written
+restore-failed = Nothing was restored
+backup-secret-errors = Passwords not restored
+backup-missing-secrets = Saved without their password (not in the keyring)
+backup-skipped-unreadable = Not exported (unreadable entries)
+backup-skipped-sites = Sites already here (kept)
+backup-skipped-workspaces = Workspaces already here (kept)
+backup-file-name = hoprs-backup.hoprs
+pick-export = Save the hoprs backup
+pick-restore = Choose a hoprs backup
+# "Exported 12 sites, 3 workspaces and 9 passwords."
+export-done = Exported { $sites }, { $workspaces } and { $secrets }.
+workspace-count =
+    { $count ->
+    [one] { $count } workspace
+   *[other] { $count } workspaces
+    }
+password-count =
+    { $count ->
+    [one] { $count } password
+   *[other] { $count } passwords
+    }
+# "Restored 2 sites, 1 workspace and 2 passwords."
+restore-done = Restored { $sites }, { $workspaces } and { $secrets }.
+
+## Remote editing
+# The Edit action (remote pane).
+edit-file = Edit
+edit-no-folders = Folders can't be edited
+edit-no-links = Links can't be edited
+edit-too-large = Files over 50 MB can't be edited
+waiting-for-connection = Waiting for connection…
+remote-may-be-truncated = The server's copy may be incomplete until then.
+changed-on-server = Changed on the server since you opened it
+keep-remote = Keep remote
+save-a-copy = Save a copy
+reload-in-editor = Now the server's version: reload it in your editor.
+upload-and-close = Upload pending changes and close
+close-keep-copies = Close and keep local copies
+upload-and-quit = Upload and quit
+quit-keep-copies = Quit and keep local copies
+checking-edits = Checking the remote edits…
+stop-keep-copies = Stop and keep local copies
+# While "Upload" runs (an upload under way has no bound but its protocol's timeouts).
+uploading-edits = Uploading… (Stop to keep local copies instead)
+# The kept notice, before a remote path: "Server copy of".
+server-copy-of = Server copy of
+# …after it.
+may-be-incomplete = may be incomplete
+# The kept notice after a close that did not ask (the site moved, "Close and
+# reconnect"): the editor's file is no longer linked to the server.
+kept-saves-stopped = The session closed: further saves in the editor won't be uploaded. Your changes are in the recovered copy; open the file again to go on editing.
+edit-one-file = Select one file to edit
+uploaded = Uploaded
+editing = Editing
+opening = Opening
+close-workspace-edits-title = Some remote edits of this workspace are not uploaded
+keeping-copies = Saving the local copies…
+close-edits-title = Some remote edits are not uploaded
+quit-edits-title = Some remote edits are not uploaded
+quit-edits-hint = The window stays open until you choose. Nothing is deleted.
+edit-unsent = not uploaded
+edit-conflict = changed on the server
+editor-command = Editor
+# Windows' example names `code.cmd`: the command runs without a shell, which does not
+# find `.cmd` shims from a bare name.
+editor-command-hint-windows = system opens remote files in the system default editor. Or type a command; the file's path is added last. For example: notepad++.exe, code.cmd --wait.
+editor-command-hint-macos = system opens remote files in the system default editor. Or type a command; the file's path is added last. For example: open -W -a "Visual Studio Code" (a full path also works).
+editor-command-hint = system opens remote files in the system default editor. Or type a command; the file's path is added last. For example: gedit, code --wait.
+# Next to the editor field when it holds `system`.
+editor-system-default = System default
+editor-command-empty = Type a command
+settings-editing = Remote editing
+# "Upload failed: Permission denied".
+upload-failed = Upload failed: { $reason }
+# "Your version was saved to <path>".
+your-version-at = Your version was saved to { $path }
+# Where "keep" puts the copies: "Unsent changes are copied to <dir>".
+copies-go-to = Unsent changes are copied to { $dir }
+# "2 files could not be uploaded".
+not-uploaded =
+    { $count ->
+    [1] 1 file could not be uploaded
+   *[other] { $count } files could not be uploaded
+    }
+# The persistent notice after a close kept unsent edits: "Kept 2 unsent edits as
+# recovered copies in" (the folder follows, in mono).
+kept-notice =
+    { $count ->
+    [1] Kept 1 unsent edit as a recovered copy in
+   *[other] Kept { $count } unsent edits as recovered copies in
+    }
+# The delete confirmation of a site with files open for editing.
+delete-site-edits =
+    { $count ->
+    [1] 1 file of this site is open for editing: its unsent changes will be kept as a recovered copy, never deleted.
+   *[other] { $count } files of this site are open for editing: their unsent changes will be kept as recovered copies, never deleted.
+    }

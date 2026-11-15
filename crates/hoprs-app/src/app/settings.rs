@@ -154,7 +154,7 @@ impl Backup {
 fn path_of(field: &str) -> Result<PathBuf, &'static str> {
     let trimmed = field.trim();
     if trimmed.is_empty() {
-        Err(strings::BACKUP_PATH_REQUIRED)
+        Err(strings::backup_path_required())
     } else {
         Ok(PathBuf::from(trimmed))
     }
@@ -338,11 +338,11 @@ impl App {
                     }
                 };
                 if backup.export_password.0.is_empty() {
-                    backup.field_error = Some(strings::BACKUP_PASSWORD_REQUIRED);
+                    backup.field_error = Some(strings::backup_password_required());
                     return Vec::new();
                 }
                 if backup.export_password != backup.export_confirm {
-                    backup.field_error = Some(strings::BACKUP_PASSWORDS_DIFFER);
+                    backup.field_error = Some(strings::backup_passwords_differ());
                     return Vec::new();
                 }
                 backup.field_error = None;
@@ -378,7 +378,7 @@ impl App {
                     return Vec::new();
                 }
                 if backup.restore_password.0.is_empty() {
-                    backup.field_error = Some(strings::BACKUP_PASSWORD_REQUIRED);
+                    backup.field_error = Some(strings::backup_password_required());
                     return Vec::new();
                 }
                 backup.field_error = None;

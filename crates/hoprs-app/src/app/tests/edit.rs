@@ -144,9 +144,9 @@ async fn edit_action_rules() {
     assert!(app.update(key(FileKey::Edit)).is_empty());
 
     for (name, reason) in [
-        ("dir", strings::EDIT_NO_FOLDERS),
-        ("link", strings::EDIT_NO_LINKS),
-        ("big.bin", strings::EDIT_TOO_LARGE),
+        ("dir", strings::edit_no_folders()),
+        ("link", strings::edit_no_links()),
+        ("big.bin", strings::edit_too_large()),
     ] {
         click(&mut app, name);
         assert_eq!(
@@ -269,8 +269,8 @@ async fn uploaded_shows_toast_and_status() {
         edit_line(the_edit(&app)),
         format!(
             "Editing a.txt — {} {}",
-            strings::WAITING_FOR_CONNECTION,
-            strings::REMOTE_MAY_BE_TRUNCATED
+            strings::waiting_for_connection(),
+            strings::remote_may_be_truncated()
         )
     );
     assert_eq!(app.toast, None, "only uploads make a toast");
@@ -1124,12 +1124,12 @@ async fn edit_needs_one_selected_file() {
     click(&mut app, "b.txt");
     assert_eq!(
         app.edit_target(0, Side::Remote),
-        Some(Err(strings::EDIT_ONE_FILE))
+        Some(Err(strings::edit_one_file()))
     );
     assert!(start_effects(&app.update(key(FileKey::Edit))).is_empty());
     assert_eq!(
         app.tabs[0].remote().note.as_deref(),
-        Some(strings::EDIT_ONE_FILE)
+        Some(strings::edit_one_file())
     );
 }
 
@@ -1162,7 +1162,7 @@ fn kept_during_an_upload_is_flagged_and_the_text_is_honest() {
     assert_eq!(notice.count, 2);
     assert_eq!(notice.incomplete, vec![rpath("/srv/b.txt")]);
     assert_eq!(
-        strings::UPLOADING_EDITS,
+        strings::uploading_edits(),
         "Uploading… (Stop to keep local copies instead)"
     );
 }
@@ -1406,7 +1406,7 @@ async fn silent_close_kept_notice_says_saves_stop() {
     assert_eq!(std::fs::read(&copies[0]).unwrap(), b"unsent 2");
     // The text: saves stop, the copy is where the notice points.
     assert_eq!(
-        strings::KEPT_SAVES_STOPPED,
+        strings::kept_saves_stopped(),
         "The session closed: further saves in the editor won't be uploaded. Your changes are in the recovered copy; open the file again to go on editing."
     );
 }

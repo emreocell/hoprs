@@ -4,10 +4,6 @@
 //! language, then English, then returns the key itself, and never panics: a missing key
 //! or a formatting error is logged once per key.
 
-// The language switch, `group_digits` and the `Arg` conversions are used by the tasks that
-// follow (settings, formatting, errors).
-#![allow(dead_code)]
-
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
@@ -324,10 +320,6 @@ impl Catalog {
         catalog
     }
 
-    pub fn language(&self) -> Language {
-        self.lang
-    }
-
     /// A message without variables. A key that no catalog has comes back as itself.
     pub fn tr(&self, key: &str) -> &'static str {
         if let Some(text) = self.plain.get(key) {
@@ -516,6 +508,16 @@ mod tests {
         "size-unit-tb",
         "size-unit-pb",
         "size-unit-eb",
+        // Settings and backup: product terms, units and symbols.
+        "label-host",
+        "field-passphrase",
+        "settings-keepalive",
+        "settings-terminal",
+        "decrease",
+        "increase",
+        "backup",
+        "backup-file-name",
+        "editor-command",
     ];
 
     fn parse(source: &str) -> ast::Resource<&str> {
@@ -668,6 +670,24 @@ mod tests {
             }
         }
         assert!(found >= 4, "found only {found} keys");
+    }
+
+    /// Every English message is looked up by a literal in `strings.rs`; only the coded
+    /// errors (`error-*`) are looked up by a code computed at run time.
+    #[test]
+    fn every_en_key_is_used() {
+        let source = include_str!("ui/strings.rs");
+        let production = &source[..source.find("#[cfg(test)]").expect("test module")];
+        let unused: Vec<String> = message_ids(EN_SRC)
+            .into_iter()
+            .map(|(id, _)| id)
+            .filter(|id| !id.starts_with("error-"))
+            .filter(|id| !production.contains(&format!("\"{id}\"")))
+            .collect();
+        assert!(
+            unused.is_empty(),
+            "keys in en.ftl never looked up: {unused:?}"
+        );
     }
 
     #[test]

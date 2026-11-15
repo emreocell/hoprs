@@ -931,165 +931,301 @@ pub fn deleted_then(done: u64, error: &str) -> String {
 }
 
 // Security and credential dialogs.
-pub const HOST_KEY_TITLE: &str = "Unknown host key";
-pub const HOST_KEY_INTRO: &str = "hoprs has not connected to this server before. Check the fingerprint with its administrator before you trust it.";
-pub const TRUST_AND_CONNECT: &str = "Trust and connect";
-pub const CERT_UNTRUSTED_TITLE: &str = "Untrusted certificate";
-pub const CERT_UNTRUSTED_INTRO: &str = "The server's certificate can't be verified. Check the fingerprint with its administrator before you trust it.";
-pub const CERT_CHANGED_TITLE: &str = "Certificate changed";
-pub const CERT_CHANGED_INTRO: &str = "The server's certificate is not the one you trusted before. Someone may be intercepting the connection.";
-pub const TRUST_CERTIFICATE: &str = "Trust this certificate";
-pub const LABEL_HOST: &str = "Host";
-pub const LABEL_ACCOUNT: &str = "Account";
-pub const LABEL_KEY_TYPE: &str = "Key type";
-pub const LABEL_FINGERPRINT: &str = "Fingerprint (SHA-256)";
-pub const LABEL_REASON: &str = "Reason";
-pub const LABEL_TRUSTED_BEFORE: &str = "Trusted before";
-pub const LABEL_PRESENTED_NOW: &str = "Presented now";
-pub const LABEL_KEY_FILE: &str = "Key";
-pub const PASSWORD_TITLE: &str = "Password";
-pub const PASSPHRASE_TITLE: &str = "Key passphrase";
-pub const FIELD_PASSPHRASE: &str = "Passphrase";
-pub const KBD_TITLE: &str = "Authentication";
-pub const SAVE_IN_KEYRING: &str = "Save in the system keyring";
-pub const SAVE_IN_KEYRING_HINT: &str = "Saved only once the connection succeeds";
-pub const CONNECT: &str = "Connect";
-pub const UNLOCK: &str = "Unlock";
-pub const CONTINUE: &str = "Continue";
-
+pub fn host_key_title() -> &'static str {
+    tr("host-key-title")
+}
+pub fn host_key_intro() -> &'static str {
+    tr("host-key-intro")
+}
+pub fn trust_and_connect() -> &'static str {
+    tr("trust-and-connect")
+}
+pub fn cert_untrusted_title() -> &'static str {
+    tr("cert-untrusted-title")
+}
+pub fn cert_untrusted_intro() -> &'static str {
+    tr("cert-untrusted-intro")
+}
+pub fn cert_changed_title() -> &'static str {
+    tr("cert-changed-title")
+}
+pub fn cert_changed_intro() -> &'static str {
+    tr("cert-changed-intro")
+}
+pub fn trust_certificate() -> &'static str {
+    tr("trust-certificate")
+}
+pub fn label_host() -> &'static str {
+    tr("label-host")
+}
+pub fn label_account() -> &'static str {
+    tr("label-account")
+}
+pub fn label_key_type() -> &'static str {
+    tr("label-key-type")
+}
+pub fn label_fingerprint() -> &'static str {
+    tr("label-fingerprint")
+}
+pub fn label_reason() -> &'static str {
+    tr("label-reason")
+}
+pub fn label_trusted_before() -> &'static str {
+    tr("label-trusted-before")
+}
+pub fn label_presented_now() -> &'static str {
+    tr("label-presented-now")
+}
+pub fn label_key_file() -> &'static str {
+    tr("label-key-file")
+}
+pub fn password_title() -> &'static str {
+    tr("password-title")
+}
+pub fn passphrase_title() -> &'static str {
+    tr("passphrase-title")
+}
+pub fn field_passphrase() -> &'static str {
+    tr("field-passphrase")
+}
+pub fn kbd_title() -> &'static str {
+    tr("kbd-title")
+}
+pub fn save_in_keyring() -> &'static str {
+    tr("save-in-keyring")
+}
+pub fn save_in_keyring_hint() -> &'static str {
+    tr("save-in-keyring-hint")
+}
+pub fn connect() -> &'static str {
+    tr("connect")
+}
+pub fn unlock() -> &'static str {
+    tr("unlock")
+}
+pub fn continue_() -> &'static str {
+    tr("continue")
+}
 /// Under a dialog, when others wait behind it: "1 more waiting".
 pub fn dialogs_waiting(n: usize) -> String {
-    format!("{n} more waiting")
+    tr_args("dialogs-waiting", &[("count", n.into())])
 }
-
 /// The warning of a host known with other key types.
 pub fn other_key_types(types: &[String]) -> String {
-    format!(
-        "This host is known with a different key type ({}). Someone may be impersonating it.",
-        types.join(", ")
+    tr_args(
+        "other-key-types",
+        &[("types", types.join(", ").as_str().into())],
     )
 }
-
 /// Why a certificate needs the user's decision.
 pub fn cert_reason(reason: &hoprs_remote::CertReason) -> String {
     use hoprs_remote::CertReason;
     match reason {
-        CertReason::Expired => "Expired".to_owned(),
-        CertReason::NotYetValid => "Not valid yet".to_owned(),
-        CertReason::WrongName => "Issued for a different name".to_owned(),
-        CertReason::UnknownIssuer => {
-            "Unknown authority (self-signed or untrusted issuer)".to_owned()
-        }
+        CertReason::Expired => tr("cert-reason-expired").to_owned(),
+        CertReason::NotYetValid => tr("cert-reason-not-yet-valid").to_owned(),
+        CertReason::WrongName => tr("cert-reason-wrong-name").to_owned(),
+        CertReason::UnknownIssuer => tr("cert-reason-unknown-issuer").to_owned(),
         CertReason::Other(text) => text.clone(),
     }
 }
-
 // Changed host key, in the tab.
-pub const HOST_KEY_CHANGED_TITLE: &str = "The host key has changed";
-pub const HOST_KEY_CHANGED_BODY: &str = "The server presented a different key than the one recorded for it. That happens when the server was reinstalled, or when someone intercepts the connection. hoprs won't connect while the old entry is in known_hosts.";
-pub const HOST_KEY_CHANGED_SESSION_BODY: &str = "The server presented a different key than the one this session verified when it connected. That happens when the server was reinstalled, or when someone intercepts the connection. A new session checks the key against known_hosts again.";
-pub const REMOVE_OLD_ENTRY: &str = "Remove the old entry…";
-pub const CLOSE_AND_RECONNECT: &str = "Close and reconnect";
-pub const READING_KNOWN_HOSTS: &str = "Reading known_hosts…";
-pub const REMOVING_KNOWN_HOSTS: &str = "Removing…";
-pub const REMOVE: &str = "Remove";
-pub const CONNECT_AGAIN: &str = "Connect again";
-pub const NO_KNOWN_HOSTS_ENTRY: &str =
-    "known_hosts has no entry for this host any more. Connect again to check the new key.";
-
+pub fn host_key_changed_title() -> &'static str {
+    tr("host-key-changed-title")
+}
+pub fn host_key_changed_body() -> &'static str {
+    tr("host-key-changed-body")
+}
+pub fn host_key_changed_session_body() -> &'static str {
+    tr("host-key-changed-session-body")
+}
+pub fn remove_old_entry() -> &'static str {
+    tr("remove-old-entry")
+}
+pub fn close_and_reconnect() -> &'static str {
+    tr("close-and-reconnect")
+}
+pub fn reading_known_hosts() -> &'static str {
+    tr("reading-known-hosts")
+}
+pub fn removing_known_hosts() -> &'static str {
+    tr("removing-known-hosts")
+}
+pub fn remove() -> &'static str {
+    tr("remove")
+}
+pub fn connect_again() -> &'static str {
+    tr("connect-again")
+}
+pub fn no_known_hosts_entry() -> &'static str {
+    tr("no-known-hosts-entry")
+}
 /// "known_hosts line 3".
 pub fn known_hosts_line(line: usize) -> String {
-    format!("known_hosts line {line}")
+    tr_args("known-hosts-line", &[("line", line.into())])
 }
-
 /// The removal question: "Remove 2 lines for [h]:2222 from known_hosts? …".
 pub fn remove_known_hosts_question(lines: usize, host: &str) -> String {
-    let lines = if lines == 1 {
-        "1 line".to_owned()
-    } else {
-        format!("{lines} lines")
-    };
-    format!(
-        "Remove {lines} for {host} from known_hosts? The next connect asks you to trust the new key."
+    tr_args(
+        "remove-known-hosts-question",
+        &[("lines", lines.into()), ("host", host.into())],
     )
 }
-
 /// The warning for lines that also name other hosts.
 pub fn also_covers_other_hosts(lines: &[usize]) -> String {
     let list: Vec<String> = lines.iter().map(ToString::to_string).collect();
     match lines {
-        [line] => format!(
-            "Line {line} also covers other hosts (a pattern or a list of names): removing it forgets this key for them too."
-        ),
-        _ => format!(
-            "Lines {} also cover other hosts (patterns or lists of names): removing them forgets these keys for them too.",
-            list.join(", ")
+        [line] => tr_args("also-covers-one-host", &[("line", (*line).into())]),
+        _ => tr_args(
+            "also-covers-other-hosts",
+            &[("lines", list.join(", ").as_str().into())],
         ),
     }
 }
-
 /// A connected tab whose site's host or port changed (an edit, a restore).
-pub const SITE_ENDPOINT_CHANGED: &str =
-    "The site's host or port changed: this session was closed. Reconnect to use the new settings.";
-
+pub fn site_endpoint_changed() -> &'static str {
+    tr("site-endpoint-changed")
+}
 // Import from FileZilla.
-pub const IMPORT_TITLE: &str = "Import from FileZilla";
-pub const IMPORT_STEP_FILE: &str = "1  File";
-pub const IMPORT_STEP_FOLDERS: &str = "2  Folders";
-pub const IMPORT_STEP_REPORT: &str = "3  Report";
-pub const IMPORT_FILE_LABEL: &str = "FileZilla's site manager file";
-pub const IMPORT_FILE_HINT: &str = "Usually sitemanager.xml in FileZilla's configuration folder. Passwords go to the system keyring.";
-pub const IMPORT_PATH_REQUIRED: &str = "Choose the sitemanager.xml file";
-pub const CHOOSE_FILE: &str = "Choose…";
-pub const NEXT: &str = "Next";
-pub const BACK: &str = "Back";
-pub const IMPORT_FOLDERS_QUESTION: &str = "Turn FileZilla folders into workspaces?";
-pub const IMPORT_FOLDERS_HINT: &str = "Yes: one workspace per folder, named by its path, with the folder's sites. No: the folder path goes in front of each site name (\"Work/Alpha\").";
-pub const IMPORT_FOLDERS_YES: &str = "Yes, make workspaces";
-pub const IMPORT_FOLDERS_NO: &str = "No, keep them in the names";
-pub const IMPORT_RUNNING: &str = "Importing…";
-pub const IMPORT_IMPORTED: &str = "Imported";
-pub const IMPORT_SKIPPED: &str = "Skipped";
-pub const IMPORT_WORKSPACES_CREATED: &str = "Workspaces created";
-pub const IMPORT_WORKSPACES_NOT_CREATED: &str = "Workspaces not created";
-pub const IMPORT_FAILURES: &str = "Failures";
-pub const IMPORT_NONE: &str = "None";
-pub const IMPORT_FAILED_KEEP_SOURCE: &str =
-    "Some entries could not be saved: keep sitemanager.xml and import again once fixed.";
-pub const IMPORT_PASSWORDS_KEEP_SOURCE: &str =
-    "The keyring refused the passwords of these sites: keep sitemanager.xml, it still has them.";
-pub const DELETE_SITEMANAGER: &str = "Delete sitemanager.xml";
-pub const DELETE_SITEMANAGER_CONFIRM: &str =
-    "Delete FileZilla's sitemanager.xml? FileZilla will no longer have these sites.";
-pub const DELETING_SITEMANAGER: &str = "Deleting…";
-pub const SITEMANAGER_DELETED: &str = "sitemanager.xml deleted";
-pub const DONE: &str = "Done";
-pub const PICK_SITEMANAGER: &str = "Choose FileZilla's sitemanager.xml";
-pub const PICK_FILTER_XML: &str = "XML files";
-
+pub fn import_title() -> &'static str {
+    tr("import-title")
+}
+pub fn import_step_file() -> &'static str {
+    tr("import-step-file")
+}
+pub fn import_step_folders() -> &'static str {
+    tr("import-step-folders")
+}
+pub fn import_step_report() -> &'static str {
+    tr("import-step-report")
+}
+pub fn import_file_label() -> &'static str {
+    tr("import-file-label")
+}
+pub fn import_file_hint() -> &'static str {
+    tr("import-file-hint")
+}
+pub fn import_path_required() -> &'static str {
+    tr("import-path-required")
+}
+pub fn choose_file() -> &'static str {
+    tr("choose-file")
+}
+pub fn next() -> &'static str {
+    tr("next")
+}
+pub fn back() -> &'static str {
+    tr("back")
+}
+pub fn import_folders_question() -> &'static str {
+    tr("import-folders-question")
+}
+pub fn import_folders_hint() -> &'static str {
+    tr("import-folders-hint")
+}
+pub fn import_folders_yes() -> &'static str {
+    tr("import-folders-yes")
+}
+pub fn import_folders_no() -> &'static str {
+    tr("import-folders-no")
+}
+pub fn import_running() -> &'static str {
+    tr("import-running")
+}
+pub fn import_imported() -> &'static str {
+    tr("import-imported")
+}
+pub fn import_skipped() -> &'static str {
+    tr("import-skipped")
+}
+pub fn import_workspaces_created() -> &'static str {
+    tr("import-workspaces-created")
+}
+pub fn import_workspaces_not_created() -> &'static str {
+    tr("import-workspaces-not-created")
+}
+pub fn import_failures() -> &'static str {
+    tr("import-failures")
+}
+pub fn import_none() -> &'static str {
+    tr("import-none")
+}
+pub fn import_failed_keep_source() -> &'static str {
+    tr("import-failed-keep-source")
+}
+pub fn import_passwords_keep_source() -> &'static str {
+    tr("import-passwords-keep-source")
+}
+pub fn delete_sitemanager() -> &'static str {
+    tr("delete-sitemanager")
+}
+pub fn delete_sitemanager_confirm() -> &'static str {
+    tr("delete-sitemanager-confirm")
+}
+pub fn deleting_sitemanager() -> &'static str {
+    tr("deleting-sitemanager")
+}
+pub fn sitemanager_deleted() -> &'static str {
+    tr("sitemanager-deleted")
+}
+pub fn done() -> &'static str {
+    tr("done")
+}
+pub fn pick_sitemanager() -> &'static str {
+    tr("pick-sitemanager")
+}
+pub fn pick_filter_xml() -> &'static str {
+    tr("pick-filter-xml")
+}
 // Settings.
-pub const SETTINGS_TITLE: &str = "Settings";
-pub const SETTINGS_TRANSFERS: &str = "Transfers";
-pub const SETTINGS_WORKERS: &str = "Workers per site";
-pub const SETTINGS_WORKERS_HINT: &str =
-    "Parallel transfers per site, 1 to 16. Applies to the next connections.";
-pub const SETTINGS_POLICY: &str = "When a file already exists";
-pub const SETTINGS_POLICY_HINT: &str =
-    "Applies to the next transfers. Ask shows the choice in the queue.";
-pub const SETTINGS_KEEPALIVE: &str = "Keepalive";
-pub const SETTINGS_KEEPALIVE_HINT: &str = "How often an idle connection is checked, so servers and routers keep it open. Applies to the next connections.";
-
+pub fn settings_title() -> &'static str {
+    tr("settings-title")
+}
+pub fn settings_transfers() -> &'static str {
+    tr("settings-transfers")
+}
+pub fn settings_workers() -> &'static str {
+    tr("settings-workers")
+}
+pub fn settings_workers_hint() -> &'static str {
+    tr("settings-workers-hint")
+}
+pub fn settings_policy() -> &'static str {
+    tr("settings-policy")
+}
+pub fn settings_policy_hint() -> &'static str {
+    tr("settings-policy-hint")
+}
+pub fn settings_keepalive() -> &'static str {
+    tr("settings-keepalive")
+}
+pub fn settings_keepalive_hint() -> &'static str {
+    tr("settings-keepalive-hint")
+}
 /// A keepalive interval: "30 s".
 pub fn seconds(secs: u64) -> String {
-    format!("{secs} s")
+    tr_args("seconds", &[("secs", secs.into())])
 }
-pub const SETTINGS_UNREADABLE: &str = "settings.toml can't be read, so the defaults apply. Changes last until hoprs closes and are not saved, to keep the file as it is: fix or delete it to save settings.";
-pub const SETTINGS_SAVE_FAILED: &str = "Can't save settings.toml";
-pub const SETTINGS_TERMINAL: &str = "Terminal";
-pub const SETTINGS_FONT_SIZE: &str = "Font size";
-pub const SETTINGS_SCROLLBACK: &str = "Scrollback lines";
-pub const SETTINGS_SCROLLBACK_HINT: &str = "Applies to terminals opened from now on.";
-pub const SETTINGS_THEME: &str = "Theme";
+pub fn settings_unreadable() -> &'static str {
+    tr("settings-unreadable")
+}
+pub fn settings_save_failed() -> &'static str {
+    tr("settings-save-failed")
+}
+pub fn settings_terminal() -> &'static str {
+    tr("settings-terminal")
+}
+pub fn settings_font_size() -> &'static str {
+    tr("settings-font-size")
+}
+pub fn settings_scrollback() -> &'static str {
+    tr("settings-scrollback")
+}
+pub fn settings_scrollback_hint() -> &'static str {
+    tr("settings-scrollback-hint")
+}
+pub fn settings_theme() -> &'static str {
+    tr("settings-theme")
+}
 pub fn settings_language() -> &'static str {
     tr("settings-language")
 }
@@ -1102,182 +1238,311 @@ pub fn language_english() -> &'static str {
 pub fn language_pt_br() -> &'static str {
     tr("language-pt-br")
 }
-pub const THEME_HOPRS_DARK: &str = "hoprs dark";
-pub const POLICY_ASK: &str = "Ask";
-pub const POLICY_OVERWRITE: &str = "Overwrite";
-pub const POLICY_SKIP: &str = "Skip";
-pub const POLICY_OVERWRITE_IF_NEWER: &str = "Overwrite if newer";
-pub const POLICY_RESUME: &str = "Resume";
-pub const DECREASE: &str = "−";
-pub const INCREASE: &str = "+";
-
+pub fn theme_hoprs_dark() -> &'static str {
+    tr("theme-hoprs-dark")
+}
+pub fn policy_ask() -> &'static str {
+    tr("settings-policy-ask")
+}
+pub fn policy_overwrite() -> &'static str {
+    tr("settings-policy-overwrite")
+}
+pub fn policy_skip() -> &'static str {
+    tr("settings-policy-skip")
+}
+pub fn policy_overwrite_if_newer() -> &'static str {
+    tr("settings-policy-overwrite-if-newer")
+}
+pub fn policy_resume() -> &'static str {
+    tr("settings-policy-resume")
+}
+pub fn decrease() -> &'static str {
+    tr("decrease")
+}
+pub fn increase() -> &'static str {
+    tr("increase")
+}
 // Backup.
-pub const BACKUP: &str = "Backup";
-pub const BACKUP_HINT: &str = "One encrypted file with every site, workspace and saved password. Keep the password: without it the backup can't be opened.";
-pub const EXPORT_BACKUP: &str = "Export backup…";
-pub const RESTORE_BACKUP: &str = "Restore backup…";
-pub const BACKUP_FILE: &str = "File";
-pub const BACKUP_PASSWORD: &str = "Password";
-pub const BACKUP_PASSWORD_CONFIRM: &str = "Password again";
-pub const BACKUP_PATH_REQUIRED: &str = "Choose a file";
-pub const BACKUP_PASSWORD_REQUIRED: &str = "Enter a password";
-pub const BACKUP_PASSWORDS_DIFFER: &str = "The passwords don't match";
-pub const EXPORT: &str = "Export";
-pub const EXPORT_OVERWRITE_CONFIRM: &str =
-    "This file already exists. Overwrite it with the new backup?";
-pub const RESTORE: &str = "Restore";
-pub const EXPORTING: &str = "Encrypting the backup… this takes a few seconds";
-pub const RESTORING: &str = "Decrypting the backup… this takes a few seconds";
-pub const RESTORE_MODE: &str = "Mode";
-pub const RESTORE_MERGE: &str = "Merge";
-pub const RESTORE_MERGE_HINT: &str = "Adds what is new; sites and workspaces you have stay.";
-pub const RESTORE_REPLACE: &str = "Replace";
-pub const RESTORE_REPLACE_HINT: &str =
-    "Everything becomes the backup: sites, workspaces and passwords not in it are removed.";
-pub const RESTORE_REPLACE_CONFIRM: &str =
-    "Replace every site, workspace and saved password with the backup's?";
-pub const REPLACE: &str = "Replace";
-pub const EXPORT_FAILED: &str = "The backup was not written";
-pub const RESTORE_FAILED: &str = "Nothing was restored";
-pub const BACKUP_SECRET_ERRORS: &str = "Passwords not restored";
-pub const BACKUP_MISSING_SECRETS: &str = "Saved without their password (not in the keyring)";
-pub const BACKUP_SKIPPED_UNREADABLE: &str = "Not exported (unreadable entries)";
-pub const BACKUP_SKIPPED_SITES: &str = "Sites already here (kept)";
-pub const BACKUP_SKIPPED_WORKSPACES: &str = "Workspaces already here (kept)";
-pub const BACKUP_FILE_NAME: &str = "hoprs-backup.hoprs";
-pub const PICK_EXPORT: &str = "Save the hoprs backup";
-pub const PICK_RESTORE: &str = "Choose a hoprs backup";
-
+pub fn backup() -> &'static str {
+    tr("backup")
+}
+pub fn backup_hint() -> &'static str {
+    tr("backup-hint")
+}
+pub fn export_backup() -> &'static str {
+    tr("export-backup")
+}
+pub fn restore_backup() -> &'static str {
+    tr("restore-backup")
+}
+pub fn backup_file() -> &'static str {
+    tr("backup-file")
+}
+pub fn backup_password() -> &'static str {
+    tr("backup-password")
+}
+pub fn backup_password_confirm() -> &'static str {
+    tr("backup-password-confirm")
+}
+pub fn backup_path_required() -> &'static str {
+    tr("backup-path-required")
+}
+pub fn backup_password_required() -> &'static str {
+    tr("backup-password-required")
+}
+pub fn backup_passwords_differ() -> &'static str {
+    tr("backup-passwords-differ")
+}
+pub fn export() -> &'static str {
+    tr("export")
+}
+pub fn export_overwrite_confirm() -> &'static str {
+    tr("export-overwrite-confirm")
+}
+pub fn restore() -> &'static str {
+    tr("restore")
+}
+pub fn exporting() -> &'static str {
+    tr("exporting")
+}
+pub fn restoring() -> &'static str {
+    tr("restoring")
+}
+pub fn restore_mode() -> &'static str {
+    tr("restore-mode")
+}
+pub fn restore_merge() -> &'static str {
+    tr("restore-merge")
+}
+pub fn restore_merge_hint() -> &'static str {
+    tr("restore-merge-hint")
+}
+pub fn restore_replace() -> &'static str {
+    tr("restore-replace")
+}
+pub fn restore_replace_hint() -> &'static str {
+    tr("restore-replace-hint")
+}
+pub fn restore_replace_confirm() -> &'static str {
+    tr("restore-replace-confirm")
+}
+pub fn replace() -> &'static str {
+    tr("replace")
+}
+pub fn export_failed() -> &'static str {
+    tr("export-failed")
+}
+pub fn restore_failed() -> &'static str {
+    tr("restore-failed")
+}
+pub fn backup_secret_errors() -> &'static str {
+    tr("backup-secret-errors")
+}
+pub fn backup_missing_secrets() -> &'static str {
+    tr("backup-missing-secrets")
+}
+pub fn backup_skipped_unreadable() -> &'static str {
+    tr("backup-skipped-unreadable")
+}
+pub fn backup_skipped_sites() -> &'static str {
+    tr("backup-skipped-sites")
+}
+pub fn backup_skipped_workspaces() -> &'static str {
+    tr("backup-skipped-workspaces")
+}
+pub fn backup_file_name() -> &'static str {
+    tr("backup-file-name")
+}
+pub fn pick_export() -> &'static str {
+    tr("pick-export")
+}
+pub fn pick_restore() -> &'static str {
+    tr("pick-restore")
+}
 /// "Exported 12 sites, 3 workspaces and 9 passwords."
 pub fn export_done(sites: usize, workspaces: usize, secrets: usize) -> String {
-    format!(
-        "Exported {}, {} and {}.",
-        count(sites, "site", "sites"),
-        count(workspaces, "workspace", "workspaces"),
-        count(secrets, "password", "passwords")
+    tr_args(
+        "export-done",
+        &[
+            ("sites", site_count(sites).as_str().into()),
+            ("workspaces", workspace_count(workspaces).as_str().into()),
+            ("secrets", password_count(secrets).as_str().into()),
+        ],
     )
 }
 
+/// A number of workspaces: "1 workspace", "3 workspaces".
+fn workspace_count(n: usize) -> String {
+    tr_args("workspace-count", &[("count", n.into())])
+}
+
+/// A number of saved passwords: "1 password", "3 passwords".
+fn password_count(n: usize) -> String {
+    tr_args("password-count", &[("count", n.into())])
+}
 /// "Restored 2 sites, 1 workspace and 2 passwords."
 pub fn restore_done(sites: usize, workspaces: usize, secrets: usize) -> String {
-    format!(
-        "Restored {}, {} and {}.",
-        count(sites, "site", "sites"),
-        count(workspaces, "workspace", "workspaces"),
-        count(secrets, "password", "passwords")
+    tr_args(
+        "restore-done",
+        &[
+            ("sites", site_count(sites).as_str().into()),
+            ("workspaces", workspace_count(workspaces).as_str().into()),
+            ("secrets", password_count(secrets).as_str().into()),
+        ],
     )
 }
-
 /// A report section's head: "Imported  4".
 pub fn section_count(title: &str, count: usize) -> String {
     format!("{title}  {count}")
 }
-
-fn count(n: usize, one: &str, many: &str) -> String {
-    if n == 1 {
-        format!("1 {one}")
-    } else {
-        format!("{n} {many}")
-    }
-}
-
 // Remote editing.
 /// The Edit action (remote pane).
-pub const EDIT_FILE: &str = "Edit";
-pub const EDIT_NO_FOLDERS: &str = "Folders can't be edited";
-pub const EDIT_NO_LINKS: &str = "Links can't be edited";
-pub const EDIT_TOO_LARGE: &str = "Files over 50 MB can't be edited";
-pub const WAITING_FOR_CONNECTION: &str = "Waiting for connection…";
-pub const REMOTE_MAY_BE_TRUNCATED: &str = "The server's copy may be incomplete until then.";
-pub const CHANGED_ON_SERVER: &str = "Changed on the server since you opened it";
-pub const KEEP_REMOTE: &str = "Keep remote";
-pub const SAVE_A_COPY: &str = "Save a copy";
-pub const RELOAD_IN_EDITOR: &str = "Now the server's version: reload it in your editor.";
-pub const UPLOAD_AND_CLOSE: &str = "Upload pending changes and close";
-pub const CLOSE_KEEP_COPIES: &str = "Close and keep local copies";
-pub const UPLOAD_AND_QUIT: &str = "Upload and quit";
-pub const QUIT_KEEP_COPIES: &str = "Quit and keep local copies";
-pub const CHECKING_EDITS: &str = "Checking the remote edits…";
-pub const STOP_KEEP_COPIES: &str = "Stop and keep local copies";
+pub fn edit_file() -> &'static str {
+    tr("edit-file")
+}
+pub fn edit_no_folders() -> &'static str {
+    tr("edit-no-folders")
+}
+pub fn edit_no_links() -> &'static str {
+    tr("edit-no-links")
+}
+pub fn edit_too_large() -> &'static str {
+    tr("edit-too-large")
+}
+pub fn waiting_for_connection() -> &'static str {
+    tr("waiting-for-connection")
+}
+pub fn remote_may_be_truncated() -> &'static str {
+    tr("remote-may-be-truncated")
+}
+pub fn changed_on_server() -> &'static str {
+    tr("changed-on-server")
+}
+pub fn keep_remote() -> &'static str {
+    tr("keep-remote")
+}
+pub fn save_a_copy() -> &'static str {
+    tr("save-a-copy")
+}
+pub fn reload_in_editor() -> &'static str {
+    tr("reload-in-editor")
+}
+pub fn upload_and_close() -> &'static str {
+    tr("upload-and-close")
+}
+pub fn close_keep_copies() -> &'static str {
+    tr("close-keep-copies")
+}
+pub fn upload_and_quit() -> &'static str {
+    tr("upload-and-quit")
+}
+pub fn quit_keep_copies() -> &'static str {
+    tr("quit-keep-copies")
+}
+pub fn checking_edits() -> &'static str {
+    tr("checking-edits")
+}
+pub fn stop_keep_copies() -> &'static str {
+    tr("stop-keep-copies")
+}
 /// While "Upload" runs (an upload under way has no bound but its protocol's timeouts).
-pub const UPLOADING_EDITS: &str = "Uploading… (Stop to keep local copies instead)";
+pub fn uploading_edits() -> &'static str {
+    tr("uploading-edits")
+}
 /// The kept notice, before a remote path: "Server copy of".
-pub const SERVER_COPY_OF: &str = "Server copy of";
+pub fn server_copy_of() -> &'static str {
+    tr("server-copy-of")
+}
 /// …after it.
-pub const MAY_BE_INCOMPLETE: &str = "may be incomplete";
+pub fn may_be_incomplete() -> &'static str {
+    tr("may-be-incomplete")
+}
 /// The kept notice after a close that did not ask (the site moved, "Close and
 /// reconnect"): the editor's file is no longer linked to the server.
-pub const KEPT_SAVES_STOPPED: &str = "The session closed: further saves in the editor won't be uploaded. Your changes are in the recovered copy; open the file again to go on editing.";
-pub const EDIT_ONE_FILE: &str = "Select one file to edit";
-pub const UPLOADED: &str = "Uploaded";
-pub const EDITING: &str = "Editing";
-pub const OPENING: &str = "Opening";
-pub const CLOSE_WORKSPACE_EDITS_TITLE: &str =
-    "Some remote edits of this workspace are not uploaded";
-pub const KEEPING_COPIES: &str = "Saving the local copies…";
-pub const CLOSE_EDITS_TITLE: &str = "Some remote edits are not uploaded";
-pub const QUIT_EDITS_TITLE: &str = "Some remote edits are not uploaded";
-pub const QUIT_EDITS_HINT: &str = "The window stays open until you choose. Nothing is deleted.";
-pub const EDIT_UNSENT: &str = "not uploaded";
-pub const EDIT_CONFLICT: &str = "changed on the server";
-pub const EDITOR_COMMAND: &str = "Editor";
+pub fn kept_saves_stopped() -> &'static str {
+    tr("kept-saves-stopped")
+}
+pub fn edit_one_file() -> &'static str {
+    tr("edit-one-file")
+}
+pub fn uploaded() -> &'static str {
+    tr("uploaded")
+}
+pub fn editing() -> &'static str {
+    tr("editing")
+}
+pub fn opening() -> &'static str {
+    tr("opening")
+}
+pub fn close_workspace_edits_title() -> &'static str {
+    tr("close-workspace-edits-title")
+}
+pub fn keeping_copies() -> &'static str {
+    tr("keeping-copies")
+}
+pub fn close_edits_title() -> &'static str {
+    tr("close-edits-title")
+}
+pub fn quit_edits_title() -> &'static str {
+    tr("quit-edits-title")
+}
+pub fn quit_edits_hint() -> &'static str {
+    tr("quit-edits-hint")
+}
+pub fn edit_unsent() -> &'static str {
+    tr("edit-unsent")
+}
+pub fn edit_conflict() -> &'static str {
+    tr("edit-conflict")
+}
+pub fn editor_command() -> &'static str {
+    tr("editor-command")
+}
 /// Windows' example names `code.cmd`: the command runs without a shell, which does not
 /// find `.cmd` shims from a bare name.
-pub const EDITOR_COMMAND_HINT: &str = if cfg!(windows) {
-    "system opens remote files in the system default editor. Or type a command; the file's path is added last. For example: notepad++.exe, code.cmd --wait."
-} else if cfg!(target_os = "macos") {
-    "system opens remote files in the system default editor. Or type a command; the file's path is added last. For example: open -W -a \"Visual Studio Code\" (a full path also works)."
-} else {
-    "system opens remote files in the system default editor. Or type a command; the file's path is added last. For example: gedit, code --wait."
-};
-/// Next to the editor field when it holds `system`.
-pub const EDITOR_SYSTEM_DEFAULT: &str = "System default";
-pub const EDITOR_COMMAND_EMPTY: &str = "Type a command";
-pub const SETTINGS_EDITING: &str = "Remote editing";
-
-/// "Upload failed: Permission denied".
-pub fn upload_failed(reason: &str) -> String {
-    format!("Upload failed: {reason}")
-}
-
-/// "Your version was saved to <path>".
-pub fn your_version_at(path: &str) -> String {
-    format!("Your version was saved to {path}")
-}
-
-/// Where "keep" puts the copies: "Unsent changes are copied to <dir>".
-pub fn copies_go_to(dir: &str) -> String {
-    format!("Unsent changes are copied to {dir}")
-}
-
-/// "2 files could not be uploaded".
-pub fn not_uploaded(n: usize) -> String {
-    if n == 1 {
-        "1 file could not be uploaded".to_owned()
+pub fn editor_command_hint() -> &'static str {
+    if cfg!(windows) {
+        tr("editor-command-hint-windows")
+    } else if cfg!(target_os = "macos") {
+        tr("editor-command-hint-macos")
     } else {
-        format!("{n} files could not be uploaded")
+        tr("editor-command-hint")
     }
 }
-
+/// Next to the editor field when it holds `system`.
+pub fn editor_system_default() -> &'static str {
+    tr("editor-system-default")
+}
+pub fn editor_command_empty() -> &'static str {
+    tr("editor-command-empty")
+}
+pub fn settings_editing() -> &'static str {
+    tr("settings-editing")
+}
+/// "Upload failed: Permission denied".
+pub fn upload_failed(reason: &str) -> String {
+    tr_args("upload-failed", &[("reason", reason.into())])
+}
+/// "Your version was saved to <path>".
+pub fn your_version_at(path: &str) -> String {
+    tr_args("your-version-at", &[("path", path.into())])
+}
+/// Where "keep" puts the copies: "Unsent changes are copied to <dir>".
+pub fn copies_go_to(dir: &str) -> String {
+    tr_args("copies-go-to", &[("dir", dir.into())])
+}
+/// "2 files could not be uploaded".
+pub fn not_uploaded(n: usize) -> String {
+    tr_args("not-uploaded", &[("count", n.into())])
+}
 /// The persistent notice after a close kept unsent edits: "Kept 2 unsent edits as
 /// recovered copies in" (the folder follows, in mono).
 pub fn kept_notice(n: usize) -> String {
-    if n == 1 {
-        "Kept 1 unsent edit as a recovered copy in".to_owned()
-    } else {
-        format!("Kept {n} unsent edits as recovered copies in")
-    }
+    tr_args("kept-notice", &[("count", n.into())])
 }
-
 /// The delete confirmation of a site with files open for editing.
 pub fn delete_site_edits(n: usize) -> String {
-    if n == 1 {
-        "1 file of this site is open for editing: its unsent changes will be kept as a recovered copy, never deleted.".to_owned()
-    } else {
-        format!(
-            "{n} files of this site are open for editing: their unsent changes will be kept as recovered copies, never deleted."
-        )
-    }
+    tr_args("delete-site-edits", &[("count", n.into())])
 }
 
 #[cfg(test)]
@@ -1371,11 +1636,11 @@ mod tests {
     fn pt_br_skip_reasons_translate_and_unknown_ones_pass_through() {
         let cat = Catalog::new(Language::PtBr);
         assert_eq!(cat.tr("skip-exists"), "já existe");
-        assert_eq!(cat.tr("skip-not-newer"), "não é mais novo");
+        assert_eq!(cat.tr("skip-not-newer"), "não é mais recente");
         assert_eq!(cat.tr("skip-already-complete"), "já está completo");
         assert_eq!(
             pt("skipped", &[("reason", "já existe".into())]),
-            "Ignorado: já existe"
+            "Ignorada: já existe"
         );
         // English process language: known reasons read as before, others unchanged.
         assert_eq!(super::skip_reason("exists"), "exists");
@@ -1457,5 +1722,189 @@ mod tests {
             months.join(" "),
             "jan fev mar abr mai jun jul ago set out nov dez"
         );
+    }
+
+    #[test]
+    fn pt_br_known_hosts_texts() {
+        assert_eq!(
+            pt("known-hosts-line", &[("line", 3usize.into())]),
+            "Linha 3 do known_hosts"
+        );
+        for (n, want) in [
+            (
+                1usize,
+                "Remover 1 linha de [h]:2222 do known_hosts? Na próxima conexão, o hoprs pede que você confie na nova chave.",
+            ),
+            (
+                2,
+                "Remover 2 linhas de [h]:2222 do known_hosts? Na próxima conexão, o hoprs pede que você confie na nova chave.",
+            ),
+        ] {
+            assert_eq!(
+                pt(
+                    "remove-known-hosts-question",
+                    &[("lines", n.into()), ("host", "[h]:2222".into())]
+                ),
+                want
+            );
+        }
+        assert!(
+            pt("also-covers-one-host", &[("line", 4usize.into())]).starts_with("A linha 4 também")
+        );
+        assert!(
+            pt("also-covers-other-hosts", &[("lines", "3, 5".into())])
+                .starts_with("As linhas 3, 5 também")
+        );
+        assert_eq!(
+            pt("dialogs-waiting", &[("count", 1usize.into())]),
+            "Mais 1 aguardando"
+        );
+    }
+
+    #[test]
+    fn pt_br_counts_and_backup_reports() {
+        for (n, want) in [
+            (0usize, "0 workspaces"),
+            (1, "1 workspace"),
+            (2, "2 workspaces"),
+        ] {
+            assert_eq!(pt("workspace-count", &[("count", n.into())]), want);
+        }
+        for (n, want) in [(0usize, "0 senhas"), (1, "1 senha"), (2, "2 senhas")] {
+            assert_eq!(pt("password-count", &[("count", n.into())]), want);
+        }
+        assert_eq!(
+            pt(
+                "export-done",
+                &[
+                    ("sites", "12 sites".into()),
+                    ("workspaces", "3 workspaces".into()),
+                    ("secrets", "9 senhas".into())
+                ]
+            ),
+            "Exportados 12 sites, 3 workspaces e 9 senhas."
+        );
+        assert_eq!(
+            pt(
+                "restore-done",
+                &[
+                    ("sites", "2 sites".into()),
+                    ("workspaces", "1 workspace".into()),
+                    ("secrets", "2 senhas".into())
+                ]
+            ),
+            "Restaurados 2 sites, 1 workspace e 2 senhas."
+        );
+        assert_eq!(pt("seconds", &[("secs", 30u64.into())]), "30 s");
+    }
+
+    #[test]
+    fn english_counts_and_backup_reports() {
+        assert_eq!(
+            super::export_done(12, 3, 9),
+            "Exported 12 sites, 3 workspaces and 9 passwords."
+        );
+        assert_eq!(
+            super::restore_done(2, 1, 2),
+            "Restored 2 sites, 1 workspace and 2 passwords."
+        );
+        assert_eq!(
+            super::restore_done(0, 1, 1),
+            "Restored 0 sites, 1 workspace and 1 password."
+        );
+        assert_eq!(super::seconds(30), "30 s");
+        assert_eq!(
+            super::remove_known_hosts_question(1, "h"),
+            "Remove 1 line for h from known_hosts? The next connect asks you to trust the new key."
+        );
+        assert_eq!(
+            super::remove_known_hosts_question(2, "h"),
+            "Remove 2 lines for h from known_hosts? The next connect asks you to trust the new key."
+        );
+        assert_eq!(
+            super::also_covers_other_hosts(&[3, 5]),
+            "Lines 3, 5 also cover other hosts (patterns or lists of names): removing them forgets these keys for them too."
+        );
+        assert_eq!(
+            super::cert_reason(&hoprs_remote::CertReason::Expired),
+            "Expired"
+        );
+        assert_eq!(
+            super::cert_reason(&hoprs_remote::CertReason::Other("x".into())),
+            "x"
+        );
+    }
+
+    #[test]
+    fn pt_br_remote_editing_texts() {
+        let n = |key: &str, n: usize| pt(key, &[("count", n.into())]);
+        assert_eq!(
+            n("not-uploaded", 0),
+            "Não foi possível fazer upload de 0 arquivos"
+        );
+        assert_eq!(
+            n("not-uploaded", 1),
+            "Não foi possível fazer upload de 1 arquivo"
+        );
+        assert_eq!(
+            n("not-uploaded", 2),
+            "Não foi possível fazer upload de 2 arquivos"
+        );
+        assert_eq!(
+            n("kept-notice", 0),
+            "Mantidas 0 edições não enviadas como cópias recuperadas em"
+        );
+        assert_eq!(
+            n("kept-notice", 1),
+            "Mantida 1 edição não enviada como cópia recuperada em"
+        );
+        assert_eq!(
+            n("kept-notice", 3),
+            "Mantidas 3 edições não enviadas como cópias recuperadas em"
+        );
+        assert!(n("delete-site-edits", 0).starts_with("0 arquivos deste site estão"));
+        assert!(n("delete-site-edits", 1).starts_with("1 arquivo deste site está"));
+        assert!(n("delete-site-edits", 2).starts_with("2 arquivos deste site estão"));
+        assert_eq!(
+            pt("upload-failed", &[("reason", "negado".into())]),
+            "Falha no upload: negado"
+        );
+        assert_eq!(
+            pt("your-version-at", &[("path", "/a/b".into())]),
+            "Sua versão foi salva em /a/b"
+        );
+        assert_eq!(
+            pt("copies-go-to", &[("dir", "/c".into())]),
+            "As alterações não enviadas são copiadas para /c"
+        );
+        let cat = Catalog::new(Language::PtBr);
+        for key in [
+            "editor-command-hint",
+            "editor-command-hint-macos",
+            "editor-command-hint-windows",
+        ] {
+            assert!(
+                cat.tr(key).starts_with("system abre os arquivos remotos"),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn english_remote_editing_counts() {
+        assert_eq!(super::not_uploaded(1), "1 file could not be uploaded");
+        assert_eq!(super::not_uploaded(2), "2 files could not be uploaded");
+        assert_eq!(
+            super::kept_notice(1),
+            "Kept 1 unsent edit as a recovered copy in"
+        );
+        assert_eq!(
+            super::kept_notice(2),
+            "Kept 2 unsent edits as recovered copies in"
+        );
+        assert!(super::delete_site_edits(1).starts_with("1 file of this site is open"));
+        assert!(super::delete_site_edits(2).starts_with("2 files of this site are open"));
+        assert_eq!(super::dialogs_waiting(1), "1 more waiting");
+        assert!(super::editor_command_hint().contains("For example: "));
     }
 }

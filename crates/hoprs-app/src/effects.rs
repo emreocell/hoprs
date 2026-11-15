@@ -520,19 +520,19 @@ async fn pick_file(target: PickTarget) -> Option<PathBuf> {
                 None => dialog,
             };
             dialog
-                .set_title(strings::PICK_SITEMANAGER)
-                .add_filter(strings::PICK_FILTER_XML, &["xml"])
+                .set_title(strings::pick_sitemanager())
+                .add_filter(strings::pick_filter_xml(), &["xml"])
                 .pick_file()
                 .await
         }
         PickTarget::ExportBackup => {
             dialog
-                .set_title(strings::PICK_EXPORT)
-                .set_file_name(strings::BACKUP_FILE_NAME)
+                .set_title(strings::pick_export())
+                .set_file_name(strings::backup_file_name())
                 .save_file()
                 .await
         }
-        PickTarget::RestoreBackup => dialog.set_title(strings::PICK_RESTORE).pick_file().await,
+        PickTarget::RestoreBackup => dialog.set_title(strings::pick_restore()).pick_file().await,
     };
     handle.map(|handle| handle.path().to_path_buf())
 }

@@ -100,7 +100,7 @@ fn import_flow_steps() {
     import(&mut app, ImportMsg::Path("  ".into()));
     assert!(import(&mut app, ImportMsg::Next).is_empty());
     assert_eq!(app.import.step, ImportStep::File);
-    assert_eq!(app.import.path_error, Some(strings::IMPORT_PATH_REQUIRED));
+    assert_eq!(app.import.path_error, Some(strings::import_path_required()));
     // "Choose…" opens the system file dialog; its answer fills the path.
     let effects = import(&mut app, ImportMsg::Choose);
     assert!(matches!(
@@ -198,11 +198,11 @@ fn import_report_sections() {
     assert_eq!(
         heads,
         [
-            (strings::IMPORT_IMPORTED, 2),
-            (strings::IMPORT_SKIPPED, 1),
-            (strings::IMPORT_WORKSPACES_CREATED, 1),
-            (strings::IMPORT_WORKSPACES_NOT_CREATED, 1),
-            (strings::IMPORT_FAILURES, 0),
+            (strings::import_imported(), 2),
+            (strings::import_skipped(), 1),
+            (strings::import_workspaces_created(), 1),
+            (strings::import_workspaces_not_created(), 1),
+            (strings::import_failures(), 0),
         ]
     );
     // Imported sites with their notes; skipped ones with the reason.
@@ -316,7 +316,7 @@ fn export_refuses_empty_password_in_ui() {
     assert!(backup(&mut app, BackupMsg::Export).is_empty());
     assert_eq!(
         app.backup.field_error,
-        Some(strings::BACKUP_PASSWORD_REQUIRED)
+        Some(strings::backup_password_required())
     );
     assert_eq!(app.backup.export, BackupState::Idle);
 
@@ -332,7 +332,7 @@ fn export_refuses_empty_password_in_ui() {
     assert!(backup(&mut app, BackupMsg::Export).is_empty());
     assert_eq!(
         app.backup.field_error,
-        Some(strings::BACKUP_PASSWORDS_DIFFER)
+        Some(strings::backup_passwords_differ())
     );
 
     // No file: refused.
@@ -342,7 +342,10 @@ fn export_refuses_empty_password_in_ui() {
     );
     backup(&mut app, BackupMsg::ExportPath(String::new()));
     assert!(backup(&mut app, BackupMsg::Export).is_empty());
-    assert_eq!(app.backup.field_error, Some(strings::BACKUP_PATH_REQUIRED));
+    assert_eq!(
+        app.backup.field_error,
+        Some(strings::backup_path_required())
+    );
     backup(
         &mut app,
         BackupMsg::ExportPath("/home/me/hoprs.backup".into()),
@@ -628,7 +631,7 @@ fn restore_replace_needs_extra_confirmation() {
     assert!(backup(&mut app, BackupMsg::Restore).is_empty());
     assert_eq!(
         app.backup.field_error,
-        Some(strings::BACKUP_PASSWORD_REQUIRED)
+        Some(strings::backup_password_required())
     );
     backup(&mut app, BackupMsg::RestorePassword(Password("pw".into())));
 
@@ -918,7 +921,7 @@ async fn reloaded_profiles_reconcile_tabs() {
     match tab_state(&app, &b.id) {
         TabState::Failed(failure) => {
             assert_eq!(failure.session, None, "a new session on reconnect");
-            assert_eq!(failure.error.message, strings::SITE_ENDPOINT_CHANGED);
+            assert_eq!(failure.error.message, strings::site_endpoint_changed());
         }
         other => panic!("{other:?}"),
     }

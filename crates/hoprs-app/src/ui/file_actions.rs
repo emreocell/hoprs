@@ -179,7 +179,7 @@ fn edit_action<'a>(
 ) -> Element<'a, Message> {
     let p = palette();
     let mut content = row![
-        text(strings::EDIT_FILE)
+        text(strings::edit_file())
             .size(theme::TEXT_XS)
             .wrapping(text::Wrapping::None)
     ]

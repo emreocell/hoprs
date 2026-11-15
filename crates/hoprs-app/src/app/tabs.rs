@@ -627,7 +627,7 @@ impl App {
                     session: None,
                     error: Error::new(
                         hoprs_core::ErrorKind::Conflict,
-                        crate::ui::strings::SITE_ENDPOINT_CHANGED,
+                        crate::ui::strings::site_endpoint_changed(),
                     ),
                     keyring_unavailable: false,
                 };

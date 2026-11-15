@@ -60,7 +60,7 @@ impl TerminalTheme {
     /// The name the settings page shows.
     pub fn label(self) -> &'static str {
         match self {
-            Self::HoprsDark => crate::ui::strings::THEME_HOPRS_DARK,
+            Self::HoprsDark => crate::ui::strings::theme_hoprs_dark(),
         }
     }
 

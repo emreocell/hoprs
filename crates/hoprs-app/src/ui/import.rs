@@ -48,7 +48,7 @@ pub fn report_sections(report: &ImportReport) -> Vec<Section<'_>> {
     }
     vec![
         section(
-            strings::IMPORT_IMPORTED,
+            strings::import_imported(),
             report
                 .imported
                 .iter()
@@ -59,7 +59,7 @@ pub fn report_sections(report: &ImportReport) -> Vec<Section<'_>> {
                 .collect(),
         ),
         section(
-            strings::IMPORT_SKIPPED,
+            strings::import_skipped(),
             report
                 .skipped
                 .iter()
@@ -70,14 +70,14 @@ pub fn report_sections(report: &ImportReport) -> Vec<Section<'_>> {
                 .collect(),
         ),
         section(
-            strings::IMPORT_WORKSPACES_CREATED,
+            strings::import_workspaces_created(),
             plain(&report.workspaces_created),
         ),
         section(
-            strings::IMPORT_WORKSPACES_NOT_CREATED,
+            strings::import_workspaces_not_created(),
             plain(&report.skipped_workspaces),
         ),
-        section(strings::IMPORT_FAILURES, plain(&report.failures)),
+        section(strings::import_failures(), plain(&report.failures)),
     ]
 }
 
@@ -116,9 +116,9 @@ fn steps(step: ImportStep) -> Element<'static, Message> {
         ImportStep::Running | ImportStep::Report => 2,
     };
     row([
-        strings::IMPORT_STEP_FILE,
-        strings::IMPORT_STEP_FOLDERS,
-        strings::IMPORT_STEP_REPORT,
+        strings::import_step_file(),
+        strings::import_step_folders(),
+        strings::import_step_report(),
     ]
     .into_iter()
     .enumerate()
@@ -146,7 +146,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     .size(theme::TEXT_MONO)
                     .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
                     .style(theme::search),
-                button(text(strings::CHOOSE_FILE))
+                button(text(strings::choose_file()))
                     .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_SM]))
                     .style(theme::button_outline)
                     .on_press(msg(ImportMsg::Choose)),
@@ -154,11 +154,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .spacing(theme::SPACE_XS)
             .align_y(Alignment::Center);
             column![
-                field(strings::IMPORT_FILE_LABEL, path.into(), flow.path_error),
-                muted(strings::IMPORT_FILE_HINT),
+                field(strings::import_file_label(), path.into(), flow.path_error),
+                muted(strings::import_file_hint()),
                 failure(flow.error.as_ref()),
                 row![
-                    primary(strings::NEXT, Some(msg(ImportMsg::Next))),
+                    primary(strings::next(), Some(msg(ImportMsg::Next))),
                     secondary(strings::cancel(), Some(msg(ImportMsg::Close))),
                 ]
                 .spacing(theme::SPACE_XS)
@@ -172,30 +172,30 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 .font(theme::MONO)
                 .size(theme::TEXT_MONO)
                 .color(palette().muted),
-            text(strings::IMPORT_FOLDERS_QUESTION).font(theme::INTER_SEMIBOLD),
-            muted(strings::IMPORT_FOLDERS_HINT),
+            text(strings::import_folders_question()).font(theme::INTER_SEMIBOLD),
+            muted(strings::import_folders_hint()),
             row![
                 primary(
-                    strings::IMPORT_FOLDERS_YES,
+                    strings::import_folders_yes(),
                     Some(msg(ImportMsg::Start {
                         folders_as_workspaces: true
                     }))
                 ),
-                button(text(strings::IMPORT_FOLDERS_NO))
+                button(text(strings::import_folders_no()))
                     .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_MD]))
                     .style(theme::button_outline)
                     .on_press(msg(ImportMsg::Start {
                         folders_as_workspaces: false
                     })),
                 space::horizontal(),
-                secondary(strings::BACK, Some(msg(ImportMsg::Back))),
+                secondary(strings::back(), Some(msg(ImportMsg::Back))),
             ]
             .spacing(theme::SPACE_XS)
             .align_y(Alignment::Center),
         ]
         .spacing(theme::SPACE_SM)
         .into(),
-        ImportStep::Running => busy(strings::IMPORT_RUNNING, app.busy_phase),
+        ImportStep::Running => busy(strings::import_running(), app.busy_phase),
         ImportStep::Report => match &flow.report {
             Some(report) => report_view(report, &flow.delete, flow.source.as_ref()),
             None => space().into(),
@@ -203,7 +203,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     };
 
     let content = column![
-        text(strings::IMPORT_TITLE)
+        text(strings::import_title())
             .size(theme::TEXT_MD)
             .font(theme::INTER_SEMIBOLD),
         steps(flow.step),
@@ -233,10 +233,10 @@ fn report_view<'a>(
     let delete_row: Element<'a, Message> = match delete {
         SourceDelete::Unavailable(KeepSource::NoReport) => space().into(),
         SourceDelete::Unavailable(KeepSource::Failures) => {
-            muted(strings::IMPORT_FAILED_KEEP_SOURCE)
+            muted(strings::import_failed_keep_source())
         }
         SourceDelete::Unavailable(KeepSource::PasswordsNotSaved(sites)) => column![
-            muted(strings::IMPORT_PASSWORDS_KEEP_SOURCE),
+            muted(strings::import_passwords_keep_source()),
             column(sites.iter().map(|name| {
                 text(name)
                     .font(theme::MONO)
@@ -249,9 +249,9 @@ fn report_view<'a>(
         .spacing(theme::SPACE_2XS)
         .into(),
         SourceDelete::Offered => row![
-            primary(strings::DONE, Some(msg(ImportMsg::Close))),
+            primary(strings::done(), Some(msg(ImportMsg::Close))),
             space::horizontal(),
-            secondary(strings::DELETE_SITEMANAGER, Some(msg(ImportMsg::Delete))),
+            secondary(strings::delete_sitemanager(), Some(msg(ImportMsg::Delete))),
         ]
         .align_y(Alignment::Center)
         .into(),
@@ -267,15 +267,15 @@ fn report_view<'a>(
                 }
             ),
             confirm(
-                strings::DELETE_SITEMANAGER_CONFIRM,
+                strings::delete_sitemanager_confirm(),
                 msg(ImportMsg::ConfirmDelete),
                 msg(ImportMsg::CancelDelete),
             ),
         ]
         .spacing(theme::SPACE_2XS)
         .into(),
-        SourceDelete::Deleting => muted(strings::DELETING_SITEMANAGER),
-        SourceDelete::Deleted => muted(strings::SITEMANAGER_DELETED),
+        SourceDelete::Deleting => muted(strings::deleting_sitemanager()),
+        SourceDelete::Deleted => muted(strings::sitemanager_deleted()),
         SourceDelete::Failed(error) => failure(Some(error)),
     };
     let mut col = column![
@@ -285,7 +285,7 @@ fn report_view<'a>(
     ]
     .spacing(theme::SPACE_MD);
     if !matches!(delete, SourceDelete::Offered) {
-        col = col.push(primary(strings::DONE, Some(msg(ImportMsg::Close))));
+        col = col.push(primary(strings::done(), Some(msg(ImportMsg::Close))));
     }
     col.into()
 }
@@ -294,9 +294,9 @@ fn section_view(section: Section<'_>) -> Element<'_, Message> {
     let head = text(strings::section_count(section.title, section.count))
         .size(theme::TEXT_XS)
         .font(theme::INTER_SEMIBOLD);
-    let error = section.title == strings::IMPORT_FAILURES && section.count > 0;
+    let error = section.title == strings::import_failures() && section.count > 0;
     let lines: Element<'_, Message> = if section.lines.is_empty() {
-        text(strings::IMPORT_NONE)
+        text(strings::import_none())
             .size(theme::TEXT_SM)
             .color(palette().muted)
             .into()
