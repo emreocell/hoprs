@@ -124,8 +124,9 @@ impl SftpChannel {
                 match channel.wait().await {
                     Some(russh::ChannelMsg::Success) => return Ok(()),
                     Some(russh::ChannelMsg::Failure) => {
-                        return Err(Error::new(
+                        return Err(Error::coded(
                             ErrorKind::Protocol,
+                            "sftp-subsystem-refused",
                             "The server refused the SFTP subsystem",
                         ));
                     }
@@ -296,31 +297,58 @@ fn not_a_dir_error(err: Error, lstat: Result<FileAttributes>, path: &RemotePath)
         Ok(attrs)
             if err.kind == ErrorKind::NotFound && entry_kind(&attrs) != Some(EntryKind::Dir) =>
         {
-            Error::new(ErrorKind::Io, format!("Not a directory: {path}"))
+            Error::coded(
+                ErrorKind::Io,
+                "fs-not-a-directory",
+                format!("Not a directory: {path}"),
+            )
+            .arg("path", path.to_string())
         }
         _ => err,
     }
 }
 
 fn start_error() -> Error {
-    Error::new(ErrorKind::Network, "Could not start SFTP")
+    Error::coded(
+        ErrorKind::Network,
+        "sftp-start-failed",
+        "Could not start SFTP",
+    )
 }
 
 /// Maps an SFTP status: the message names `path`, the detail keeps the raw status.
 fn map_status(status: &Status, path: &RemotePath) -> Error {
-    let (kind, what) = match status.status_code {
-        StatusCode::NoSuchFile => (ErrorKind::NotFound, "No such file or directory"),
-        StatusCode::PermissionDenied => (ErrorKind::Permission, "Permission denied"),
-        StatusCode::NoConnection | StatusCode::ConnectionLost => {
-            (ErrorKind::Network, "SFTP connection lost")
-        }
+    let error = match status.status_code {
+        StatusCode::NoSuchFile => Error::coded(
+            ErrorKind::NotFound,
+            "fs-no-such-file",
+            format!("No such file or directory: {path}"),
+        )
+        .arg("path", path.to_string()),
+        StatusCode::PermissionDenied => Error::coded(
+            ErrorKind::Permission,
+            "fs-permission-denied",
+            format!("Permission denied: {path}"),
+        )
+        .arg("path", path.to_string()),
+        StatusCode::NoConnection | StatusCode::ConnectionLost => Error::coded(
+            ErrorKind::Network,
+            "sftp-connection-lost",
+            format!("SFTP connection lost: {path}"),
+        )
+        .arg("path", path.to_string()),
         StatusCode::Failure
         | StatusCode::BadMessage
         | StatusCode::OpUnsupported
         | StatusCode::Eof
-        | StatusCode::Ok => (ErrorKind::Io, "SFTP operation failed"),
+        | StatusCode::Ok => Error::coded(
+            ErrorKind::Io,
+            "sftp-operation-failed",
+            format!("SFTP operation failed: {path}"),
+        )
+        .arg("path", path.to_string()),
     };
-    Error::new(kind, format!("{what}: {path}")).with_detail(format!(
+    error.with_detail(format!(
         "{:?}: {}",
         status.status_code, status.error_message
     ))
@@ -330,14 +358,20 @@ fn map_error(err: SftpError, path: &RemotePath) -> Error {
     match err {
         SftpError::Status(status) => map_status(&status, path),
         // Channel gone (closed stream, dropped request) or no reply in time.
-        SftpError::IO(_) | SftpError::UnexpectedBehavior(_) | SftpError::Timeout => {
-            Error::new(ErrorKind::Network, format!("SFTP connection lost: {path}"))
-                .with_detail(err.to_string())
-        }
-        SftpError::Limited(_) | SftpError::UnexpectedPacket => {
-            Error::new(ErrorKind::Io, format!("SFTP operation failed: {path}"))
-                .with_detail(err.to_string())
-        }
+        SftpError::IO(_) | SftpError::UnexpectedBehavior(_) | SftpError::Timeout => Error::coded(
+            ErrorKind::Network,
+            "sftp-connection-lost",
+            format!("SFTP connection lost: {path}"),
+        )
+        .arg("path", path.to_string())
+        .with_detail(err.to_string()),
+        SftpError::Limited(_) | SftpError::UnexpectedPacket => Error::coded(
+            ErrorKind::Io,
+            "sftp-operation-failed",
+            format!("SFTP operation failed: {path}"),
+        )
+        .arg("path", path.to_string())
+        .with_detail(err.to_string()),
     }
 }
 
@@ -345,11 +379,18 @@ fn map_error(err: SftpError, path: &RemotePath) -> Error {
 fn ensure_regular(attrs: &FileAttributes, path: &RemotePath) -> Result<()> {
     match entry_kind(attrs) {
         Some(EntryKind::File) => Ok(()),
-        Some(EntryKind::Dir) => Err(Error::new(ErrorKind::Io, format!("Is a directory: {path}"))),
-        Some(EntryKind::Symlink) | None => Err(Error::new(
+        Some(EntryKind::Dir) => Err(Error::coded(
             ErrorKind::Io,
+            "fs-is-a-directory",
+            format!("Is a directory: {path}"),
+        )
+        .arg("path", path.to_string())),
+        Some(EntryKind::Symlink) | None => Err(Error::coded(
+            ErrorKind::Io,
+            "fs-not-a-regular-file",
             format!("Not a regular file: {path}"),
-        )),
+        )
+        .arg("path", path.to_string())),
     }
 }
 
@@ -358,10 +399,14 @@ fn ensure_regular(attrs: &FileAttributes, path: &RemotePath) -> Result<()> {
 fn check_resume_size(attrs: &FileAttributes, offset: u64, path: &RemotePath) -> Result<u64> {
     let size = attrs.size.unwrap_or(0);
     if size < offset {
-        return Err(Error::new(
+        return Err(Error::coded(
             ErrorKind::Io,
+            "sftp-cannot-resume-size",
             format!("Cannot resume at {offset}: {path} has only {size} bytes"),
-        ));
+        )
+        .arg("offset", offset.to_string())
+        .arg("path", path.to_string())
+        .arg("size", size.to_string()));
     }
     Ok(size)
 }
@@ -419,7 +464,11 @@ impl SftpFs {
         if *self.inner.state.borrow() == SessionState::Connected {
             Ok(())
         } else {
-            Err(Error::new(ErrorKind::Network, "Not connected"))
+            Err(Error::coded(
+                ErrorKind::Network,
+                "net-not-connected",
+                "Not connected",
+            ))
         }
     }
 
@@ -511,10 +560,12 @@ impl RemoteFs for SftpFs {
         let chan = self.meta().await?;
         let attrs = chan.lstat(path).await?;
         let Some(kind) = entry_kind(&attrs) else {
-            return Err(Error::new(
+            return Err(Error::coded(
                 ErrorKind::Io,
+                "fs-not-a-regular-file",
                 format!("Not a regular file: {path}"),
-            ));
+            )
+            .arg("path", path.to_string()));
         };
         let name = path.file_name().unwrap_or("/").to_owned();
         Ok(make_entry(name, path.clone(), kind, &attrs))
@@ -546,10 +597,12 @@ impl RemoteFs for SftpFs {
             let attrs = match chan.lstat(path).await {
                 Ok(attrs) => attrs,
                 Err(e) if e.kind == ErrorKind::NotFound => {
-                    return Err(Error::new(
+                    return Err(Error::coded(
                         ErrorKind::Io,
+                        "sftp-cannot-resume-missing",
                         format!("Cannot resume a missing file: {path}"),
-                    ));
+                    )
+                    .arg("path", path.to_string()));
                 }
                 Err(e) => return Err(e),
             };
@@ -597,11 +650,17 @@ impl RemoteFs for SftpFs {
             return chan.check(result, from).map(|_| ());
         }
         let mut data = Vec::new();
-        for s in [from.as_str(), to.as_str()] {
-            let len = u32::try_from(s.len())
-                .map_err(|_| Error::new(ErrorKind::Io, format!("Path too long: {s}")))?;
+        for path in [from.as_str(), to.as_str()] {
+            let len = u32::try_from(path.len()).map_err(|_| {
+                Error::coded(
+                    ErrorKind::Io,
+                    "sftp-path-too-long",
+                    format!("Path too long: {path}"),
+                )
+                .arg("path", path.to_string())
+            })?;
             data.extend_from_slice(&len.to_be_bytes());
-            data.extend_from_slice(s.as_bytes());
+            data.extend_from_slice(path.as_bytes());
         }
         let reply = chan.sftp.extended(POSIX_RENAME, data).await;
         match chan.check(reply, from)? {
@@ -641,10 +700,12 @@ impl RemoteFs for SftpFs {
             .ok()
             .and_then(|d| u32::try_from(d.as_secs()).ok())
             .ok_or_else(|| {
-                Error::new(
+                Error::coded(
                     ErrorKind::Io,
+                    "sftp-mtime-out-of-range",
                     format!("Modification time out of range for SFTP: {path}"),
                 )
+                .arg("path", path.to_string())
             })?;
         let chan = self.meta().await?;
         let attrs = FileAttributes {
@@ -990,5 +1051,15 @@ mod tests {
 
         fs.remove_file(&path).await.unwrap();
         session.disconnect().await;
+    }
+
+    #[test]
+    fn status_errors_carry_a_code_and_the_path() {
+        let path = RemotePath::new("/a/b").unwrap();
+        let denied = map_status(&status(StatusCode::PermissionDenied), &path);
+        assert_eq!(denied.code, Some("fs-permission-denied"));
+        assert_eq!(denied.args, vec![("path", "/a/b".to_owned())]);
+        let lost = map_status(&status(StatusCode::ConnectionLost), &path);
+        assert_eq!(lost.code, Some("sftp-connection-lost"));
     }
 }

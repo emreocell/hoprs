@@ -269,15 +269,15 @@ pub(crate) async fn authenticate<H: client::Handler>(
 
     if handle.is_closed() {
         // See `session::attempt`, which tells a server disconnect apart from a lost link.
-        return Err(Error::new(ErrorKind::Network, "Connection lost"));
+        return Err(Error::coded(
+            ErrorKind::Network,
+            "net-connection-lost",
+            "Connection lost",
+        ));
     }
     Err(
-        Error::new(ErrorKind::Auth, "Authentication failed").with_detail(failure_detail(
-            &tried,
-            &skipped,
-            &agent_skipped,
-            &methods,
-        )),
+        Error::coded(ErrorKind::Auth, "auth-failed", "Authentication failed")
+            .with_detail(failure_detail(&tried, &skipped, &agent_skipped, &methods)),
     )
 }
 
@@ -452,7 +452,11 @@ async fn try_agent<H: client::Handler>(
                 }
             }
             Err(russh::AgentAuthError::Send(_)) => {
-                return Err(Error::new(ErrorKind::Network, "Connection lost"));
+                return Err(Error::coded(
+                    ErrorKind::Network,
+                    "net-connection-lost",
+                    "Connection lost",
+                ));
             }
             Err(russh::AgentAuthError::Key(e)) => {
                 agent_skipped.push((fingerprint, e.to_string()));
@@ -512,8 +516,9 @@ async fn keyboard_interactive<H: client::Handler>(
                 .await
                 .ok_or_else(cancelled)?;
             if answers.len() != prompts.len() {
-                return Err(Error::new(
+                return Err(Error::coded(
                     ErrorKind::Auth,
+                    "ssh-kbd-wrong-answer-count",
                     "Wrong number of keyboard-interactive answers",
                 ));
             }
@@ -535,15 +540,16 @@ async fn keyboard_interactive<H: client::Handler>(
             *methods = remaining_methods;
             Ok(false)
         }
-        KeyboardInteractiveAuthResponse::InfoRequest { .. } => Err(Error::new(
+        KeyboardInteractiveAuthResponse::InfoRequest { .. } => Err(Error::coded(
             ErrorKind::Auth,
+            "ssh-kbd-too-many-rounds",
             "Too many keyboard-interactive rounds",
         )),
     }
 }
 
 fn cancelled() -> Error {
-    Error::new(ErrorKind::Auth, "Cancelled by user")
+    Error::coded(ErrorKind::Auth, "auth-cancelled", "Cancelled by user")
 }
 
 /// Records the server's reply; `true` means authenticated.

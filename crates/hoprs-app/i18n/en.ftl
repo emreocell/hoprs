@@ -631,3 +631,84 @@ delete-site-edits =
     [1] 1 file of this site is open for editing: its unsent changes will be kept as a recovered copy, never deleted.
    *[other] { $count } files of this site are open for editing: their unsent changes will be kept as recovered copies, never deleted.
     }
+
+## Errors — SSH and SFTP
+
+error-auth-cancelled = Cancelled by user
+error-sftp-subsystem-refused = The server refused the SFTP subsystem
+error-sftp-start-failed = Could not start SFTP
+error-sftp-connection-lost = SFTP connection lost: { $path }
+error-sftp-operation-failed = SFTP operation failed: { $path }
+error-sftp-cannot-resume-size = Cannot resume at { $offset }: { $path } has only { $size } bytes
+error-sftp-cannot-resume-missing = Cannot resume a missing file: { $path }
+error-sftp-path-too-long = Path too long: { $path }
+error-sftp-mtime-out-of-range = Modification time out of range for SFTP: { $path }
+error-auth-failed = Authentication failed
+error-ssh-kbd-wrong-answer-count = Wrong number of keyboard-interactive answers
+error-ssh-kbd-too-many-rounds = Too many keyboard-interactive rounds
+error-ssh-too-many-channels = Too many channels on this connection (limit { $limit })
+error-known-hosts-changed = known_hosts changed; review the entries again
+error-known-hosts-invalid-host = Invalid host name for known_hosts
+error-ssh-protocol-error = SSH protocol error
+error-host-key-changed = Host key for { $host } has changed
+error-host-key-revoked = Host key for { $host } has been revoked
+error-host-key-certificate-unsupported = Host certificates are not supported
+error-ssh-shell-closed = Shell closed
+error-ssh-pty-refused = Server refused the PTY/shell request
+error-ssh-closed-during-request = Connection closed during the { $what } request
+error-ssh-shell-request-timed-out = Shell request timed out
+
+## Errors — FTP and TLS
+
+error-ftp-login-failed = Login failed: { $context }
+error-ftp-server-closed = Server closed the connection: { $context }
+error-ftp-cannot-open-data-connection = Cannot open data connection: { $context }
+error-ftp-transfer-aborted = Transfer aborted: { $context }
+error-ftp-reply-no-such-file = No such file or directory: { $context }
+error-ftp-reply-permission-denied = Permission denied: { $context }
+error-ftp-file-unavailable = File unavailable: { $context }
+error-ftp-server-failed-file = Server failed to process the file: { $context }
+error-ftp-storage-full = Server storage full or quota exceeded: { $context }
+error-ftp-name-not-allowed = File name not allowed: { $context }
+error-ftp-unexpected-reply = Unexpected FTP reply: { $context }
+error-ftp-connection-lost = Connection lost: { $context }
+error-tls-failed = TLS failed: { $context }
+error-ftp-unexpected-reply-path = Unexpected FTP reply: { $path }
+error-ftp-name-line-break = FTP cannot use a name with a line break: { $name }
+error-ftp-listing-format = Cannot read the server's listing format
+error-ftp-connection-lost-path = Connection lost: { $path }
+error-ftp-offset-out-of-range = Offset { $offset } out of range: { $path }
+error-ftp-cannot-continue = Cannot continue { $path } at byte { $offset }
+error-ftp-cannot-continue-missing = Cannot continue a missing file: { $path }
+error-ftp-mtime-out-of-range = Modification time out of range for FTP: { $context }
+error-tls-certificate-not-trusted = Certificate not trusted
+error-ftp-ftps-refused = Server refused FTPS: { $target }
+error-ftp-tls-config-missing = FTPS needs a TLS configuration
+error-ftp-control-command-timed-out = Control command timed out
+error-ftp-command-timed-out = Command timed out
+error-ftp-no-data-timeout = Connection lost: no data for { $secs } s
+error-ftp-upload-refused = Upload refused by the server: { $context }
+error-ftp-write-after-end = Write after the end of the upload: { $context }
+error-tls-trusted-cert-unusable = Cannot use trusted certificate { $path }
+error-tls-verifier-build-failed = Cannot build the certificate verifier
+error-tls-configure-failed = Cannot configure TLS
+
+## Errors — network, files and local disk
+
+error-fs-permission-denied = Permission denied: { $path }
+error-fs-no-such-file = No such file or directory: { $path }
+error-fs-not-a-regular-file = Not a regular file: { $path }
+error-fs-is-a-directory = Is a directory: { $path }
+error-fs-not-a-directory = Not a directory: { $path }
+error-net-connection-timed-out = Connection timed out
+error-net-connection-failed = Connection failed
+error-net-not-connected = Not connected
+error-net-disconnected-by-user = Disconnected by user
+error-net-connection-lost = Connection lost
+error-local-invalid-path = Invalid local path
+error-local-not-a-file = not a file: { $path }
+error-local-offset-beyond-end = offset { $offset } beyond end of { $path }
+error-local-cannot-resume-missing = cannot resume missing file: { $path }
+error-local-is-a-directory = is a directory: { $path }
+error-local-not-a-directory = not a directory: { $path }
+error-local-set-modified-failed = set_modified task failed: { $reason }

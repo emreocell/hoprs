@@ -219,8 +219,11 @@ async fn open_channel_while_reconnecting_is_network() {
     assert!(matches!(*rx.borrow(), SessionState::Reconnecting { .. }));
 
     s.disconnect().await;
-    let by_user =
-        SessionState::Disconnected(Error::new(ErrorKind::Network, "Disconnected by user"));
+    let by_user = SessionState::Disconnected(Error::coded(
+        ErrorKind::Network,
+        "net-disconnected-by-user",
+        "Disconnected by user",
+    ));
     assert_eq!(*rx.borrow_and_update(), by_user);
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(
@@ -371,8 +374,11 @@ async fn explicit_disconnect_does_not_reconnect() {
     let mut rx = s.state();
 
     s.disconnect().await;
-    let expected =
-        SessionState::Disconnected(Error::new(ErrorKind::Network, "Disconnected by user"));
+    let expected = SessionState::Disconnected(Error::coded(
+        ErrorKind::Network,
+        "net-disconnected-by-user",
+        "Disconnected by user",
+    ));
     assert_eq!(*rx.borrow_and_update(), expected);
 
     tokio::time::sleep(Duration::from_millis(1500)).await;

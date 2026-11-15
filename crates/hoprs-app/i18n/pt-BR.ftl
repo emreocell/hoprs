@@ -587,3 +587,84 @@ delete-site-edits =
     [one] { $count } arquivo deste site está aberto para edição: as alterações não enviadas serão mantidas como cópia recuperada, nunca excluídas.
    *[other] { $count } arquivos deste site estão abertos para edição: as alterações não enviadas serão mantidas como cópias recuperadas, nunca excluídas.
     }
+
+## Errors — SSH and SFTP
+
+error-auth-cancelled = Cancelado pelo usuário
+error-sftp-subsystem-refused = O servidor recusou o subsistema SFTP
+error-sftp-start-failed = Não foi possível iniciar o SFTP
+error-sftp-connection-lost = Conexão SFTP perdida: { $path }
+error-sftp-operation-failed = Falha na operação SFTP: { $path }
+error-sftp-cannot-resume-size = Não foi possível retomar em { $offset }: { $path } tem apenas { $size } bytes
+error-sftp-cannot-resume-missing = Não foi possível retomar um arquivo inexistente: { $path }
+error-sftp-path-too-long = Caminho longo demais: { $path }
+error-sftp-mtime-out-of-range = Data de modificação fora do intervalo aceito pelo SFTP: { $path }
+error-auth-failed = Falha na autenticação
+error-ssh-kbd-wrong-answer-count = Número incorreto de respostas keyboard-interactive
+error-ssh-kbd-too-many-rounds = Rodadas demais de keyboard-interactive
+error-ssh-too-many-channels = Canais demais nesta conexão (limite: { $limit })
+error-known-hosts-changed = O known_hosts mudou; revise as entradas novamente
+error-known-hosts-invalid-host = Nome de host inválido para o known_hosts
+error-ssh-protocol-error = Erro de protocolo SSH
+error-host-key-changed = A chave do host { $host } mudou
+error-host-key-revoked = A chave do host { $host } foi revogada
+error-host-key-certificate-unsupported = Certificados de host não são suportados
+error-ssh-shell-closed = Shell encerrado
+error-ssh-pty-refused = O servidor recusou a requisição de PTY/shell
+error-ssh-closed-during-request = Conexão encerrada durante a requisição de { $what }
+error-ssh-shell-request-timed-out = Tempo esgotado na requisição do shell
+
+## Errors — FTP and TLS
+
+error-ftp-login-failed = Falha no login: { $context }
+error-ftp-server-closed = O servidor encerrou a conexão: { $context }
+error-ftp-cannot-open-data-connection = Não foi possível abrir a conexão de dados: { $context }
+error-ftp-transfer-aborted = Transferência interrompida: { $context }
+error-ftp-reply-no-such-file = Arquivo ou pasta inexistente: { $context }
+error-ftp-reply-permission-denied = Permissão negada: { $context }
+error-ftp-file-unavailable = Arquivo indisponível: { $context }
+error-ftp-server-failed-file = O servidor não conseguiu processar o arquivo: { $context }
+error-ftp-storage-full = Armazenamento do servidor cheio ou cota excedida: { $context }
+error-ftp-name-not-allowed = Nome de arquivo não permitido: { $context }
+error-ftp-unexpected-reply = Resposta FTP inesperada: { $context }
+error-ftp-connection-lost = Conexão perdida: { $context }
+error-tls-failed = Falha de TLS: { $context }
+error-ftp-unexpected-reply-path = Resposta FTP inesperada: { $path }
+error-ftp-name-line-break = O FTP não aceita um nome com quebra de linha: { $name }
+error-ftp-listing-format = Não foi possível ler o formato da listagem do servidor
+error-ftp-connection-lost-path = Conexão perdida: { $path }
+error-ftp-offset-out-of-range = Deslocamento { $offset } fora do intervalo: { $path }
+error-ftp-cannot-continue = Não foi possível continuar { $path } no byte { $offset }
+error-ftp-cannot-continue-missing = Não foi possível continuar um arquivo inexistente: { $path }
+error-ftp-mtime-out-of-range = Data de modificação fora do intervalo aceito pelo FTP: { $context }
+error-tls-certificate-not-trusted = Certificado não confiável
+error-ftp-ftps-refused = O servidor recusou FTPS: { $target }
+error-ftp-tls-config-missing = O FTPS precisa de uma configuração de TLS
+error-ftp-control-command-timed-out = Tempo esgotado no comando de controle
+error-ftp-command-timed-out = Tempo esgotado no comando
+error-ftp-no-data-timeout = Conexão perdida: sem dados há { $secs } s
+error-ftp-upload-refused = Upload recusado pelo servidor: { $context }
+error-ftp-write-after-end = Escrita após o fim do upload: { $context }
+error-tls-trusted-cert-unusable = Não foi possível usar o certificado confiável { $path }
+error-tls-verifier-build-failed = Não foi possível criar o verificador de certificados
+error-tls-configure-failed = Não foi possível configurar o TLS
+
+## Errors — network, files and local disk
+
+error-fs-permission-denied = Permissão negada: { $path }
+error-fs-no-such-file = Arquivo ou pasta inexistente: { $path }
+error-fs-not-a-regular-file = Não é um arquivo regular: { $path }
+error-fs-is-a-directory = É uma pasta: { $path }
+error-fs-not-a-directory = Não é uma pasta: { $path }
+error-net-connection-timed-out = Tempo de conexão esgotado
+error-net-connection-failed = Falha na conexão
+error-net-not-connected = Sem conexão
+error-net-disconnected-by-user = Desconectado pelo usuário
+error-net-connection-lost = Conexão perdida
+error-local-invalid-path = Caminho local inválido
+error-local-not-a-file = Não é um arquivo: { $path }
+error-local-offset-beyond-end = Deslocamento { $offset } além do fim de { $path }
+error-local-cannot-resume-missing = Não foi possível retomar um arquivo inexistente: { $path }
+error-local-is-a-directory = É uma pasta: { $path }
+error-local-not-a-directory = Não é uma pasta: { $path }
+error-local-set-modified-failed = Falha ao definir a data de modificação: { $reason }

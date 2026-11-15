@@ -12,29 +12,81 @@ use suppaftp::types::Response;
 /// disambiguate with a `stat`.
 pub(crate) fn map_reply(code: u32, text: &str, context: &str) -> Error {
     let lower = text.to_lowercase();
-    let (kind, what) = match code {
-        530 => (ErrorKind::Auth, "Login failed"),
-        421 => (ErrorKind::Network, "Server closed the connection"),
-        425 => (ErrorKind::Network, "Cannot open data connection"),
-        426 => (ErrorKind::Network, "Transfer aborted"),
-        450 | 550 if lower.contains("no such file") || lower.contains("not found") => {
-            (ErrorKind::NotFound, "No such file or directory")
-        }
-        450 | 550 if lower.contains("denied") || lower.contains("permission") => {
-            (ErrorKind::Permission, "Permission denied")
-        }
-        450 | 550 => (ErrorKind::Io, "File unavailable"),
+    let context_arg = context.to_string();
+    let error = match code {
+        530 => Error::coded(
+            ErrorKind::Auth,
+            "ftp-login-failed",
+            format!("Login failed: {context}"),
+        )
+        .arg("context", context_arg),
+        421 => Error::coded(
+            ErrorKind::Network,
+            "ftp-server-closed",
+            format!("Server closed the connection: {context}"),
+        )
+        .arg("context", context_arg),
+        425 => Error::coded(
+            ErrorKind::Network,
+            "ftp-cannot-open-data-connection",
+            format!("Cannot open data connection: {context}"),
+        )
+        .arg("context", context_arg),
+        426 => Error::coded(
+            ErrorKind::Network,
+            "ftp-transfer-aborted",
+            format!("Transfer aborted: {context}"),
+        )
+        .arg("context", context_arg),
+        450 | 550 if lower.contains("no such file") || lower.contains("not found") => Error::coded(
+            ErrorKind::NotFound,
+            "ftp-reply-no-such-file",
+            format!("No such file or directory: {context}"),
+        )
+        .arg("context", context_arg),
+        450 | 550 if lower.contains("denied") || lower.contains("permission") => Error::coded(
+            ErrorKind::Permission,
+            "ftp-reply-permission-denied",
+            format!("Permission denied: {context}"),
+        )
+        .arg("context", context_arg),
+        450 | 550 => Error::coded(
+            ErrorKind::Io,
+            "ftp-file-unavailable",
+            format!("File unavailable: {context}"),
+        )
+        .arg("context", context_arg),
         // vsftpd: "Failure writing to local file." (a full disk among others).
-        451 => (ErrorKind::Io, "Server failed to process the file"),
-        452 | 552 => (ErrorKind::Io, "Server storage full or quota exceeded"),
-        553 => (ErrorKind::Io, "File name not allowed"),
-        _ => (ErrorKind::Protocol, "Unexpected FTP reply"),
+        451 => Error::coded(
+            ErrorKind::Io,
+            "ftp-server-failed-file",
+            format!("Server failed to process the file: {context}"),
+        )
+        .arg("context", context_arg),
+        452 | 552 => Error::coded(
+            ErrorKind::Io,
+            "ftp-storage-full",
+            format!("Server storage full or quota exceeded: {context}"),
+        )
+        .arg("context", context_arg),
+        553 => Error::coded(
+            ErrorKind::Io,
+            "ftp-name-not-allowed",
+            format!("File name not allowed: {context}"),
+        )
+        .arg("context", context_arg),
+        _ => Error::coded(
+            ErrorKind::Protocol,
+            "ftp-unexpected-reply",
+            format!("Unexpected FTP reply: {context}"),
+        )
+        .arg("context", context_arg),
     };
     let detail = match code {
         425 | 426 => format!("{DATA_CHANNEL}{code} {text}"),
         _ => format!("{code} {text}"),
     };
-    Error::new(kind, format!("{what}: {context}")).with_detail(detail)
+    error.with_detail(detail)
 }
 
 /// Detail prefix of the `Network` errors for data channel replies (`425`, `426`): they come
@@ -44,8 +96,13 @@ const DATA_CHANNEL: &str = "data channel: ";
 /// A transfer's data connection failed while its control connection still answers: `Network`,
 /// but not a control loss.
 pub(crate) fn data_channel_lost(context: &str, detail: impl fmt::Display) -> Error {
-    Error::new(ErrorKind::Network, format!("Connection lost: {context}"))
-        .with_detail(format!("{DATA_CHANNEL}{detail}"))
+    Error::coded(
+        ErrorKind::Network,
+        "ftp-connection-lost",
+        format!("Connection lost: {context}"),
+    )
+    .arg("context", context.to_string())
+    .with_detail(format!("{DATA_CHANNEL}{detail}"))
 }
 
 /// Whether `e`, returned by a command, means the connection it ran on is lost: a socket or
@@ -98,28 +155,39 @@ pub(crate) fn map_ftp_error(err: FtpError, context: &str) -> Error {
             if e.get_ref()
                 .is_some_and(|inner| inner.is::<DataConnectFailed>()) =>
         {
-            Error::new(
+            Error::coded(
                 ErrorKind::Network,
+                "ftp-cannot-open-data-connection",
                 format!("Cannot open data connection: {context}"),
             )
+            .arg("context", context.to_string())
             .with_detail(format!(
                 "{DATA_CHANNEL}{}",
                 e.get_ref().map(|i| i.to_string()).unwrap_or_default()
             ))
         }
-        FtpError::ConnectionError(e) => {
-            Error::new(ErrorKind::Network, format!("Connection lost: {context}"))
-                .with_detail(e.to_string())
-        }
-        FtpError::SecureError(e) => {
-            Error::new(ErrorKind::Tls, format!("TLS failed: {context}")).with_detail(e)
-        }
+        FtpError::ConnectionError(e) => Error::coded(
+            ErrorKind::Network,
+            "ftp-connection-lost",
+            format!("Connection lost: {context}"),
+        )
+        .arg("context", context.to_string())
+        .with_detail(e.to_string()),
+        FtpError::SecureError(e) => Error::coded(
+            ErrorKind::Tls,
+            "tls-failed",
+            format!("TLS failed: {context}"),
+        )
+        .arg("context", context.to_string())
+        .with_detail(e),
         e @ (FtpError::BadResponse
         | FtpError::InvalidAddress(_)
-        | FtpError::DataConnectionAlreadyOpen) => Error::new(
+        | FtpError::DataConnectionAlreadyOpen) => Error::coded(
             ErrorKind::Protocol,
+            "ftp-unexpected-reply",
             format!("Unexpected FTP reply: {context}"),
         )
+        .arg("context", context.to_string())
         .with_detail(e.to_string()),
     }
 }
@@ -283,5 +351,27 @@ mod tests {
         let e = map_ftp_error(FtpError::UnexpectedResponse(reply), "h");
         assert_eq!(e.kind, ErrorKind::Auth);
         assert_eq!(e.detail.as_deref(), Some("530 Login incorrect."));
+    }
+
+    #[test]
+    fn replies_carry_a_code_and_the_context() {
+        let login = map_reply(530, "Login incorrect.", "me@host");
+        assert_eq!(login.code, Some("ftp-login-failed"));
+        assert_eq!(login.args, vec![("context", "me@host".to_owned())]);
+        assert_eq!(login.message, "Login failed: me@host");
+        assert_eq!(
+            map_reply(550, "Permission denied.", "/a").code,
+            Some("ftp-reply-permission-denied")
+        );
+        assert_eq!(map_reply(999, "?", "/a").code, Some("ftp-unexpected-reply"));
+    }
+
+    #[test]
+    fn a_refused_data_connection_is_coded() {
+        let addr: std::net::SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let refused = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+        let e = map_ftp_error(data_connect_failed(addr, refused), "/a");
+        assert_eq!(e.code, Some("ftp-cannot-open-data-connection"));
+        assert_eq!(e.args, vec![("context", "/a".to_owned())]);
     }
 }

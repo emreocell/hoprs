@@ -65,7 +65,7 @@ pub(crate) async fn open_control(
         None => prompter
             .password(&cfg.user, &cfg.host)
             .await
-            .ok_or_else(|| Error::new(ErrorKind::Auth, "Cancelled by user"))?,
+            .ok_or_else(|| Error::coded(ErrorKind::Auth, "auth-cancelled", "Cancelled by user"))?,
     };
 
     let rejected = match attempt(cfg, &password).await? {
@@ -99,7 +99,12 @@ pub(crate) async fn open_control(
 }
 
 fn not_trusted(fp: &str) -> Error {
-    Error::new(ErrorKind::Tls, "Certificate not trusted").with_detail(fp.to_owned())
+    Error::coded(
+        ErrorKind::Tls,
+        "tls-certificate-not-trusted",
+        "Certificate not trusted",
+    )
+    .with_detail(fp.to_owned())
 }
 
 enum Attempt {
@@ -124,7 +129,12 @@ async fn attempt(cfg: &FtpConfig, password: &SecretString) -> Result<Attempt> {
     let result = tokio::time::timeout(cfg.connect_timeout, connect_and_login(cfg, password, tls))
         .await
         .unwrap_or_else(|_| {
-            Err(Error::new(ErrorKind::Network, "Connection timed out").with_detail(target))
+            Err(Error::coded(
+                ErrorKind::Network,
+                "net-connection-timed-out",
+                "Connection timed out",
+            )
+            .with_detail(target))
         });
     match result {
         Ok(control) => Ok(Attempt::Connected {
@@ -151,16 +161,25 @@ async fn connect_and_login(
     let target = format!("{}:{}", cfg.host, cfg.port);
     let addr = (cfg.host.as_str(), cfg.port);
     let connect_error = |e| match e {
-        FtpError::ConnectionError(e) => Error::new(ErrorKind::Network, "Connection failed")
-            .with_detail(format!("{target}: {e}")),
+        FtpError::ConnectionError(e) => Error::coded(
+            ErrorKind::Network,
+            "net-connection-failed",
+            "Connection failed",
+        )
+        .with_detail(format!("{target}: {e}")),
         e => map_ftp_error(e, &target),
     };
     // A refused `AUTH TLS`, `PBSZ` or `PROT` means the server does not offer FTPS.
     let refused = |e| match e {
         FtpError::UnexpectedResponse(reply) => {
             let (code, text) = reply_parts(&reply);
-            Error::new(ErrorKind::Tls, format!("Server refused FTPS: {target}"))
-                .with_detail(format!("{code} {text}"))
+            Error::coded(
+                ErrorKind::Tls,
+                "ftp-ftps-refused",
+                format!("Server refused FTPS: {target}"),
+            )
+            .arg("target", target.to_string())
+            .with_detail(format!("{code} {text}"))
         }
         e => connect_error(e),
     };
@@ -190,7 +209,11 @@ async fn connect_and_login(
         (FtpSecurity::Plain, _) => FtpStream::connect(addr).await.map_err(connect_error)?,
         // Never fall back to plain FTP when FTPS was asked for.
         (FtpSecurity::ExplicitTls | FtpSecurity::ImplicitTls, None) => {
-            return Err(Error::new(ErrorKind::Tls, "FTPS needs a TLS configuration"));
+            return Err(Error::coded(
+                ErrorKind::Tls,
+                "ftp-tls-config-missing",
+                "FTPS needs a TLS configuration",
+            ));
         }
     };
 
@@ -459,7 +482,7 @@ impl Shared {
         let password = AttemptPrompter(self)
             .password(&user, &host)
             .await
-            .ok_or_else(|| Error::new(ErrorKind::Auth, "Cancelled by user"))?;
+            .ok_or_else(|| Error::coded(ErrorKind::Auth, "auth-cancelled", "Cancelled by user"))?;
         self.cfg
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -623,11 +646,15 @@ impl fmt::Debug for FtpSession {
 }
 
 fn not_connected() -> Error {
-    Error::new(ErrorKind::Network, "Not connected")
+    Error::coded(ErrorKind::Network, "net-not-connected", "Not connected")
 }
 
 fn user_disconnected() -> ConnectionState {
-    ConnectionState::Disconnected(Error::new(ErrorKind::Network, "Disconnected by user"))
+    ConnectionState::Disconnected(Error::coded(
+        ErrorKind::Network,
+        "net-disconnected-by-user",
+        "Disconnected by user",
+    ))
 }
 
 impl FtpSession {
@@ -698,7 +725,11 @@ impl FtpSession {
             Ok(ConnectionState::Disconnected(e)) => Err(e),
             Ok(_) => Ok(session),
             // The supervisor lives as long as a handle does; this one is still here.
-            Err(_) => Err(Error::new(ErrorKind::Network, "Connection lost")),
+            Err(_) => Err(Error::coded(
+                ErrorKind::Network,
+                "net-connection-lost",
+                "Connection lost",
+            )),
         }
     }
 
@@ -807,7 +838,7 @@ impl FtpSession {
                     }
                     // As an unanswered keepalive (the connection log warns about it).
                     Some(Err(_)) => Some(
-                        Error::new(ErrorKind::Network, "Connection lost")
+                        Error::coded(ErrorKind::Network, "net-connection-lost", "Connection lost")
                             .with_detail(hoprs_core::KEEPALIVE_UNANSWERED),
                     ),
                 };
@@ -866,7 +897,7 @@ impl FtpSession {
             biased;
             result = tokio::time::timeout(shared.command_timeout, f(control)) => {
                 Some(result.unwrap_or_else(|_| {
-                    Err(Error::new(ErrorKind::Network, "Control command timed out"))
+                    Err(Error::coded(ErrorKind::Network, "ftp-control-command-timed-out", "Control command timed out"))
                 }))
             }
             _ = state.wait_for(|s| matches!(s, ConnectionState::Disconnected(_))) => None,
@@ -1031,7 +1062,13 @@ impl FtpSession {
     {
         let result = tokio::time::timeout(self.command_timeout(), f(conn.control()))
             .await
-            .unwrap_or_else(|_| Err(Error::new(ErrorKind::Network, "Command timed out")));
+            .unwrap_or_else(|_| {
+                Err(Error::coded(
+                    ErrorKind::Network,
+                    "ftp-command-timed-out",
+                    "Command timed out",
+                ))
+            });
         match &result {
             Err(e) if is_control_loss(e) || e.kind == ErrorKind::Tls => {
                 if report {
@@ -1100,7 +1137,7 @@ impl Drop for InFlight<'_> {
         if !self.done
             && let Some((_, generation)) = self.slot.take()
         {
-            let e = Error::new(ErrorKind::Network, "Connection lost")
+            let e = Error::coded(ErrorKind::Network, "net-connection-lost", "Connection lost")
                 .with_detail("a command was interrupted before its reply");
             let _ = self.shared.lost.send((generation, e, false));
         }
@@ -1357,7 +1394,11 @@ impl Supervisor {
                     }
                     let last = match &*self.shared.state.borrow() {
                         ConnectionState::Disconnected(e) => e.clone(),
-                        _ => Error::new(ErrorKind::Network, "Disconnected by user"),
+                        _ => Error::coded(
+                            ErrorKind::Network,
+                            "net-disconnected-by-user",
+                            "Disconnected by user",
+                        ),
                     };
                     self.shared.reconnecting(1, &last);
                     let _ = ack.send(());
@@ -1443,7 +1484,7 @@ async fn keepalive(shared: &Shared, probe: bool) -> Result<Instant> {
         Ok(Ok(())) => return Ok(Instant::now() + interval),
         Ok(Err(e)) => map_ftp_error(e, "keepalive"),
         // The connection log warns about it (see `hoprs_core::KEEPALIVE_UNANSWERED`).
-        Err(_) => Error::new(ErrorKind::Network, "Connection lost")
+        Err(_) => Error::coded(ErrorKind::Network, "net-connection-lost", "Connection lost")
             .with_detail(hoprs_core::KEEPALIVE_UNANSWERED),
     };
     slot.take();

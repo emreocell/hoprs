@@ -239,7 +239,12 @@ impl FtpFs {
         };
         match self.stat_exact(&parent).await {
             Ok(st) if st.kind == EntryKind::Dir => {
-                let e = Error::new(ErrorKind::Permission, format!("Permission denied: {path}"));
+                let e = Error::coded(
+                    ErrorKind::Permission,
+                    "fs-permission-denied",
+                    format!("Permission denied: {path}"),
+                )
+                .arg("path", path.to_string());
                 match err.detail {
                     Some(detail) => e.with_detail(detail),
                     None => e,
@@ -330,10 +335,12 @@ impl FtpFs {
                         && only.mode == up.mode
                         && only.modified == up.modified =>
                 {
-                    return Err(Error::new(
+                    return Err(Error::coded(
                         ErrorKind::Permission,
+                        "fs-permission-denied",
                         format!("Permission denied: {path}"),
-                    ));
+                    )
+                    .arg("path", path.to_string()));
                 }
                 // A real child that happens to share the directory's name.
                 EntryKind::Dir => {}
@@ -341,25 +348,31 @@ impl FtpFs {
                 // own entry points to a file or to a directory that cannot be opened; it is
                 // taken as a file.
                 EntryKind::File | EntryKind::Symlink => {
-                    return Err(Error::new(
+                    return Err(Error::coded(
                         ErrorKind::NotFound,
+                        "fs-no-such-file",
                         format!("No such file or directory: {path}"),
                     )
+                    .arg("path", path.to_string())
                     .with_detail(format!("{parent} is not a directory")));
                 }
             }
         }
         let Some(listed) = entries.into_iter().find(|e| e.name == name) else {
-            return Err(Error::new(
+            return Err(Error::coded(
                 ErrorKind::NotFound,
+                "fs-no-such-file",
                 format!("No such file or directory: {path}"),
-            ));
+            )
+            .arg("path", path.to_string()));
         };
         let Some(mut entry) = to_entry(&parent, listed) else {
-            return Err(Error::new(
+            return Err(Error::coded(
                 ErrorKind::Io,
+                "fs-not-a-regular-file",
                 format!("Not a regular file: {path}"),
-            ));
+            )
+            .arg("path", path.to_string()));
         };
         if entry.kind == EntryKind::File && !mlsd {
             // `LIST` dates have minutes at best (only a day for older files).
@@ -447,7 +460,12 @@ impl FtpFs {
             .await?;
         match probe {
             Probe::Found(listed) => to_entry(&parent, listed).ok_or_else(|| {
-                Error::new(ErrorKind::Protocol, format!("Unexpected FTP reply: {path}"))
+                Error::coded(
+                    ErrorKind::Protocol,
+                    "ftp-unexpected-reply-path",
+                    format!("Unexpected FTP reply: {path}"),
+                )
+                .arg("path", path.to_string())
             }),
             Probe::List { sized } => match self.stat_listed(path).await {
                 Err(e) if sized && e.kind == ErrorKind::NotFound => Err(unreadable_listing_error(
@@ -457,10 +475,12 @@ impl FtpFs {
                 other => other,
             },
             Probe::Missing if confirm_missing => self.stat_listed(path).await,
-            Probe::Missing => Err(Error::new(
+            Probe::Missing => Err(Error::coded(
                 ErrorKind::NotFound,
+                "fs-no-such-file",
                 format!("No such file or directory: {path}"),
-            )),
+            )
+            .arg("path", path.to_string())),
             Probe::Refused(code, text) => Err(map_reply(code, &text, path.as_str())),
         }
     }
@@ -499,13 +519,13 @@ struct Listing {
 fn arg(path: &RemotePath) -> Result<&str> {
     let s = path.as_str();
     if s.contains(['\r', '\n']) {
-        return Err(Error::new(
+        let name = s.escape_debug().to_string();
+        return Err(Error::coded(
             ErrorKind::Io,
-            format!(
-                "FTP cannot use a name with a line break: {}",
-                s.escape_debug()
-            ),
-        ));
+            "ftp-name-line-break",
+            format!("FTP cannot use a name with a line break: {name}"),
+        )
+        .arg("name", name.to_string()));
     }
     Ok(s)
 }
@@ -538,8 +558,13 @@ enum Probe {
 /// The size in a `213` reply to `SIZE`.
 fn parse_size(code: u32, text: &str, path: &str) -> Result<u64> {
     text.trim().parse().map_err(|_| {
-        Error::new(ErrorKind::Protocol, format!("Unexpected FTP reply: {path}"))
-            .with_detail(format!("{code} {text}"))
+        Error::coded(
+            ErrorKind::Protocol,
+            "ftp-unexpected-reply-path",
+            format!("Unexpected FTP reply: {path}"),
+        )
+        .arg("path", path.to_string())
+        .with_detail(format!("{code} {text}"))
     })
 }
 
@@ -551,18 +576,21 @@ fn listing_format_error(dir: &RemotePath, lines: &[String]) -> Error {
 }
 
 fn unreadable_listing_error(path: &RemotePath, detail: &str) -> Error {
-    Error::new(
+    Error::coded(
         ErrorKind::Protocol,
+        "ftp-listing-format",
         "Cannot read the server's listing format",
     )
     .with_detail(format!("{path}: {}", detail.trim_end()))
 }
 
 fn not_found(path: &RemotePath, cause: &Error) -> Error {
-    let e = Error::new(
+    let e = Error::coded(
         ErrorKind::NotFound,
+        "fs-no-such-file",
         format!("No such file or directory: {path}"),
-    );
+    )
+    .arg("path", path.to_string());
     match &cause.detail {
         Some(detail) => e.with_detail(detail.clone()),
         None => e,
@@ -579,11 +607,18 @@ fn is_definite(e: &Error) -> bool {
 fn regular_file(st: &RemoteEntry, path: &RemotePath) -> Result<()> {
     match st.kind {
         EntryKind::File => Ok(()),
-        EntryKind::Dir => Err(Error::new(ErrorKind::Io, format!("Is a directory: {path}"))),
-        EntryKind::Symlink => Err(Error::new(
+        EntryKind::Dir => Err(Error::coded(
             ErrorKind::Io,
+            "fs-is-a-directory",
+            format!("Is a directory: {path}"),
+        )
+        .arg("path", path.to_string())),
+        EntryKind::Symlink => Err(Error::coded(
+            ErrorKind::Io,
+            "fs-not-a-regular-file",
             format!("Not a regular file: {path}"),
-        )),
+        )
+        .arg("path", path.to_string())),
     }
 }
 
@@ -648,8 +683,13 @@ fn transfer_opened(
             e
         }
         Ok(Err(e)) => map_ftp_error(e, path.as_str()),
-        Err(_) => Error::new(ErrorKind::Network, format!("Connection lost: {path}"))
-            .with_detail("no reply to the transfer command"),
+        Err(_) => Error::coded(
+            ErrorKind::Network,
+            "ftp-connection-lost-path",
+            format!("Connection lost: {path}"),
+        )
+        .arg("path", path.to_string())
+        .with_detail("no reply to the transfer command"),
     };
     if report {
         conn.report(&e);
@@ -658,7 +698,12 @@ fn transfer_opened(
 }
 
 fn not_a_dir(path: &RemotePath) -> Error {
-    Error::new(ErrorKind::Io, format!("Not a directory: {path}"))
+    Error::coded(
+        ErrorKind::Io,
+        "fs-not-a-directory",
+        format!("Not a directory: {path}"),
+    )
+    .arg("path", path.to_string())
 }
 
 /// The entry for `listed` in `dir`; `None` for special files and names that cannot be a
@@ -736,10 +781,12 @@ impl RemoteFs for FtpFs {
                         && only.mode == st.mode
                         && only.modified == st.modified
                     {
-                        return Err(Error::new(
+                        return Err(Error::coded(
                             ErrorKind::Permission,
+                            "fs-permission-denied",
                             format!("Permission denied: {path}"),
-                        ));
+                        )
+                        .arg("path", path.to_string()));
                     }
                 }
                 // A symlink to a file is listed as its own entry, like a file.
@@ -770,10 +817,13 @@ impl RemoteFs for FtpFs {
             return Ok(Box::new(tokio::io::empty()));
         }
         let rest = usize::try_from(offset).map_err(|_| {
-            Error::new(
+            Error::coded(
                 ErrorKind::Io,
+                "ftp-offset-out-of-range",
                 format!("Offset {offset} out of range: {path}"),
             )
+            .arg("offset", offset.to_string())
+            .arg("path", path.to_string())
         })?;
         let timeout = self.session.command_timeout();
         let mut conn = self.session.checkout().await?;
@@ -804,17 +854,22 @@ impl RemoteFs for FtpFs {
             match self.file_size(path).await {
                 Ok(size) if size == offset => {}
                 Ok(size) => {
-                    return Err(Error::new(
+                    return Err(Error::coded(
                         ErrorKind::Io,
+                        "ftp-cannot-continue",
                         format!("Cannot continue {path} at byte {offset}"),
                     )
+                    .arg("path", path.to_string())
+                    .arg("offset", offset.to_string())
                     .with_detail(format!("the file has {size} bytes")));
                 }
                 Err(e) if e.kind == ErrorKind::NotFound => {
-                    return Err(Error::new(
+                    return Err(Error::coded(
                         ErrorKind::Io,
+                        "ftp-cannot-continue-missing",
                         format!("Cannot continue a missing file: {path}"),
-                    ));
+                    )
+                    .arg("path", path.to_string()));
                 }
                 Err(e) => return Err(e),
             }
@@ -914,10 +969,13 @@ impl RemoteFs for FtpFs {
         match self.stat_exact(path).await {
             Err(e) if e.kind == ErrorKind::NotFound => Err(not_found(path, &err)),
             Err(e) if is_definite(&e) => Err(e),
-            Ok(st) if st.kind == EntryKind::Dir => {
-                Err(Error::new(ErrorKind::Io, format!("Is a directory: {path}"))
-                    .with_detail(err.detail.unwrap_or_default()))
-            }
+            Ok(st) if st.kind == EntryKind::Dir => Err(Error::coded(
+                ErrorKind::Io,
+                "fs-is-a-directory",
+                format!("Is a directory: {path}"),
+            )
+            .arg("path", path.to_string())
+            .with_detail(err.detail.unwrap_or_default())),
             _ => Err(err),
         }
     }
@@ -936,10 +994,11 @@ impl RemoteFs for FtpFs {
             Err(e) if is_definite(&e) => Err(e),
             Ok(st) if st.kind != EntryKind::Dir => Err(not_a_dir(path)),
             // Most likely not empty.
-            Ok(_) => {
-                Err(Error::new(ErrorKind::Io, err.message)
-                    .with_detail(err.detail.unwrap_or_default()))
-            }
+            Ok(_) => Err(Error {
+                kind: ErrorKind::Io,
+                detail: Some(err.detail.clone().unwrap_or_default()),
+                ..err
+            }),
             Err(_) => Err(err),
         }
     }
@@ -970,10 +1029,12 @@ impl RemoteFs for FtpFs {
                         return Ok(None);
                     }
                     let Some(command) = command else {
-                        return Err(Error::new(
+                        return Err(Error::coded(
                             ErrorKind::Io,
+                            "ftp-mtime-out-of-range",
                             format!("Modification time out of range for FTP: {context}"),
-                        ));
+                        )
+                        .arg("context", context.to_string()));
                     };
                     session::quote(&mut c.stream, &command, &context)
                         .await

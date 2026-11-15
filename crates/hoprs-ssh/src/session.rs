@@ -245,7 +245,11 @@ impl SshSession {
             Ok(SessionState::Disconnected(e)) => Err(e),
             Ok(_) => Ok(session),
             // The supervisor lives as long as a handle does; this one is still here.
-            Err(_) => Err(Error::new(ErrorKind::Network, "Connection lost")),
+            Err(_) => Err(Error::coded(
+                ErrorKind::Network,
+                "net-connection-lost",
+                "Connection lost",
+            )),
         }
     }
 
@@ -324,7 +328,11 @@ impl SshSession {
             // the connection of `handle`.
             let current = shared.handle.read().unwrap_or_else(PoisonError::into_inner);
             let Some((handle, generation)) = current.as_ref() else {
-                return Err(Error::new(ErrorKind::Network, "Not connected"));
+                return Err(Error::coded(
+                    ErrorKind::Network,
+                    "net-not-connected",
+                    "Not connected",
+                ));
             };
             let slot = if pty {
                 shared.budget.acquire_pty(*generation)?
@@ -474,7 +482,7 @@ impl Supervisor {
                     // The sender is dropped without a reason when the session task ends
                     // without calling `disconnected`.
                     let last = reason
-                        .unwrap_or_else(|_| Error::new(ErrorKind::Network, "Connection lost"));
+                        .unwrap_or_else(|_| Error::coded(ErrorKind::Network, "net-connection-lost", "Connection lost"));
                     return Phase::Reconnecting { last, immediate: false };
                 }
                 command = self.commands.recv() => match command {
@@ -589,7 +597,11 @@ impl Supervisor {
 }
 
 fn user_disconnected_error() -> Error {
-    Error::new(ErrorKind::Network, "Disconnected by user")
+    Error::coded(
+        ErrorKind::Network,
+        "net-disconnected-by-user",
+        "Disconnected by user",
+    )
 }
 
 fn user_disconnected() -> SessionState {
@@ -639,7 +651,7 @@ async fn establish(
     tokio::select! {
         result = attempt(cfg, watched.clone(), pinned, remembered) => result,
         _ = watchdog::expired(&watched, cfg.connect_timeout) => {
-            Err(Error::new(ErrorKind::Network, "Connection timed out"))
+            Err(Error::coded(ErrorKind::Network, "net-connection-timed-out", "Connection timed out"))
         }
     }
 }
@@ -677,8 +689,12 @@ async fn attempt(
         .map_err(|e| e.0)?;
     // russh only completes the key exchange after `check_server_key` accepted the key.
     let host_key = verified.try_recv().map_err(|_| {
-        Error::new(ErrorKind::Protocol, "SSH protocol error")
-            .with_detail("the server key was never verified")
+        Error::coded(
+            ErrorKind::Protocol,
+            "ssh-protocol-error",
+            "SSH protocol error",
+        )
+        .with_detail("the server key was never verified")
     })?;
     let auth =
         match crate::auth::authenticate(&mut handle, cfg, prompter.as_ref(), remembered).await {
@@ -707,7 +723,12 @@ async fn connect_tcp(cfg: &SshConfig) -> Result<TcpStream> {
     let stream = TcpStream::connect((cfg.host.as_str(), cfg.port))
         .await
         .map_err(|e| {
-            Error::new(ErrorKind::Network, "Connection failed").with_detail(e.to_string())
+            Error::coded(
+                ErrorKind::Network,
+                "net-connection-failed",
+                "Connection failed",
+            )
+            .with_detail(e.to_string())
         })?;
     // Nagle only delays interactive traffic; a failure here is harmless.
     let _ = stream.set_nodelay(true);
@@ -720,7 +741,7 @@ async fn connect_tcp(cfg: &SshConfig) -> Result<TcpStream> {
 /// The server sent `DISCONNECT` while we authenticated: most likely `MaxAuthTries` was
 /// reached, which retrying cannot fix.
 fn closed_during_auth() -> Error {
-    Error::new(ErrorKind::Auth, "Authentication failed")
+    Error::coded(ErrorKind::Auth, "auth-failed", "Authentication failed")
         .with_detail("server closed the connection during authentication (MaxAuthTries?)")
 }
 
@@ -791,16 +812,23 @@ const CHANGED_LINE_SUFFIX: &str = "; remove it to continue";
 
 /// `known_hosts` has another key of the same type for `host`, at `line`.
 pub(crate) fn known_hosts_changed(host: &str, line: usize) -> Error {
-    Error::new(ErrorKind::HostKey, changed_message(host))
-        .with_detail(format!("{CHANGED_LINE_PREFIX}{line}{CHANGED_LINE_SUFFIX}"))
+    Error::coded(
+        ErrorKind::HostKey,
+        "host-key-changed",
+        changed_message(host),
+    )
+    .arg("host", host)
+    .with_detail(format!("{CHANGED_LINE_PREFIX}{line}{CHANGED_LINE_SUFFIX}"))
 }
 
 /// `known_hosts` revokes the presented key for `host`, at `line`.
 fn known_hosts_revoked(host: &str, line: usize) -> Error {
-    Error::new(
+    Error::coded(
         ErrorKind::HostKey,
+        "host-key-revoked",
         format!("Host key for {host} has been revoked"),
     )
+    .arg("host", host)
     .with_detail(format!("known_hosts line {line}"))
 }
 
@@ -820,7 +848,13 @@ fn check_pinned(pinned: Option<&PublicKey>, host: &str, key: &PublicKey) -> Resu
 /// The server presented a `key_type` key (`fingerprint`) instead of the one this session
 /// verified when it first connected.
 pub(crate) fn pinned_key_changed(host: &str, key_type: &str, fingerprint: &str) -> Error {
-    Error::new(ErrorKind::HostKey, changed_message(host)).with_detail(format!(
+    Error::coded(
+        ErrorKind::HostKey,
+        "host-key-changed",
+        changed_message(host),
+    )
+    .arg("host", host)
+    .with_detail(format!(
         "the server presented a {key_type} key ({fingerprint}) instead of the key verified \
          when this session connected"
     ))
@@ -869,16 +903,16 @@ pub(crate) fn map_russh_error(e: russh::Error) -> Error {
         | E::Elapsed(_) => ErrorKind::Network,
         _ => ErrorKind::Protocol,
     };
-    let message = match kind {
-        ErrorKind::Network => "Connection lost",
-        _ => "SSH protocol error",
+    let (code, message) = match kind {
+        ErrorKind::Network => ("net-connection-lost", "Connection lost"),
+        _ => ("ssh-protocol-error", "SSH protocol error"),
     };
     let detail = match e {
         // The connection log warns about it (see `hoprs_core::KEEPALIVE_UNANSWERED`).
         E::KeepaliveTimeout => hoprs_core::KEEPALIVE_UNANSWERED.to_owned(),
         e => e.to_string(),
     };
-    Error::new(kind, message).with_detail(detail)
+    Error::coded(kind, code, message).with_detail(detail)
 }
 
 impl ClientHandler {
@@ -900,10 +934,11 @@ impl client::Handler for ClientHandler {
             client::DisconnectReason::ReceivedDisconnect(info) => {
                 self.server_disconnected.store(true, Ordering::SeqCst);
                 (
-                    Error::new(ErrorKind::Network, "Connection lost").with_detail(format!(
-                        "server disconnected ({:?}): {}",
-                        info.reason_code, info.message
-                    )),
+                    Error::coded(ErrorKind::Network, "net-connection-lost", "Connection lost")
+                        .with_detail(format!(
+                            "server disconnected ({:?}): {}",
+                            info.reason_code, info.message
+                        )),
                     Ok(()),
                 )
             }
@@ -920,8 +955,9 @@ impl client::Handler for ClientHandler {
         server_public_key: &PublicKeyOrCertificate,
     ) -> std::result::Result<bool, Self::Error> {
         let PublicKeyOrCertificate::PublicKey { key, .. } = server_public_key else {
-            return Err(HandlerError(Error::new(
+            return Err(HandlerError(Error::coded(
                 ErrorKind::HostKey,
+                "host-key-certificate-unsupported",
                 "Host certificates are not supported",
             )));
         };
@@ -947,8 +983,9 @@ impl client::Handler for ClientHandler {
                     )
                     .await;
                 if !accepted {
-                    return Err(HandlerError(Error::new(
+                    return Err(HandlerError(Error::coded(
                         ErrorKind::HostKey,
+                        "auth-cancelled",
                         "Cancelled by user",
                     )));
                 }
@@ -1065,5 +1102,27 @@ mod tests {
             russh_config(&cfg, &[]).keepalive_interval,
             Some(cfg.keepalive_interval)
         );
+    }
+
+    #[test]
+    fn host_key_errors_carry_their_codes_and_host() {
+        let changed = known_hosts_changed("example.org", 3);
+        assert_eq!(changed.code, Some("host-key-changed"));
+        assert_eq!(changed.args, vec![("host", "example.org".to_owned())]);
+        assert_eq!(changed.message, "Host key for example.org has changed");
+        let revoked = known_hosts_revoked("example.org", 3);
+        assert_eq!(revoked.code, Some("host-key-revoked"));
+        let pinned = pinned_key_changed("example.org", "ssh-ed25519", "SHA256:x");
+        assert_eq!(pinned.code, Some("host-key-changed"));
+    }
+
+    #[test]
+    fn transport_errors_carry_their_codes_and_keep_the_detail_uncoded() {
+        let lost = map_russh_error(russh::Error::Disconnect);
+        assert_eq!(lost.code, Some("net-connection-lost"));
+        assert_eq!(lost.detail.as_deref(), Some("Disconnected"));
+        let protocol = map_russh_error(russh::Error::Inconsistent);
+        assert_eq!(protocol.code, Some("ssh-protocol-error"));
+        assert!(user_disconnected_error().code == Some("net-disconnected-by-user"));
     }
 }

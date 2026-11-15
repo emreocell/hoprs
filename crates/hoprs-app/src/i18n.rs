@@ -751,4 +751,284 @@ mod tests {
         );
         assert_eq!(resolve(LanguageChoice::Fixed(Language::En)), Language::En);
     }
+
+    // ---- error codes in the core crates ---------------------------------------------
+
+    /// One `Error::coded(kind, "code", message)` call found in a crate's source.
+    struct CodedSite {
+        file: String,
+        code: String,
+        /// The message expression as written, e.g. `"Not connected"` or `format!(..)`.
+        message: String,
+        args: Vec<String>,
+    }
+
+    /// Index just past the `)` that closes the `(` at `open`, skipping string literals.
+    fn closing_paren(src: &str, open: usize) -> usize {
+        let b = src.as_bytes();
+        let (mut depth, mut i) = (0usize, open);
+        while i < b.len() {
+            match b[i] {
+                b'"' => {
+                    i += 1;
+                    while b[i] != b'"' {
+                        if b[i] == b'\\' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                }
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return i + 1;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        panic!("unbalanced parenthesis");
+    }
+
+    /// Splits `inner` at its top-level commas.
+    fn top_level_parts(inner: &str) -> Vec<String> {
+        let b = inner.as_bytes();
+        let (mut parts, mut depth, mut start, mut i) = (Vec::new(), 0i32, 0, 0);
+        while i < b.len() {
+            match b[i] {
+                b'"' => {
+                    i += 1;
+                    while b[i] != b'"' {
+                        if b[i] == b'\\' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                }
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth -= 1,
+                b',' if depth == 0 => {
+                    parts.push(inner[start..i].trim().to_owned());
+                    start = i + 1;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        let last = inner[start..].trim();
+        if !last.is_empty() {
+            parts.push(last.to_owned());
+        }
+        parts
+    }
+
+    /// The content of a leading Rust string literal (`"…"`), with `\"` and `\\` resolved and
+    /// a `\` line continuation swallowing the next line's indentation.
+    fn string_literal(text: &str) -> Option<String> {
+        let rest = text.strip_prefix('"')?;
+        let mut out = String::new();
+        let mut chars = rest.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => return Some(out),
+                '\\' => match chars.next()? {
+                    '\n' => {
+                        while chars.peek().is_some_and(|c| c.is_whitespace()) {
+                            chars.next();
+                        }
+                    }
+                    other => out.push(other),
+                },
+                c => out.push(c),
+            }
+        }
+        None
+    }
+
+    /// The named values of a `format!` template: `{name}` placeholders. `None` when the
+    /// template has anything this scan cannot map (positional or `:?` placeholders).
+    fn template_variables(template: &str) -> Option<Vec<String>> {
+        let mut vars = Vec::new();
+        let mut rest = template.replace("{{", "").replace("}}", "");
+        while let Some(open) = rest.find('{') {
+            let close = rest[open..].find('}')? + open;
+            let name = &rest[open + 1..close];
+            let is_const = name.chars().all(|c| c.is_ascii_uppercase() || c == '_');
+            let is_ident = !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+            if !is_const && !is_ident {
+                return None;
+            }
+            if is_ident && !vars.contains(&name.to_owned()) {
+                vars.push(name.to_owned());
+            }
+            rest = rest[close + 1..].to_owned();
+        }
+        vars.sort();
+        Some(vars)
+    }
+
+    /// Production source of `path`: everything before its `mod tests`.
+    fn production_source(source: &str) -> &str {
+        let mut from = 0;
+        while let Some(at) = source[from..].find("#[cfg(test)]") {
+            let at = from + at;
+            let after = source[at + "#[cfg(test)]".len()..].trim_start();
+            if after.starts_with("mod ") {
+                return &source[..at];
+            }
+            from = at + 1;
+        }
+        source
+    }
+
+    fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if name != "tests" {
+                    rust_files(&path, out);
+                }
+            } else if name.ends_with(".rs") && name != "tests.rs" && name != "testing.rs" {
+                out.push(path);
+            }
+        }
+    }
+
+    fn coded_sites() -> Vec<CodedSite> {
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(&crates).unwrap() {
+            let src = entry.unwrap().path().join("src");
+            if src.is_dir() {
+                rust_files(&src, &mut files);
+            }
+        }
+        files.sort();
+        let mut sites = Vec::new();
+        for file in files {
+            let text = std::fs::read_to_string(&file).unwrap();
+            let src = production_source(&text);
+            let mut from = 0;
+            while let Some(at) = src[from..].find("Error::coded(") {
+                let open = from + at + "Error::coded".len();
+                let end = closing_paren(src, open);
+                from = end;
+                let parts = top_level_parts(&src[open + 1..end - 1]);
+                assert_eq!(parts.len(), 3, "{}: {:?}", file.display(), parts);
+                // A code computed at run time (a variable) is covered by its literal sites.
+                let Some(code) = string_literal(&parts[1]) else {
+                    continue;
+                };
+                let mut args = Vec::new();
+                let mut tail = end;
+                loop {
+                    let rest = src[tail..].trim_start();
+                    let skipped = src.len() - tail - rest.len();
+                    let call = if rest.starts_with(".arg(") {
+                        ".arg"
+                    } else if rest.starts_with(".with_detail(") {
+                        ".with_detail"
+                    } else {
+                        break;
+                    };
+                    let open = tail + skipped + call.len();
+                    let close = closing_paren(src, open);
+                    if call == ".arg" {
+                        let name = string_literal(src[open + 1..close - 1].trim_start())
+                            .expect("arg name literal");
+                        args.push(name);
+                    }
+                    tail = close;
+                }
+                args.sort();
+                sites.push(CodedSite {
+                    file: file.display().to_string(),
+                    code,
+                    message: parts[2].clone(),
+                    args,
+                });
+            }
+        }
+        sites
+    }
+
+    /// The single-line value of `key` in a catalog source.
+    fn single_line(source: &str, key: &str) -> Option<String> {
+        source
+            .lines()
+            .find_map(|line| line.strip_prefix(key)?.strip_prefix(" = "))
+            .map(str::to_owned)
+    }
+
+    #[test]
+    fn error_codes_exist_in_both_catalogs() {
+        let sites = coded_sites();
+        assert!(
+            sites.len() >= 100,
+            "found only {} coded errors",
+            sites.len()
+        );
+        let en = variables(EN_SRC);
+        let pt = variables(PT_BR_SRC);
+        let mut texts: std::collections::BTreeMap<String, (String, Vec<String>)> =
+            std::collections::BTreeMap::new();
+        for site in &sites {
+            let key = format!("error-{}", site.code);
+            let at = format!("{} ({})", site.code, site.file);
+            let Some(en_vars) = en.get(&key) else {
+                panic!("{key} is not in en.ftl: {at}");
+            };
+            assert!(pt.contains_key(&key), "{key} is not in pt-BR.ftl: {at}");
+            assert_eq!(
+                en_vars, &site.args,
+                "{at}: arguments passed vs. variables of en.ftl"
+            );
+            assert_eq!(&pt[&key], en_vars, "{at}: pt-BR variables");
+            // The English the call writes: a literal or a `format!` template.
+            let template = if let Some(literal) = string_literal(&site.message) {
+                Some(literal)
+            } else {
+                site.message
+                    .strip_prefix("format!(")
+                    .and_then(|rest| string_literal(rest.trim_start()))
+            };
+            if let Some(template) = &template
+                && let Some(vars) = template_variables(template)
+            {
+                assert_eq!(
+                    vars, site.args,
+                    "{at}: variables of the message vs. arguments"
+                );
+                let mut shown = template.replace("{{", "\u{1}").replace("}}", "\u{2}");
+                for var in &vars {
+                    shown = shown.replace(&format!("{{{var}}}"), &format!("{{ ${var} }}"));
+                }
+                let shown = shown.replace('\u{1}', "{").replace('\u{2}', "}");
+                if let Some(value) = single_line(EN_SRC, &key) {
+                    assert_eq!(value, shown, "{at}: en.ftl text differs from the message");
+                }
+            }
+            // One code is one English message with one set of arguments.
+            let text = template.unwrap_or_else(|| site.message.clone());
+            match texts.get(&site.code) {
+                Some((first, args)) => {
+                    assert_eq!(
+                        first, &text,
+                        "code {} has two different messages",
+                        site.code
+                    );
+                    assert_eq!(args, &site.args, "code {} has two argument sets", site.code);
+                }
+                None => {
+                    texts.insert(site.code.clone(), (text, site.args.clone()));
+                }
+            }
+        }
+    }
 }
