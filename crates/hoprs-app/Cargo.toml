@@ -50,6 +50,8 @@ fluent-bundle = "0.16"
 fluent-syntax = "0.12"
 # Language identifiers for the Fluent bundles. MIT OR Apache-2.0.
 unic-langid = "0.9"
+# The OS language, for the "System" language setting. MIT OR Apache-2.0.
+sys-locale = "0.3"
 
 # Windows: attach to the parent console so `hoprs.exe --version` prints (GUI subsystem),
 # and open remote edits with the default editor.

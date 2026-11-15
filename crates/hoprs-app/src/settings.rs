@@ -12,6 +12,7 @@ use hoprs_core::{Error, ErrorKind, Result};
 use hoprs_transfer::ConflictPolicy;
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::Language;
 use crate::terminal::TermTheme;
 
 pub const FILE_NAME: &str = "settings.toml";
@@ -79,6 +80,48 @@ impl TerminalTheme {
     }
 }
 
+/// The interface language setting: follow the OS, or a fixed language.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LanguageChoice {
+    #[default]
+    System,
+    Fixed(Language),
+}
+
+impl LanguageChoice {
+    /// The choices the settings page offers, in order.
+    pub const ALL: [LanguageChoice; 3] = [
+        LanguageChoice::System,
+        LanguageChoice::Fixed(Language::En),
+        LanguageChoice::Fixed(Language::PtBr),
+    ];
+
+    /// The value in `settings.toml`.
+    fn key(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Fixed(lang) => lang.tag(),
+        }
+    }
+
+    /// The name the settings page shows (a language is named in itself).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::System => crate::ui::strings::language_system(),
+            Self::Fixed(Language::En) => crate::ui::strings::language_english(),
+            Self::Fixed(Language::PtBr) => crate::ui::strings::language_pt_br(),
+        }
+    }
+
+    /// The choice named `key`; an unknown value (a newer hoprs) is `System`.
+    fn from_key(key: &str) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|choice| choice.key() == key)
+            .unwrap_or_default()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
     /// Transfer workers per site (`1..=16`), for the connections made from now on.
@@ -91,6 +134,8 @@ pub struct Settings {
     /// from now on.
     pub terminal_scrollback: usize,
     pub terminal_theme: TerminalTheme,
+    /// The interface language: the OS's, or a fixed one.
+    pub language: LanguageChoice,
     /// Seconds between keepalives on an idle SSH or FTP connection (`10..=300`), for the
     /// connections made from now on.
     pub keepalive_secs: u64,
@@ -108,6 +153,7 @@ impl Default for Settings {
             terminal_font_size: FONT_SIZE_DEFAULT,
             terminal_scrollback: SCROLLBACK_DEFAULT,
             terminal_theme: TerminalTheme::HoprsDark,
+            language: LanguageChoice::System,
             keepalive_secs: KEEPALIVE_DEFAULT,
             editor_command: EDITOR_DEFAULT.to_owned(),
         }
@@ -167,6 +213,8 @@ struct File {
     terminal_scrollback: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     terminal_theme: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    language: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     keepalive_secs: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -236,6 +284,10 @@ pub fn parse(content: &str) -> Result<Settings> {
             .terminal_theme
             .as_deref()
             .map_or(defaults.terminal_theme, TerminalTheme::from_key),
+        language: file
+            .language
+            .as_deref()
+            .map_or(defaults.language, LanguageChoice::from_key),
         keepalive_secs: file.keepalive_secs.map_or(defaults.keepalive_secs, |n| {
             clamp_keepalive(u64::try_from(n.max(0)).unwrap_or(KEEPALIVE_MAX))
         }),
@@ -255,6 +307,7 @@ fn file_of(settings: &Settings) -> File {
         terminal_font_size: Some(clamp_font_size(settings.terminal_font_size).into()),
         terminal_scrollback: i64::try_from(clamp_scrollback(settings.terminal_scrollback)).ok(),
         terminal_theme: Some(settings.terminal_theme.key().to_owned()),
+        language: Some(settings.language.key().to_owned()),
         keepalive_secs: i64::try_from(clamp_keepalive(settings.keepalive_secs)).ok(),
         editor_command: Some(if valid_editor(&settings.editor_command) {
             settings.editor_command.clone()
@@ -282,6 +335,12 @@ fn render_over(existing: &str, settings: &Settings) -> Result<String> {
         && TerminalTheme::from_key(existing) == settings.terminal_theme
     {
         ours.remove("terminal_theme");
+    }
+    // Same for a language this version does not know: it reads as `system`.
+    if let Some(existing) = table.get("language").and_then(toml::Value::as_str)
+        && LanguageChoice::from_key(existing) == settings.language
+    {
+        ours.remove("language");
     }
     table.extend(ours);
     Ok(toml::to_string(&table).expect("a parsed table always serializes"))
@@ -588,5 +647,51 @@ mod tests {
             ..Settings::default()
         });
         assert!(rendered.contains("keepalive_secs = 10"), "{rendered}");
+    }
+
+    #[test]
+    fn language_setting_loads_and_keeps_unknown() {
+        use crate::i18n::Language;
+
+        assert_eq!(Settings::default().language, LanguageChoice::System);
+        assert_eq!(
+            parse("language = \"pt-BR\"").unwrap().language,
+            LanguageChoice::Fixed(Language::PtBr)
+        );
+        assert_eq!(
+            parse("language = \"en\"").unwrap().language,
+            LanguageChoice::Fixed(Language::En)
+        );
+        assert_eq!(
+            parse("language = \"system\"").unwrap().language,
+            LanguageChoice::System
+        );
+        assert_eq!(parse("").unwrap().language, LanguageChoice::System);
+        assert_eq!(
+            parse("language = \"klingon\"").unwrap().language,
+            LanguageChoice::System
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        // An unknown value stays in the file while the user changes nothing about it.
+        std::fs::write(&path, "language = \"klingon\"\n").unwrap();
+        let loaded = load(&path).settings;
+        assert_eq!(loaded.language, LanguageChoice::System);
+        save(&path, &loaded).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("language = \"klingon\""), "{text}");
+        // Picking a language replaces it.
+        let picked = Settings {
+            language: LanguageChoice::Fixed(Language::PtBr),
+            ..loaded
+        };
+        save(&path, &picked).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("language = \"pt-BR\""), "{text}");
+        assert!(!text.contains("klingon"), "{text}");
+        assert_eq!(load(&path).settings, picked);
+        // A fresh file writes the default as `system`.
+        assert!(render(&Settings::default()).contains("language = \"system\""));
     }
 }

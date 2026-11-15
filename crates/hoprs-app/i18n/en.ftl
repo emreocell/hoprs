@@ -24,3 +24,10 @@ site-count =
         [one] { $count } site
        *[other] { $count } sites
     }
+
+# The settings page: the interface language, and its choices. The two language names are
+# written in themselves, so they are the same in every catalog.
+settings-language = Language
+language-system = System
+language-english = English
+language-pt-br = Português (Brasil)

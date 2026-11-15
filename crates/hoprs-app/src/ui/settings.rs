@@ -12,7 +12,9 @@ use iced::{Alignment, Element, Length, Padding};
 
 use crate::app::settings::{Backup, BackupMsg, BackupPanel, BackupState, SettingsMsg};
 use crate::app::{App, Message, PickTarget};
-use crate::settings::{FONT_SIZE_MAX, FONT_SIZE_MIN, TerminalTheme, WORKERS_MAX, WORKERS_MIN};
+use crate::settings::{
+    FONT_SIZE_MAX, FONT_SIZE_MIN, LanguageChoice, TerminalTheme, WORKERS_MAX, WORKERS_MIN,
+};
 use crate::ui::site_form::Password;
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
@@ -69,6 +71,15 @@ struct Secs(u64);
 impl fmt::Display for Secs {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&strings::seconds(self.0))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LanguageOption(LanguageChoice);
+
+impl fmt::Display for LanguageOption {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0.label())
     }
 }
 
@@ -311,6 +322,20 @@ pub fn view(app: &App) -> Element<'_, Message> {
         );
     }
 
+    let languages: Vec<LanguageOption> = LanguageChoice::ALL
+        .into_iter()
+        .map(LanguageOption)
+        .collect();
+    let language = pick_list(
+        languages,
+        Some(LanguageOption(settings.language)),
+        |choice| msg(SettingsMsg::Language(choice.0)),
+    )
+    .text_size(theme::TEXT_SM)
+    .width(240)
+    .style(theme::pick_list)
+    .menu_style(theme::menu);
+
     let content = column![
         row![
             text(strings::SETTINGS_TITLE)
@@ -320,6 +345,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
             plain(strings::DONE, Some(msg(SettingsMsg::Close))),
         ]
         .align_y(Alignment::Center),
+        hrule(),
+        field(strings::settings_language(), language.into(), None),
         hrule(),
         transfers,
         hrule(),

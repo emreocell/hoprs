@@ -16,6 +16,8 @@ use fluent_bundle::{FluentArgs, FluentResource, FluentValue};
 use fluent_syntax::ast;
 use unic_langid::LanguageIdentifier;
 
+use crate::settings::LanguageChoice;
+
 const EN_SRC: &str = include_str!("../i18n/en.ftl");
 const PT_BR_SRC: &str = include_str!("../i18n/pt-BR.ftl");
 
@@ -421,6 +423,27 @@ mod active {
     }
 }
 
+/// The language an OS locale (`pt_BR.UTF-8`, `pt-BR`, `C`, …) asks for: Brazilian
+/// Portuguese when the language subtag is `pt` (any case, any region or suffix), English
+/// otherwise, also for no locale, an empty one, `C` and `POSIX`.
+pub fn language_from_locale(locale: Option<&str>) -> Language {
+    let tag = locale.unwrap_or("");
+    let subtag = tag.split(['_', '-', '.', '@']).next().unwrap_or("");
+    if subtag.eq_ignore_ascii_case("pt") {
+        Language::PtBr
+    } else {
+        Language::En
+    }
+}
+
+/// The language a setting means; `System` asks the OS.
+pub fn resolve(choice: LanguageChoice) -> Language {
+    match choice {
+        LanguageChoice::Fixed(lang) => lang,
+        LanguageChoice::System => language_from_locale(sys_locale::get_locale().as_deref()),
+    }
+}
+
 pub fn set_language(lang: Language) {
     active::set(lang);
 }
@@ -443,7 +466,7 @@ pub fn tr_args(key: &str, args: &[(&str, Arg)]) -> String {
 mod tests {
     use super::*;
 
-    const SAME_IN_BOTH: &[&str] = &["app-title"];
+    const SAME_IN_BOTH: &[&str] = &["app-title", "language-english", "language-pt-br"];
 
     fn parse(source: &str) -> ast::Resource<&str> {
         ast::Resource::default_from(source)
@@ -587,5 +610,42 @@ mod tests {
             }
         }
         assert!(found >= 4, "found only {found} keys");
+    }
+
+    #[test]
+    fn locale_mapping() {
+        for pt in [
+            "pt_BR.UTF-8",
+            "pt-BR",
+            "pt_PT",
+            "pt",
+            "PT",
+            "pt_BR.UTF-8@euro",
+        ] {
+            assert_eq!(language_from_locale(Some(pt)), Language::PtBr, "{pt}");
+        }
+        for other in [
+            "en_US.UTF-8",
+            "de_DE",
+            "C",
+            "C.UTF-8",
+            "POSIX",
+            "",
+            "ptx",
+            "en",
+        ] {
+            assert_eq!(language_from_locale(Some(other)), Language::En, "{other}");
+        }
+        assert_eq!(language_from_locale(None), Language::En);
+    }
+
+    #[test]
+    fn resolve_fixed_ignores_the_os() {
+        use crate::settings::LanguageChoice;
+        assert_eq!(
+            resolve(LanguageChoice::Fixed(Language::PtBr)),
+            Language::PtBr
+        );
+        assert_eq!(resolve(LanguageChoice::Fixed(Language::En)), Language::En);
     }
 }

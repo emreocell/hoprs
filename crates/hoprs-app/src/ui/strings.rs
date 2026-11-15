@@ -629,6 +629,18 @@ pub const SETTINGS_FONT_SIZE: &str = "Font size";
 pub const SETTINGS_SCROLLBACK: &str = "Scrollback lines";
 pub const SETTINGS_SCROLLBACK_HINT: &str = "Applies to terminals opened from now on.";
 pub const SETTINGS_THEME: &str = "Theme";
+pub fn settings_language() -> &'static str {
+    tr("settings-language")
+}
+pub fn language_system() -> &'static str {
+    tr("language-system")
+}
+pub fn language_english() -> &'static str {
+    tr("language-english")
+}
+pub fn language_pt_br() -> &'static str {
+    tr("language-pt-br")
+}
 pub const THEME_HOPRS_DARK: &str = "hoprs dark";
 pub const POLICY_ASK: &str = "Ask";
 pub const POLICY_OVERWRITE: &str = "Overwrite";

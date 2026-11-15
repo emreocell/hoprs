@@ -140,6 +140,8 @@ fn boot(log: logbuf::LogBuffer, probe: Option<probe::Probe>) -> (Hoprs, Task<Roo
             std::process::exit(1);
         }
     };
+    // The language before the first view: the setting, or the OS's.
+    i18n::set_language(i18n::resolve(backend.settings().settings.language));
     let backend: Arc<dyn BackendApi> = Arc::new(backend);
     let (mut app, effects) = App::boot();
     app.attach_log(log);

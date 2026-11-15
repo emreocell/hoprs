@@ -946,3 +946,46 @@ async fn reloaded_profiles_reconcile_tabs() {
         "only `c`, now gone, is closed: {effects:?}"
     );
 }
+
+/// Puts the thread's language back to English when a test ends, however it ends.
+struct RestoreEnglish;
+
+impl Drop for RestoreEnglish {
+    fn drop(&mut self) {
+        crate::i18n::set_language(crate::i18n::Language::En);
+    }
+}
+
+/// Picking a language on the settings page switches the labels the views build at once,
+/// and saves the choice.
+#[tokio::test]
+async fn language_choice_switches_labels_and_saves() {
+    use crate::i18n::Language;
+    use crate::settings::LanguageChoice;
+
+    let _restore = RestoreEnglish;
+    let mut app = loaded(&FakeBackend::new()).await;
+    assert_eq!(strings::language_system(), "System");
+    assert_eq!(strings::app_title(), "hoprs");
+
+    let effects = settings(
+        &mut app,
+        SettingsMsg::Language(LanguageChoice::Fixed(Language::PtBr)),
+    );
+    assert_eq!(crate::i18n::language(), Language::PtBr);
+    assert_eq!(strings::language_system(), "Sistema");
+    assert_eq!(strings::settings_language(), "Idioma");
+    assert_eq!(app.settings.language, LanguageChoice::Fixed(Language::PtBr));
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::SaveSettings(s) if s.language == LanguageChoice::Fixed(Language::PtBr)))
+    );
+
+    settings(
+        &mut app,
+        SettingsMsg::Language(LanguageChoice::Fixed(Language::En)),
+    );
+    assert_eq!(strings::language_system(), "System");
+    assert_eq!(strings::settings_language(), "Language");
+}
