@@ -138,4 +138,6 @@ pull request that changes one silently will be asked to revert it.
 ## Getting help
 
 Ask in [Discussions](https://github.com/engviniciusbs/hoprs/discussions): questions, ideas
-and "how do I…" are all welcome there. Please be kind and assume good faith.
+and "how do I…" are all welcome there. Everyone taking part follows the
+[Code of Conduct](CODE_OF_CONDUCT.md); report problems to
+[conduct@hoprs.online](mailto:conduct@hoprs.online).
