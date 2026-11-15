@@ -909,9 +909,20 @@ async fn deliver_enqueue(
     let backend: Arc<dyn BackendApi> = fake.clone();
     let mut out = Vec::new();
     for effect in effects {
-        if let Effect::EnqueueCompare { tab, items } = effect {
+        if let Effect::EnqueueCompare {
+            tab,
+            run,
+            roots,
+            items,
+        } = effect
+        {
             let results = effects::enqueue_compare(backend.clone(), items).await;
-            out.extend(app.update(msg(CompareMsg::Enqueued { tab, results })));
+            out.extend(app.update(msg(CompareMsg::Enqueued {
+                tab,
+                run,
+                roots,
+                results,
+            })));
         }
     }
     out
@@ -1147,17 +1158,26 @@ async fn an_ending_that_beats_the_ids_is_not_lost() {
     let effects = app.update(msg(CompareMsg::UploadSelected { tab }));
     let backend: Arc<dyn BackendApi> = fake.clone();
     let items = enqueue_effect(&effects);
+    let roots = match &effects[0] {
+        Effect::EnqueueCompare { roots, .. } => roots.clone(),
+        other => panic!("{other:?}"),
+    };
     let results = effects::enqueue_compare(backend, items).await;
     let id = *results[0].result.as_ref().unwrap();
     // The engine's event comes before the result.
     app.update(ended(1, id, TransferState::Done));
-    app.update(msg(CompareMsg::Enqueued { tab, results }));
+    app.update(msg(CompareMsg::Enqueued {
+        tab,
+        run,
+        roots,
+        results,
+    }));
     assert_eq!(row_state(&app, "a"), RowState::Done);
 }
 
 #[tokio::test]
 async fn done_files_are_remembered_and_the_next_run_gets_them() {
-    let (mut app, fake, _a, tab, run) = running().await;
+    let (mut app, fake, a, tab, run) = running().await;
     diff_row(
         &mut app,
         tab,
@@ -1186,7 +1206,10 @@ async fn done_files_are_remembered_and_the_next_run_gets_them() {
     app.update(ended(1, f, TransferState::Done));
     app.update(ended(2, d, TransferState::Done));
     assert_eq!(state(&app).synced.len(), 1, "folders are not remembered");
-    assert_eq!(state(&app).synced["d/f.bin"], (7, 7));
+    assert_eq!(
+        state(&app).synced[&(rpath("/home/me/d/f.bin"), rpath("/srv/d/f.bin"))],
+        (7, 7)
+    );
 
     let effects = app.update(msg(CompareMsg::Start { tab }));
     let known = effects
@@ -1197,6 +1220,37 @@ async fn done_files_are_remembered_and_the_next_run_gets_them() {
         })
         .unwrap();
     assert_eq!(known["d/f.bin"], (7, 7));
+
+    // Visit the subfolder: the run there benefits (its own relative path), and coming back
+    // the memory is still there.
+    fake.local_fs().add_dir("/home/me/d");
+    fake.remote_fs(&a.id).add_dir("/srv/d");
+    for (path, expect) in [("d", "f.bin"), ("..", "d/f.bin")] {
+        for side in [Side::Local, Side::Remote] {
+            let root = if side == Side::Local {
+                "/home/me"
+            } else {
+                "/srv"
+            };
+            let target = if path == ".." {
+                root.to_owned()
+            } else {
+                format!("{root}/{path}")
+            };
+            let nav = app.update(pane_msg(tab, side, PaneMsg::Navigate(rpath(&target))));
+            settle_all(&mut app, &fake, run_listings(&fake, &nav).await).await;
+        }
+        let effects = app.update(msg(CompareMsg::Start { tab }));
+        let known = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::Compare { options, .. } => Some(options.known_synced.clone()),
+                _ => None,
+            })
+            .expect("a run starts");
+        assert_eq!(known.get(expect), Some(&(7, 7)), "{path}: {known:?}");
+        assert_eq!(known.len(), 1);
+    }
 }
 
 #[tokio::test]
@@ -1341,4 +1395,35 @@ async fn open_at_the_roots_does_not_arm_the_suppression() {
     let nav = app.update(msg(CompareMsg::Open { tab, index: 0 }));
     assert!(nav.is_empty());
     assert!(!state(&app).suppress_auto, "no listing would consume it");
+}
+
+#[tokio::test]
+async fn ids_of_an_older_run_are_not_attached_to_a_newer_runs_rows() {
+    let (mut app, fake, _a, tab, run) = running().await;
+    diff_row(
+        &mut app,
+        tab,
+        run,
+        "a",
+        EntryKind::File,
+        Status::OnlyLocal,
+        (Some(1), None),
+    );
+    let effects = app.update(msg(CompareMsg::UploadSelected { tab }));
+    // A new run finds the same path before the ids come back.
+    let restarted = app.update(msg(CompareMsg::Start { tab }));
+    let run2 = started(&restarted)[0].0;
+    diff_row(
+        &mut app,
+        tab,
+        run2,
+        "a",
+        EntryKind::File,
+        Status::OnlyLocal,
+        (Some(1), None),
+    );
+    deliver_enqueue(&mut app, &fake, effects).await;
+    assert_eq!(row_state(&app, "a"), RowState::Idle);
+    assert!(state(&app).queued.is_empty());
+    assert_eq!(state(&app).enqueuing, 0);
 }

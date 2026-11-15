@@ -180,11 +180,19 @@ pub fn run(
             Task::none()
         }
         Effect::Enqueue(specs) => Task::perform(enqueue_all(backend, specs), Message::Enqueued),
-        Effect::EnqueueCompare { tab, items } => {
-            Task::perform(enqueue_compare(backend, items), move |results| {
-                Message::Compare(CompareMsg::Enqueued { tab, results })
+        Effect::EnqueueCompare {
+            tab,
+            run,
+            roots,
+            items,
+        } => Task::perform(enqueue_compare(backend, items), move |results| {
+            Message::Compare(CompareMsg::Enqueued {
+                tab,
+                run,
+                roots,
+                results,
             })
-        }
+        }),
         Effect::Control { id, op } => Task::perform(
             async move { backend.control(id, op).await },
             move |result| Message::ControlDone { id, result },

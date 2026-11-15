@@ -533,6 +533,9 @@ pub enum Effect {
     /// [`CompareMsg::Enqueued`] with each item's id.
     EnqueueCompare {
         tab: TabId,
+        /// The run and roots the rows belong to.
+        run: CompareRunId,
+        roots: (RemotePath, RemotePath),
         items: Vec<compare::CompareItem>,
     },
     /// Pause, resume, cancel, retry or resolve one item.

@@ -197,13 +197,16 @@ pub struct CompareState {
     pub identical: u64,
     /// The panel was closed with the cross: hidden until the next run.
     pub hidden: bool,
-    /// Files the panel transferred this session: relative path -> (local size, remote size)
-    /// after the transfer (servers that cannot set mtimes).
-    pub synced: HashMap<RelPath, (u64, u64)>,
+    /// Files the panel transferred this tab's session: (absolute local path, absolute remote
+    /// path) -> (local size, remote size) after the transfer (servers that cannot set
+    /// mtimes). Absolute, so the memory holds over any folder the tab visits;
+    /// [`CompareState::known_synced`] rebases it to a run's roots.
+    pub synced: HashMap<(RemotePath, RemotePath), (u64, u64)>,
+    /// The run whose rows the panel shows (kept after it ends); enqueue results of another
+    /// run are not attached to rows.
+    pub last_run: Option<CompareRunId>,
     /// Transfers the panel queued that have not finished, and what each is for.
     pub queued: HashMap<TransferId, QueuedItem>,
-    /// The roots `synced` belongs to (its paths are relative to them).
-    pub synced_roots: Option<(RemotePath, RemotePath)>,
     /// Panel enqueues whose ids have not come back yet.
     pub enqueuing: usize,
     /// Terminal states that arrived while ids were still on their way back.
@@ -262,6 +265,18 @@ impl CompareState {
                 Phase::Debouncing => self.roots.is_some(),
                 _ => true,
             }
+    }
+
+    /// `synced` as a run under `roots` needs it: the entries inside both roots, by path
+    /// relative to them (the same relative path on both sides).
+    pub fn known_synced(&self, roots: &(RemotePath, RemotePath)) -> HashMap<RelPath, (u64, u64)> {
+        self.synced
+            .iter()
+            .filter_map(|((local, remote), sizes)| {
+                let rel = relative(&roots.0, local)?;
+                (relative(&roots.1, remote)? == rel).then_some((rel, *sizes))
+            })
+            .collect()
     }
 
     /// The selected rows the panel can send to the server / fetch from it.
@@ -333,8 +348,14 @@ pub enum CompareMsg {
     UploadSelected { tab: TabId },
     /// "Download selected".
     DownloadSelected { tab: TabId },
-    /// The ids of what [`Effect::EnqueueCompare`] queued, per row path.
-    Enqueued { tab: TabId, results: Vec<Queued> },
+    /// The ids of what [`Effect::EnqueueCompare`] queued, per row path; `run` and `roots`
+    /// are those the items were chosen under.
+    Enqueued {
+        tab: TabId,
+        run: CompareRunId,
+        roots: (RemotePath, RemotePath),
+        results: Vec<Queued>,
+    },
     /// The head's Collapse / Expand.
     ToggleCollapsed { tab: TabId },
     /// A press in the panel: the keyboard drives it from now on; `cursor` is the row
@@ -466,7 +487,12 @@ impl App {
                 Some(i) => self.compare_transfer(i, Side::Remote),
                 None => Vec::new(),
             },
-            CompareMsg::Enqueued { tab, results } => self.compare_enqueued(tab, results),
+            CompareMsg::Enqueued {
+                tab,
+                run,
+                roots,
+                results,
+            } => self.compare_enqueued(tab, run, roots, results),
             CompareMsg::ToggleCollapsed { tab } => {
                 if let Some(state) = self
                     .files_tab_index(tab)
@@ -651,15 +677,11 @@ impl App {
         state.focused = false;
         state.cursor = None;
         state.suppress_auto = false;
-        if state.synced_roots.as_ref() != Some(&(local.clone(), remote.clone())) {
-            // What was sent under other folders says nothing about these.
-            state.synced.clear();
-            state.synced_roots = None;
-        }
+        state.last_run = Some(run);
         let options = CompareOptions {
             ignore,
             limit: Some(LIMIT),
-            known_synced: state.synced.clone(),
+            known_synced: state.known_synced(&(local.clone(), remote.clone())),
             ..CompareOptions::default()
         };
         effects.push(Effect::Compare {
@@ -816,6 +838,17 @@ fn components(rel: &str) -> impl Iterator<Item = &str> {
     rel.split('/').filter(|part| !part.is_empty())
 }
 
+/// `path` relative to `root` (`/`-separated), when it is inside it.
+fn relative(root: &RemotePath, path: &RemotePath) -> Option<RelPath> {
+    let rest = path.as_str().strip_prefix(root.as_str())?;
+    let rest = if root.as_str() == "/" {
+        rest
+    } else {
+        rest.strip_prefix('/')?
+    };
+    (!rest.is_empty()).then(|| rest.to_owned())
+}
+
 /// `root` with the relative path's components appended.
 fn under(root: &RemotePath, rel: &str) -> RemotePath {
     components(rel).fold(root.clone(), |path, part| path.join(part))
@@ -871,13 +904,27 @@ impl App {
         if items.is_empty() {
             return Vec::new();
         }
+        let Some(run) = state.last_run else {
+            return Vec::new();
+        };
         state.enqueuing += 1;
-        vec![Effect::EnqueueCompare { tab: id, items }]
+        vec![Effect::EnqueueCompare {
+            tab: id,
+            run,
+            roots: (local_root, remote_root),
+            items,
+        }]
     }
 
     /// The ids came back: rows become queued (or failed), and terminal states that beat the
     /// ids here are applied.
-    fn compare_enqueued(&mut self, tab: TabId, results: Vec<Queued>) -> Vec<Effect> {
+    fn compare_enqueued(
+        &mut self,
+        tab: TabId,
+        run: CompareRunId,
+        roots: (RemotePath, RemotePath),
+        results: Vec<Queued>,
+    ) -> Vec<Effect> {
         let Some(index) = self.files_tab_index(tab) else {
             return Vec::new();
         };
@@ -885,10 +932,13 @@ impl App {
             return Vec::new();
         };
         state.enqueuing = state.enqueuing.saturating_sub(1);
-        let Some(roots) = state.roots.clone() else {
-            state.early.clear();
+        // Rows of another run (or other folders) are not the ones these items came from.
+        if state.last_run != Some(run) || state.roots.as_ref() != Some(&roots) {
+            if state.enqueuing == 0 {
+                state.early.clear();
+            }
             return Vec::new();
-        };
+        }
         let mut ids = Vec::new();
         for Queued { path, size, result } in results {
             let Some(row) = state
@@ -1001,11 +1051,13 @@ impl App {
         if *ended == TransferState::Done
             && let Some(size) = item.file_size
         {
-            if state.synced_roots.as_ref() != Some(&item.roots) {
-                state.synced.clear();
-                state.synced_roots = Some(item.roots.clone());
-            }
-            state.synced.insert(item.path.clone(), (size, size));
+            state.synced.insert(
+                (
+                    under(&item.roots.0, &item.path),
+                    under(&item.roots.1, &item.path),
+                ),
+                (size, size),
+            );
         }
         // The batch is over when nothing queued is left; one run follows, for these folders.
         let over = state.queued.is_empty() && state.enqueuing == 0;
@@ -1020,6 +1072,9 @@ impl App {
     /// that side, else to the nearest existing ancestor up to the compared root. The panes
     /// listing again does not start a run (the current rows stay).
     fn compare_open(&mut self, index: usize, row: usize) -> Vec<Effect> {
+        if !self.can_act(index, Side::Local) || !self.can_act(index, Side::Remote) {
+            return Vec::new();
+        }
         let tab = &self.tabs[index];
         let Some(state) = tab.compare() else {
             return Vec::new();
@@ -1035,7 +1090,8 @@ impl App {
         let target =
             |root: &RemotePath, absent: Status| {
                 let mut depth = parent.len();
-                // Up while an ancestor (or the folder itself) is a folder this side lacks.
+                // A row for a folder this side lacks, at or above the parent: this side
+                // cannot be inside it, so it stops at that folder's own parent.
                 for r in state.rows.iter().filter(|r| {
                     r.diff.status == absent && r.diff.kind != hoprs_core::EntryKind::File
                 }) {
@@ -1057,13 +1113,19 @@ impl App {
         if moves.is_empty() {
             return Vec::new();
         }
-        // At least one pane's folder changes, so a listing follows and consumes the flag.
+        // Navigating lists the panes; the flag (read while the navigation starts) is
+        // consumed by those listings, so it stays only if one was emitted.
         if let Some(state) = self.tabs[index].compare_mut() {
             state.suppress_auto = true;
         }
         let mut effects = Vec::new();
         for (side, path) in moves {
             effects.extend(self.navigate(index, side, path));
+        }
+        if effects.is_empty()
+            && let Some(state) = self.tabs[index].compare_mut()
+        {
+            state.suppress_auto = false;
         }
         effects
     }
