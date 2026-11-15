@@ -6,7 +6,7 @@ use std::fmt;
 use hoprs_transfer::ConflictPolicy;
 use hoprs_vault::{BackupImportReport, ExportReport, ImportMode};
 use iced::widget::{
-    button, column, container, pick_list, row, rule, scrollable, space, text, text_input,
+    button, checkbox, column, container, pick_list, row, rule, scrollable, space, text, text_input,
 };
 use iced::{Alignment, Element, Length, Padding};
 
@@ -322,6 +322,37 @@ pub fn view(app: &App) -> Element<'_, Message> {
         );
     }
 
+    let ignore_value = app
+        .compare_ignore_input
+        .clone()
+        .unwrap_or_else(|| settings.compare_ignore.join(", "));
+    let ignore_default = crate::settings::compare_ignore_default().join(", ");
+    let comparing = column![
+        heading(strings::settings_compare()),
+        field(
+            strings::settings_compare_auto(),
+            checkbox(settings.compare_auto)
+                .on_toggle(|on| msg(SettingsMsg::CompareAuto(on)))
+                .style(theme::checkbox)
+                .into(),
+            None
+        ),
+        field(
+            strings::settings_compare_ignore(),
+            text_input(&ignore_default, &ignore_value)
+                .on_input(|typed| msg(SettingsMsg::CompareIgnore(typed)))
+                .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
+                .style(theme::search)
+                .font(theme::MONO)
+                .size(theme::TEXT_MONO)
+                .width(320)
+                .into(),
+            None
+        ),
+        muted(strings::settings_compare_ignore_hint()),
+    ]
+    .spacing(theme::SPACE_SM);
+
     let languages: Vec<LanguageOption> = LanguageChoice::ALL
         .into_iter()
         .map(LanguageOption)
@@ -353,6 +384,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
         terminal,
         hrule(),
         editing,
+        hrule(),
+        comparing,
         hrule(),
         backup_view(&app.backup, app.busy_phase),
     ]

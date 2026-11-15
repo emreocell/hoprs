@@ -605,6 +605,10 @@ editor-command-hint = system opens remote files in the system default editor. Or
 editor-system-default = System default
 editor-command-empty = Type a command
 settings-editing = Remote editing
+settings-compare = Folder compare
+settings-compare-auto = Compare folders automatically
+settings-compare-ignore = Ignore when comparing
+settings-compare-ignore-hint = Names separated by commas. * matches any run of characters, for example *.log.
 # "Upload failed: Permission denied".
 upload-failed = Upload failed: { $reason }
 # "Your version was saved to <path>".

@@ -1557,6 +1557,18 @@ pub fn editor_command_empty() -> &'static str {
 pub fn settings_editing() -> &'static str {
     tr("settings-editing")
 }
+pub fn settings_compare() -> &'static str {
+    tr("settings-compare")
+}
+pub fn settings_compare_auto() -> &'static str {
+    tr("settings-compare-auto")
+}
+pub fn settings_compare_ignore() -> &'static str {
+    tr("settings-compare-ignore")
+}
+pub fn settings_compare_ignore_hint() -> &'static str {
+    tr("settings-compare-ignore-hint")
+}
 /// "Upload failed: Permission denied".
 pub fn upload_failed(reason: &str) -> String {
     tr_args("upload-failed", &[("reason", reason.into())])

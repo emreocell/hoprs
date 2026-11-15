@@ -558,6 +558,10 @@ editor-command-hint = system abre os arquivos remotos no editor padrão do siste
 editor-system-default = Padrão do sistema
 editor-command-empty = Digite um comando
 settings-editing = Edição remota
+settings-compare = Comparação de pastas
+settings-compare-auto = Comparar pastas automaticamente
+settings-compare-ignore = Ignorar ao comparar
+settings-compare-ignore-hint = Nomes separados por vírgula. * vale para qualquer trecho de texto, por exemplo *.log.
 # "Upload failed: Permission denied".
 upload-failed = Falha no upload: { $reason }
 # "Your version was saved to <path>".

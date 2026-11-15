@@ -38,6 +38,10 @@ pub enum SettingsMsg {
     Keepalive(u64),
     /// The editor command as typed: applied (and saved) when not empty.
     EditorCommand(String),
+    /// Folder compare re-runs by itself; saved at once.
+    CompareAuto(bool),
+    /// The compare's ignore list as typed (comma-separated): saved as parsed.
+    CompareIgnore(String),
     Backup(BackupMsg),
     Close,
 }
@@ -255,6 +259,23 @@ impl App {
                 self.settings.editor_command = command;
                 self.save_settings_effect().into_iter().collect()
             }
+            SettingsMsg::CompareAuto(on) => {
+                if on == self.settings.compare_auto {
+                    return Vec::new();
+                }
+                self.settings.compare_auto = on;
+                self.save_settings_effect().into_iter().collect()
+            }
+            SettingsMsg::CompareIgnore(typed) => {
+                let names = crate::settings::parse_compare_ignore(&typed);
+                // The field keeps what was typed ("a, " must not snap back to "a").
+                self.compare_ignore_input = Some(typed);
+                if names == self.settings.compare_ignore {
+                    return Vec::new();
+                }
+                self.settings.compare_ignore = names;
+                self.save_settings_effect().into_iter().collect()
+            }
             SettingsMsg::Backup(msg) => self.backup_msg(msg),
             SettingsMsg::Close => {
                 if matches!(self.form, Some(Form::Settings)) {
@@ -263,6 +284,7 @@ impl App {
                 // Typed passwords don't outlive the page, nor does a blank editor field.
                 self.backup.forget_passwords();
                 self.editor_input = None;
+                self.compare_ignore_input = None;
                 Vec::new()
             }
         }

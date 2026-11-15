@@ -178,6 +178,8 @@ pub struct App {
     pub kept_notice: Option<edit::KeptNotice>,
     /// The editor command as typed on the settings page, while it is not valid.
     pub editor_input: Option<String>,
+    /// The compare ignore field as typed, while the settings page is open.
+    pub compare_ignore_input: Option<String>,
     /// Actions waiting for their site's lost session to reconnect ([`reconnect`]).
     held: HashMap<SiteId, Vec<Effect>>,
     /// Listings sent again after a reconnection, which the reconnect's result does not
@@ -708,6 +710,7 @@ impl App {
             queued_quit: None,
             kept_notice: None,
             editor_input: None,
+            compare_ignore_input: None,
             held: HashMap::new(),
             replayed: HashSet::new(),
             next_id: 0,
