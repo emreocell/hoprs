@@ -124,11 +124,21 @@ pub struct QueueStore {
 }
 
 fn db_err(e: impl std::fmt::Display) -> Error {
-    Error::new(ErrorKind::Io, "Queue database error").with_detail(e.to_string())
+    Error::coded(
+        ErrorKind::Io,
+        "queue-database-error",
+        "Queue database error",
+    )
+    .with_detail(e.to_string())
 }
 
 fn corrupt(what: &str) -> Error {
-    Error::new(ErrorKind::Io, "Queue database error").with_detail(format!("corrupt row: {what}"))
+    Error::coded(
+        ErrorKind::Io,
+        "queue-database-error",
+        "Queue database error",
+    )
+    .with_detail(format!("corrupt row: {what}"))
 }
 
 trait Db<T> {
@@ -480,8 +490,9 @@ impl QueueStore {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .db()?;
         if version > SCHEMA_VERSION {
-            return Err(Error::new(
+            return Err(Error::coded(
                 ErrorKind::Io,
+                "queue-newer-version",
                 "The transfer queue was saved by a newer version of hoprs",
             )
             .with_detail(format!(

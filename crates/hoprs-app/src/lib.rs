@@ -162,7 +162,11 @@ fn boot(log: logbuf::LogBuffer, probe: Option<probe::Probe>) -> (Hoprs, Task<Roo
 /// The real backend at the standard locations, secrets in the system keyring.
 fn open_backend() -> hoprs_core::Result<Backend> {
     let config = BackendConfig::standard().ok_or_else(|| {
-        hoprs_core::Error::new(hoprs_core::ErrorKind::Io, "No configuration directory")
+        hoprs_core::Error::coded(
+            hoprs_core::ErrorKind::Io,
+            "app-no-config-dir",
+            "No configuration directory",
+        )
     })?;
     Backend::open(config, Arc::new(LazyKeyringStore::new()))
 }

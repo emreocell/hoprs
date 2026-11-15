@@ -241,20 +241,31 @@ const SNIFF_BYTES: u64 = 4096;
 /// A window remains between that check and `remove_file`: the path could be
 /// swapped in between. The caller only runs this on explicit user request.
 pub fn delete_source(path: &Path) -> Result<()> {
-    let refuse = |why: &str| Error::new(ErrorKind::Protocol, format!("not deleting: {why}"));
     // Friendly refusal for the common case; O_NOFOLLOW below closes the race.
     let meta = std::fs::symlink_metadata(path)?;
     if meta.file_type().is_symlink() {
-        return Err(refuse("the path is a symlink"));
+        return Err(Error::coded(
+            ErrorKind::Protocol,
+            "import-delete-symlink",
+            "not deleting: the path is a symlink",
+        ));
     }
     // Before opening: Windows refuses to open a directory (PermissionDenied) instead
     // of opening it as Unix does.
     if !meta.is_file() {
-        return Err(refuse("not a regular file"));
+        return Err(Error::coded(
+            ErrorKind::Protocol,
+            "import-delete-not-regular",
+            "not deleting: not a regular file",
+        ));
     }
     let mut file = open_nofollow(path)?;
     if !file.metadata()?.is_file() {
-        return Err(refuse("not a regular file"));
+        return Err(Error::coded(
+            ErrorKind::Protocol,
+            "import-delete-not-regular",
+            "not deleting: not a regular file",
+        ));
     }
     let mut head = Vec::new();
     (&mut file).take(SNIFF_BYTES).read_to_end(&mut head)?;
@@ -265,7 +276,11 @@ pub fn delete_source(path: &Path) -> Result<()> {
             .windows(b"<FileZilla3".len())
             .any(|w| w == b"<FileZilla3");
     if !is_filezilla {
-        return Err(refuse("not a FileZilla site manager file"));
+        return Err(Error::coded(
+            ErrorKind::Protocol,
+            "import-delete-not-filezilla",
+            "not deleting: not a FileZilla site manager file",
+        ));
     }
     std::fs::remove_file(path)?;
     Ok(())

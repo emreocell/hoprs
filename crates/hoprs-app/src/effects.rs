@@ -1017,7 +1017,14 @@ pub fn connect_sites(
 async fn open_folder(dir: PathBuf) -> Result<(), Error> {
     tokio::task::spawn_blocking(move || open_with_system(&dir))
         .await
-        .map_err(|e| Error::new(ErrorKind::Io, "Opener task failed").with_detail(e.to_string()))?
+        .map_err(|e| {
+            Error::coded(
+                ErrorKind::Io,
+                "app-opener-task-failed",
+                "Opener task failed",
+            )
+            .with_detail(e.to_string())
+        })?
 }
 
 fn open_with_system(dir: &Path) -> Result<(), Error> {
@@ -1033,6 +1040,13 @@ fn open_with_system(dir: &Path) -> Result<(), Error> {
     if status.success() || cfg!(target_os = "windows") {
         Ok(())
     } else {
-        Err(Error::new(ErrorKind::Io, format!("{OPENER} failed")).with_detail(status.to_string()))
+        let opener = OPENER;
+        Err(Error::coded(
+            ErrorKind::Io,
+            "app-opener-failed",
+            format!("{opener} failed"),
+        )
+        .arg("opener", opener)
+        .with_detail(status.to_string()))
     }
 }

@@ -258,7 +258,12 @@ impl From<Policy> for ConflictPolicy {
 /// Parses `settings.toml` content; missing keys take their defaults.
 pub fn parse(content: &str) -> Result<Settings> {
     let file: File = toml::from_str(content).map_err(|err| {
-        Error::new(ErrorKind::Protocol, "Can't read settings.toml").with_detail(err.message())
+        Error::coded(
+            ErrorKind::Protocol,
+            "settings-cannot-read",
+            "Can't read settings.toml",
+        )
+        .with_detail(err.message())
     })?;
     let defaults = Settings::default();
     Ok(Settings {
@@ -326,7 +331,12 @@ pub fn render(settings: &Settings) -> String {
 /// and value stays as it was. Fails if `existing` is not TOML.
 fn render_over(existing: &str, settings: &Settings) -> Result<String> {
     let mut table: toml::Table = toml::from_str(existing).map_err(|err| {
-        Error::new(ErrorKind::Protocol, "Can't read settings.toml").with_detail(err.message())
+        Error::coded(
+            ErrorKind::Protocol,
+            "settings-cannot-read",
+            "Can't read settings.toml",
+        )
+        .with_detail(err.message())
     })?;
     let mut ours = toml::Table::try_from(file_of(settings)).expect("plain keys always serialize");
     // A theme this version does not know reads as the default: unless the user picked
@@ -389,7 +399,12 @@ fn read(path: &Path) -> Result<Option<String>> {
 }
 
 fn cannot_read(detail: String) -> Error {
-    Error::new(ErrorKind::Io, "Can't read settings.toml").with_detail(detail)
+    Error::coded(
+        ErrorKind::Io,
+        "settings-cannot-read",
+        "Can't read settings.toml",
+    )
+    .with_detail(detail)
 }
 
 /// Writes `settings` to `path` atomically (the vault's crash-safe write), keeping the

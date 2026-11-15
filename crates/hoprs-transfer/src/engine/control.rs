@@ -25,10 +25,6 @@ pub(super) enum Control {
 
 const USER_SKIP: &str = "skipped by user";
 
-fn conflict(message: &str) -> Error {
-    Error::new(ErrorKind::Conflict, message)
-}
-
 /// Failed or cancelled, except a duplicate-name child, which stays failed.
 fn is_retryable(state: &TransferState) -> bool {
     matches!(state, TransferState::Failed(_) | TransferState::Cancelled)
@@ -43,9 +39,11 @@ impl Actor {
         op: Control,
     ) -> Result<()> {
         match op {
-            Control::Pause | Control::Cancel if state.is_terminal() => {
-                Err(conflict("Transfer already finished"))
-            }
+            Control::Pause | Control::Cancel if state.is_terminal() => Err(Error::coded(
+                ErrorKind::Conflict,
+                "transfer-already-finished",
+                "Transfer already finished",
+            )),
             Control::Pause if *state == TransferState::Paused => Ok(()),
             Control::Pause => {
                 self.stop_subtree(id, Intent::Pause);
@@ -55,25 +53,35 @@ impl Actor {
                 self.stop_subtree(id, Intent::Cancel);
                 Ok(())
             }
-            Control::Resume if *state != TransferState::Paused => {
-                Err(conflict("Transfer is not paused"))
-            }
+            Control::Resume if *state != TransferState::Paused => Err(Error::coded(
+                ErrorKind::Conflict,
+                "transfer-not-paused",
+                "Transfer is not paused",
+            )),
             Control::Resume => {
                 self.restart_subtree(id, |s| *s == TransferState::Paused, Intent::Pause);
                 Ok(())
             }
-            Control::Retry if is_duplicate_name(state) => Err(conflict(
+            Control::Retry if is_duplicate_name(state) => Err(Error::coded(
+                ErrorKind::Conflict,
+                "transfer-duplicate-name-no-retry",
                 "A duplicate name in a directory listing cannot be retried",
             )),
-            Control::Retry if !is_retryable(state) => {
-                Err(conflict("Transfer is not failed or cancelled"))
-            }
+            Control::Retry if !is_retryable(state) => Err(Error::coded(
+                ErrorKind::Conflict,
+                "transfer-not-failed-or-cancelled",
+                "Transfer is not failed or cancelled",
+            )),
             Control::Retry => {
                 self.restart_subtree(id, is_retryable, Intent::Cancel);
                 Ok(())
             }
             Control::Resolve(_) if !matches!(state, TransferState::AwaitingDecision(_)) => {
-                Err(conflict("Transfer is not awaiting a decision"))
+                Err(Error::coded(
+                    ErrorKind::Conflict,
+                    "transfer-not-awaiting-decision",
+                    "Transfer is not awaiting a decision",
+                ))
             }
             Control::Resolve(resolution) => {
                 self.resolve(id, resolution);

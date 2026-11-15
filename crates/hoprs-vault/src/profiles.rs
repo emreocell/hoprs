@@ -199,7 +199,13 @@ pub(crate) fn save_workspaces(dir: &Path, profiles: &Profiles) -> Result<()> {
 }
 
 fn cannot_read(file: &str, detail: impl Into<String>) -> Error {
-    Error::new(ErrorKind::Protocol, format!("Cannot read {file}")).with_detail(detail)
+    Error::coded(
+        ErrorKind::Protocol,
+        "profile-cannot-read",
+        format!("Cannot read {file}"),
+    )
+    .arg("file", file)
+    .with_detail(detail)
 }
 
 fn load_file<T: DeserializeOwned + Serialize>(dir: &Path, kind: &Kind<T>) -> Result<Loaded<T>> {
@@ -226,10 +232,12 @@ fn load_file<T: DeserializeOwned + Serialize>(dir: &Path, kind: &Kind<T>) -> Res
     match doc.remove("version") {
         Some(Value::Integer(v)) if v == VERSION => {}
         Some(Value::Integer(v)) if v > VERSION => {
-            return Err(
-                Error::new(ErrorKind::Protocol, "Profile was written by a newer hoprs")
-                    .with_detail(format!("{file} has version {v}")),
-            );
+            return Err(Error::coded(
+                ErrorKind::Protocol,
+                "profile-newer-version",
+                "Profile was written by a newer hoprs",
+            )
+            .with_detail(format!("{file} has version {v}")));
         }
         Some(Value::Integer(v)) => {
             return Err(cannot_read(file, format!("unsupported version {v}")));
@@ -307,7 +315,13 @@ fn check_unique(seen: &mut HashSet<String>, file: &str, id: &str) -> Result<()> 
     if seen.insert(id.to_owned()) {
         Ok(())
     } else {
-        Err(Error::new(ErrorKind::Protocol, format!("Duplicate id in {file}")).with_detail(id))
+        Err(Error::coded(
+            ErrorKind::Protocol,
+            "profile-duplicate-id",
+            format!("Duplicate id in {file}"),
+        )
+        .arg("file", file)
+        .with_detail(id))
     }
 }
 
@@ -320,7 +334,13 @@ fn save_file<T: Serialize>(
 ) -> Result<()> {
     let file = kind.file;
     let cannot_save = |detail: String| {
-        Error::new(ErrorKind::Protocol, format!("Cannot save {file}")).with_detail(detail)
+        Error::coded(
+            ErrorKind::Protocol,
+            "profile-cannot-save",
+            format!("Cannot save {file}"),
+        )
+        .arg("file", file)
+        .with_detail(detail)
     };
     let raw_after = |anchor: Option<&str>| -> Vec<Value> {
         rest.unreadable

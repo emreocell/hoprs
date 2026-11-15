@@ -115,7 +115,11 @@ pub struct BackupImportReport {
 }
 
 fn unsupported_params() -> Error {
-    Error::new(ErrorKind::Protocol, "Unsupported backup parameters")
+    Error::coded(
+        ErrorKind::Protocol,
+        "backup-unsupported-parameters",
+        "Unsupported backup parameters",
+    )
 }
 
 /// Checks the cost parameters against our limits and Argon2's own.
@@ -161,11 +165,19 @@ impl Header {
     /// Argon2 only runs once this succeeds.
     fn decode(prefix: &[u8], file_len: u64) -> Result<Header> {
         if prefix.len() < MAGIC.len() || &prefix[..MAGIC.len()] != MAGIC {
-            return Err(Error::new(ErrorKind::Protocol, "Not a hoprs backup"));
+            return Err(Error::coded(
+                ErrorKind::Protocol,
+                "backup-not-a-backup",
+                "Not a hoprs backup",
+            ));
         }
         if prefix.len() < HEADER_LEN || file_len < (HEADER_LEN + TAG_LEN) as u64 {
-            return Err(Error::new(ErrorKind::Protocol, "Backup file is truncated")
-                .with_detail(format!("{file_len} bytes")));
+            return Err(Error::coded(
+                ErrorKind::Protocol,
+                "backup-truncated",
+                "Backup file is truncated",
+            )
+            .with_detail(format!("{file_len} bytes")));
         }
         let header = &prefix[..HEADER_LEN];
         let u16_at = |at: usize| u16::from_be_bytes([header[at], header[at + 1]]);
@@ -174,10 +186,12 @@ impl Header {
         };
         let version = u16_at(8);
         if version != FORMAT_VERSION {
-            return Err(
-                Error::new(ErrorKind::Protocol, "Unsupported backup version")
-                    .with_detail(format!("version {version}")),
-            );
+            return Err(Error::coded(
+                ErrorKind::Protocol,
+                "backup-unsupported-version",
+                "Unsupported backup version",
+            )
+            .with_detail(format!("version {version}")));
         }
         let params = ExportParams {
             m_cost: u32_at(10),
@@ -208,13 +222,23 @@ fn cipher(password: &SecretString, header: &Header) -> Result<XChaCha20Poly1305>
             &mut key[..],
         )
         .map_err(|e| unsupported_params().with_detail(e.to_string()))?;
-    XChaCha20Poly1305::new_from_slice(&key[..])
-        .map_err(|_| Error::new(ErrorKind::Protocol, "Invalid backup key length"))
+    XChaCha20Poly1305::new_from_slice(&key[..]).map_err(|_| {
+        Error::coded(
+            ErrorKind::Protocol,
+            "backup-invalid-key-length",
+            "Invalid backup key length",
+        )
+    })
 }
 
 fn random<const N: usize>() -> Result<[u8; N]> {
     <[u8; N]>::try_generate().map_err(|e| {
-        Error::new(ErrorKind::Io, "System random generator failed").with_detail(e.to_string())
+        Error::coded(
+            ErrorKind::Io,
+            "backup-random-failed",
+            "System random generator failed",
+        )
+        .with_detail(e.to_string())
     })
 }
 
@@ -235,7 +259,13 @@ fn seal(plaintext: &[u8], password: &SecretString, params: ExportParams) -> Resu
                 aad: &aad,
             },
         )
-        .map_err(|_| Error::new(ErrorKind::Protocol, "Cannot encrypt the backup"))?;
+        .map_err(|_| {
+            Error::coded(
+                ErrorKind::Protocol,
+                "backup-cannot-encrypt",
+                "Cannot encrypt the backup",
+            )
+        })?;
     let mut out = Vec::with_capacity(HEADER_LEN + ciphertext.len());
     out.extend_from_slice(&aad);
     out.extend_from_slice(&ciphertext);
@@ -251,7 +281,13 @@ fn decrypt(
 ) -> Result<Zeroizing<Vec<u8>>> {
     cipher(password, header)?
         .decrypt_in_place(&XNonce::from(header.nonce), aad, &mut *body)
-        .map_err(|_| Error::new(ErrorKind::Auth, "Wrong password or damaged file"))?;
+        .map_err(|_| {
+            Error::coded(
+                ErrorKind::Auth,
+                "backup-wrong-password",
+                "Wrong password or damaged file",
+            )
+        })?;
     Ok(body)
 }
 
@@ -281,8 +317,12 @@ fn read_backup(path: &Path, password: &SecretString) -> Result<Zeroizing<Vec<u8>
     let file_len = file.metadata()?.len();
     let header = Header::decode(&prefix[..filled], file_len)?;
     if file_len > MAX_BACKUP_BYTES {
-        return Err(Error::new(ErrorKind::Protocol, "Backup file is too large")
-            .with_detail(format!("{file_len} bytes (limit {MAX_BACKUP_BYTES})")));
+        return Err(Error::coded(
+            ErrorKind::Protocol,
+            "backup-too-large",
+            "Backup file is too large",
+        )
+        .with_detail(format!("{file_len} bytes (limit {MAX_BACKUP_BYTES})")));
     }
     // At most MAX_BACKUP_BYTES, so it fits in usize on every target.
     let body_len = usize::try_from(file_len).unwrap_or(usize::MAX) - HEADER_LEN;
@@ -356,7 +396,12 @@ impl Write for ByteCounter {
 
 fn to_json(backup: &Backup) -> Result<Zeroizing<Vec<u8>>> {
     let cannot = |e: serde_json::Error| {
-        Error::new(ErrorKind::Protocol, "Cannot build the backup").with_detail(format!(
+        Error::coded(
+            ErrorKind::Protocol,
+            "backup-cannot-build",
+            "Cannot build the backup",
+        )
+        .with_detail(format!(
             "{:?} error at line {} column {}",
             e.classify(),
             e.line(),
@@ -371,7 +416,12 @@ fn to_json(backup: &Backup) -> Result<Zeroizing<Vec<u8>>> {
 }
 
 fn invalid_content(detail: impl Into<String>) -> Error {
-    Error::new(ErrorKind::Protocol, "Invalid backup content").with_detail(detail)
+    Error::coded(
+        ErrorKind::Protocol,
+        "backup-invalid-content",
+        "Invalid backup content",
+    )
+    .with_detail(detail)
 }
 
 /// Parses the plaintext. Error details carry positions only: serde_json's
@@ -456,7 +506,11 @@ impl Vault {
         params: ExportParams,
     ) -> Result<ExportReport> {
         if password.expose_secret().is_empty() {
-            return Err(Error::new(ErrorKind::Protocol, "Backup password is empty"));
+            return Err(Error::coded(
+                ErrorKind::Protocol,
+                "backup-password-empty",
+                "Backup password is empty",
+            ));
         }
         argon_params(params)?;
         let mut missing_secrets = Vec::new();
@@ -470,8 +524,12 @@ impl Vault {
             for kind in KINDS {
                 let value = if flag(&site, kind) {
                     self.secrets.get(&site.id, kind).map_err(|err| {
-                        let mut out = Error::new(err.kind, "Cannot read a secret for the backup")
-                            .with_detail(format!("site {:?} ({})", site.name, site.id));
+                        let mut out = Error::coded(
+                            err.kind,
+                            "backup-cannot-read-secret",
+                            "Cannot read a secret for the backup",
+                        )
+                        .with_detail(format!("site {:?} ({})", site.name, site.id));
                         append_detail(&mut out, &describe(&err));
                         out
                     })?

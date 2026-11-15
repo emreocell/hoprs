@@ -105,7 +105,11 @@ pub struct TransferEngine {
 }
 
 fn stopped() -> Error {
-    Error::new(ErrorKind::Io, "Transfer engine stopped")
+    Error::coded(
+        ErrorKind::Io,
+        "transfer-engine-stopped",
+        "Transfer engine stopped",
+    )
 }
 
 impl TransferEngine {

@@ -151,7 +151,12 @@ pub fn is_keyring_unavailable(err: &Error) -> bool {
 
 /// The keyring backend cannot be reached at all.
 fn unavailable(err: &keyring_core::Error) -> Error {
-    Error::new(ErrorKind::Io, UNAVAILABLE_MESSAGE).with_detail(err.to_string())
+    Error::coded(
+        ErrorKind::Io,
+        "vault-keyring-unavailable",
+        "System keyring unavailable",
+    )
+    .with_detail(err.to_string())
 }
 
 /// Maps a keyring error to `Io`. The detail never carries secret bytes:
@@ -167,7 +172,7 @@ fn map_error(err: &keyring_core::Error) -> Error {
         K::Ambiguous(entries) => format!("{} matching keyring entries", entries.len()),
         other => other.to_string(),
     };
-    Error::new(ErrorKind::Io, "System keyring error").with_detail(detail)
+    Error::coded(ErrorKind::Io, "vault-keyring-error", "System keyring error").with_detail(detail)
 }
 
 /// Secrets kept in memory only: for tests and dry-run imports.

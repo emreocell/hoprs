@@ -29,7 +29,13 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let (target, via_link) = resolve_target(path)?;
     let file_name = target
         .file_name()
-        .ok_or_else(|| Error::new(ErrorKind::Io, "Invalid profile path"))?
+        .ok_or_else(|| {
+            Error::coded(
+                ErrorKind::Io,
+                "profile-invalid-path",
+                "Invalid profile path",
+            )
+        })?
         .to_owned();
     let parent = match target.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
@@ -81,10 +87,12 @@ fn resolve_target(path: &Path) -> Result<(PathBuf, bool)> {
             Err(err) => return Err(err.into()),
         }
     }
-    Err(
-        Error::new(ErrorKind::Io, "Too many levels of symbolic links")
-            .with_detail(path.display().to_string()),
+    Err(Error::coded(
+        ErrorKind::Io,
+        "profile-symlink-loop",
+        "Too many levels of symbolic links",
     )
+    .with_detail(path.display().to_string()))
 }
 
 fn create_private_dir(dir: &Path) -> Result<()> {

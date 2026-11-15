@@ -713,6 +713,17 @@ mod tests {
             unused.is_empty(),
             "keys in en.ftl never looked up: {unused:?}"
         );
+        // The error keys are looked up by code: each must be a code some call site writes.
+        let codes: std::collections::BTreeSet<String> = coded_sites()
+            .into_iter()
+            .map(|site| format!("error-{}", site.code))
+            .collect();
+        let dead: Vec<String> = message_ids(EN_SRC)
+            .into_iter()
+            .map(|(id, _)| id)
+            .filter(|id| id.starts_with("error-") && !codes.contains(id))
+            .collect();
+        assert!(dead.is_empty(), "error keys no call site uses: {dead:?}");
     }
 
     #[test]

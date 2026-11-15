@@ -58,7 +58,7 @@ pub(super) const SYMLINK_SKIP: &str = "symlinks are not followed";
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 fn unknown() -> Error {
-    Error::new(ErrorKind::NotFound, "Unknown transfer")
+    Error::coded(ErrorKind::NotFound, "transfer-unknown", "Unknown transfer")
 }
 
 /// Appends a queue-store error to `e`'s technical detail.

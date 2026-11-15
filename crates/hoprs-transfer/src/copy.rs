@@ -60,10 +60,12 @@ pub async fn copy_file(
 
     let got = dst.size(dst_path).await?;
     if got != src_entry.size {
-        return Err(
-            Error::new(ErrorKind::Protocol, "Size mismatch after transfer")
-                .with_detail(format!("expected {}, got {}", src_entry.size, got)),
-        );
+        return Err(Error::coded(
+            ErrorKind::Protocol,
+            "transfer-size-mismatch",
+            "Size mismatch after transfer",
+        )
+        .with_detail(format!("expected {}, got {}", src_entry.size, got)));
     }
     if let Some(mtime) = src_entry.modified {
         let _ = dst.set_modified(dst_path, mtime).await;

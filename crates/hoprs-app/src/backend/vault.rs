@@ -46,7 +46,10 @@ impl VaultHandle {
             f(&mut vault)
         })
         .await
-        .map_err(|e| Error::new(ErrorKind::Io, "Vault task failed").with_detail(e.to_string()))?
+        .map_err(|e| {
+            Error::coded(ErrorKind::Io, "app-vault-task-failed", "Vault task failed")
+                .with_detail(e.to_string())
+        })?
     }
 
     // Test convenience: the app reads through `snapshot`.
@@ -134,7 +137,12 @@ impl VaultHandle {
                 .find(|w| w.id == id)
                 .cloned()
                 .ok_or_else(|| {
-                    Error::new(ErrorKind::NotFound, "Unknown workspace").with_detail(id.0.clone())
+                    Error::coded(
+                        ErrorKind::NotFound,
+                        "vault-unknown-workspace",
+                        "Unknown workspace",
+                    )
+                    .with_detail(id.0.clone())
                 })?;
             let mut changed = false;
             for (site, saved) in tabs {
@@ -216,8 +224,12 @@ impl VaultHandle {
                 .map(|id| {
                     let found = match v.site(&id) {
                         Some(site) => Ok((site.clone(), batch.read(site))),
-                        None => Err(Error::new(ErrorKind::NotFound, "Unknown site")
-                            .with_detail(id.0.clone())),
+                        None => Err(Error::coded(
+                            ErrorKind::NotFound,
+                            "vault-unknown-site",
+                            "Unknown site",
+                        )
+                        .with_detail(id.0.clone())),
                     };
                     (id, found)
                 })
