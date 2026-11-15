@@ -668,3 +668,35 @@ async fn reconnecting_keeps_the_run_and_the_relist_rearms() {
     }));
     assert_eq!(started(&effects).len(), 1);
 }
+
+/// A suppressed navigation whose listing fails must not swallow the next navigation.
+#[tokio::test]
+async fn a_failed_suppressed_listing_ends_the_suppression() {
+    let (mut app, fake, _a, tab, run) = running().await;
+    app.update(found(tab, run, "kept"));
+    app.tabs[0].compare_mut().unwrap().suppress_auto = true;
+    let nav = app.update(pane_msg(
+        tab,
+        Side::Local,
+        PaneMsg::Navigate(rpath("/home/gone")),
+    ));
+    assert!(cancelled(&nav).is_empty());
+    let failed = settle_all(&mut app, &fake, run_listings(&fake, &nav).await).await;
+    assert!(started(&failed).is_empty() && debounces(&failed).is_empty());
+    assert!(matches!(
+        app.tabs[0].pane(Side::Local).unwrap().listing,
+        crate::app::files::Listing::Failed(_)
+    ));
+    assert!(!state(&app).suppress_auto);
+
+    // The next navigation cancels and re-arms as usual.
+    let next = app.update(pane_msg(
+        tab,
+        Side::Local,
+        PaneMsg::Navigate(rpath("/home/me/sub")),
+    ));
+    assert_eq!(cancelled(&next), [run]);
+    assert!(state(&app).rows.is_empty() && state(&app).roots.is_none());
+    let after = settle_all(&mut app, &fake, run_listings(&fake, &next).await).await;
+    assert_eq!(debounces(&after).len(), 1);
+}

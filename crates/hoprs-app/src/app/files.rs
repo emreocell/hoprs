@@ -595,6 +595,9 @@ impl App {
         let quiet = self.tabs[index]
             .compare()
             .is_some_and(|s| s.quiet_request == Some(request_id));
+        if quiet && let Some(state) = self.tabs[index].compare_mut() {
+            state.quiet_request = None;
+        }
         let Some(pane) = self.tabs[index].pane_mut(side) else {
             return Vec::new();
         };
@@ -636,6 +639,16 @@ impl App {
             }
             effects
         } else {
+            // A failed listing never reaches `compare_after_listing`: once nothing is
+            // pending any more, an Open's suppression ends here.
+            let idle = [Side::Local, Side::Remote].iter().all(|s| {
+                self.tabs[index]
+                    .pane(*s)
+                    .is_none_or(|p| p.request.is_none())
+            });
+            if idle && let Some(state) = self.tabs[index].compare_mut() {
+                state.suppress_auto = false;
+            }
             Vec::new()
         }
     }

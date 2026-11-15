@@ -133,7 +133,10 @@ pub struct CompareState {
     pub generation: u64,
     /// Task 7's Open: set this before navigating the panes to an item, and the navigation
     /// keeps the current run, rows and roots and starts no run. One-shot: consumed when the
-    /// panes have listed again (or by the next explicit run).
+    /// panes have listed again, when a listing fails with nothing else pending, or by the
+    /// next explicit run. Contract: set it only when at least one listing is guaranteed to
+    /// follow (a navigation that changes a pane's folder); otherwise do not set it, or it
+    /// would swallow the user's next navigation.
     pub suppress_auto: bool,
     /// The listing a file operation's refresh asked for: it neither cancels nor re-arms
     /// anything.
