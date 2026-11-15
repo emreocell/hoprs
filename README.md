@@ -207,8 +207,9 @@ one side only is one row and is not walked.
 
 - **Automatic:** with "Compare automatically" on (the panel's checkbox, or Settings ›
   Folder compare), changing folders in either pane starts a new comparison after a short
-  pause. Turn it off to compare only when you press Compare. The comparison uses the tab's
-  connection; it never opens its own.
+  pause. Turn it off to compare only when you press Compare. File operations (rename, new
+  folder, delete, permissions) do not re-run the comparison; a folder change or an explicit
+  refresh does. The comparison uses the tab's connection; it never opens its own.
 - **Ignore list:** `.git, node_modules, .DS_Store` by default, editable in Settings. Names
   are matched at any depth on both sides, and `*` matches any run of characters (`*.log`).
 - **Limit:** a side with more than 10 000 entries pauses the walk and shows what was found

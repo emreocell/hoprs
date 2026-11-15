@@ -965,6 +965,10 @@ impl RemoteFs for ActiveFs {
         self.activity.touch();
         self.inner.set_modified(path, mtime).await
     }
+
+    fn mtime_precision(&self) -> Duration {
+        self.inner.mtime_precision()
+    }
 }
 
 /// Starts the session's monitor (see the module docs): it logs every state change and
@@ -1106,6 +1110,57 @@ mod tests {
 
     use super::super::broker::{BrokerEvent, PromptAnswer, PromptKind};
     use super::*;
+
+    #[tokio::test]
+    async fn active_fs_forwards_the_mtime_precision() {
+        struct Minutes(MemFs);
+        #[async_trait::async_trait]
+        impl RemoteFs for Minutes {
+            async fn list(&self, p: &RemotePath) -> Result<Vec<hoprs_core::RemoteEntry>> {
+                self.0.list(p).await
+            }
+            async fn stat(&self, p: &RemotePath) -> Result<hoprs_core::RemoteEntry> {
+                self.0.stat(p).await
+            }
+            async fn open_read(
+                &self,
+                p: &RemotePath,
+                o: u64,
+            ) -> Result<hoprs_remote::BoxAsyncRead> {
+                self.0.open_read(p, o).await
+            }
+            async fn open_write(
+                &self,
+                p: &RemotePath,
+                o: u64,
+            ) -> Result<hoprs_remote::BoxAsyncWrite> {
+                self.0.open_write(p, o).await
+            }
+            async fn mkdir(&self, p: &RemotePath) -> Result<()> {
+                self.0.mkdir(p).await
+            }
+            async fn rename(&self, a: &RemotePath, b: &RemotePath) -> Result<()> {
+                self.0.rename(a, b).await
+            }
+            async fn remove_file(&self, p: &RemotePath) -> Result<()> {
+                self.0.remove_file(p).await
+            }
+            async fn remove_dir(&self, p: &RemotePath) -> Result<()> {
+                self.0.remove_dir(p).await
+            }
+            async fn chmod(&self, p: &RemotePath, m: u32) -> Result<()> {
+                self.0.chmod(p, m).await
+            }
+            fn mtime_precision(&self) -> Duration {
+                Duration::from_secs(60)
+            }
+        }
+        let fs = ActiveFs {
+            inner: Arc::new(Minutes(MemFs::new())),
+            activity: Arc::new(Activity::new()),
+        };
+        assert_eq!(fs.mtime_precision(), Duration::from_secs(60));
+    }
 
     struct FakeConn {
         state: watch::Sender<ConnectionState>,

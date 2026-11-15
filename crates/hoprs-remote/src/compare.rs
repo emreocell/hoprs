@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
-use hoprs_core::{EntryKind, Error, RemoteEntry, RemotePath, Result};
+use hoprs_core::{EntryKind, Error, ErrorKind, RemoteEntry, RemotePath, Result};
 use tokio::sync::{Semaphore, mpsc, watch};
 
 use crate::RemoteFs;
@@ -162,9 +162,14 @@ struct Listed {
 async fn list_one(
     fs: &dyn RemoteFs,
     sem: &Semaphore,
+    stop: &watch::Receiver<bool>,
     path: &RemotePath,
 ) -> Result<Vec<RemoteEntry>> {
     let _permit = sem.acquire().await;
+    if *stop.borrow() {
+        // Stopped while queued: no new listing; the caller discards this result.
+        return Ok(Vec::new());
+    }
     fs.list(path).await
 }
 
@@ -173,11 +178,12 @@ async fn list_pair(
     local_sem: &Semaphore,
     remote: &Arc<dyn RemoteFs>,
     remote_sem: &Semaphore,
+    stop: &watch::Receiver<bool>,
     pair: Pair,
 ) -> Listed {
     let (l, r) = tokio::join!(
-        list_one(local.as_ref(), local_sem, &pair.local),
-        list_one(remote.as_ref(), remote_sem, &pair.remote),
+        list_one(local.as_ref(), local_sem, stop, &pair.local),
+        list_one(remote.as_ref(), remote_sem, stop, &pair.remote),
     );
     Listed {
         pair,
@@ -197,7 +203,8 @@ fn join_rel(parent: &str, name: &str) -> RelPath {
 /// Walks both trees and reports every difference through `progress`.
 ///
 /// Listing errors on a root fail the call; on a subfolder they become [`Status::Unreadable`]
-/// differences and the walk goes on. When a side reaches `options.limit` the walk sends
+/// differences and the walk goes on, except a network error, which fails the call too (the
+/// connection is gone, every other folder would fail the same way). When a side reaches `options.limit` the walk sends
 /// [`Progress::LimitReached`] and waits until `resume` turns `true`, then continues without a
 /// limit (a `resume` that is `true` from the start means no limit).
 ///
@@ -242,6 +249,9 @@ pub async fn compare(
         local: local_root,
         remote: remote_root,
     });
+    // Listings queued on a semaphore check this after getting their permit (declared before
+    // `inflight`, which borrows it).
+    let list_stop = stop.clone();
     let mut inflight = FuturesUnordered::new();
     let mut paused = false;
 
@@ -256,7 +266,14 @@ pub async fn compare(
             let Some(pair) = pending.pop_front() else {
                 break;
             };
-            inflight.push(list_pair(&local, &local_sem, &remote, &remote_sem, pair));
+            inflight.push(list_pair(
+                &local,
+                &local_sem,
+                &remote,
+                &remote_sem,
+                &list_stop,
+                pair,
+            ));
         }
         let Some(listed) = inflight.next().await else {
             if paused && !pending.is_empty() {
@@ -303,6 +320,8 @@ pub async fn compare(
         } = listed;
         let is_root = pair.rel.is_empty();
         let (l, r) = match (l, r) {
+            // A dropped connection is not a folder problem: fail the whole call.
+            (Err(e), _) | (_, Err(e)) if e.kind == ErrorKind::Network => return Err(e),
             (Err(e), _) | (_, Err(e)) if is_root => return Err(e),
             (Err(error), _) => {
                 summary.differences += 1;
@@ -504,6 +523,7 @@ mod tests {
         active: AtomicUsize,
         overlapped: AtomicUsize,
         fail: Vec<String>,
+        fail_kind: ErrorKind,
     }
 
     impl Probe {
@@ -516,6 +536,7 @@ mod tests {
                 active: AtomicUsize::new(0),
                 overlapped: AtomicUsize::new(0),
                 fail: Vec::new(),
+                fail_kind: ErrorKind::Permission,
             }
         }
         fn listings(&self) -> Vec<String> {
@@ -535,7 +556,7 @@ mod tests {
             }
             self.active.fetch_sub(1, Ordering::SeqCst);
             if self.fail.iter().any(|f| f == path.as_str()) {
-                return Err(Error::new(ErrorKind::Permission, "denied"));
+                return Err(Error::new(self.fail_kind, "denied"));
             }
             self.inner.list(path).await
         }
@@ -989,6 +1010,62 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(r.found[1].path, "good/only");
+    }
+
+    #[tokio::test]
+    async fn network_error_on_a_subfolder_fails_the_call() {
+        let (a, b) = (MemFs::new(), MemFs::new());
+        for s in [&a, &b] {
+            s.add_file("/bad/f", b"x", t(0));
+            s.add_file("/good/f", b"x", t(0));
+        }
+        let mut pa = Probe::new(a);
+        pa.fail = vec!["/bad".into()];
+        pa.fail_kind = ErrorKind::Network;
+        let e = run(Arc::new(pa), Arc::new(b), opts()).await.err().unwrap();
+        assert_eq!(e.kind, ErrorKind::Network);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_listing_starts_after_stop_for_queued_futures() {
+        let (a, b) = (MemFs::new(), MemFs::new());
+        for s in [&a, &b] {
+            for i in 0..4 {
+                s.add_file(&format!("/d{i}/f"), b"x", t(0));
+            }
+        }
+        let pa = Arc::new(Probe::new(a));
+        let mut pb = Probe::new(b);
+        pb.delay = Duration::from_secs(1);
+        let pb = Arc::new(pb);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (_resume_tx, resume) = watch::channel(false);
+        let (stop_tx, stop) = watch::channel(false);
+        let o = CompareOptions {
+            concurrency_a: 4,
+            concurrency_b: 1,
+            ..Default::default()
+        };
+        let (a2, b2) = (pa.clone(), pb.clone());
+        let task = tokio::spawn(async move {
+            compare(
+                a2,
+                p("/"),
+                b2,
+                p("/"),
+                o,
+                tx,
+                CompareSignals { resume, stop },
+            )
+            .await
+        });
+        // The root takes 1 s; its four subfolders then queue on the remote permit.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert_eq!(pb.listings().len(), 2);
+        stop_tx.send(true).unwrap();
+        let summary = task.await.unwrap().unwrap();
+        assert!(summary.stopped);
+        assert_eq!(pb.listings().len(), 2, "{:?}", pb.listings());
     }
 
     #[tokio::test]

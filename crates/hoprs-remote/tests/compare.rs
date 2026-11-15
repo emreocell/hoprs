@@ -49,6 +49,10 @@ impl Drop for Cleanup {
 }
 
 /// A modification time a day ago, on a minute boundary, so `LIST` shows it exactly.
+///
+/// Independent of the host's time zone: vsftpd lists in GMT and the test's expected times are
+/// absolute (`SystemTime`), and a day back stays inside the 6-month window in which `LIST`
+/// shows a time of day rather than only a date.
 fn base_time() -> SystemTime {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)

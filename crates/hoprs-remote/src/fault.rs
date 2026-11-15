@@ -226,6 +226,10 @@ impl<F: RemoteFs> RemoteFs for FaultFs<F> {
         self.enter(None).await?;
         self.inner.set_modified(path, mtime).await
     }
+
+    fn mtime_precision(&self) -> Duration {
+        self.inner.mtime_precision()
+    }
 }
 
 /// Decides how many bytes a stream call may move. `Err` means the armed

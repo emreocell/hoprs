@@ -1310,6 +1310,39 @@ async fn auto_reruns_once_when_the_whole_batch_has_ended() {
 }
 
 #[tokio::test]
+async fn no_rerun_after_a_batch_when_the_panes_left_the_compared_folders() {
+    let (mut app, fake, a, tab, run) = running().await;
+    fake.local_fs().add_dir("/home/me/d");
+    fake.remote_fs(&a.id).add_dir("/srv/d");
+    diff_row(
+        &mut app,
+        tab,
+        run,
+        "d/a",
+        EntryKind::File,
+        Status::OnlyLocal,
+        (Some(1), None),
+    );
+    let effects = app.update(msg(CompareMsg::UploadSelected { tab }));
+    deliver_enqueue(&mut app, &fake, effects).await;
+    let RowState::Queued(a) = row_state(&app, "d/a") else {
+        panic!()
+    };
+    // Open moves the panes into the item's folder; the roots stay.
+    let nav = app.update(msg(CompareMsg::Open { tab, index: 0 }));
+    settle_all(&mut app, &fake, run_listings(&fake, &nav).await).await;
+    assert_eq!(
+        app.tabs[0].pane(Side::Local).unwrap().path.to_string(),
+        "/home/me/d"
+    );
+    let last = app.update(ended(1, a, TransferState::Done));
+    assert!(
+        started(&last).is_empty(),
+        "no run on other folders: {last:?}"
+    );
+}
+
+#[tokio::test]
 async fn open_goes_to_the_items_folder_without_a_new_run() {
     let (mut app, fake, _a, tab, run) = running().await;
     app.update(msg(CompareMsg::Progress {

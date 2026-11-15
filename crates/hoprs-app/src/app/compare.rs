@@ -1062,7 +1062,14 @@ impl App {
         // The batch is over when nothing queued is left; one run follows, for these folders.
         let over = state.queued.is_empty() && state.enqueuing == 0;
         let same_folders = state.roots.as_ref() == Some(&item.roots);
-        if over && same_folders && self.settings.compare_auto {
+        // The panes may have moved (Open) while the batch ran: the run is for the folders
+        // they show now, so it follows only when those are still the compared roots.
+        let panes_on_roots = {
+            let tab = &self.tabs[index];
+            let path = |side| tab.pane(side).map(|p| &p.path);
+            path(Side::Local) == Some(&item.roots.0) && path(Side::Remote) == Some(&item.roots.1)
+        };
+        if over && same_folders && panes_on_roots && self.settings.compare_auto {
             return self.start_compare(index);
         }
         Vec::new()
