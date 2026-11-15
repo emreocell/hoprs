@@ -1,10 +1,11 @@
 //! Protocol-agnostic remote filesystem abstraction.
 
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use hoprs_core::{RemoteEntry, RemotePath, Result};
 
+mod compare;
 mod connection;
 #[cfg(feature = "testing")]
 mod fault;
@@ -21,6 +22,9 @@ mod sftp;
 #[cfg(feature = "testing")]
 pub mod testing;
 
+pub use compare::{
+    CompareOptions, CompareSide, Difference, Progress, RelPath, Status, Summary, compare, ignored,
+};
 pub use connection::Connection;
 pub use ftp::{
     CertProblem, CertReason, FtpConfig, FtpFs, FtpPrompter, FtpSecurity, TransferMode,
@@ -88,5 +92,12 @@ pub trait RemoteFs: Send + Sync {
     /// the default no-op.
     async fn set_modified(&self, _path: &RemotePath, _mtime: SystemTime) -> Result<()> {
         Ok(())
+    }
+
+    /// The finest difference between modification times this backend's listings can tell
+    /// apart; the folder compare widens its tolerance to it. Default 1 s; FTP listing with
+    /// `LIST` (no `MLSD`) has minutes.
+    fn mtime_precision(&self) -> Duration {
+        Duration::from_secs(1)
     }
 }
