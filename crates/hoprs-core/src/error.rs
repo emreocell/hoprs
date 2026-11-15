@@ -53,6 +53,11 @@ pub struct Error {
     pub kind: ErrorKind,
     pub message: String,
     pub detail: Option<String>,
+    /// Stable, kebab-case key of the message (the app's catalog looks up
+    /// `error-<code>`); `None` for errors that have no translation.
+    pub code: Option<&'static str>,
+    /// Named values of the message, for the translation (`host`, `path`, ...).
+    pub args: Vec<(&'static str, String)>,
 }
 
 impl Error {
@@ -61,7 +66,23 @@ impl Error {
             kind,
             message: message.into(),
             detail: None,
+            code: None,
+            args: Vec::new(),
         }
+    }
+
+    /// An error with a stable `code`; `message` is its English text (logs,
+    /// `Display` and the fallback).
+    pub fn coded(kind: ErrorKind, code: &'static str, message: impl Into<String>) -> Self {
+        let mut err = Self::new(kind, message);
+        err.code = Some(code);
+        err
+    }
+
+    /// Adds a named value for the translation.
+    pub fn arg(mut self, name: &'static str, value: impl Into<String>) -> Self {
+        self.args.push((name, value.into()));
+        self
     }
 
     pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
@@ -127,5 +148,15 @@ mod tests {
             Error::new(ErrorKind::Auth, "Wrong password").with_detail("SSH_MSG_USERAUTH_FAILURE");
         assert_eq!(e.to_string(), "Wrong password");
         assert_eq!(e.detail.as_deref(), Some("SSH_MSG_USERAUTH_FAILURE"));
+    }
+    #[test]
+    fn coded_error_keeps_message_and_display() {
+        let e =
+            Error::coded(ErrorKind::Auth, "auth-wrong-password", "Wrong password").arg("host", "h");
+        assert_eq!(e.to_string(), "Wrong password");
+        assert_eq!(e.code, Some("auth-wrong-password"));
+        assert_eq!(e.args, vec![("host", "h".to_owned())]);
+        let plain = Error::new(ErrorKind::Auth, "x");
+        assert!(plain.code.is_none() && plain.args.is_empty());
     }
 }

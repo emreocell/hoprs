@@ -25,7 +25,7 @@ pub fn strip_id() -> Id {
 pub fn view(app: &App) -> Element<'_, Message> {
     if app.tabs.is_empty() {
         return container(
-            text(strings::NO_SESSIONS)
+            text(strings::no_sessions())
                 .size(theme::TEXT_XS)
                 .color(palette().muted),
         )
@@ -81,8 +81,8 @@ fn session_actions(app: &App) -> Option<Element<'_, Message>> {
     };
     Some(
         row![
-            action(strings::NEW_TERMINAL_TAB, TabKind::Terminal),
-            action(strings::NEW_FILES_TAB, TabKind::Files),
+            action(strings::new_terminal_tab(), TabKind::Terminal),
+            action(strings::new_files_tab(), TabKind::Files),
         ]
         .spacing(theme::SPACE_3XS)
         .padding(Padding::ZERO.left(theme::SPACE_XS).right(theme::SPACE_XS))
@@ -94,16 +94,16 @@ fn session_tab<'a>(app: &'a App, index: usize, tab: &'a Tab) -> Element<'a, Mess
     let active = app.active_tab == Some(index);
     let (name, tag) = match app.site(&tab.site) {
         Some(site) => (site.name.as_str(), tab_tag(site, tab.kind())),
-        None => (strings::SITE_MISSING, ""),
+        None => (strings::site_missing(), ""),
     };
     let p = palette();
-    let close = button(text(strings::CLOSE_TAB).size(theme::TEXT_SM))
+    let close = button(text(strings::close_tab()).size(theme::TEXT_SM))
         .padding(Padding::from([0.0, theme::SPACE_2XS]))
         .style(theme::button_text)
         .on_press(Message::CloseTab(tab.id));
     // The site's transfers stopped on a lost connection, until they run again.
     let paused = app.queue.site_paused(&tab.site).map(|_| {
-        text(strings::SITE_PAUSED)
+        text(strings::site_paused())
             .size(theme::TEXT_TAG)
             .color(p.error)
             .wrapping(text::Wrapping::None)

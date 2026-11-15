@@ -138,7 +138,8 @@ pub async fn rename_no_replace(
     };
     if exists {
         return Err(
-            Error::new(ErrorKind::Conflict, "Already exists").with_detail(to.as_str().to_owned())
+            Error::coded(ErrorKind::Conflict, "fs-already-exists", "Already exists")
+                .with_detail(to.as_str().to_owned()),
         );
     }
     fs.rename(from, to).await

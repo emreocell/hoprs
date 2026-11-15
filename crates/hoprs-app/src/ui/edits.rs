@@ -26,28 +26,32 @@ pub fn clock(at: SystemTime) -> String {
 /// name (drawn in mono) and the text after it.
 pub fn edit_line_parts(edit: &RemoteEdit) -> (String, String, String) {
     let name = edit.name().to_owned();
-    let editing = |after: String| (format!("{} ", strings::EDITING), after);
+    let editing = |after: String| (format!("{} ", strings::editing()), after);
     let (before, after) = match &edit.status {
         EditStatus::Editing { saved: None } => editing(String::new()),
-        EditStatus::Editing { saved: Some(at) } => editing(format!(" — saved {}", clock(*at))),
+        EditStatus::Editing { saved: Some(at) } => {
+            editing(format!(" — {}", strings::saved_at(&clock(*at))))
+        }
         EditStatus::Waiting { truncated } => {
-            let mut after = format!(" — {}", strings::WAITING_FOR_CONNECTION);
+            let mut after = format!(" — {}", strings::waiting_for_connection());
             if *truncated {
                 after.push(' ');
-                after.push_str(strings::REMOTE_MAY_BE_TRUNCATED);
+                after.push_str(strings::remote_may_be_truncated());
             }
             editing(after)
         }
         EditStatus::Failed { error, truncated } => {
-            let mut after = format!(": {}", strings::upload_failed(&error.message));
+            let mut after = format!(": {}", strings::upload_failed(&strings::error(error)));
             if *truncated {
                 after.push(' ');
-                after.push_str(strings::REMOTE_MAY_BE_TRUNCATED);
+                after.push_str(strings::remote_may_be_truncated());
             }
             (String::new(), after)
         }
-        EditStatus::Conflict { .. } => (String::new(), format!(": {}", strings::CHANGED_ON_SERVER)),
-        EditStatus::Replaced { .. } => editing(format!(" — {}", strings::RELOAD_IN_EDITOR)),
+        EditStatus::Conflict { .. } => {
+            (String::new(), format!(": {}", strings::changed_on_server()))
+        }
+        EditStatus::Replaced { .. } => editing(format!(" — {}", strings::reload_in_editor())),
     };
     (before, name, after)
 }
@@ -124,7 +128,7 @@ fn line(edit: &RemoteEdit) -> Element<'_, Message> {
     match &edit.status {
         EditStatus::Failed { .. } => {
             head = head.push(small_button(
-                strings::RETRY,
+                strings::retry(),
                 Some(edit_msg(EditMsg::Retry(id))),
                 false,
             ));
@@ -137,23 +141,23 @@ fn line(edit: &RemoteEdit) -> Element<'_, Message> {
             let choose = |choice| (!busy).then(|| edit_msg(EditMsg::Resolve { id, choice }));
             head = head
                 .push(small_button(
-                    strings::OVERWRITE,
+                    strings::overwrite(),
                     choose(EditChoice::Overwrite),
                     false,
                 ))
                 .push(small_button(
-                    strings::KEEP_REMOTE,
+                    strings::keep_remote(),
                     choose(EditChoice::KeepRemote),
                     false,
                 ))
                 .push(small_button(
-                    strings::SAVE_A_COPY,
+                    strings::save_a_copy(),
                     choose(EditChoice::SaveCopy),
                     false,
                 ));
             if let Some(error) = error {
                 details = details.push(
-                    text(error.message.clone())
+                    text(strings::error(error))
                         .size(theme::TEXT_XS)
                         .color(p.error),
                 );
@@ -196,7 +200,7 @@ pub fn strip<'a>(app: &'a App, tab: &'a Tab) -> Option<Element<'a, Message>> {
     for o in opening {
         let name = o.remote.file_name().unwrap_or(o.remote.as_str());
         lines = lines.push(with_name(
-            format!("{} ", strings::OPENING),
+            format!("{} ", strings::opening()),
             name.to_owned(),
             "…".to_owned(),
             palette().muted,
@@ -216,9 +220,9 @@ fn files_list(files: &[QuestionFile]) -> Element<'_, Message> {
     let mut list = column![].spacing(theme::SPACE_3XS);
     for file in files {
         let state = if file.conflict {
-            Some(strings::EDIT_CONFLICT)
+            Some(strings::edit_conflict())
         } else if file.unsent {
-            Some(strings::EDIT_UNSENT)
+            Some(strings::edit_unsent())
         } else {
             None
         };
@@ -248,7 +252,7 @@ fn question_body<'a>(
     let Some(files) = &question.files else {
         return body
             .push(
-                text(strings::CHECKING_EDITS)
+                text(strings::checking_edits())
                     .size(theme::TEXT_XS)
                     .color(p.muted),
             )
@@ -267,7 +271,7 @@ fn question_body<'a>(
     }
     if let Some(error) = &question.error {
         body = body.push(
-            text(error.message.clone())
+            text(strings::error(error))
                 .size(theme::TEXT_XS)
                 .color(p.error),
         );
@@ -277,7 +281,7 @@ fn question_body<'a>(
     let mut actions = if question.busy == Some(CloseAnswer::Upload) {
         // The upload may take its full limit: keeping instead stays one click away.
         row![small_button(
-            strings::STOP_KEEP_COPIES,
+            strings::stop_keep_copies(),
             Some(answer(CloseAnswer::Keep)),
             false
         )]
@@ -285,7 +289,7 @@ fn question_body<'a>(
         row![
             small_button(labels[0], on(CloseAnswer::Upload), true),
             small_button(labels[1], on(CloseAnswer::Keep), false),
-            small_button(strings::CANCEL, on(CloseAnswer::Cancel), false),
+            small_button(strings::cancel(), on(CloseAnswer::Cancel), false),
         ]
     }
     .spacing(theme::SPACE_XS)
@@ -293,14 +297,14 @@ fn question_body<'a>(
     match question.busy {
         Some(CloseAnswer::Upload) => {
             actions = actions.push(
-                text(strings::UPLOADING_EDITS)
+                text(strings::uploading_edits())
                     .size(theme::TEXT_XS)
                     .color(p.muted),
             );
         }
         Some(CloseAnswer::Keep) => {
             actions = actions.push(
-                text(strings::KEEPING_COPIES)
+                text(strings::keeping_copies())
                     .size(theme::TEXT_XS)
                     .color(p.muted),
             );
@@ -317,8 +321,8 @@ pub fn close_ask<'a>(app: &'a App, tab: &'a Tab) -> Option<Element<'a, Message>>
     Some(
         container(question_body(
             question,
-            strings::CLOSE_EDITS_TITLE,
-            [strings::UPLOAD_AND_CLOSE, strings::CLOSE_KEEP_COPIES],
+            strings::close_edits_title(),
+            [strings::upload_and_close(), strings::close_keep_copies()],
             move |answer| edit_msg(EditMsg::CloseTab { tab: id, answer }),
         ))
         .width(Length::Fill)
@@ -336,19 +340,19 @@ pub fn quit_view(app: &App) -> Element<'_, Message> {
     };
     let (title, labels) = match ask.purpose {
         EditsFor::Workspace(_) => (
-            strings::CLOSE_WORKSPACE_EDITS_TITLE,
-            [strings::UPLOAD_AND_CLOSE, strings::CLOSE_KEEP_COPIES],
+            strings::close_workspace_edits_title(),
+            [strings::upload_and_close(), strings::close_keep_copies()],
         ),
         _ => (
-            strings::QUIT_EDITS_TITLE,
-            [strings::UPLOAD_AND_QUIT, strings::QUIT_KEEP_COPIES],
+            strings::quit_edits_title(),
+            [strings::upload_and_quit(), strings::quit_keep_copies()],
         ),
     };
     let content = column![
         question_body(&ask.question, title, labels, |answer| {
             edit_msg(EditMsg::Center(answer))
         }),
-        text(strings::QUIT_EDITS_HINT)
+        text(strings::quit_edits_hint())
             .size(theme::TEXT_XS)
             .color(palette().muted),
     ]
@@ -394,7 +398,7 @@ pub fn kept_notice(app: &App) -> Option<Element<'_, Message>> {
             text(strings::kept_notice(notice.count)).size(theme::TEXT_XS),
             container(path_text(notice.dir.display().to_string())).width(Length::Fill),
             small_button(
-                strings::DISMISS,
+                strings::dismiss(),
                 Some(edit_msg(EditMsg::DismissKept)),
                 false
             ),
@@ -404,13 +408,13 @@ pub fn kept_notice(app: &App) -> Option<Element<'_, Message>> {
     ]
     .spacing(theme::SPACE_3XS);
     if notice.closed_unasked {
-        lines = lines.push(text(strings::KEPT_SAVES_STOPPED).size(theme::TEXT_XS));
+        lines = lines.push(text(strings::kept_saves_stopped()).size(theme::TEXT_XS));
     }
     for remote in &notice.incomplete {
         lines = lines.push(with_name(
-            format!("{} ", strings::SERVER_COPY_OF),
+            format!("{} ", strings::server_copy_of()),
             remote.as_str().to_owned(),
-            format!(" {}", strings::MAY_BE_INCOMPLETE),
+            format!(" {}", strings::may_be_incomplete()),
             palette().error,
         ));
     }

@@ -12,7 +12,9 @@ use iced::{Alignment, Element, Length, Padding};
 
 use crate::app::settings::{Backup, BackupMsg, BackupPanel, BackupState, SettingsMsg};
 use crate::app::{App, Message, PickTarget};
-use crate::settings::{FONT_SIZE_MAX, FONT_SIZE_MIN, TerminalTheme, WORKERS_MAX, WORKERS_MIN};
+use crate::settings::{
+    FONT_SIZE_MAX, FONT_SIZE_MIN, LanguageChoice, TerminalTheme, WORKERS_MAX, WORKERS_MIN,
+};
 use crate::ui::site_form::Password;
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
@@ -38,11 +40,11 @@ impl fmt::Display for PolicyChoice {
 
 pub fn policy_label(policy: ConflictPolicy) -> &'static str {
     match policy {
-        ConflictPolicy::Ask => strings::POLICY_ASK,
-        ConflictPolicy::Overwrite => strings::POLICY_OVERWRITE,
-        ConflictPolicy::Skip => strings::POLICY_SKIP,
-        ConflictPolicy::OverwriteIfNewer => strings::POLICY_OVERWRITE_IF_NEWER,
-        ConflictPolicy::Resume => strings::POLICY_RESUME,
+        ConflictPolicy::Ask => strings::policy_ask(),
+        ConflictPolicy::Overwrite => strings::policy_overwrite(),
+        ConflictPolicy::Skip => strings::policy_skip(),
+        ConflictPolicy::OverwriteIfNewer => strings::policy_overwrite_if_newer(),
+        ConflictPolicy::Resume => strings::policy_resume(),
     }
 }
 
@@ -69,6 +71,15 @@ struct Secs(u64);
 impl fmt::Display for Secs {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&strings::seconds(self.0))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LanguageOption(LanguageChoice);
+
+impl fmt::Display for LanguageOption {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0.label())
     }
 }
 
@@ -156,7 +167,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let workers = settings.workers_per_site;
     let stepper = row![
         outlined(
-            strings::DECREASE,
+            strings::decrease(),
             (workers > WORKERS_MIN).then(|| msg(SettingsMsg::Workers(workers - 1)))
         ),
         container(
@@ -167,7 +178,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .width(36)
         .align_x(Alignment::Center),
         outlined(
-            strings::INCREASE,
+            strings::increase(),
             (workers < WORKERS_MAX).then(|| msg(SettingsMsg::Workers(workers + 1)))
         ),
     ]
@@ -198,11 +209,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
     .style(theme::pick_list)
     .menu_style(theme::menu);
 
-    let mut transfers = column![heading(strings::SETTINGS_TRANSFERS)].spacing(theme::SPACE_SM);
+    let mut transfers = column![heading(strings::settings_transfers())].spacing(theme::SPACE_SM);
     if app.settings_load_error.is_some() {
         transfers = transfers.push(
             column![
-                text(strings::SETTINGS_UNREADABLE)
+                text(strings::settings_unreadable())
                     .size(theme::TEXT_SM)
                     .color(palette().error),
                 failure(app.settings_load_error.as_ref()),
@@ -211,16 +222,16 @@ pub fn view(app: &App) -> Element<'_, Message> {
         );
     }
     transfers = transfers
-        .push(field(strings::SETTINGS_WORKERS, stepper.into(), None))
-        .push(muted(strings::SETTINGS_WORKERS_HINT))
-        .push(field(strings::SETTINGS_POLICY, policy.into(), None))
-        .push(muted(strings::SETTINGS_POLICY_HINT))
-        .push(field(strings::SETTINGS_KEEPALIVE, keepalive.into(), None))
-        .push(muted(strings::SETTINGS_KEEPALIVE_HINT));
+        .push(field(strings::settings_workers(), stepper.into(), None))
+        .push(muted(strings::settings_workers_hint()))
+        .push(field(strings::settings_policy(), policy.into(), None))
+        .push(muted(strings::settings_policy_hint()))
+        .push(field(strings::settings_keepalive(), keepalive.into(), None))
+        .push(muted(strings::settings_keepalive_hint()));
     if let Some(error) = &app.settings_save_error {
         transfers = transfers.push(
             column![
-                text(strings::SETTINGS_SAVE_FAILED)
+                text(strings::settings_save_failed())
                     .size(theme::TEXT_SM)
                     .color(palette().error),
                 failure(Some(error)),
@@ -232,7 +243,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let font_size = settings.terminal_font_size;
     let font_stepper = row![
         outlined(
-            strings::DECREASE,
+            strings::decrease(),
             (font_size > FONT_SIZE_MIN).then(|| msg(SettingsMsg::TerminalFontSize(font_size - 1)))
         ),
         container(
@@ -243,7 +254,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .width(36)
         .align_x(Alignment::Center),
         outlined(
-            strings::INCREASE,
+            strings::increase(),
             (font_size < FONT_SIZE_MAX).then(|| msg(SettingsMsg::TerminalFontSize(font_size + 1)))
         ),
     ]
@@ -273,11 +284,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
     .style(theme::pick_list)
     .menu_style(theme::menu);
     let terminal = column![
-        heading(strings::SETTINGS_TERMINAL),
-        field(strings::SETTINGS_FONT_SIZE, font_stepper.into(), None),
-        field(strings::SETTINGS_SCROLLBACK, scrollback.into(), None),
-        muted(strings::SETTINGS_SCROLLBACK_HINT),
-        field(strings::SETTINGS_THEME, term_theme.into(), None),
+        heading(strings::settings_terminal()),
+        field(strings::settings_font_size(), font_stepper.into(), None),
+        field(strings::settings_scrollback(), scrollback.into(), None),
+        muted(strings::settings_scrollback_hint()),
+        field(strings::settings_theme(), term_theme.into(), None),
     ]
     .spacing(theme::SPACE_SM);
 
@@ -295,31 +306,47 @@ pub fn view(app: &App) -> Element<'_, Message> {
     .align_y(Alignment::Center);
     // The setting stays a string; `system` reads as what it does.
     if crate::settings::is_system_editor(editor_value) {
-        editor_field = editor_field.push(muted(strings::EDITOR_SYSTEM_DEFAULT));
+        editor_field = editor_field.push(muted(strings::editor_system_default()));
     }
     let mut editing = column![
-        heading(strings::SETTINGS_EDITING),
-        field(strings::EDITOR_COMMAND, editor_field.into(), None),
-        muted(strings::EDITOR_COMMAND_HINT),
+        heading(strings::settings_editing()),
+        field(strings::editor_command(), editor_field.into(), None),
+        muted(strings::editor_command_hint()),
     ]
     .spacing(theme::SPACE_SM);
     if app.editor_input.is_some() {
         editing = editing.push(
-            text(strings::EDITOR_COMMAND_EMPTY)
+            text(strings::editor_command_empty())
                 .size(theme::TEXT_SM)
                 .color(palette().error),
         );
     }
 
+    let languages: Vec<LanguageOption> = LanguageChoice::ALL
+        .into_iter()
+        .map(LanguageOption)
+        .collect();
+    let language = pick_list(
+        languages,
+        Some(LanguageOption(settings.language)),
+        |choice| msg(SettingsMsg::Language(choice.0)),
+    )
+    .text_size(theme::TEXT_SM)
+    .width(240)
+    .style(theme::pick_list)
+    .menu_style(theme::menu);
+
     let content = column![
         row![
-            text(strings::SETTINGS_TITLE)
+            text(strings::settings_title())
                 .size(theme::TEXT_MD)
                 .font(theme::INTER_SEMIBOLD),
             space::horizontal(),
-            plain(strings::DONE, Some(msg(SettingsMsg::Close))),
+            plain(strings::done(), Some(msg(SettingsMsg::Close))),
         ]
         .align_y(Alignment::Center),
+        hrule(),
+        field(strings::settings_language(), language.into(), None),
         hrule(),
         transfers,
         hrule(),
@@ -345,18 +372,18 @@ fn backup_view(backup: &Backup, phase: u32) -> Element<'_, Message> {
     let running = backup.running();
     let buttons = row![
         outlined(
-            strings::EXPORT_BACKUP,
+            strings::export_backup(),
             (!running).then(|| backup_msg(BackupMsg::OpenExport))
         ),
         outlined(
-            strings::RESTORE_BACKUP,
+            strings::restore_backup(),
             (!running).then(|| backup_msg(BackupMsg::OpenRestore))
         ),
     ]
     .spacing(theme::SPACE_XS);
     let mut col = column![
-        heading(strings::BACKUP),
-        muted(strings::BACKUP_HINT),
+        heading(strings::backup()),
+        muted(strings::backup_hint()),
         buttons
     ]
     .spacing(theme::SPACE_SM);
@@ -364,15 +391,15 @@ fn backup_view(backup: &Backup, phase: u32) -> Element<'_, Message> {
     // The running operation and the outcomes, above the panel (in view without
     // scrolling).
     match (&backup.export, &backup.restore) {
-        (BackupState::Running, _) => col = col.push(busy(strings::EXPORTING, phase)),
-        (_, BackupState::Running) => col = col.push(busy(strings::RESTORING, phase)),
+        (BackupState::Running, _) => col = col.push(busy(strings::exporting(), phase)),
+        (_, BackupState::Running) => col = col.push(busy(strings::restoring(), phase)),
         _ => {}
     }
     if backup.panel == BackupPanel::Export {
         match &backup.export {
             BackupState::Done(report) => col = col.push(export_report(report)),
             BackupState::Failed(error) => {
-                col = col.push(outcome_error(strings::EXPORT_FAILED, error));
+                col = col.push(outcome_error(strings::export_failed(), error));
             }
             BackupState::Idle | BackupState::Running => {}
         }
@@ -381,7 +408,7 @@ fn backup_view(backup: &Backup, phase: u32) -> Element<'_, Message> {
         match &backup.restore {
             BackupState::Done(report) => col = col.push(restore_report(report)),
             BackupState::Failed(error) => {
-                col = col.push(outcome_error(strings::RESTORE_FAILED, error));
+                col = col.push(outcome_error(strings::restore_failed(), error));
             }
             BackupState::Idle | BackupState::Running => {}
         }
@@ -410,7 +437,7 @@ fn path_row<'a>(
     row![
         input(value, false, on_input),
         outlined(
-            strings::CHOOSE_FILE,
+            strings::choose_file(),
             Some(backup_msg(BackupMsg::Choose(target)))
         ),
     ]
@@ -432,9 +459,9 @@ fn field_error(backup: &Backup) -> Element<'_, Message> {
 fn export_panel(backup: &Backup) -> Element<'_, Message> {
     panel(
         column![
-            heading(strings::EXPORT_BACKUP),
+            heading(strings::export_backup()),
             field(
-                strings::BACKUP_FILE,
+                strings::backup_file(),
                 path_row(&backup.export_path, PickTarget::ExportBackup, |v| {
                     backup_msg(BackupMsg::ExportPath(v))
                 }),
@@ -442,7 +469,7 @@ fn export_panel(backup: &Backup) -> Element<'_, Message> {
             ),
             row![
                 field(
-                    strings::BACKUP_PASSWORD,
+                    strings::backup_password(),
                     input(&backup.export_password.0, true, |v| {
                         backup_msg(BackupMsg::ExportPassword(Password(v)))
                     })
@@ -450,7 +477,7 @@ fn export_panel(backup: &Backup) -> Element<'_, Message> {
                     None,
                 ),
                 field(
-                    strings::BACKUP_PASSWORD_CONFIRM,
+                    strings::backup_password_confirm(),
                     input(&backup.export_confirm.0, true, |v| {
                         backup_msg(BackupMsg::ExportConfirm(Password(v)))
                     })
@@ -471,16 +498,19 @@ fn export_panel(backup: &Backup) -> Element<'_, Message> {
 fn export_actions(backup: &Backup) -> Element<'_, Message> {
     if backup.confirm_overwrite {
         return confirm_with(
-            strings::EXPORT_OVERWRITE_CONFIRM,
-            strings::OVERWRITE,
+            strings::export_overwrite_confirm(),
+            strings::overwrite(),
             backup_msg(BackupMsg::ConfirmOverwrite),
             backup_msg(BackupMsg::CancelOverwrite),
         );
     }
     let idle = !backup.running() && !backup.export_checking;
     row![
-        primary(strings::EXPORT, idle.then(|| backup_msg(BackupMsg::Export))),
-        plain(strings::CANCEL, Some(backup_msg(BackupMsg::Cancel))),
+        primary(
+            strings::export(),
+            idle.then(|| backup_msg(BackupMsg::Export))
+        ),
+        plain(strings::cancel(), Some(backup_msg(BackupMsg::Cancel))),
     ]
     .spacing(theme::SPACE_XS)
     .align_y(Alignment::Center)
@@ -496,23 +526,23 @@ fn restore_panel(backup: &Backup) -> Element<'_, Message> {
             .on_press(backup_msg(BackupMsg::RestoreMode(mode)))
     };
     let mode_hint = match backup.restore_mode {
-        ImportMode::Merge => strings::RESTORE_MERGE_HINT,
-        ImportMode::Replace => strings::RESTORE_REPLACE_HINT,
+        ImportMode::Merge => strings::restore_merge_hint(),
+        ImportMode::Replace => strings::restore_replace_hint(),
     };
     let actions: Element<'_, Message> = if backup.confirm_replace {
         confirm_with(
-            strings::RESTORE_REPLACE_CONFIRM,
-            strings::REPLACE,
+            strings::restore_replace_confirm(),
+            strings::replace(),
             backup_msg(BackupMsg::ConfirmReplace),
             backup_msg(BackupMsg::CancelReplace),
         )
     } else {
         row![
             primary(
-                strings::RESTORE,
+                strings::restore(),
                 (!running).then(|| backup_msg(BackupMsg::Restore))
             ),
-            plain(strings::CANCEL, Some(backup_msg(BackupMsg::Cancel))),
+            plain(strings::cancel(), Some(backup_msg(BackupMsg::Cancel))),
         ]
         .spacing(theme::SPACE_XS)
         .align_y(Alignment::Center)
@@ -520,16 +550,16 @@ fn restore_panel(backup: &Backup) -> Element<'_, Message> {
     };
     panel(
         column![
-            heading(strings::RESTORE_BACKUP),
+            heading(strings::restore_backup()),
             field(
-                strings::BACKUP_FILE,
+                strings::backup_file(),
                 path_row(&backup.restore_path, PickTarget::RestoreBackup, |v| {
                     backup_msg(BackupMsg::RestorePath(v))
                 }),
                 None,
             ),
             field(
-                strings::BACKUP_PASSWORD,
+                strings::backup_password(),
                 input(&backup.restore_password.0, true, |v| {
                     backup_msg(BackupMsg::RestorePassword(Password(v)))
                 })
@@ -538,10 +568,10 @@ fn restore_panel(backup: &Backup) -> Element<'_, Message> {
                 None,
             ),
             field(
-                strings::RESTORE_MODE,
+                strings::restore_mode(),
                 row![
-                    mode(strings::RESTORE_MERGE, ImportMode::Merge),
-                    mode(strings::RESTORE_REPLACE, ImportMode::Replace),
+                    mode(strings::restore_merge(), ImportMode::Merge),
+                    mode(strings::restore_replace(), ImportMode::Replace),
                 ]
                 .spacing(theme::SPACE_XS)
                 .into(),
@@ -609,13 +639,13 @@ fn export_report(report: &ExportReport) -> Element<'_, Message> {
     .spacing(theme::SPACE_SM);
     col = names(
         col,
-        strings::BACKUP_MISSING_SECRETS,
+        strings::backup_missing_secrets(),
         report.missing_secrets.iter().cloned(),
         false,
     );
     col = names(
         col,
-        strings::BACKUP_SKIPPED_UNREADABLE,
+        strings::backup_skipped_unreadable(),
         report
             .skipped_unreadable
             .iter()
@@ -634,19 +664,19 @@ fn restore_report(report: &BackupImportReport) -> Element<'_, Message> {
     .spacing(theme::SPACE_SM);
     col = names(
         col,
-        strings::BACKUP_SECRET_ERRORS,
+        strings::backup_secret_errors(),
         report.secret_errors.iter().cloned(),
         true,
     );
     col = names(
         col,
-        strings::BACKUP_SKIPPED_SITES,
+        strings::backup_skipped_sites(),
         report.skipped_sites.iter().cloned(),
         false,
     );
     col = names(
         col,
-        strings::BACKUP_SKIPPED_WORKSPACES,
+        strings::backup_skipped_workspaces(),
         report.skipped_workspaces.iter().cloned(),
         false,
     );

@@ -59,17 +59,17 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let p = palette();
     let counts = queue.counts();
     let labels = [
-        strings::QUEUE_ACTIVE,
-        strings::QUEUE_QUEUED,
-        strings::QUEUE_FAILED,
-        strings::QUEUE_DONE,
+        strings::queue_active(),
+        strings::queue_queued(),
+        strings::queue_failed(),
+        strings::queue_done(),
     ];
     // A narrow window: short labels, no worker count, the session policy as a tag in
     // place of the title, tighter gaps.
     let fit = fit::queue_head(app.window_width, queue.session_policy().is_some());
     let compact = fit.compact;
     let mut head = row![fit.title.then(|| {
-        text(strings::TRANSFERS)
+        text(strings::transfers())
             .font(theme::INTER_SEMIBOLD)
             .wrapping(text::Wrapping::None)
     })]
@@ -91,9 +91,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
         ));
     }
     let toggle = if app.queue_open {
-        strings::QUEUE_HIDE
+        strings::queue_hide()
     } else {
-        strings::QUEUE_SHOW
+        strings::queue_show()
     };
     let head = head
         .push(space::horizontal())
@@ -131,9 +131,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
             row![
                 button(
                     text(if compact {
-                        strings::CLEAR_FINISHED_SHORT
+                        strings::clear_finished_short()
                     } else {
-                        strings::CLEAR_FINISHED
+                        strings::clear_finished()
                     })
                     .size(theme::TEXT_XS)
                     .wrapping(text::Wrapping::None)
@@ -186,12 +186,12 @@ fn body(app: &App) -> Element<'_, Message> {
     };
     if queue.len() == 0 {
         if queue.resyncing() {
-            return note(text(strings::QUEUE_LOADING).color(p.muted).into());
+            return note(text(strings::queue_loading()).color(p.muted).into());
         }
         return note(
             column![
-                text(strings::NO_TRANSFERS),
-                text(strings::NO_TRANSFERS_HINT)
+                text(strings::no_transfers()),
+                text(strings::no_transfers_hint())
                     .size(theme::TEXT_XS)
                     .color(p.muted),
             ]
@@ -202,10 +202,10 @@ fn body(app: &App) -> Element<'_, Message> {
     let rows = queue.rows_in(queue.tab);
     if rows.is_empty() {
         let empty = match queue.tab {
-            QueueTab::Active => strings::NOTHING_ACTIVE,
-            QueueTab::Queued => strings::NOTHING_QUEUED,
-            QueueTab::Failed => strings::NOTHING_FAILED,
-            QueueTab::Done => strings::NOTHING_DONE,
+            QueueTab::Active => strings::nothing_active(),
+            QueueTab::Queued => strings::nothing_queued(),
+            QueueTab::Failed => strings::nothing_failed(),
+            QueueTab::Done => strings::nothing_done(),
         };
         return note(text(empty).color(p.muted).into());
     }
@@ -235,8 +235,8 @@ fn queue_row<'a>(app: &'a App, row: &'a QueueRow) -> Element<'a, Message> {
     let item = &row.item;
     let id = item.id;
     let (arrow, path) = match item.spec.direction {
-        Direction::Upload => (strings::UPLOAD_ARROW, &item.spec.local),
-        Direction::Download => (strings::DOWNLOAD_ARROW, &item.spec.remote),
+        Direction::Upload => (strings::upload_arrow(), &item.spec.local),
+        Direction::Download => (strings::download_arrow(), &item.spec.remote),
     };
     // The name first (a long folder must not hide it), then the source folder, muted.
     let mono = |label: &'a str| {
@@ -251,7 +251,7 @@ fn queue_row<'a>(app: &'a App, row: &'a QueueRow) -> Element<'a, Message> {
     ]
     .align_y(Alignment::Center);
     if item.is_dir == Some(true) {
-        name = name.push(mono(strings::PATH_SEPARATOR).color(p.muted));
+        name = name.push(mono(strings::path_separator()).color(p.muted));
     }
     let name = row![name.spacing(theme::SPACE_XS)]
         .push(path.parent().map(|parent| {
@@ -265,7 +265,7 @@ fn queue_row<'a>(app: &'a App, row: &'a QueueRow) -> Element<'a, Message> {
         .align_y(Alignment::Center);
     let site = app
         .site(&item.spec.site)
-        .map_or(strings::SITE_MISSING, |s| s.name.as_str());
+        .map_or(strings::site_missing(), |s| s.name.as_str());
     let cell = |content: Element<'a, Message>, width: Length, right: bool| {
         container(content)
             .width(width)
@@ -287,7 +287,7 @@ fn queue_row<'a>(app: &'a App, row: &'a QueueRow) -> Element<'a, Message> {
             .into()
     };
     let status: Element<'a, Message> = match app.queue.status(row) {
-        RowStatus::Error(error) => error_text(&error.message),
+        RowStatus::Error(error) => error_text(crate::ui::strings::error(error)),
         RowStatus::Progress {
             fraction,
             bytes_per_sec,
@@ -317,14 +317,14 @@ fn queue_row<'a>(app: &'a App, row: &'a QueueRow) -> Element<'a, Message> {
             .size(theme::TEXT_SM)
             .wrapping(text::Wrapping::None)
             .into(),
-        RowStatus::Transferring => muted(strings::TRANSFERRING.to_owned()),
-        RowStatus::Starting => muted(strings::STARTING.to_owned()),
-        RowStatus::Waiting => muted(strings::WAITING_FOR_WORKER.to_owned()),
-        RowStatus::Paused => muted(strings::PAUSED.to_owned()),
+        RowStatus::Transferring => muted(strings::transferring().to_owned()),
+        RowStatus::Starting => muted(strings::starting().to_owned()),
+        RowStatus::Waiting => muted(strings::waiting_for_worker().to_owned()),
+        RowStatus::Paused => muted(strings::paused().to_owned()),
         RowStatus::Conflict => row![
-            text(strings::FILE_EXISTS).size(theme::TEXT_SM),
+            text(strings::file_exists()).size(theme::TEXT_SM),
             checkbox(app.queue.apply_all(id))
-                .label(strings::APPLY_TO_ALL)
+                .label(strings::apply_to_all())
                 .text_size(theme::TEXT_XS)
                 .size(theme::TEXT_SM)
                 .style(theme::checkbox)
@@ -333,21 +333,21 @@ fn queue_row<'a>(app: &'a App, row: &'a QueueRow) -> Element<'a, Message> {
         .spacing(theme::SPACE_SM)
         .align_y(Alignment::Center)
         .into(),
-        RowStatus::Done => muted(strings::TRANSFER_DONE.to_owned()),
+        RowStatus::Done => muted(strings::transfer_done().to_owned()),
         RowStatus::Skipped(reason) => muted(strings::skipped(reason)),
-        RowStatus::Dismissed => muted(strings::DISMISSED.to_owned()),
-        RowStatus::Cancelled => muted(strings::CANCELLED.to_owned()),
+        RowStatus::Dismissed => muted(strings::dismissed().to_owned()),
+        RowStatus::Cancelled => muted(strings::cancelled().to_owned()),
     };
     let mut actions = row![].spacing(theme::SPACE_3XS).align_y(Alignment::Center);
     for action in app.queue.actions(row) {
         let label = match action {
-            RowAction::Pause => strings::PAUSE,
-            RowAction::Resume | RowAction::Resolve(ResolveAction::Resume) => strings::RESUME,
-            RowAction::Cancel => strings::CANCEL,
-            RowAction::Retry => strings::RETRY,
-            RowAction::Dismiss => strings::DISMISS,
-            RowAction::Resolve(ResolveAction::Skip) => strings::SKIP,
-            RowAction::Resolve(ResolveAction::Overwrite) => strings::OVERWRITE,
+            RowAction::Pause => strings::pause(),
+            RowAction::Resume | RowAction::Resolve(ResolveAction::Resume) => strings::resume(),
+            RowAction::Cancel => strings::cancel(),
+            RowAction::Retry => strings::retry(),
+            RowAction::Dismiss => strings::dismiss(),
+            RowAction::Resolve(ResolveAction::Skip) => strings::skip(),
+            RowAction::Resolve(ResolveAction::Overwrite) => strings::overwrite(),
         };
         actions = actions.push(
             button(text(label).size(theme::TEXT_XS))
@@ -366,7 +366,7 @@ fn queue_row<'a>(app: &'a App, row: &'a QueueRow) -> Element<'a, Message> {
     .into()
 }
 
-fn error_text<'a>(message: &'a str) -> Element<'a, Message> {
+fn error_text<'a>(message: String) -> Element<'a, Message> {
     text(message)
         .size(theme::TEXT_SM)
         .color(palette().error)

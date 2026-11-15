@@ -591,8 +591,11 @@ async fn command_while_reconnecting_is_network() {
     assert!(matches!(*rx.borrow(), ConnectionState::Reconnecting { .. }));
 
     s.disconnect().await;
-    let by_user =
-        ConnectionState::Disconnected(Error::new(ErrorKind::Network, "Disconnected by user"));
+    let by_user = ConnectionState::Disconnected(Error::coded(
+        ErrorKind::Network,
+        "net-disconnected-by-user",
+        "Disconnected by user",
+    ));
     assert_eq!(*rx.borrow_and_update(), by_user);
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(
@@ -741,8 +744,11 @@ async fn explicit_disconnect_does_not_reconnect() {
     let (s, _p) = session().await;
     let mut rx = s.state();
     s.disconnect().await;
-    let expected =
-        ConnectionState::Disconnected(Error::new(ErrorKind::Network, "Disconnected by user"));
+    let expected = ConnectionState::Disconnected(Error::coded(
+        ErrorKind::Network,
+        "net-disconnected-by-user",
+        "Disconnected by user",
+    ));
     assert_eq!(*rx.borrow_and_update(), expected);
     tokio::time::sleep(Duration::from_millis(1500)).await;
     assert!(
@@ -1090,8 +1096,11 @@ async fn disconnect_while_command_hangs() {
     tokio::time::timeout(Duration::from_secs(1), s.disconnect())
         .await
         .expect("disconnect waited for the hung command");
-    let by_user =
-        ConnectionState::Disconnected(Error::new(ErrorKind::Network, "Disconnected by user"));
+    let by_user = ConnectionState::Disconnected(Error::coded(
+        ErrorKind::Network,
+        "net-disconnected-by-user",
+        "Disconnected by user",
+    ));
     assert_eq!(*rx.borrow_and_update(), by_user);
     let result = tokio::time::timeout(Duration::from_secs(1), hung)
         .await
@@ -1394,8 +1403,11 @@ async fn disconnect_during_keepalive() {
     tokio::time::timeout(Duration::from_secs(1), s.disconnect())
         .await
         .expect("disconnect waited for the keepalive NOOP");
-    let by_user =
-        ConnectionState::Disconnected(Error::new(ErrorKind::Network, "Disconnected by user"));
+    let by_user = ConnectionState::Disconnected(Error::coded(
+        ErrorKind::Network,
+        "net-disconnected-by-user",
+        "Disconnected by user",
+    ));
     assert_eq!(*s.state().borrow(), by_user);
     wait_live(&live, 0).await;
 }

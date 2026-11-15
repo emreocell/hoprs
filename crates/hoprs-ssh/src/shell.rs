@@ -158,7 +158,7 @@ impl fmt::Debug for ShellHandle {
 }
 
 fn shell_closed() -> Error {
-    Error::new(ErrorKind::Network, "Shell closed")
+    Error::coded(ErrorKind::Network, "ssh-shell-closed", "Shell closed")
 }
 
 impl ShellChannel {
@@ -295,16 +295,19 @@ async fn expect_reply(reader: &mut ChannelReadHalf, what: &str) -> Result<()> {
             match reader.wait().await {
                 Some(ChannelMsg::Success) => return Ok(()),
                 Some(ChannelMsg::Failure) => {
-                    return Err(Error::new(
+                    return Err(Error::coded(
                         ErrorKind::Protocol,
+                        "ssh-pty-refused",
                         "Server refused the PTY/shell request",
                     ));
                 }
                 Some(ChannelMsg::Close | ChannelMsg::Eof) | None => {
-                    return Err(Error::new(
+                    return Err(Error::coded(
                         ErrorKind::Network,
+                        "ssh-closed-during-request",
                         format!("Connection closed during the {what} request"),
-                    ));
+                    )
+                    .arg("what", what));
                 }
                 Some(_) => {}
             }
@@ -312,7 +315,13 @@ async fn expect_reply(reader: &mut ChannelReadHalf, what: &str) -> Result<()> {
     };
     tokio::time::timeout(REQUEST_TIMEOUT, wait)
         .await
-        .unwrap_or_else(|_| Err(Error::new(ErrorKind::Network, "Shell request timed out")))
+        .unwrap_or_else(|_| {
+            Err(Error::coded(
+                ErrorKind::Network,
+                "ssh-shell-request-timed-out",
+                "Shell request timed out",
+            ))
+        })
 }
 
 /// Output waiting for the consumer, in order. Consecutive `Data` are coalesced.

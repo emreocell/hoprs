@@ -41,16 +41,16 @@ pub fn line(app: &App) -> StatusLine {
     let tab = app.active_tab.and_then(|i| app.tabs.get(i));
     let site = tab.and_then(|t| app.site(&t.site));
     let (state, tone) = match tab.map(|t| app.conn(&t.site).conn_status()) {
-        _ if app.closing => (strings::CLOSING.to_owned(), Tone::Muted),
-        None => (strings::NOT_CONNECTED.to_owned(), Tone::Muted),
-        Some(ConnStatus::Connecting) => (strings::CONNECTING.to_owned(), Tone::Muted),
-        Some(ConnStatus::Connected) => (strings::CONNECTED.to_owned(), Tone::Ok),
+        _ if app.closing => (strings::closing().to_owned(), Tone::Muted),
+        None => (strings::not_connected().to_owned(), Tone::Muted),
+        Some(ConnStatus::Connecting) => (strings::connecting().to_owned(), Tone::Muted),
+        Some(ConnStatus::Connected) => (strings::connected().to_owned(), Tone::Ok),
         Some(ConnStatus::Reconnecting { attempt, of }) => {
             (strings::reconnecting(attempt, of), Tone::Muted)
         }
-        Some(ConnStatus::Waiting) => (strings::WAITING_FOR_YOU.to_owned(), Tone::Muted),
+        Some(ConnStatus::Waiting) => (strings::waiting_for_you().to_owned(), Tone::Muted),
         Some(ConnStatus::Disconnected(error)) => {
-            (strings::disconnected(&error.message), Tone::Error)
+            (strings::disconnected(&strings::error(error)), Tone::Error)
         }
     };
     let auth = match (tab, site) {
@@ -90,7 +90,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let items = items
         .push(space::horizontal())
         .push(
-            button(text(strings::LOG).size(theme::TEXT_XS))
+            button(text(strings::log()).size(theme::TEXT_XS))
                 .padding(Padding::from([0.0, theme::SPACE_XS]))
                 .style(theme::queue_tab(app.log.open))
                 .on_press(Message::Log(LogMsg::Toggle)),

@@ -55,7 +55,7 @@ pub fn content(dialog: &Dialog) -> Content {
         warning: None,
         fields: Vec::new(),
         save: dialog.can_save(),
-        action: strings::CONNECT,
+        action: strings::connect(),
         decision: dialog.is_decision(),
     };
     match &request.kind {
@@ -65,16 +65,16 @@ pub fn content(dialog: &Dialog) -> Content {
             other_key_types,
             ..
         } => Content {
-            title: strings::HOST_KEY_TITLE.to_owned(),
-            intro: Some(strings::HOST_KEY_INTRO.to_owned()),
+            title: strings::host_key_title().to_owned(),
+            intro: Some(strings::host_key_intro().to_owned()),
             rows: vec![
-                (strings::LABEL_HOST, request.key.clone()),
-                (strings::LABEL_KEY_TYPE, key_type.clone()),
-                (strings::LABEL_FINGERPRINT, fingerprint.clone()),
+                (strings::label_host(), request.key.clone()),
+                (strings::label_key_type(), key_type.clone()),
+                (strings::label_fingerprint(), fingerprint.clone()),
             ],
             warning: (!other_key_types.is_empty())
                 .then(|| strings::other_key_types(other_key_types)),
-            action: strings::TRUST_AND_CONNECT,
+            action: strings::trust_and_connect(),
             ..base
         },
         PromptKind::Certificate {
@@ -82,48 +82,48 @@ pub fn content(dialog: &Dialog) -> Content {
             problem,
             ..
         } => {
-            let host = (strings::LABEL_HOST, request.key.clone());
+            let host = (strings::label_host(), request.key.clone());
             match problem {
                 CertProblem::Untrusted { reason } => Content {
-                    title: strings::CERT_UNTRUSTED_TITLE.to_owned(),
-                    intro: Some(strings::CERT_UNTRUSTED_INTRO.to_owned()),
+                    title: strings::cert_untrusted_title().to_owned(),
+                    intro: Some(strings::cert_untrusted_intro().to_owned()),
                     rows: vec![
                         host,
-                        (strings::LABEL_REASON, strings::cert_reason(reason)),
-                        (strings::LABEL_FINGERPRINT, fingerprint.clone()),
+                        (strings::label_reason(), strings::cert_reason(reason)),
+                        (strings::label_fingerprint(), fingerprint.clone()),
                     ],
-                    action: strings::TRUST_CERTIFICATE,
+                    action: strings::trust_certificate(),
                     ..base
                 },
                 CertProblem::Changed { pinned, reason } => Content {
-                    title: strings::CERT_CHANGED_TITLE.to_owned(),
+                    title: strings::cert_changed_title().to_owned(),
                     intro: None,
                     rows: vec![
                         host,
-                        (strings::LABEL_REASON, strings::cert_reason(reason)),
-                        (strings::LABEL_TRUSTED_BEFORE, pinned.clone()),
-                        (strings::LABEL_PRESENTED_NOW, fingerprint.clone()),
+                        (strings::label_reason(), strings::cert_reason(reason)),
+                        (strings::label_trusted_before(), pinned.clone()),
+                        (strings::label_presented_now(), fingerprint.clone()),
                     ],
-                    warning: Some(strings::CERT_CHANGED_INTRO.to_owned()),
-                    action: strings::TRUST_CERTIFICATE,
+                    warning: Some(strings::cert_changed_intro().to_owned()),
+                    action: strings::trust_certificate(),
                     ..base
                 },
             }
         }
         PromptKind::Password { user, .. } => Content {
-            title: strings::PASSWORD_TITLE.to_owned(),
-            rows: vec![(strings::LABEL_ACCOUNT, format!("{user}@{}", request.key))],
-            fields: vec![(strings::FIELD_PASSWORD.to_owned(), false)],
+            title: strings::password_title().to_owned(),
+            rows: vec![(strings::label_account(), format!("{user}@{}", request.key))],
+            fields: vec![(strings::field_password().to_owned(), false)],
             ..base
         },
         PromptKind::Passphrase { path } => Content {
-            title: strings::PASSPHRASE_TITLE.to_owned(),
+            title: strings::passphrase_title().to_owned(),
             rows: vec![
-                (strings::LABEL_HOST, request.key.clone()),
-                (strings::LABEL_KEY_FILE, path.display().to_string()),
+                (strings::label_host(), request.key.clone()),
+                (strings::label_key_file(), path.display().to_string()),
             ],
-            fields: vec![(strings::FIELD_PASSPHRASE.to_owned(), false)],
-            action: strings::UNLOCK,
+            fields: vec![(strings::field_passphrase().to_owned(), false)],
+            action: strings::unlock(),
             ..base
         },
         PromptKind::KeyboardInteractive {
@@ -132,17 +132,17 @@ pub fn content(dialog: &Dialog) -> Content {
             prompts,
         } => Content {
             title: if name.trim().is_empty() {
-                strings::KBD_TITLE.to_owned()
+                strings::kbd_title().to_owned()
             } else {
                 name.clone()
             },
             intro: (!instructions.trim().is_empty()).then(|| instructions.clone()),
-            rows: vec![(strings::LABEL_HOST, request.key.clone())],
+            rows: vec![(strings::label_host(), request.key.clone())],
             fields: prompts
                 .iter()
                 .map(|p| (p.text.trim().to_owned(), p.echo))
                 .collect(),
-            action: strings::CONTINUE,
+            action: strings::continue_(),
             ..base
         },
     }
@@ -221,11 +221,11 @@ pub fn view(dialog: &Dialog) -> Element<'_, Message> {
         body = body.push(
             column![
                 checkbox(dialog.save)
-                    .label(strings::SAVE_IN_KEYRING)
+                    .label(strings::save_in_keyring())
                     .text_size(theme::TEXT_SM)
                     .style(theme::checkbox)
                     .on_toggle(|v| msg(DialogMsg::Save(v))),
-                text(strings::SAVE_IN_KEYRING_HINT)
+                text(strings::save_in_keyring_hint())
                     .size(theme::TEXT_XS)
                     .color(p.muted),
             ]
@@ -244,7 +244,7 @@ pub fn view(dialog: &Dialog) -> Element<'_, Message> {
 /// credential: Cancel as text, then the action in white.
 fn buttons<'a>(action: &'a str, decision: bool) -> Element<'a, Message> {
     let pad = Padding::from([theme::SPACE_2XS, theme::SPACE_MD]);
-    let cancel = button(text(strings::CANCEL).font(theme::INTER_SEMIBOLD))
+    let cancel = button(text(strings::cancel()).font(theme::INTER_SEMIBOLD))
         .padding(pad)
         .on_press(msg(DialogMsg::Cancel));
     let row = if decision {
@@ -301,12 +301,12 @@ pub fn host_key_changed_body<'a>(app: &'a App, tab: &'a Tab) -> iced::widget::Co
     let conn = app.conn(&tab.site);
     let line = conn.host_key_change().and_then(|change| change.line);
     let explanation = if line.is_some() {
-        strings::HOST_KEY_CHANGED_BODY
+        strings::host_key_changed_body()
     } else {
-        strings::HOST_KEY_CHANGED_SESSION_BODY
+        strings::host_key_changed_session_body()
     };
     let mut body = column![
-        text(strings::HOST_KEY_CHANGED_TITLE)
+        text(strings::host_key_changed_title())
             .font(theme::INTER_SEMIBOLD)
             .color(p.error),
         text(explanation).size(theme::TEXT_SM).color(p.ink_2),
@@ -330,17 +330,17 @@ pub fn host_key_changed_body<'a>(app: &'a App, tab: &'a Tab) -> iced::widget::Co
     for action in app.failure_actions(tab) {
         let (label, style, on_press): (_, fn(&iced::Theme, _) -> _, _) = match action {
             FailureAction::RemoveOldEntry => (
-                strings::REMOVE_OLD_ENTRY,
+                strings::remove_old_entry(),
                 theme::button_outline,
                 fix(KnownHostsMsg::Start),
             ),
             FailureAction::CloseAndReconnect => (
-                strings::CLOSE_AND_RECONNECT,
+                strings::close_and_reconnect(),
                 theme::button_outline,
                 Message::RestartSession(tab.id),
             ),
             FailureAction::EditSite => (
-                strings::EDIT_SITE,
+                strings::edit_site(),
                 theme::button_text,
                 Message::EditSite(tab.site.clone()),
             ),
@@ -356,8 +356,8 @@ pub fn host_key_changed_body<'a>(app: &'a App, tab: &'a Tab) -> iced::widget::Co
     let muted = |label: &'a str| text(label).size(theme::TEXT_SM).color(p.muted);
     body = match &conn.known_hosts {
         KnownHostsFix::Idle => body.push(actions),
-        KnownHostsFix::Checking => body.push(muted(strings::READING_KNOWN_HOSTS)),
-        KnownHostsFix::Removing => body.push(muted(strings::REMOVING_KNOWN_HOSTS)),
+        KnownHostsFix::Checking => body.push(muted(strings::reading_known_hosts())),
+        KnownHostsFix::Removing => body.push(muted(strings::removing_known_hosts())),
         KnownHostsFix::Failed(error) => body
             .push(crate::ui::widgets::failure(Some(error)))
             .push(actions),
@@ -376,13 +376,13 @@ fn confirm<'a>(
     let pad = Padding::from([theme::SPACE_2XS, theme::SPACE_MD]);
     let (question, yes) = if entries.is_empty() {
         (
-            strings::NO_KNOWN_HOSTS_ENTRY.to_owned(),
-            strings::CONNECT_AGAIN,
+            strings::no_known_hosts_entry().to_owned(),
+            strings::connect_again(),
         )
     } else {
         (
             strings::remove_known_hosts_question(entries.len(), &host),
-            strings::REMOVE,
+            strings::remove(),
         )
     };
     let mut body =
@@ -408,7 +408,7 @@ fn confirm<'a>(
                 .padding(pad)
                 .style(theme::button_primary)
                 .on_press(fix(KnownHostsMsg::Confirm)),
-            button(text(strings::KEEP))
+            button(text(strings::keep()))
                 .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
                 .style(theme::button_text)
                 .on_press(fix(KnownHostsMsg::Cancel)),

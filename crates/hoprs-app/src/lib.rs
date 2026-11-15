@@ -11,6 +11,7 @@ mod backend;
 pub mod bench;
 pub mod cli;
 mod effects;
+mod i18n;
 mod icon;
 mod logbuf;
 mod probe;
@@ -66,7 +67,7 @@ pub fn run() -> iced::Result {
     let _instance = match acquire_first_instance_lock(&instance_lock_paths()) {
         Ok(Some(lock)) => Some(lock),
         Ok(None) => {
-            println!("{}", ui::strings::ALREADY_RUNNING);
+            println!("{}", ui::strings::already_running());
             std::process::exit(0);
         }
         Err(err) => {
@@ -78,7 +79,7 @@ pub fn run() -> iced::Result {
 
     iced::application(move || boot(log.clone(), probe), update, view)
         .subscription(subscription)
-        .title(ui::strings::APP_TITLE)
+        .title(ui::strings::app_title())
         .theme(|_: &Hoprs| ui::theme::theme())
         .settings(iced::Settings {
             fonts: ui::theme::FONTS.map(Cow::Borrowed).to_vec(),
@@ -123,6 +124,9 @@ struct Hoprs {
 
 /// What iced carries: the app's messages, and the start-up probe's steps, which never
 /// reach the [`App`].
+// `Message` is large; boxing it would allocate on every message for a probe that is
+// rarely on.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 enum Root {
     App(Message),
@@ -135,10 +139,12 @@ fn boot(log: logbuf::LogBuffer, probe: Option<probe::Probe>) -> (Hoprs, Task<Roo
         Err(err) => {
             // No profiles, no app: there is nothing to show yet without them.
             tracing::error!(%err, "cannot open the profiles");
-            eprintln!("{}: {err}", ui::strings::CANNOT_OPEN_PROFILES);
+            eprintln!("{}: {err}", ui::strings::cannot_open_profiles());
             std::process::exit(1);
         }
     };
+    // The language before the first view: the setting, or the OS's.
+    i18n::set_language(i18n::resolve(backend.settings().settings.language));
     let backend: Arc<dyn BackendApi> = Arc::new(backend);
     let (mut app, effects) = App::boot();
     app.attach_log(log);
@@ -156,7 +162,11 @@ fn boot(log: logbuf::LogBuffer, probe: Option<probe::Probe>) -> (Hoprs, Task<Roo
 /// The real backend at the standard locations, secrets in the system keyring.
 fn open_backend() -> hoprs_core::Result<Backend> {
     let config = BackendConfig::standard().ok_or_else(|| {
-        hoprs_core::Error::new(hoprs_core::ErrorKind::Io, "No configuration directory")
+        hoprs_core::Error::coded(
+            hoprs_core::ErrorKind::Io,
+            "app-no-config-dir",
+            "No configuration directory",
+        )
     })?;
     Backend::open(config, Arc::new(LazyKeyringStore::new()))
 }

@@ -104,15 +104,23 @@ pub fn read_sitemanager(path: &Path) -> Result<ParsedSiteManager> {
         return Err(too_large(bytes.len() as u64));
     }
     let xml = String::from_utf8(bytes).map_err(|_| {
-        Error::new(ErrorKind::Protocol, "Cannot read sitemanager.xml")
-            .with_detail("file is not valid UTF-8")
+        Error::coded(
+            ErrorKind::Protocol,
+            "import-cannot-read",
+            "Cannot read sitemanager.xml",
+        )
+        .with_detail("file is not valid UTF-8")
     })?;
     parse_sitemanager(&xml)
 }
 
 fn too_large(len: u64) -> Error {
-    Error::new(ErrorKind::Protocol, "sitemanager.xml is too large")
-        .with_detail(format!("{len} bytes (limit {MAX_SITEMANAGER_BYTES})"))
+    Error::coded(
+        ErrorKind::Protocol,
+        "import-file-too-large",
+        "sitemanager.xml is too large",
+    )
+    .with_detail(format!("{len} bytes (limit {MAX_SITEMANAGER_BYTES})"))
 }
 
 /// Parses FileZilla 3.x `sitemanager.xml` content. All or nothing: any XML
@@ -128,8 +136,12 @@ pub fn parse_sitemanager(xml: &str) -> Result<ParsedSiteManager> {
         .iter()
         .find(|e| e.name == "FileZilla3")
         .ok_or_else(|| {
-            Error::new(ErrorKind::Protocol, "Cannot read sitemanager.xml")
-                .with_detail("root element is not FileZilla3")
+            Error::coded(
+                ErrorKind::Protocol,
+                "import-cannot-read",
+                "Cannot read sitemanager.xml",
+            )
+            .with_detail("root element is not FileZilla3")
         })?;
     let entries = top
         .child("Servers")
@@ -194,8 +206,12 @@ fn syntax_error(xml: &str, offset: u64, what: impl std::fmt::Display) -> Error {
         .chars()
         .count()
         + 1;
-    Error::new(ErrorKind::Protocol, "Cannot read sitemanager.xml")
-        .with_detail(format!("line {line}, column {column}: {what}"))
+    Error::coded(
+        ErrorKind::Protocol,
+        "import-cannot-read",
+        "Cannot read sitemanager.xml",
+    )
+    .with_detail(format!("line {line}, column {column}: {what}"))
 }
 
 fn build_tree(xml: &str) -> Result<Elem> {

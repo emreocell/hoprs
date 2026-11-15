@@ -70,15 +70,18 @@ pub(crate) fn verifier(
     let mut roots = RootCertStore::empty();
     // Unparsable system certificates are skipped, like every TLS client does.
     roots.add_parsable_certificates(system_roots().iter().cloned());
-    for path in &cfg.extra_roots {
+    for root in &cfg.extra_roots {
+        let path = root.display().to_string();
         let bad_root = |detail: String| {
-            Error::new(
+            Error::coded(
                 ErrorKind::Tls,
-                format!("Cannot use trusted certificate {}", path.display()),
+                "tls-trusted-cert-unusable",
+                format!("Cannot use trusted certificate {path}"),
             )
+            .arg("path", path.to_string())
             .with_detail(detail)
         };
-        let certs = CertificateDer::pem_file_iter(path)
+        let certs = CertificateDer::pem_file_iter(root)
             .and_then(|it| it.collect::<std::result::Result<Vec<_>, _>>())
             .map_err(|e| bad_root(e.to_string()))?;
         if certs.is_empty() {
@@ -95,8 +98,12 @@ pub(crate) fn verifier(
         let v = WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider.clone())
             .build()
             .map_err(|e| {
-                Error::new(ErrorKind::Tls, "Cannot build the certificate verifier")
-                    .with_detail(e.to_string())
+                Error::coded(
+                    ErrorKind::Tls,
+                    "tls-verifier-build-failed",
+                    "Cannot build the certificate verifier",
+                )
+                .with_detail(e.to_string())
             })?;
         Some(v)
     };
@@ -252,7 +259,14 @@ pub(crate) fn connector(
     let verifier = verifier(cfg, slot, stale)?;
     let config = ClientConfig::builder_with_provider(verifier.provider.clone())
         .with_safe_default_protocol_versions()
-        .map_err(|e| Error::new(ErrorKind::Tls, "Cannot configure TLS").with_detail(e.to_string()))?
+        .map_err(|e| {
+            Error::coded(
+                ErrorKind::Tls,
+                "tls-configure-failed",
+                "Cannot configure TLS",
+            )
+            .with_detail(e.to_string())
+        })?
         .dangerous()
         .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();

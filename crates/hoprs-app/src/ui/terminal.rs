@@ -182,7 +182,7 @@ pub fn map_key(
 pub fn view<'a>(app: &'a App, tab: &'a Tab, terminal: &'a TerminalTab) -> Element<'a, Message> {
     let body: Element<'a, Message> = match app.conn(&tab.site).state {
         TabState::Failed(_) => crate::ui::files::not_connected(app, tab),
-        TabState::Connecting => centered(text(strings::CONNECTING).color(palette().muted)),
+        TabState::Connecting => centered(text(strings::connecting()).color(palette().muted)),
         TabState::Connected(_) => {
             // An ended shell takes no keys (its cursor is an outline).
             let focused = app.terminal_has_keyboard(tab);
@@ -200,7 +200,7 @@ pub fn view<'a>(app: &'a App, tab: &'a Tab, terminal: &'a TerminalTab) -> Elemen
             }
             if terminal.input_dropped {
                 col = col
-                    .push(note(strings::TERMINAL_INPUT_DROPPED))
+                    .push(note(strings::terminal_input_dropped()))
                     .push(hrule());
             }
             col = col.push(
@@ -277,7 +277,7 @@ fn end_banner(
         .style(theme::button_outline)
         .on_press_maybe(can_restart.then(|| msg(tab, TerminalMsg::Restart)));
     let hint = (!can_restart).then(|| {
-        text(strings::TERMINAL_WAITING_FOR_CONNECTION)
+        text(strings::terminal_waiting_for_connection())
             .size(theme::TEXT_XS)
             .color(p.muted)
     });
@@ -296,7 +296,7 @@ fn end_banner(
 
 /// The inline search bar: the query, "No match", previous, next and close.
 fn search_bar(tab: TabId, bar: &SearchBar) -> Element<'_, Message> {
-    let field = text_input(strings::TERMINAL_SEARCH_PLACEHOLDER, &bar.query)
+    let field = text_input(strings::terminal_search_placeholder(), &bar.query)
         .id(search_id(tab))
         .on_input(move |query| msg(tab, TerminalMsg::SearchInput(query)))
         .on_submit(msg(tab, TerminalMsg::SearchNext))
@@ -312,7 +312,7 @@ fn search_bar(tab: TabId, bar: &SearchBar) -> Element<'_, Message> {
             .on_press(msg(tab, m))
     };
     let no_match = bar.no_match.then(|| {
-        text(strings::TERMINAL_SEARCH_NO_MATCH)
+        text(strings::terminal_search_no_match())
             .size(theme::TEXT_XS)
             .color(palette().muted)
     });
@@ -322,11 +322,11 @@ fn search_bar(tab: TabId, bar: &SearchBar) -> Element<'_, Message> {
             no_match,
             space::horizontal(),
             action(
-                strings::TERMINAL_SEARCH_PREVIOUS,
+                strings::terminal_search_previous(),
                 TerminalMsg::SearchPrevious
             ),
-            action(strings::TERMINAL_SEARCH_NEXT, TerminalMsg::SearchNext),
-            action(strings::TERMINAL_SEARCH_CLOSE, TerminalMsg::CloseSearch),
+            action(strings::terminal_search_next(), TerminalMsg::SearchNext),
+            action(strings::terminal_search_close(), TerminalMsg::CloseSearch),
         ]
         .spacing(theme::SPACE_XS)
         .align_y(Alignment::Center),

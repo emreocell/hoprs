@@ -94,10 +94,13 @@ impl Idle {
 
     /// The error of a connection that stayed silent too long.
     fn error(&self, context: &str) -> Error {
-        Error::new(
+        let secs = self.timeout.as_secs();
+        Error::coded(
             ErrorKind::Network,
-            format!("Connection lost: no data for {} s", self.timeout.as_secs()),
+            "ftp-no-data-timeout",
+            format!("Connection lost: no data for {secs} s"),
         )
+        .arg("secs", secs.to_string())
         .with_detail(context.to_owned())
     }
 }
@@ -114,8 +117,13 @@ fn silent(conn: PooledConn, transfer: Transfer, idle: &Idle, context: &str) -> E
 
 /// The connection that carried the transfer is lost (or the server is gone).
 fn lost(context: &str, detail: impl Display) -> Error {
-    Error::new(ErrorKind::Network, format!("Connection lost: {context}"))
-        .with_detail(detail.to_string())
+    Error::coded(
+        ErrorKind::Network,
+        "ftp-connection-lost",
+        format!("Connection lost: {context}"),
+    )
+    .arg("context", context.to_string())
+    .with_detail(detail.to_string())
 }
 
 /// Closes `conn` after a best-effort `ABOR` sent from a background task. Never waits.
@@ -153,10 +161,12 @@ async fn finish(
         Ok(Err(FtpError::ConnectionError(io))) if upload => {
             match tokio::time::timeout(timeouts.reply, conn.stream().noop()).await {
                 Ok(Ok(())) => {
-                    return Err(Error::new(
+                    return Err(Error::coded(
                         ErrorKind::Io,
+                        "ftp-upload-refused",
                         format!("Upload refused by the server: {context}"),
                     )
+                    .arg("context", context.to_string())
                     .with_detail(format!("the server closed the data connection: {io}")));
                 }
                 _ => lost(&context, io),
@@ -413,10 +423,15 @@ impl AsyncWrite for FtpWriter {
             }
         }
         ready!(this.poll_closed(cx))?;
-        Poll::Ready(Err(to_io(Error::new(
-            ErrorKind::Io,
-            format!("Write after the end of the upload: {}", this.context),
-        ))))
+        let context = &this.context;
+        Poll::Ready(Err(to_io(
+            Error::coded(
+                ErrorKind::Io,
+                "ftp-write-after-end",
+                format!("Write after the end of the upload: {context}"),
+            )
+            .arg("context", context.to_string()),
+        )))
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {

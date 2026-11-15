@@ -520,19 +520,19 @@ async fn pick_file(target: PickTarget) -> Option<PathBuf> {
                 None => dialog,
             };
             dialog
-                .set_title(strings::PICK_SITEMANAGER)
-                .add_filter(strings::PICK_FILTER_XML, &["xml"])
+                .set_title(strings::pick_sitemanager())
+                .add_filter(strings::pick_filter_xml(), &["xml"])
                 .pick_file()
                 .await
         }
         PickTarget::ExportBackup => {
             dialog
-                .set_title(strings::PICK_EXPORT)
-                .set_file_name(strings::BACKUP_FILE_NAME)
+                .set_title(strings::pick_export())
+                .set_file_name(strings::backup_file_name())
                 .save_file()
                 .await
         }
-        PickTarget::RestoreBackup => dialog.set_title(strings::PICK_RESTORE).pick_file().await,
+        PickTarget::RestoreBackup => dialog.set_title(strings::pick_restore()).pick_file().await,
     };
     handle.map(|handle| handle.path().to_path_buf())
 }
@@ -1017,7 +1017,14 @@ pub fn connect_sites(
 async fn open_folder(dir: PathBuf) -> Result<(), Error> {
     tokio::task::spawn_blocking(move || open_with_system(&dir))
         .await
-        .map_err(|e| Error::new(ErrorKind::Io, "Opener task failed").with_detail(e.to_string()))?
+        .map_err(|e| {
+            Error::coded(
+                ErrorKind::Io,
+                "app-opener-task-failed",
+                "Opener task failed",
+            )
+            .with_detail(e.to_string())
+        })?
 }
 
 fn open_with_system(dir: &Path) -> Result<(), Error> {
@@ -1033,6 +1040,13 @@ fn open_with_system(dir: &Path) -> Result<(), Error> {
     if status.success() || cfg!(target_os = "windows") {
         Ok(())
     } else {
-        Err(Error::new(ErrorKind::Io, format!("{OPENER} failed")).with_detail(status.to_string()))
+        let opener = OPENER;
+        Err(Error::coded(
+            ErrorKind::Io,
+            "app-opener-failed",
+            format!("{opener} failed"),
+        )
+        .arg("opener", opener)
+        .with_detail(status.to_string()))
     }
 }

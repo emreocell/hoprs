@@ -288,7 +288,11 @@ pub trait BackendApi: Send + Sync {
 
 /// A remote listing asked without a session.
 fn not_connected() -> Error {
-    Error::new(hoprs_core::ErrorKind::NotFound, "Not connected")
+    Error::coded(
+        hoprs_core::ErrorKind::NotFound,
+        "net-not-connected",
+        "Not connected",
+    )
 }
 
 /// Runs file work on the blocking pool.
@@ -296,7 +300,12 @@ async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> Result<T> {
     tokio::task::spawn_blocking(work).await.map_err(|e| {
-        Error::new(hoprs_core::ErrorKind::Io, "Background task failed").with_detail(e.to_string())
+        Error::coded(
+            hoprs_core::ErrorKind::Io,
+            "app-background-task-failed",
+            "Background task failed",
+        )
+        .with_detail(e.to_string())
     })?
 }
 
@@ -551,18 +560,24 @@ impl BackendApi for Backend {
         editor: String,
     ) -> Result<EditId> {
         let fs = self.sessions.remote(session)?;
-        let state = self
-            .sessions
-            .state(session)
-            .ok_or_else(|| Error::new(hoprs_core::ErrorKind::NotFound, "Session closed"))?;
+        let state = self.sessions.state(session).ok_or_else(|| {
+            Error::coded(
+                hoprs_core::ErrorKind::NotFound,
+                "session-closed",
+                "Session closed",
+            )
+        })?;
         let mode = match self.sessions.protocol(session) {
             Some(hoprs_core::Protocol::Ssh) => UploadMode::TempRename,
             _ => UploadMode::InPlace,
         };
-        let site = self
-            .sessions
-            .site(session)
-            .ok_or_else(|| Error::new(hoprs_core::ErrorKind::NotFound, "Session closed"))?;
+        let site = self.sessions.site(session).ok_or_else(|| {
+            Error::coded(
+                hoprs_core::ErrorKind::NotFound,
+                "session-closed",
+                "Session closed",
+            )
+        })?;
         let target = EditSession {
             session,
             site: site.to_string(),

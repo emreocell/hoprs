@@ -18,6 +18,9 @@ pub const NAME_MIN: f32 = 120.0;
 /// default 1280 px window, the remote one down to a ~1240 px window. Narrower panes get
 /// [`Toolbar::Compact`] (no hints) down to [`TOOLBAR_NARROW`], then [`Toolbar::Narrow`].
 const TOOLBAR_FULL_REMOTE: f32 = 492.0;
+/// The same in Portuguese, whose labels are wider ("Renomear", "Nova pasta",
+/// "Permissões…"): measured at ~510 px, so the default 1280 px window (512 px panes) just fits.
+const TOOLBAR_FULL_REMOTE_PT: f32 = 512.0;
 const TOOLBAR_FULL_LOCAL: f32 = 360.0;
 /// Below this pane width (either side) the toolbar also uses short labels ("Folder",
 /// "Perms…"): without them the six remote actions need ~385 px, more than the 352 px
@@ -83,6 +86,9 @@ impl Toolbar {
 pub fn toolbar(pane: f32, side: Side) -> Toolbar {
     let full = match side {
         Side::Local => TOOLBAR_FULL_LOCAL,
+        Side::Remote if crate::i18n::language() == crate::i18n::Language::PtBr => {
+            TOOLBAR_FULL_REMOTE_PT
+        }
         Side::Remote => TOOLBAR_FULL_REMOTE,
     };
     if pane >= full {
@@ -196,6 +202,18 @@ mod tests {
                 assert!(pane - fixed >= NAME_MIN, "{pane}: {c:?}");
             }
         }
+    }
+
+    /// The Portuguese labels are wider: the remote toolbar keeps its hints at the default
+    /// window (512 px panes, as measured) but drops them from a ~1240 px window, where
+    /// "Permissões…" would be cut.
+    #[test]
+    fn remote_toolbar_needs_more_room_in_portuguese() {
+        crate::i18n::set_language(crate::i18n::Language::PtBr);
+        assert_eq!(toolbar(pane_width(1280.0), Side::Remote), Toolbar::Full);
+        assert_eq!(toolbar(pane_width(1240.0), Side::Remote), Toolbar::Compact);
+        assert_eq!(toolbar(pane_width(1280.0), Side::Local), Toolbar::Full);
+        crate::i18n::set_language(crate::i18n::Language::En);
     }
 
     #[test]

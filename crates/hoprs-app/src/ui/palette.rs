@@ -34,8 +34,8 @@ pub fn overlay<'a>(app: &'a App, base: Element<'a, Message>) -> Element<'a, Mess
         return base;
     };
     let placeholder = match state.scope {
-        Scope::All => strings::PALETTE_PLACEHOLDER,
-        Scope::Workspaces => strings::PALETTE_WORKSPACES_PLACEHOLDER,
+        Scope::All => strings::palette_placeholder(),
+        Scope::Workspaces => strings::palette_workspaces_placeholder(),
     };
     let input = text_input(placeholder, &state.query)
         .id(input_id())
@@ -49,7 +49,7 @@ pub fn overlay<'a>(app: &'a App, base: Element<'a, Message>) -> Element<'a, Mess
     let selected = state.selected.min(results.len().saturating_sub(1));
     let list: Element<'a, Message> = if results.is_empty() {
         container(
-            text(strings::PALETTE_NO_RESULTS)
+            text(strings::palette_no_results())
                 .size(theme::TEXT_SM)
                 .color(palette().muted),
         )
@@ -106,10 +106,10 @@ fn result_row<'a>(index: usize, entry: Entry, selected: bool) -> Element<'a, Mes
             .wrapping(text::Wrapping::None)
     });
     let group = match entry.group {
-        Group::Action => strings::PALETTE_GROUP_ACTION,
-        Group::Tab => strings::PALETTE_GROUP_TAB,
-        Group::Site => strings::PALETTE_GROUP_SITE,
-        Group::Workspace => strings::PALETTE_GROUP_WORKSPACE,
+        Group::Action => strings::palette_group_action(),
+        Group::Tab => strings::palette_group_tab(),
+        Group::Site => strings::palette_group_site(),
+        Group::Workspace => strings::palette_group_workspace(),
     };
     let shortcut = entry.shortcut.map(|key| {
         container(text(key).size(theme::TEXT_XS))

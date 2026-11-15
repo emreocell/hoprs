@@ -302,10 +302,10 @@ pub enum PaletteMsg {
 pub fn tab_label(app: &App, tab: &Tab) -> String {
     let site = app
         .site(&tab.site)
-        .map_or(strings::SITE_MISSING, |s| s.name.as_str());
+        .map_or(strings::site_missing(), |s| s.name.as_str());
     let kind = match tab.kind() {
-        TabKind::Terminal => strings::PALETTE_KIND_TERMINAL,
-        TabKind::Files => strings::PALETTE_KIND_FILES,
+        TabKind::Terminal => strings::palette_kind_terminal(),
+        TabKind::Files => strings::palette_kind_files(),
     };
     format!("{site} · {kind}")
 }
@@ -340,19 +340,23 @@ impl App {
                 shortcut: None,
                 mono: true,
             }));
-            out.push(Entry::action(PaletteItem::NewSite, strings::NEW_SITE, None));
+            out.push(Entry::action(
+                PaletteItem::NewSite,
+                strings::new_site(),
+                None,
+            ));
             if !self.workspaces.is_empty() {
                 out.push(Entry::action(
                     PaletteItem::OpenWorkspace,
-                    strings::PALETTE_OPEN_WORKSPACE,
+                    strings::palette_open_workspace(),
                     None,
                 ));
             }
             for (item, label) in [
-                (PaletteItem::ToggleQueue, strings::PALETTE_TOGGLE_QUEUE),
-                (PaletteItem::ToggleLog, strings::PALETTE_TOGGLE_LOG),
-                (PaletteItem::ImportFilezilla, strings::IMPORT_FILEZILLA),
-                (PaletteItem::Settings, strings::SETTINGS),
+                (PaletteItem::ToggleQueue, strings::palette_toggle_queue()),
+                (PaletteItem::ToggleLog, strings::palette_toggle_log()),
+                (PaletteItem::ImportFilezilla, strings::import_filezilla()),
+                (PaletteItem::Settings, strings::settings()),
             ] {
                 out.push(Entry::action(item, label, None));
             }
@@ -414,19 +418,19 @@ impl App {
         if self.reconnect_message(tab).is_some() {
             out.push(Entry::action(
                 PaletteItem::Reconnect(tab.id),
-                strings::RECONNECT,
+                strings::reconnect(),
                 None,
             ));
         }
         if self.can_open_session_tab(index) {
             out.push(Entry::action(
                 PaletteItem::NewTerminalTab(tab.id),
-                strings::NEW_TERMINAL_TAB,
+                strings::new_terminal_tab(),
                 None,
             ));
             out.push(Entry::action(
                 PaletteItem::NewFilesTab(tab.id),
-                strings::NEW_FILES_TAB,
+                strings::new_files_tab(),
                 None,
             ));
         }
@@ -434,7 +438,7 @@ impl App {
             detail: Some(tab_label(self, tab)),
             ..Entry::action(
                 PaletteItem::CloseTab(tab.id),
-                strings::PALETTE_CLOSE_TAB,
+                strings::palette_close_tab(),
                 None,
             )
         });
@@ -457,22 +461,34 @@ impl App {
         };
         out.push(key(
             FileKey::NewFolder,
-            strings::NEW_FOLDER,
-            strings::KEY_NEW_FOLDER,
+            strings::new_folder(),
+            strings::key_new_folder(),
         ));
         if !pane.selected_entries().is_empty() {
-            out.push(key(FileKey::Rename, strings::RENAME, strings::KEY_RENAME));
-            out.push(key(FileKey::Delete, strings::DELETE, strings::KEY_DELETE));
+            out.push(key(
+                FileKey::Rename,
+                strings::rename(),
+                strings::key_rename(),
+            ));
+            out.push(key(
+                FileKey::Delete,
+                strings::delete(),
+                strings::key_delete(),
+            ));
         }
         if matches!(self.edit_target(index, side), Some(Ok(_))) {
-            out.push(key(FileKey::Edit, strings::PALETTE_EDIT, strings::KEY_EDIT));
+            out.push(key(
+                FileKey::Edit,
+                strings::palette_edit(),
+                strings::key_edit(),
+            ));
         }
         if !self.transfer_specs(index, side).is_empty() {
             let label = match side {
-                Side::Local => strings::PALETTE_UPLOAD,
-                Side::Remote => strings::PALETTE_DOWNLOAD,
+                Side::Local => strings::palette_upload(),
+                Side::Remote => strings::palette_download(),
             };
-            out.push(key(FileKey::Transfer, label, strings::KEY_TRANSFER));
+            out.push(key(FileKey::Transfer, label, strings::key_transfer()));
         }
     }
 
@@ -488,21 +504,21 @@ impl App {
         if !terminal.model.selected_text().is_empty() {
             out.push(Entry::action(
                 PaletteItem::Copy(tab.id),
-                strings::PALETTE_COPY,
-                Some(strings::PALETTE_KEY_COPY),
+                strings::palette_copy(),
+                Some(strings::palette_key_copy()),
             ));
         }
         if terminal.open_shell().is_some() {
             out.push(Entry::action(
                 PaletteItem::Paste(tab.id),
-                strings::PALETTE_PASTE,
-                Some(strings::PALETTE_KEY_PASTE),
+                strings::palette_paste(),
+                Some(strings::palette_key_paste()),
             ));
         }
         out.push(Entry::action(
             PaletteItem::Find(tab.id),
-            strings::PALETTE_FIND,
-            Some(strings::PALETTE_KEY_FIND),
+            strings::palette_find(),
+            Some(strings::palette_key_find()),
         ));
     }
 

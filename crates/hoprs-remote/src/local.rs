@@ -22,10 +22,6 @@ pub struct LocalFs {
     root: PathBuf,
 }
 
-fn io_err(msg: String) -> Error {
-    Error::new(ErrorKind::Io, msg)
-}
-
 fn entry_kind(meta: &Metadata) -> EntryKind {
     let ft = meta.file_type();
     if ft.is_symlink() {
@@ -79,8 +75,12 @@ impl LocalFs {
             match (parts.next(), parts.next()) {
                 (Some(Component::Normal(n)), None) if n == std::ffi::OsStr::new(comp) => {}
                 _ => {
-                    return Err(Error::new(ErrorKind::Io, "Invalid local path")
-                        .with_detail(format!("unsafe path component: {comp:?}")));
+                    return Err(Error::coded(
+                        ErrorKind::Io,
+                        "local-invalid-path",
+                        "Invalid local path",
+                    )
+                    .with_detail(format!("unsafe path component: {comp:?}")));
                 }
             }
             out.push(comp);
@@ -120,7 +120,12 @@ impl RemoteFs for LocalFs {
     async fn open_read(&self, path: &RemotePath, offset: u64) -> Result<BoxAsyncRead> {
         let local = self.local(path)?;
         if tokio::fs::metadata(&local).await?.is_dir() {
-            return Err(io_err(format!("not a file: {path}")));
+            return Err(Error::coded(
+                ErrorKind::Io,
+                "local-not-a-file",
+                format!("not a file: {path}"),
+            )
+            .arg("path", path.to_string()));
         }
         let mut file = tokio::fs::File::open(&local).await?;
         if offset > 0 {
@@ -132,13 +137,31 @@ impl RemoteFs for LocalFs {
     async fn open_write(&self, path: &RemotePath, offset: u64) -> Result<BoxAsyncWrite> {
         let local = self.local(path)?;
         match tokio::fs::metadata(&local).await {
-            Ok(m) if m.is_dir() => return Err(io_err(format!("not a file: {path}"))),
+            Ok(m) if m.is_dir() => {
+                return Err(Error::coded(
+                    ErrorKind::Io,
+                    "local-not-a-file",
+                    format!("not a file: {path}"),
+                )
+                .arg("path", path.to_string()));
+            }
             Ok(m) if offset > m.len() => {
-                return Err(io_err(format!("offset {offset} beyond end of {path}")));
+                return Err(Error::coded(
+                    ErrorKind::Io,
+                    "local-offset-beyond-end",
+                    format!("offset {offset} beyond end of {path}"),
+                )
+                .arg("offset", offset.to_string())
+                .arg("path", path.to_string()));
             }
             Ok(_) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound && offset > 0 => {
-                return Err(io_err(format!("cannot resume missing file: {path}")));
+                return Err(Error::coded(
+                    ErrorKind::Io,
+                    "local-cannot-resume-missing",
+                    format!("cannot resume missing file: {path}"),
+                )
+                .arg("path", path.to_string()));
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
@@ -173,14 +196,24 @@ impl RemoteFs for LocalFs {
 
     async fn remove_file(&self, path: &RemotePath) -> Result<()> {
         if self.meta(path).await?.is_dir() {
-            return Err(io_err(format!("is a directory: {path}")));
+            return Err(Error::coded(
+                ErrorKind::Io,
+                "local-is-a-directory",
+                format!("is a directory: {path}"),
+            )
+            .arg("path", path.to_string()));
         }
         Ok(tokio::fs::remove_file(self.local(path)?).await?)
     }
 
     async fn remove_dir(&self, path: &RemotePath) -> Result<()> {
         if !self.meta(path).await?.is_dir() {
-            return Err(io_err(format!("not a directory: {path}")));
+            return Err(Error::coded(
+                ErrorKind::Io,
+                "local-not-a-directory",
+                format!("not a directory: {path}"),
+            )
+            .arg("path", path.to_string()));
         }
         Ok(tokio::fs::remove_dir(self.local(path)?).await?)
     }
@@ -212,7 +245,14 @@ impl RemoteFs for LocalFs {
             file.set_modified(mtime)
         })
         .await
-        .map_err(|e| io_err(format!("set_modified task failed: {e}")))?
+        .map_err(|reason| {
+            Error::coded(
+                ErrorKind::Io,
+                "local-set-modified-failed",
+                format!("set_modified task failed: {reason}"),
+            )
+            .arg("reason", reason.to_string())
+        })?
         .map_err(Error::from)
     }
 }

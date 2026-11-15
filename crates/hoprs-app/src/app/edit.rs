@@ -44,9 +44,9 @@ pub const TOAST_TIME: Duration = Duration::from_secs(3);
 /// Why Edit cannot open `entry`, if it cannot.
 pub fn edit_refusal(entry: &RemoteEntry) -> Option<&'static str> {
     match entry.kind {
-        EntryKind::Dir => Some(strings::EDIT_NO_FOLDERS),
-        EntryKind::Symlink => Some(strings::EDIT_NO_LINKS),
-        EntryKind::File if entry.size > EDIT_MAX_BYTES => Some(strings::EDIT_TOO_LARGE),
+        EntryKind::Dir => Some(strings::edit_no_folders()),
+        EntryKind::Symlink => Some(strings::edit_no_links()),
+        EntryKind::File if entry.size > EDIT_MAX_BYTES => Some(strings::edit_too_large()),
         EntryKind::File => None,
     }
 }
@@ -324,7 +324,7 @@ impl Tab {
             });
         // Several selected: one file at a time (the cursor's would be a guess).
         if pane.selected_entries().len() > 1 {
-            return Some(Err(strings::EDIT_ONE_FILE));
+            return Some(Err(strings::edit_one_file()));
         }
         let entry = cursor.or_else(|| pane.selected_entries().first().copied())?;
         Some(match edit_refusal(entry) {
@@ -357,10 +357,10 @@ impl App {
         if let Some(pane) = self.tabs[index].pane_mut(side)
             && pane.note.as_deref().is_some_and(|note| {
                 [
-                    strings::EDIT_NO_FOLDERS,
-                    strings::EDIT_NO_LINKS,
-                    strings::EDIT_TOO_LARGE,
-                    strings::EDIT_ONE_FILE,
+                    strings::edit_no_folders(),
+                    strings::edit_no_links(),
+                    strings::edit_too_large(),
+                    strings::edit_one_file(),
                 ]
                 .contains(&note)
             })
@@ -523,7 +523,7 @@ impl App {
                 };
                 edit.status = EditStatus::Editing { saved: Some(at) };
                 let name = edit.name().to_owned();
-                return self.show_toast(strings::UPLOADED, name);
+                return self.show_toast(strings::uploaded(), name);
             }
             EditEvent::RemoteChanged { id } => {
                 if let Some(edit) = find(&mut self.edits, id) {

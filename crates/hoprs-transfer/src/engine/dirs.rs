@@ -106,7 +106,14 @@ impl Actor {
         let state = if failed == 0 {
             TransferState::Done
         } else {
-            TransferState::Failed(Error::new(ErrorKind::Io, format!("{failed} items failed")))
+            TransferState::Failed(
+                Error::coded(
+                    ErrorKind::Io,
+                    "transfer-items-failed",
+                    format!("{failed} items failed"),
+                )
+                .arg("failed", failed.to_string()),
+            )
         };
         self.transition(dir, state);
     }
@@ -154,8 +161,12 @@ impl Actor {
                 size: (e.kind == EntryKind::File).then_some(e.size),
                 state: if !seen.insert(e.name.as_str()) {
                     TransferState::Failed(
-                        Error::new(ErrorKind::Io, DUPLICATE_NAME)
-                            .with_detail(format!("{:?} in {}", e.name, parent.local)),
+                        Error::coded(
+                            ErrorKind::Io,
+                            "transfer-duplicate-name",
+                            "Duplicate name in directory listing",
+                        )
+                        .with_detail(format!("{:?} in {}", e.name, parent.local)),
                     )
                 } else if e.kind == EntryKind::Symlink {
                     TransferState::Skipped(SYMLINK_SKIP.to_string())

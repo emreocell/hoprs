@@ -176,10 +176,10 @@ impl SiteForm {
                 .host
                 .trim()
                 .is_empty()
-                .then_some(strings::HOST_REQUIRED),
+                .then_some(strings::host_required()),
             port: match self.port.trim().parse::<u16>() {
                 Ok(port) if port > 0 => None,
-                _ => Some(strings::PORT_INVALID),
+                _ => Some(strings::port_invalid()),
             },
         }
     }
@@ -313,9 +313,9 @@ struct OpenAsChoice(OpenAs);
 impl fmt::Display for OpenAsChoice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self.0 {
-            OpenAs::Terminal => strings::OPEN_AS_TERMINAL,
-            OpenAs::Files => strings::OPEN_AS_FILES,
-            OpenAs::Both => strings::OPEN_AS_BOTH,
+            OpenAs::Terminal => strings::open_as_terminal(),
+            OpenAs::Files => strings::open_as_files(),
+            OpenAs::Both => strings::open_as_both(),
         })
     }
 }
@@ -332,8 +332,8 @@ struct ModeChoice(FtpMode);
 impl fmt::Display for ModeChoice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self.0 {
-            FtpMode::Passive => strings::FTP_PASSIVE,
-            FtpMode::Active => strings::FTP_ACTIVE,
+            FtpMode::Passive => strings::ftp_passive(),
+            FtpMode::Active => strings::ftp_active(),
         })
     }
 }
@@ -350,15 +350,15 @@ fn msg(m: SiteFormMsg) -> Message {
 pub fn view(form: &SiteForm, delete_note: Option<String>) -> Element<'_, Message> {
     let errors = form.errors.clone().unwrap_or_default();
     let title = if form.editing {
-        strings::SITE_FORM_EDIT
+        strings::site_form_edit()
     } else {
-        strings::SITE_FORM_NEW
+        strings::site_form_new()
     };
 
     let name = field(
-        strings::FIELD_NAME,
+        strings::field_name(),
         input(
-            strings::FIELD_NAME_HINT,
+            strings::field_name_hint(),
             &form.name,
             SiteFormMsg::Name,
             false,
@@ -366,7 +366,7 @@ pub fn view(form: &SiteForm, delete_note: Option<String>) -> Element<'_, Message
         None,
     );
     let protocol = field(
-        strings::FIELD_PROTOCOL,
+        strings::field_protocol(),
         pick_list(PROTOCOLS, Some(ProtocolChoice(form.protocol)), |c| {
             msg(SiteFormMsg::Protocol(c.0))
         })
@@ -379,29 +379,29 @@ pub fn view(form: &SiteForm, delete_note: Option<String>) -> Element<'_, Message
         None,
     );
     let host = field(
-        strings::FIELD_HOST,
+        strings::field_host(),
         input("", &form.host, SiteFormMsg::Host, true),
         errors.host,
     );
     let port = container(field(
-        strings::FIELD_PORT,
+        strings::field_port(),
         input("", &form.port, SiteFormMsg::Port, true),
         errors.port,
     ))
     .width(140);
     let user = field(
-        strings::FIELD_USER,
+        strings::field_user(),
         input("", &form.user, SiteFormMsg::User, true),
         None,
     );
 
     let password_hint = if form.has_password() {
-        strings::PASSWORD_REPLACE
+        strings::password_replace()
     } else {
-        strings::PASSWORD_OPTIONAL
+        strings::password_optional()
     };
     let mut password = column![field(
-        strings::FIELD_PASSWORD,
+        strings::field_password(),
         text_input(password_hint, &form.password.0)
             .on_input(|v| msg(SiteFormMsg::Password(Password(v))))
             .secure(true)
@@ -415,10 +415,10 @@ pub fn view(form: &SiteForm, delete_note: Option<String>) -> Element<'_, Message
     if form.has_password() {
         password = password.push(
             row![
-                muted(strings::PASSWORD_SAVED),
+                muted(strings::password_saved()),
                 space::horizontal(),
                 checkbox(form.forget_password)
-                    .label(strings::FORGET_PASSWORD)
+                    .label(strings::forget_password())
                     .text_size(theme::TEXT_XS)
                     .style(theme::checkbox)
                     .on_toggle(|v| msg(SiteFormMsg::ForgetPassword(v))),
@@ -429,17 +429,17 @@ pub fn view(form: &SiteForm, delete_note: Option<String>) -> Element<'_, Message
 
     let options: Element<'_, Message> = match form.protocol {
         Protocol::Ssh => section(
-            strings::SSH_OPTIONS,
+            strings::ssh_options(),
             column![
                 checkbox(form.use_agent)
-                    .label(strings::USE_AGENT)
+                    .label(strings::use_agent())
                     .text_size(theme::TEXT_SM)
                     .style(theme::checkbox)
                     .on_toggle(|v| msg(SiteFormMsg::UseAgent(v))),
                 field(
-                    strings::KEY_FILE,
+                    strings::key_file(),
                     input(
-                        strings::KEY_FILE_HINT,
+                        strings::key_file_hint(),
                         &form.key_file,
                         SiteFormMsg::KeyFile,
                         true
@@ -447,7 +447,7 @@ pub fn view(form: &SiteForm, delete_note: Option<String>) -> Element<'_, Message
                     None,
                 ),
                 field(
-                    strings::OPEN_AS,
+                    strings::open_as(),
                     pick_list(OPEN_AS, Some(OpenAsChoice(form.open_as)), |c| {
                         msg(SiteFormMsg::OpenAs(c.0))
                     })
@@ -463,10 +463,10 @@ pub fn view(form: &SiteForm, delete_note: Option<String>) -> Element<'_, Message
             .into(),
         ),
         Protocol::Ftp | Protocol::FtpsExplicit | Protocol::FtpsImplicit => section(
-            strings::FTP_OPTIONS,
+            strings::ftp_options(),
             column![
                 field(
-                    strings::FTP_MODE,
+                    strings::ftp_mode(),
                     pick_list(MODES, Some(ModeChoice(form.ftp_mode)), |c| {
                         msg(SiteFormMsg::FtpMode(c.0))
                     })
@@ -478,7 +478,7 @@ pub fn view(form: &SiteForm, delete_note: Option<String>) -> Element<'_, Message
                     None,
                 ),
                 checkbox(form.nat_workaround)
-                    .label(strings::NAT_WORKAROUND)
+                    .label(strings::nat_workaround())
                     .text_size(theme::TEXT_SM)
                     .style(theme::checkbox)
                     .on_toggle(|v| msg(SiteFormMsg::NatWorkaround(v))),
@@ -489,12 +489,12 @@ pub fn view(form: &SiteForm, delete_note: Option<String>) -> Element<'_, Message
     };
 
     let folders = section(
-        strings::START_FOLDERS,
+        strings::start_folders(),
         row![
             field(
-                strings::REMOTE_DIR,
+                strings::remote_dir(),
                 input(
-                    strings::FOLDER_HINT,
+                    strings::folder_hint(),
                     &form.remote_dir,
                     SiteFormMsg::RemoteDir,
                     true
@@ -502,9 +502,9 @@ pub fn view(form: &SiteForm, delete_note: Option<String>) -> Element<'_, Message
                 None,
             ),
             field(
-                strings::LOCAL_DIR,
+                strings::local_dir(),
                 input(
-                    strings::FOLDER_HINT,
+                    strings::folder_hint(),
                     &form.local_dir,
                     SiteFormMsg::LocalDir,
                     true
@@ -543,7 +543,7 @@ pub fn view(form: &SiteForm, delete_note: Option<String>) -> Element<'_, Message
 fn actions(form: &SiteForm, delete_note: Option<String>) -> Element<'_, Message> {
     if form.confirm_delete {
         let confirm = confirm(
-            strings::DELETE_SITE_CONFIRM,
+            strings::delete_site_confirm(),
             msg(SiteFormMsg::ConfirmDelete),
             msg(SiteFormMsg::CancelDelete),
         );
@@ -559,16 +559,16 @@ fn actions(form: &SiteForm, delete_note: Option<String>) -> Element<'_, Message>
         };
     }
     let save_label = if form.busy {
-        strings::SAVING
+        strings::saving()
     } else {
-        strings::SAVE
+        strings::save()
     };
     let mut buttons = row![
         button(text(save_label).font(theme::INTER_SEMIBOLD))
             .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_MD]))
             .style(theme::button_primary)
             .on_press_maybe((!form.busy).then(|| msg(SiteFormMsg::Save))),
-        button(text(strings::CANCEL))
+        button(text(strings::cancel()))
             .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
             .style(theme::button_text)
             .on_press(msg(SiteFormMsg::Cancel)),
@@ -578,7 +578,7 @@ fn actions(form: &SiteForm, delete_note: Option<String>) -> Element<'_, Message>
     .spacing(theme::SPACE_XS);
     if form.editing {
         buttons = buttons.push(
-            button(text(strings::DELETE))
+            button(text(strings::delete()))
                 .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
                 .style(theme::button_text)
                 .on_press_maybe((!form.busy).then(|| msg(SiteFormMsg::Delete))),

@@ -401,7 +401,7 @@ fn timestamp() -> String {
 }
 
 fn no_edit() -> Error {
-    Error::new(ErrorKind::NotFound, "No such edit")
+    Error::coded(ErrorKind::NotFound, "edit-unknown", "No such edit")
 }
 
 impl EditManager {
@@ -501,8 +501,10 @@ impl EditManager {
         }
         let entry = fs.stat(&remote).await?;
         if entry.kind != EntryKind::File {
-            return Err(Error::new(ErrorKind::Io, "Only files can be edited")
-                .with_detail(remote.to_string()));
+            return Err(
+                Error::coded(ErrorKind::Io, "edit-only-files", "Only files can be edited")
+                    .with_detail(remote.to_string()),
+            );
         }
         let dir = self.session_dir(session, &state).await?;
         let local = local_path_for(&dir, remote.as_str())?;
@@ -556,9 +558,11 @@ impl EditManager {
         match choice {
             EditChoice::Overwrite => match self.inner.sync(&edit, true).await {
                 Outcome::Failed(error) => Err(error),
-                Outcome::Conflict => {
-                    Err(Error::new(ErrorKind::Conflict, "The remote file changed"))
-                }
+                Outcome::Conflict => Err(Error::coded(
+                    ErrorKind::Conflict,
+                    "edit-remote-changed",
+                    "The remote file changed",
+                )),
                 Outcome::Unchanged | Outcome::Uploaded | Outcome::Pending => Ok(()),
             },
             EditChoice::KeepRemote | EditChoice::SaveCopy => {
@@ -576,13 +580,13 @@ impl EditManager {
                 let replaced = async {
                     if choice == EditChoice::SaveCopy {
                         let data = data.ok_or_else(|| {
-                            Error::new(ErrorKind::NotFound, "The local file is gone")
+                            Error::coded(ErrorKind::NotFound, "edit-local-gone", "The local file is gone")
                         })?;
                         let name = edit.remote.file_name().unwrap_or("file");
                         let parent = edit.remote.parent().unwrap_or_else(RemotePath::root);
                         let copy = parent.join(&format!("{name}.hoprs-{}", timestamp()));
                         if edit.fs.stat(&copy).await.is_ok() {
-                            return Err(Error::new(ErrorKind::Conflict, "The copy already exists")
+                            return Err(Error::coded(ErrorKind::Conflict, "edit-copy-exists", "The copy already exists")
                                 .with_detail(copy.to_string()));
                         }
                         write_remote(edit.fs.as_ref(), &copy, &data).await?;
@@ -693,7 +697,11 @@ impl EditManager {
         let edit = self.inner.edit(id).ok_or_else(no_edit)?;
         match self.inner.sync(&edit, false).await {
             Outcome::Failed(error) => Err(error),
-            Outcome::Conflict => Err(Error::new(ErrorKind::Conflict, "The remote file changed")),
+            Outcome::Conflict => Err(Error::coded(
+                ErrorKind::Conflict,
+                "edit-remote-changed",
+                "The remote file changed",
+            )),
             Outcome::Unchanged | Outcome::Uploaded | Outcome::Pending => Ok(()),
         }
     }
@@ -1361,7 +1369,12 @@ fn start_watcher(files: mpsc::UnboundedSender<PathBuf>) -> Result<notify::Recomm
 }
 
 fn watch_error(error: notify::Error) -> Error {
-    Error::new(ErrorKind::Io, "Cannot watch the edited files").with_detail(error.to_string())
+    Error::coded(
+        ErrorKind::Io,
+        "edit-cannot-watch",
+        "Cannot watch the edited files",
+    )
+    .with_detail(error.to_string())
 }
 
 /// Whether a watcher event may be a save: creations, removals (an editor recreating the
@@ -1404,6 +1417,7 @@ struct Cut {
 }
 
 /// Uploads `data` by `mode` (see the module docs).
+#[allow(clippy::result_large_err)] // `Cut` holds an `Error`, rare and short-lived
 async fn upload(
     fs: &dyn RemoteFs,
     remote: &RemotePath,
@@ -1472,7 +1486,7 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
 fn write_private(path: &Path, data: &[u8]) -> Result<()> {
     let parent = path
         .parent()
-        .ok_or_else(|| Error::new(ErrorKind::Io, "No parent directory"))?;
+        .ok_or_else(|| Error::coded(ErrorKind::Io, "edit-no-parent", "No parent directory"))?;
     create_private_dir_all(parent)?;
     let mut name = OsString::from(".");
     name.push(path.file_name().unwrap_or_default());
@@ -1512,7 +1526,7 @@ fn write_new_private_with(
 ) -> Result<PathBuf> {
     let parent = base
         .parent()
-        .ok_or_else(|| Error::new(ErrorKind::Io, "No parent directory"))?;
+        .ok_or_else(|| Error::coded(ErrorKind::Io, "edit-no-parent", "No parent directory"))?;
     create_private_dir_all(parent)?;
     for n in 0u32.. {
         let path = if n == 0 {
@@ -1590,8 +1604,9 @@ fn prepare_session_dir(root: &Path, session: SessionId) -> Result<PathBuf> {
 }
 
 fn refused(remote: &str) -> Error {
-    Error::new(
+    Error::coded(
         ErrorKind::Permission,
+        "edit-path-refused",
         "This remote path cannot be edited locally",
     )
     .with_detail(format!("{remote:?}"))
@@ -1651,11 +1666,19 @@ pub fn editor_launch(command: &str, path: &Path) -> Result<EditorLaunch> {
         return Ok(EditorLaunch::System);
     }
     let words = split_command(command).ok_or_else(|| {
-        Error::new(ErrorKind::Io, "The editor command has an unmatched quote")
-            .with_detail(command.to_owned())
+        Error::coded(
+            ErrorKind::Io,
+            "edit-unmatched-quote",
+            "The editor command has an unmatched quote",
+        )
+        .with_detail(command.to_owned())
     })?;
     if words.is_empty() {
-        return Err(Error::new(ErrorKind::Io, "No editor command is set"));
+        return Err(Error::coded(
+            ErrorKind::Io,
+            "edit-no-editor",
+            "No editor command is set",
+        ));
     }
     let mut argv: Vec<OsString> = words.into_iter().map(OsString::from).collect();
     argv.push(path.as_os_str().to_owned());
@@ -1832,8 +1855,12 @@ fn open_with_system(path: &Path) -> Result<()> {
         tracing::debug!(path = %path.display(), "no file association: opening in notepad");
         return spawn_editor(&["notepad.exe".into(), path.as_os_str().to_owned()], path);
     }
-    Err(Error::new(ErrorKind::Io, "Cannot start the editor")
-        .with_detail(format!("ShellExecuteW failed with code {code}")))
+    Err(Error::coded(
+        ErrorKind::Io,
+        "edit-cannot-start-editor",
+        "Cannot start the editor",
+    )
+    .with_detail(format!("ShellExecuteW failed with code {code}")))
 }
 
 /// Spawns `argv` (program first, never empty) detached, without waiting for it: null
@@ -1862,8 +1889,12 @@ fn spawn_editor(argv: &[OsString], path: &Path) -> Result<()> {
         child.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
     let mut child = child.spawn().map_err(|e| {
-        Error::new(ErrorKind::Io, "Cannot start the editor")
-            .with_detail(format!("{}: {e}", program.to_string_lossy()))
+        Error::coded(
+            ErrorKind::Io,
+            "edit-cannot-start-editor",
+            "Cannot start the editor",
+        )
+        .with_detail(format!("{}: {e}", program.to_string_lossy()))
     })?;
     tracing::info!(editor = %program.to_string_lossy(), path = %path.display(), "editor started");
     let reaper = std::thread::Builder::new()

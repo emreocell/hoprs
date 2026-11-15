@@ -30,10 +30,10 @@ fn msg(m: LogMsg) -> Message {
 
 fn level_label(level: LogLevel) -> &'static str {
     match level {
-        LogLevel::Error => strings::LOG_ERROR,
-        LogLevel::Warn => strings::LOG_WARN,
-        LogLevel::Info => strings::LOG_INFO,
-        LogLevel::Debug => strings::LOG_DEBUG,
+        LogLevel::Error => strings::log_error(),
+        LogLevel::Warn => strings::log_warn(),
+        LogLevel::Info => strings::log_info(),
+        LogLevel::Debug => strings::log_debug(),
     }
 }
 
@@ -68,7 +68,7 @@ pub fn view(app: &App) -> Option<Element<'_, Message>> {
         );
     }
     let filter = container(
-        text_input(strings::FILTER_LOG, &log.query)
+        text_input(strings::filter_log(), &log.query)
             .on_input(|q| msg(LogMsg::Filter(q)))
             .padding(Padding::from([0.0, theme::SPACE_XS]))
             .size(theme::TEXT_XS)
@@ -78,10 +78,10 @@ pub fn view(app: &App) -> Option<Element<'_, Message>> {
     .width(FILTER_WIDTH);
     let has_lines = log.shown_len() > 0;
     let head = row![
-        text(strings::LOG)
+        text(strings::log())
             .font(theme::INTER_SEMIBOLD)
             .wrapping(text::Wrapping::None),
-        hint(levels, strings::LOG_LEVEL_HINT),
+        hint(levels, strings::log_level_hint()),
         filter,
         space::horizontal(),
         text(strings::log_lines(log.shown_len()))
@@ -90,17 +90,17 @@ pub fn view(app: &App) -> Option<Element<'_, Message>> {
             .wrapping(text::Wrapping::None),
         row![
             small(
-                strings::COPY_SHOWN,
+                strings::copy_shown(),
                 has_lines.then_some(msg(LogMsg::CopyShown))
             ),
             hint(
                 small(
-                    strings::CLEAR,
+                    strings::clear(),
                     (!log.is_empty()).then_some(msg(LogMsg::Clear))
                 ),
-                strings::CLEAR_HINT
+                strings::clear_hint()
             ),
-            small(strings::QUEUE_HIDE, Some(msg(LogMsg::Toggle))),
+            small(strings::queue_hide(), Some(msg(LogMsg::Toggle))),
         ]
         .spacing(theme::SPACE_2XS)
         .align_y(Alignment::Center),
@@ -133,9 +133,9 @@ pub fn view(app: &App) -> Option<Element<'_, Message>> {
         )
     } else {
         let note = if log.is_empty() {
-            strings::NO_LOG_LINES
+            strings::no_log_lines()
         } else {
-            strings::NO_LOG_MATCHES
+            strings::no_log_matches()
         };
         container(text(note).color(p.muted))
             .padding(Padding::from([theme::SPACE_SM, theme::SPACE_MD]))

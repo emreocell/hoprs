@@ -192,8 +192,9 @@ pub fn remove_entries(
     let data = read_optional(path)?.unwrap_or_default();
     let name = host_name(host, port);
     if entries_in(&data, &name) != expected {
-        return Err(hoprs_core::Error::new(
+        return Err(hoprs_core::Error::coded(
             hoprs_core::ErrorKind::Conflict,
+            "known-hosts-changed",
             "known_hosts changed; review the entries again",
         ));
     }
@@ -267,8 +268,9 @@ fn validate_host(host: &str) -> Result<()> {
         || host.starts_with(['@', '#', '|'])
         || host.contains(|c: char| c.is_whitespace() || c.is_control() || ",*?!".contains(c));
     if bad {
-        return Err(hoprs_core::Error::new(
+        return Err(hoprs_core::Error::coded(
             hoprs_core::ErrorKind::Io,
+            "known-hosts-invalid-host",
             "Invalid host name for known_hosts",
         ));
     }

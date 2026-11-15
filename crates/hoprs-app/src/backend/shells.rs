@@ -57,7 +57,7 @@ impl ShellControl for ShellHandle {
 
 /// The error for input to a shell that ended or is unknown.
 pub fn shell_closed() -> Error {
-    Error::new(ErrorKind::Network, "Shell closed")
+    Error::coded(ErrorKind::Network, "session-shell-closed", "Shell closed")
 }
 
 struct Shell {

@@ -167,24 +167,24 @@ async fn palette_lists_context_actions() {
     let app = App::new();
     let entries = all(&app);
     for label in [
-        strings::NEW_SITE,
-        strings::IMPORT_FILEZILLA,
-        strings::SETTINGS,
-        strings::PALETTE_TOGGLE_QUEUE,
-        strings::PALETTE_TOGGLE_LOG,
+        strings::new_site(),
+        strings::import_filezilla(),
+        strings::settings(),
+        strings::palette_toggle_queue(),
+        strings::palette_toggle_log(),
     ] {
         let found = entry(&entries, label).unwrap_or_else(|| panic!("{label}"));
         assert_eq!(found.group, Group::Action);
         assert!(!found.mono, "an action reads in Inter");
     }
     for label in [
-        strings::NEW_TERMINAL_TAB,
-        strings::NEW_FILES_TAB,
-        strings::RECONNECT,
-        strings::PALETTE_CLOSE_TAB,
-        strings::PALETTE_OPEN_WORKSPACE,
-        strings::NEW_FOLDER,
-        strings::PALETTE_PASTE,
+        strings::new_terminal_tab(),
+        strings::new_files_tab(),
+        strings::reconnect(),
+        strings::palette_close_tab(),
+        strings::palette_open_workspace(),
+        strings::new_folder(),
+        strings::palette_paste(),
     ] {
         assert!(entry(&entries, label).is_none(), "{label}: {entries:?}");
     }
@@ -214,57 +214,57 @@ async fn palette_lists_context_actions() {
     assert!(other.mono);
     let shop = entry(&entries, "Shop").expect("the workspace");
     assert_eq!(shop.item, PaletteItem::Workspace(ws.id.clone()));
-    assert!(entry(&entries, strings::PALETTE_OPEN_WORKSPACE).is_some());
+    assert!(entry(&entries, strings::palette_open_workspace()).is_some());
     // The session's actions on the active (terminal) tab, with their shortcuts.
-    let new_terminal = entry(&entries, strings::NEW_TERMINAL_TAB).expect("new terminal tab");
+    let new_terminal = entry(&entries, strings::new_terminal_tab()).expect("new terminal tab");
     assert_eq!(new_terminal.item, PaletteItem::NewTerminalTab(terminal));
-    assert!(entry(&entries, strings::NEW_FILES_TAB).is_some());
+    assert!(entry(&entries, strings::new_files_tab()).is_some());
     assert_eq!(
-        entry(&entries, strings::PALETTE_CLOSE_TAB).map(|e| e.item.clone()),
+        entry(&entries, strings::palette_close_tab()).map(|e| e.item.clone()),
         Some(PaletteItem::CloseTab(terminal))
     );
-    let paste = entry(&entries, strings::PALETTE_PASTE).expect("paste");
-    assert_eq!(paste.shortcut, Some(strings::PALETTE_KEY_PASTE));
-    let find = entry(&entries, strings::PALETTE_FIND).expect("find");
-    assert_eq!(find.shortcut, Some(strings::PALETTE_KEY_FIND));
+    let paste = entry(&entries, strings::palette_paste()).expect("paste");
+    assert_eq!(paste.shortcut, Some(strings::palette_key_paste()));
+    let find = entry(&entries, strings::palette_find()).expect("find");
+    assert_eq!(find.shortcut, Some(strings::palette_key_find()));
     // Nothing selected in the terminal: no Copy. No file actions in a terminal tab.
-    assert!(entry(&entries, strings::PALETTE_COPY).is_none());
-    assert!(entry(&entries, strings::NEW_FOLDER).is_none());
-    assert!(entry(&entries, strings::RECONNECT).is_none(), "connected");
+    assert!(entry(&entries, strings::palette_copy()).is_none());
+    assert!(entry(&entries, strings::new_folder()).is_none());
+    assert!(entry(&entries, strings::reconnect()).is_none(), "connected");
 
     // The files tab: its focused pane's actions, each with its key; Rename and Delete
     // need a selection.
     app.update(Message::SelectTab(1));
     let entries = all(&app);
-    let new_folder = entry(&entries, strings::NEW_FOLDER).expect("new folder");
-    assert_eq!(new_folder.shortcut, Some(strings::KEY_NEW_FOLDER));
-    assert!(entry(&entries, strings::RENAME).is_none());
-    assert!(entry(&entries, strings::PALETTE_PASTE).is_none());
+    let new_folder = entry(&entries, strings::new_folder()).expect("new folder");
+    assert_eq!(new_folder.shortcut, Some(strings::key_new_folder()));
+    assert!(entry(&entries, strings::rename()).is_none());
+    assert!(entry(&entries, strings::palette_paste()).is_none());
     app.update(Message::Key {
         key: FileKey::SwitchPane,
         shift: false,
     });
     app.update(pane_msg(files, Side::Remote, PaneMsg::Click(0)));
     let entries = all(&app);
-    let rename = entry(&entries, strings::RENAME).expect("rename");
+    let rename = entry(&entries, strings::rename()).expect("rename");
     assert_eq!(
         (rename.item.clone(), rename.shortcut),
         (
             PaletteItem::FileKey(FileKey::Rename, Side::Remote),
-            Some(strings::KEY_RENAME)
+            Some(strings::key_rename())
         )
     );
     assert_eq!(
-        entry(&entries, strings::DELETE).and_then(|e| e.shortcut),
-        Some(strings::KEY_DELETE)
+        entry(&entries, strings::delete()).and_then(|e| e.shortcut),
+        Some(strings::key_delete())
     );
     assert_eq!(
-        entry(&entries, strings::PALETTE_EDIT).and_then(|e| e.shortcut),
-        Some(strings::KEY_EDIT)
+        entry(&entries, strings::palette_edit()).and_then(|e| e.shortcut),
+        Some(strings::key_edit())
     );
     assert_eq!(
-        entry(&entries, strings::PALETTE_DOWNLOAD).and_then(|e| e.shortcut),
-        Some(strings::KEY_TRANSFER)
+        entry(&entries, strings::palette_download()).and_then(|e| e.shortcut),
+        Some(strings::key_transfer())
     );
 
     // The connection is lost: Reconnect, and no new tab on a dead session.
@@ -276,17 +276,17 @@ async fn palette_lists_context_actions() {
     });
     let entries = all(&app);
     assert_eq!(
-        entry(&entries, strings::RECONNECT).map(|e| e.item.clone()),
+        entry(&entries, strings::reconnect()).map(|e| e.item.clone()),
         Some(PaletteItem::Reconnect(files))
     );
-    assert!(entry(&entries, strings::NEW_TERMINAL_TAB).is_none());
+    assert!(entry(&entries, strings::new_terminal_tab()).is_none());
 
     // "Open workspace…" narrows the palette to the workspaces.
     app.update(palette(PaletteMsg::Open));
     app.update(palette(PaletteMsg::Query("open work".into())));
     assert_eq!(
         app.palette_results().first().map(|e| e.label.as_str()),
-        Some(strings::PALETTE_OPEN_WORKSPACE)
+        Some(strings::palette_open_workspace())
     );
     assert!(app.update(pressed(FileKey::Enter)).is_empty());
     let open = app.palette.as_ref().expect("still open");
@@ -304,7 +304,7 @@ async fn enter_runs_and_closes() {
     app.update(palette(PaletteMsg::Query("new si".into())));
     assert_eq!(
         app.palette_results().first().map(|e| e.label.as_str()),
-        Some(strings::NEW_SITE)
+        Some(strings::new_site())
     );
     // Enter runs the selected row through the action's own message, and closes.
     app.update(pressed(FileKey::Enter));
@@ -317,7 +317,10 @@ async fn enter_runs_and_closes() {
     let results = labels(&app.palette_results());
     assert_eq!(
         results,
-        [strings::PALETTE_TOGGLE_LOG, strings::PALETTE_TOGGLE_QUEUE]
+        [
+            strings::palette_toggle_log(),
+            strings::palette_toggle_queue()
+        ]
     );
     app.update(pressed(FileKey::Down));
     assert_eq!(app.palette.as_ref().map(|p| p.selected), Some(1));
@@ -338,7 +341,7 @@ async fn enter_runs_and_closes() {
     let index = app
         .palette_results()
         .iter()
-        .position(|e| e.label == strings::SETTINGS)
+        .position(|e| e.label == strings::settings())
         .expect("settings listed");
     app.update(palette(PaletteMsg::Pick(index)));
     assert!(app.palette.is_none());
@@ -630,13 +633,13 @@ async fn empty_query_reaches_sites_workspaces_and_settings() {
     // The tab's own actions first, at most 5.
     let context = groups.iter().take_while(|g| **g == Group::Action).count();
     assert_eq!(context, 5, "{:?}", labels(&results));
-    assert_eq!(results[0].label, strings::NEW_FOLDER);
+    assert_eq!(results[0].label, strings::new_folder());
     // Then the other tabs (not the active one), at most 3.
     let tabs: Vec<&Entry> = results.iter().filter(|e| e.group == Group::Tab).collect();
     assert_eq!(tabs.len(), 3, "{:?}", labels(&results));
     assert!(tabs.iter().all(|e| e.item != PaletteItem::Tab(files)));
     // Go to: the workspaces, Settings and some sites are reachable without typing.
-    for label in [strings::PALETTE_OPEN_WORKSPACE, strings::SETTINGS] {
+    for label in [strings::palette_open_workspace(), strings::settings()] {
         assert!(
             entry(&results, label).is_some(),
             "{label}: {:?}",
@@ -657,7 +660,7 @@ async fn empty_query_reaches_sites_workspaces_and_settings() {
     app.update(palette(PaletteMsg::Query("close tab".into())));
     assert_eq!(
         app.palette_results().first().map(|e| e.label.as_str()),
-        Some(strings::PALETTE_CLOSE_TAB)
+        Some(strings::palette_close_tab())
     );
 }
 

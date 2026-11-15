@@ -58,6 +58,8 @@ it, in one quiet window that opens in under 100 ms and idles at about 33 MB.
   a cascade of modal dialogs. `known_hosts` is verified; FTPS certificates can be pinned.
 - **Connections that survive:** keepalive, automatic reconnection with backoff, and recovery
   from connections that servers drop while idle.
+- **Language:** English or Brazilian Portuguese. hoprs follows the OS language by default;
+  Settings › Language switches it at once.
 - **Command palette:** Ctrl+K (Cmd+K on macOS) jumps to any tab, site, workspace or action.
 - **Technical log:** a log panel and `RUST_LOG` support, with no passwords, file contents or
   terminal bytes in it.
@@ -235,6 +237,17 @@ line).
 
 The Log button in the status bar opens the technical log: connections, retries, transfer
 decisions. It never contains passwords, passphrases, file contents or terminal output.
+
+### Language
+
+The interface is in English and Brazilian Portuguese. "System" (the default) follows the OS
+language: any Portuguese locale gives Portuguese, anything else English. Pick one in
+Settings › Language (Idioma); it applies immediately. Messages that come from servers or
+the OS (for example an SFTP server's own error text) are shown as they are.
+
+Translators: the texts are Fluent files in `crates/hoprs-app/i18n/`. `en.ftl` is the
+reference: copy it, translate the values, and keep the `{ $var }` names unchanged. The
+tests check that both catalogs have the same keys and variables (`cargo test -p hoprs-app`).
 
 ## Where your data lives
 

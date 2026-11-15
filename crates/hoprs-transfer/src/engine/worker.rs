@@ -100,7 +100,7 @@ pub(super) enum WorkerMsg {
 const STOP_GRACE: Duration = Duration::from_millis(200);
 
 fn panicked() -> Error {
-    Error::new(ErrorKind::Io, "Worker panicked")
+    Error::coded(ErrorKind::Io, "transfer-worker-panicked", "Worker panicked")
 }
 
 /// Runs one worker phase as its own task and always reports to the actor:
@@ -165,10 +165,12 @@ async fn prepare(route: &Route, policy: ConflictPolicy, fresh_dst: bool) -> Resu
         }
     };
     if dst.as_ref().is_some_and(|d| d.kind != EntryKind::File) {
-        return Err(
-            Error::new(ErrorKind::Io, "Destination is not a regular file")
-                .with_detail(route.dst_path.to_string()),
-        );
+        return Err(Error::coded(
+            ErrorKind::Io,
+            "transfer-destination-not-file",
+            "Destination is not a regular file",
+        )
+        .with_detail(route.dst_path.to_string()));
     }
     let decision = decide(policy, &src, dst.as_ref());
     Ok(Prepared::File { src, dst, decision })
@@ -192,10 +194,12 @@ async fn prepare_dir(route: &Route) -> Result<Prepared> {
     let entries = route.src.list(&route.src_path).await?;
     // The actor joins these names onto paths, which must not panic.
     if let Some(bad) = entries.iter().find(|e| !is_plain_name(&e.name)) {
-        return Err(
-            Error::new(ErrorKind::Io, "Invalid name in directory listing")
-                .with_detail(format!("{:?} in {}", bad.name, route.src_path)),
-        );
+        return Err(Error::coded(
+            ErrorKind::Io,
+            "transfer-invalid-listing-name",
+            "Invalid name in directory listing",
+        )
+        .with_detail(format!("{:?} in {}", bad.name, route.src_path)));
     }
     Ok(Prepared::Dir { entries, created })
 }

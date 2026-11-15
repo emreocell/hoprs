@@ -49,19 +49,19 @@ pub const PTY_RESERVE: usize = 3;
 /// The SFTP metadata channel.
 const METADATA_CHANNELS: usize = 1;
 
-const LIMIT_MESSAGE: &str = "Too many channels on this connection";
-
 /// The error for a channel past `limit` (ours or the server's).
 pub(crate) fn too_many_channels(limit: usize) -> Error {
-    Error::new(
+    Error::coded(
         ErrorKind::Protocol,
-        format!("{LIMIT_MESSAGE} (limit {limit})"),
+        "ssh-too-many-channels",
+        format!("Too many channels on this connection (limit {limit})"),
     )
+    .arg("limit", limit.to_string())
 }
 
 /// Whether `error` is the "Too many channels" error of a channel open.
 pub fn is_channel_limit(error: &Error) -> bool {
-    error.kind == ErrorKind::Protocol && error.message.starts_with(LIMIT_MESSAGE)
+    error.code == Some("ssh-too-many-channels")
 }
 
 /// How many SFTP stream channels fit under `max_channels` beside the metadata channel and
@@ -134,7 +134,11 @@ impl ChannelBudget {
     fn acquire_below(self: &Arc<Self>, generation: u64, cap: usize) -> Result<ChannelSlot> {
         let mut count = self.count();
         if count.generation != generation {
-            return Err(Error::new(ErrorKind::Network, "Not connected"));
+            return Err(Error::coded(
+                ErrorKind::Network,
+                "net-not-connected",
+                "Not connected",
+            ));
         }
         if count.open >= cap {
             return Err(too_many_channels(self.limit));
@@ -176,6 +180,14 @@ mod tests {
     use hoprs_core::ErrorKind;
 
     use super::*;
+
+    #[test]
+    fn the_limit_error_is_coded_and_recognized() {
+        let e = too_many_channels(3);
+        assert_eq!(e.code, Some("ssh-too-many-channels"));
+        assert_eq!(e.args, vec![("limit", "3".to_owned())]);
+        assert!(is_channel_limit(&e));
+    }
 
     #[test]
     fn channel_budget_reserves_room_for_a_pty() {

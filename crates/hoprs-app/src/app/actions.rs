@@ -176,20 +176,20 @@ pub fn check_name(
     side: Side,
 ) -> Result<(), &'static str> {
     if name.trim().is_empty() {
-        return Err(strings::NAME_EMPTY);
+        return Err(strings::name_empty());
     }
     if name.trim() != name {
-        return Err(strings::NAME_SPACES);
+        return Err(strings::name_spaces());
     }
     if name == "." || name == ".." || name.contains('/') || name.contains('\0') {
-        return Err(strings::NAME_INVALID);
+        return Err(strings::name_invalid());
     }
     // On Windows the local disk takes `\` as a separator too.
     if cfg!(windows) && side == Side::Local && name.contains('\\') {
-        return Err(strings::NAME_INVALID_WINDOWS);
+        return Err(strings::name_invalid_windows());
     }
     if except != Some(name) && entries.iter().any(|e| e.name == name) {
-        return Err(strings::NAME_TAKEN);
+        return Err(strings::name_taken());
     }
     Ok(())
 }
@@ -197,11 +197,11 @@ pub fn check_name(
 /// "New folder", or "New folder 2", 3… if taken.
 fn new_folder_name(entries: &[RemoteEntry]) -> String {
     let taken = |name: &str| entries.iter().any(|e| e.name == name);
-    let mut name = strings::NEW_FOLDER_NAME.to_owned();
+    let mut name = strings::new_folder_name().to_owned();
     let mut n = 1;
     while taken(&name) {
         n += 1;
-        name = strings::numbered(strings::NEW_FOLDER_NAME, n);
+        name = strings::numbered(strings::new_folder_name(), n);
     }
     name
 }
@@ -541,7 +541,10 @@ impl App {
         if let Err(mut error) = result {
             // A delete that stopped half way: say how far it got.
             if busy.kind == BusyKind::Delete && busy.done > 0 {
-                error.message = strings::deleted_then(busy.done, &error.message);
+                error.message = strings::deleted_then(busy.done, &strings::error(&error));
+                // The composed text is the message now: no code to translate it again.
+                error.code = None;
+                error.args.clear();
             }
             pane.action_error = Some(error);
             pane.select_after = None;
@@ -628,18 +631,18 @@ mod tests {
         assert_eq!(check_name("b.txt", &entries, None, Side::Remote), Ok(()));
         assert_eq!(
             check_name("  ", &entries, None, Side::Remote),
-            Err(strings::NAME_EMPTY)
+            Err(strings::name_empty())
         );
         for bad in [".", "..", "a/b"] {
             assert_eq!(
                 check_name(bad, &entries, None, Side::Remote),
-                Err(strings::NAME_INVALID),
+                Err(strings::name_invalid()),
                 "{bad:?}"
             );
         }
         assert_eq!(
             check_name("a.txt", &entries, None, Side::Remote),
-            Err(strings::NAME_TAKEN)
+            Err(strings::name_taken())
         );
         assert_eq!(
             check_name("a.txt", &entries, Some("a.txt"), Side::Remote),
@@ -648,7 +651,7 @@ mod tests {
         for padded in [" b.txt", "b.txt ", "b.txt\t"] {
             assert_eq!(
                 check_name(padded, &entries, None, Side::Local),
-                Err(strings::NAME_SPACES),
+                Err(strings::name_spaces()),
                 "{padded:?}"
             );
         }
@@ -656,7 +659,7 @@ mod tests {
         assert_eq!(check_name("a\\b", &entries, None, Side::Remote), Ok(()));
         let local = check_name("a\\b", &entries, None, Side::Local);
         if cfg!(windows) {
-            assert_eq!(local, Err(strings::NAME_INVALID_WINDOWS));
+            assert_eq!(local, Err(strings::name_invalid_windows()));
         } else {
             assert_eq!(local, Ok(()));
         }

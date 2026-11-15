@@ -82,6 +82,63 @@ async fn next(
     tokio::time::timeout(Duration::from_millis(100), events.recv()).await
 }
 
+/// Puts the thread's language back to English when a test ends, however it ends.
+struct RestoreEnglish;
+
+impl Drop for RestoreEnglish {
+    fn drop(&mut self) {
+        crate::i18n::set_language(crate::i18n::Language::En);
+    }
+}
+
+/// The content a dialog builds is read from the active language each time the view is
+/// built, so an open dialog follows a switch at once. A security dialog is exclusive:
+/// the settings page behind it takes no clicks, so the switch is set directly here.
+#[test]
+fn open_dialog_follows_a_language_switch() {
+    use crate::app::settings::SettingsMsg;
+    use crate::i18n::Language;
+    use crate::settings::LanguageChoice;
+
+    let _restore = RestoreEnglish;
+    let mut app = App::new();
+    show(
+        &mut app,
+        request(1, 1, "h:22", host_key(&["ssh-rsa", "ssh-ed25519"])),
+    );
+    let en = dialogs::content(app.dialogs.current.as_ref().expect("dialog open"));
+    assert_eq!(en.title, "Unknown host key");
+    assert_eq!(en.action, "Trust and connect");
+    assert_eq!(en.rows[0].0, "Host");
+    assert_eq!(en.rows[1].0, "Key type");
+
+    // Under the dialog the settings message is not handled: the language stays.
+    app.update(Message::Settings(SettingsMsg::Language(
+        LanguageChoice::Fixed(Language::PtBr),
+    )));
+    assert_eq!(crate::i18n::language(), Language::En);
+
+    crate::i18n::set_language(Language::PtBr);
+    let pt = dialogs::content(app.dialogs.current.as_ref().expect("still open"));
+    assert_eq!(pt.title, "Chave de host desconhecida");
+    assert_eq!(pt.action, "Confiar e conectar");
+    assert_eq!(pt.rows[1].0, "Tipo de chave");
+    assert_eq!(
+        pt.warning.as_deref(),
+        Some(
+            "Este host é conhecido com outro tipo de chave (ssh-rsa, ssh-ed25519). Alguém pode estar se passando por ele."
+        )
+    );
+    assert_eq!(
+        pt.rows[0].1, "h:22",
+        "values the user did not write stay as they are"
+    );
+
+    crate::i18n::set_language(Language::En);
+    let back = dialogs::content(app.dialogs.current.as_ref().expect("still open"));
+    assert_eq!(back.title, "Unknown host key");
+}
+
 #[test]
 fn prompts_are_queued_one_at_a_time() {
     let mut app = App::new();
@@ -511,24 +568,24 @@ fn cert_changed_shows_both_fingerprints() {
         ),
     );
     let content = dialogs::content(app.dialogs.current.as_ref().unwrap());
-    assert_eq!(content.title, strings::CERT_CHANGED_TITLE);
+    assert_eq!(content.title, strings::cert_changed_title());
     assert!(
         content
             .rows
-            .contains(&(strings::LABEL_TRUSTED_BEFORE, "SHA256:AAAA".into()))
+            .contains(&(strings::label_trusted_before(), "SHA256:AAAA".into()))
     );
     assert!(
         content
             .rows
-            .contains(&(strings::LABEL_PRESENTED_NOW, "SHA256:BBBB".into()))
+            .contains(&(strings::label_presented_now(), "SHA256:BBBB".into()))
     );
     assert!(
         content
             .rows
-            .contains(&(strings::LABEL_HOST, "ftp.example.com:21".into()))
+            .contains(&(strings::label_host(), "ftp.example.com:21".into()))
     );
     assert!(content.warning.is_some());
-    assert_eq!(content.action, strings::TRUST_CERTIFICATE);
+    assert_eq!(content.action, strings::trust_certificate());
     assert!(content.decision);
 
     // An untrusted one shows its fingerprint and reason; no "trusted before".
@@ -541,22 +598,21 @@ fn cert_changed_shows_both_fingerprints() {
     dialog_msg(&mut app, DialogMsg::Cancel);
     show(&mut app, untrusted);
     let content = dialogs::content(app.dialogs.current.as_ref().unwrap());
-    assert_eq!(content.title, strings::CERT_UNTRUSTED_TITLE);
+    assert_eq!(content.title, strings::cert_untrusted_title());
     assert!(
         content
             .rows
-            .contains(&(strings::LABEL_FINGERPRINT, "SHA256:BBBB".into()))
+            .contains(&(strings::label_fingerprint(), "SHA256:BBBB".into()))
     );
-    assert!(
-        content
-            .rows
-            .contains(&(strings::LABEL_REASON, "Issued for a different name".into()))
-    );
+    assert!(content.rows.contains(&(
+        strings::label_reason(),
+        "Issued for a different name".into()
+    )));
     assert!(
         !content
             .rows
             .iter()
-            .any(|(l, _)| *l == strings::LABEL_TRUSTED_BEFORE)
+            .any(|(l, _)| *l == strings::label_trusted_before())
     );
 
     // A host key known with another type warns of impersonation.
@@ -576,9 +632,9 @@ fn cert_changed_shows_both_fingerprints() {
     assert!(
         content
             .rows
-            .contains(&(strings::LABEL_FINGERPRINT, "SHA256:new".into()))
+            .contains(&(strings::label_fingerprint(), "SHA256:new".into()))
     );
-    assert_eq!(content.action, strings::TRUST_AND_CONNECT);
+    assert_eq!(content.action, strings::trust_and_connect());
     dialog_msg(&mut app, DialogMsg::Cancel);
     show(&mut app, request(4, 1, "h:22", host_key(&[])));
     assert!(
@@ -662,7 +718,7 @@ fn password_cleared_after_submit() {
         !content.save,
         "keyboard-interactive answers are never saved"
     );
-    assert_eq!(content.title, strings::KBD_TITLE);
+    assert_eq!(content.title, strings::kbd_title());
     dialog_msg(&mut app, DialogMsg::Input(0, Typed("123456".into())));
     dialog_msg(&mut app, DialogMsg::Input(1, Typed("s3cret".into())));
     let effects = dialog_msg(&mut app, DialogMsg::Submit);
@@ -695,7 +751,7 @@ fn password_cleared_after_submit() {
     assert!(
         content
             .rows
-            .contains(&(strings::LABEL_KEY_FILE, "/home/u/.ssh/id_ed25519".into()))
+            .contains(&(strings::label_key_file(), "/home/u/.ssh/id_ed25519".into()))
     );
 }
 

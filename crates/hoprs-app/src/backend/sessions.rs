@@ -270,7 +270,7 @@ impl Link {
 }
 
 fn closed() -> Error {
-    Error::new(ErrorKind::NotFound, "Session closed")
+    Error::coded(ErrorKind::NotFound, "session-closed", "Session closed")
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -695,8 +695,9 @@ impl SessionManager {
             sessions.get(&id).ok_or_else(closed)?.link.clone()
         };
         let Link::Ssh(session) = link else {
-            return Err(Error::new(
+            return Err(Error::coded(
                 ErrorKind::Protocol,
+                "session-terminal-needs-ssh",
                 "Terminals need an SSH site",
             ));
         };
@@ -763,7 +764,7 @@ impl SessionManager {
         entry
             .remote
             .clone()
-            .ok_or_else(|| Error::new(ErrorKind::Network, "Not connected"))
+            .ok_or_else(|| Error::coded(ErrorKind::Network, "net-not-connected", "Not connected"))
     }
 
     /// The site of a session.

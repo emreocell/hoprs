@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hoprs_core::{Error, ErrorKind, RemotePath, Result, SiteId};
@@ -35,12 +37,20 @@ UPDATE transfers SET next_policy = 'resume'
     AND (state = 'active' OR (state = 'paused' AND state_detail = 'active'));
 ";
 
+/// Adds the stable code of a failed item's error and its arguments (a JSON
+/// object of strings), so the app can show the error in the user's language.
+/// Older rows have neither and show their English message.
+const MIGRATION_V3: &str = "
+ALTER TABLE transfers ADD COLUMN error_code TEXT;
+ALTER TABLE transfers ADD COLUMN error_args TEXT;
+";
+
 /// The schema version this code reads and writes (`PRAGMA user_version`).
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 const SELECT: &str = "SELECT id, parent_id, site, direction, local_path, remote_path, is_dir, size, \
-    bytes_done, state, state_detail, error_kind, error_message, error_detail, conflict_json \
-    FROM transfers";
+    bytes_done, state, state_detail, error_kind, error_message, error_detail, conflict_json, \
+    error_code, error_args FROM transfers";
 
 /// The state a `Paused` item was paused from, so `resume` can treat it correctly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,11 +124,21 @@ pub struct QueueStore {
 }
 
 fn db_err(e: impl std::fmt::Display) -> Error {
-    Error::new(ErrorKind::Io, "Queue database error").with_detail(e.to_string())
+    Error::coded(
+        ErrorKind::Io,
+        "queue-database-error",
+        "Queue database error",
+    )
+    .with_detail(e.to_string())
 }
 
 fn corrupt(what: &str) -> Error {
-    Error::new(ErrorKind::Io, "Queue database error").with_detail(format!("corrupt row: {what}"))
+    Error::coded(
+        ErrorKind::Io,
+        "queue-database-error",
+        "Queue database error",
+    )
+    .with_detail(format!("corrupt row: {what}"))
 }
 
 trait Db<T> {
@@ -202,6 +222,67 @@ fn conflict_from_json(json: &str) -> Result<ConflictInfo> {
     })
 }
 
+/// A stored error code as the `&'static str` `Error::code` holds. Each distinct value read
+/// from the file is leaked once (so the leak is bounded by the distinct codes the file
+/// holds, not only those of this binary); a value that is not a kebab-case ASCII code of
+/// at most 64 bytes reads as no code, which also bounds what a damaged file can leak.
+fn intern_code(s: &str) -> Option<&'static str> {
+    let valid = !s.is_empty()
+        && s.len() <= 64
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    if !valid {
+        return None;
+    }
+    static CODES: Mutex<Option<HashMap<String, &'static str>>> = Mutex::new(None);
+    let mut guard = CODES.lock().ok()?;
+    let codes = guard.get_or_insert_with(HashMap::new);
+    if let Some(code) = codes.get(s) {
+        return Some(code);
+    }
+    let code: &'static str = Box::leak(s.to_owned().into_boxed_str());
+    codes.insert(s.to_owned(), code);
+    Some(code)
+}
+
+/// Argument names are `&'static str` too, interned the same way.
+fn intern_name(s: &str) -> &'static str {
+    static NAMES: Mutex<Option<HashMap<String, &'static str>>> = Mutex::new(None);
+    let Ok(mut guard) = NAMES.lock() else {
+        return Box::leak(s.to_owned().into_boxed_str());
+    };
+    let names = guard.get_or_insert_with(HashMap::new);
+    names
+        .entry(s.to_owned())
+        .or_insert_with(|| Box::leak(s.to_owned().into_boxed_str()))
+}
+
+fn args_to_json(args: &[(&'static str, String)]) -> Option<String> {
+    if args.is_empty() {
+        return None;
+    }
+    let map: serde_json::Map<String, serde_json::Value> = args
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), serde_json::Value::String(v.clone())))
+        .collect();
+    Some(serde_json::Value::Object(map).to_string())
+}
+
+/// Malformed JSON, or anything but an object of strings, reads as no arguments.
+fn args_from_json(json: &str) -> Vec<(&'static str, String)> {
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str(json) else {
+        return Vec::new();
+    };
+    let mut args = Vec::new();
+    for (k, v) in map {
+        let serde_json::Value::String(v) = v else {
+            return Vec::new();
+        };
+        args.push((intern_name(&k), v));
+    }
+    args
+}
+
 fn item_from_row(row: &Row<'_>) -> Result<TransferItem> {
     let site: String = row.get(2).db()?;
     let direction = match row.get::<_, String>(3).db()?.as_str() {
@@ -236,6 +317,12 @@ fn item_from_row(row: &Row<'_>) -> Result<TransferItem> {
             let message: Option<String> = row.get(12).db()?;
             let mut err = Error::new(kind, message.unwrap_or_default());
             err.detail = row.get(13).db()?;
+            let code: Option<String> = row.get(15).db()?;
+            if let Some(code) = code.as_deref().and_then(intern_code) {
+                err.code = Some(code);
+                let args: Option<String> = row.get(16).db()?;
+                err.args = args.as_deref().map(args_from_json).unwrap_or_default();
+            }
             TransferState::Failed(err)
         }
         "cancelled" => TransferState::Cancelled,
@@ -298,6 +385,7 @@ fn current_state(conn: &Connection, id: TransferId) -> Result<Option<(String, Op
 fn write_state(conn: &Connection, id: TransferId, state: &TransferState) -> Result<()> {
     let mut detail: Option<String> = None;
     let (mut kind, mut message, mut err_detail, mut conflict) = (None, None, None, None);
+    let (mut err_code, mut err_args): (Option<&str>, Option<String>) = (None, None);
     let mut keep_policy = false;
     let name = match state {
         TransferState::Queued => {
@@ -330,6 +418,8 @@ fn write_state(conn: &Connection, id: TransferId, state: &TransferState) -> Resu
             kind = Some(e.kind.as_str());
             message = Some(e.message.clone());
             err_detail = e.detail.clone();
+            err_code = e.code;
+            err_args = args_to_json(&e.args);
             "failed"
         }
         TransferState::Cancelled => {
@@ -339,7 +429,7 @@ fn write_state(conn: &Connection, id: TransferId, state: &TransferState) -> Resu
     };
     conn.execute(
         "UPDATE transfers SET state = ?2, state_detail = ?3, error_kind = ?4, error_message = ?5, \
-         error_detail = ?6, conflict_json = ?7, \
+         error_detail = ?6, conflict_json = ?7, error_code = ?9, error_args = ?10, \
          next_policy = CASE WHEN ?8 THEN next_policy ELSE NULL END WHERE id = ?1",
         params![
             id.0,
@@ -349,7 +439,9 @@ fn write_state(conn: &Connection, id: TransferId, state: &TransferState) -> Resu
             message,
             err_detail,
             conflict,
-            keep_policy
+            keep_policy,
+            err_code,
+            err_args
         ],
     )
     .db()?;
@@ -398,15 +490,16 @@ impl QueueStore {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .db()?;
         if version > SCHEMA_VERSION {
-            return Err(Error::new(
+            return Err(Error::coded(
                 ErrorKind::Io,
+                "queue-newer-version",
                 "The transfer queue was saved by a newer version of hoprs",
             )
             .with_detail(format!(
                 "queue schema version {version}, this version understands up to {SCHEMA_VERSION}"
             )));
         }
-        for (target, migration) in [(1, MIGRATION_V1), (2, MIGRATION_V2)] {
+        for (target, migration) in [(1, MIGRATION_V1), (2, MIGRATION_V2), (3, MIGRATION_V3)] {
             if version < target {
                 let tx = conn.unchecked_transaction().db()?;
                 tx.execute_batch(migration).db()?;
@@ -1035,13 +1128,118 @@ mod tests {
                 .conn
                 .pragma_query_value(None, "user_version", |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 2);
+            assert_eq!(version, 3);
             let items = s.list_all().unwrap();
             assert_eq!(items.len(), expected.len());
             for (item, (policy, origin)) in items.iter().zip(expected) {
                 assert_eq!(s.next_policy(item.id).unwrap(), policy, "{item:?}");
                 assert_eq!(s.paused_from(item.id).unwrap(), origin, "{item:?}");
             }
+        }
+    }
+
+    /// A schema-v2 queue file with one failed row.
+    fn write_v2_failed(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(MIGRATION_V1).unwrap();
+        conn.execute_batch(MIGRATION_V2).unwrap();
+        conn.pragma_update(None, "user_version", 2).unwrap();
+        conn.execute(
+            "INSERT INTO transfers (site, direction, local_path, remote_path, state, error_kind, \
+             error_message, error_detail, created_at) VALUES ('site', 'upload', '/a', '/b', \
+             'failed', 'permission', 'Permission denied', 'EACCES', 0)",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn opening_a_v2_database_migrates_to_v3() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queue.db");
+        write_v2_failed(&path);
+        for _ in 0..2 {
+            let s = QueueStore::open(&path).unwrap();
+            let version: i64 = s
+                .conn
+                .pragma_query_value(None, "user_version", |r| r.get(0))
+                .unwrap();
+            assert_eq!(version, 3);
+            let items = s.list_all().unwrap();
+            let TransferState::Failed(e) = &items[0].state else {
+                panic!("{items:?}");
+            };
+            assert_eq!(e.kind, ErrorKind::Permission);
+            assert_eq!(e.message, "Permission denied");
+            assert_eq!(e.detail.as_deref(), Some("EACCES"));
+            assert_eq!((e.code, e.args.len()), (None, 0));
+        }
+    }
+
+    #[test]
+    fn coded_error_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queue.db");
+        let id = {
+            let mut s = QueueStore::open(&path).unwrap();
+            let id = new_item(&mut s);
+            let err = Error::coded(ErrorKind::Network, "net-test-code", "Cannot reach h")
+                .arg("host", "h")
+                .arg("port", "22")
+                .with_detail("refused");
+            s.set_state(id, &TransferState::Failed(err)).unwrap();
+            id
+        };
+        let s = QueueStore::open(&path).unwrap();
+        let TransferState::Failed(e) = s.get(id).unwrap().unwrap().state else {
+            panic!("not failed");
+        };
+        assert_eq!(e.code, Some("net-test-code"));
+        let mut args = e.args.clone();
+        args.sort();
+        assert_eq!(
+            args,
+            vec![("host", "h".to_owned()), ("port", "22".to_owned())]
+        );
+        assert_eq!(e.message, "Cannot reach h");
+        assert_eq!(e.detail.as_deref(), Some("refused"));
+    }
+
+    #[test]
+    fn invalid_stored_codes_read_as_no_code() {
+        let mut s = QueueStore::open_in_memory().unwrap();
+        let id = new_item(&mut s);
+        let err = Error::coded(ErrorKind::Io, "io-test-code", "Broken");
+        s.set_state(id, &TransferState::Failed(err)).unwrap();
+        let long = "a".repeat(65);
+        for bad in ["Has Space", "UPPER", "", long.as_str(), "snow\u{2603}"] {
+            s.conn
+                .execute("UPDATE transfers SET error_code = ?1", [bad])
+                .unwrap();
+            let TransferState::Failed(e) = s.get(id).unwrap().unwrap().state else {
+                panic!("not failed");
+            };
+            assert_eq!(e.code, None, "{bad}");
+            assert_eq!(e.message, "Broken");
+        }
+    }
+
+    #[test]
+    fn malformed_error_args_reads_as_no_args() {
+        let mut s = QueueStore::open_in_memory().unwrap();
+        let id = new_item(&mut s);
+        let err = Error::coded(ErrorKind::Io, "io-test-code", "Broken").arg("a", "b");
+        s.set_state(id, &TransferState::Failed(err)).unwrap();
+        for bad in ["{not json", "[1,2]", "{\"a\": 3}", ""] {
+            s.conn
+                .execute("UPDATE transfers SET error_args = ?1", [bad])
+                .unwrap();
+            let TransferState::Failed(e) = s.get(id).unwrap().unwrap().state else {
+                panic!("not failed");
+            };
+            assert_eq!(e.code, Some("io-test-code"), "{bad}");
+            assert!(e.args.is_empty(), "{bad}");
+            assert_eq!(e.message, "Broken");
         }
     }
 

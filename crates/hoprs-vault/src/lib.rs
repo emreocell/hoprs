@@ -64,7 +64,8 @@ impl fmt::Debug for Vault {
 }
 
 fn unknown_site(id: &SiteId) -> Error {
-    Error::new(ErrorKind::NotFound, "Unknown site").with_detail(id.0.clone())
+    Error::coded(ErrorKind::NotFound, "vault-unknown-site", "Unknown site")
+        .with_detail(id.0.clone())
 }
 
 impl Vault {
@@ -95,8 +96,9 @@ impl Vault {
     /// whatever `site` says.
     pub fn upsert_site(&mut self, mut site: Site) -> Result<()> {
         if self.profiles.is_unreadable_site_id(&site.id.0) {
-            return Err(Error::new(
+            return Err(Error::coded(
                 ErrorKind::Protocol,
+                "profile-site-id-unreadable",
                 "Site id is taken by an unreadable entry",
             )
             .with_detail(site.id.0));
@@ -129,12 +131,17 @@ impl Vault {
         if let Some(missing) = workspace.sites.iter().find(|ws| {
             self.site(&ws.site).is_none() && !self.profiles.is_unreadable_site_id(&ws.site.0)
         }) {
-            return Err(Error::new(ErrorKind::Protocol, "Unknown site in workspace")
-                .with_detail(missing.site.0.clone()));
+            return Err(Error::coded(
+                ErrorKind::Protocol,
+                "vault-workspace-unknown-site",
+                "Unknown site in workspace",
+            )
+            .with_detail(missing.site.0.clone()));
         }
         if self.profiles.is_unreadable_workspace_id(&workspace.id.0) {
-            return Err(Error::new(
+            return Err(Error::coded(
                 ErrorKind::Protocol,
+                "profile-workspace-id-unreadable",
                 "Workspace id is taken by an unreadable entry",
             )
             .with_detail(workspace.id.0));
@@ -151,9 +158,12 @@ impl Vault {
 
     pub fn remove_workspace(&mut self, id: &WorkspaceId) -> Result<()> {
         let Some(pos) = self.profiles.workspaces.iter().position(|w| &w.id == id) else {
-            return Err(
-                Error::new(ErrorKind::NotFound, "Unknown workspace").with_detail(id.0.clone())
-            );
+            return Err(Error::coded(
+                ErrorKind::NotFound,
+                "vault-unknown-workspace",
+                "Unknown workspace",
+            )
+            .with_detail(id.0.clone()));
         };
         let mut next = self.profiles.clone();
         next.workspaces.remove(pos);
@@ -226,8 +236,9 @@ impl Vault {
             None => Ok(()),
             Some(err) => {
                 let cause = describe(&err);
-                Err(Error::new(
+                Err(Error::coded(
                     ErrorKind::Io,
+                    "vault-site-secrets-not-deleted",
                     "Site removed, but its secrets could not be deleted from the keyring",
                 )
                 .with_detail(format!("site {name:?} ({id}): {cause}")))

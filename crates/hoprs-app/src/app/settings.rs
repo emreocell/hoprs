@@ -17,8 +17,8 @@ use secrecy::SecretString;
 
 use super::{App, Effect, Form, PickTarget};
 use crate::settings::{
-    SettingsLoad, TerminalTheme, clamp_font_size, clamp_keepalive, clamp_scrollback, clamp_workers,
-    valid_editor,
+    LanguageChoice, SettingsLoad, TerminalTheme, clamp_font_size, clamp_keepalive,
+    clamp_scrollback, clamp_workers, valid_editor,
 };
 use crate::ui::site_form::Password;
 use crate::ui::strings;
@@ -32,6 +32,8 @@ pub enum SettingsMsg {
     /// Scrollback lines (clamped to `1 000..=100 000`), for the terminals opened next.
     TerminalScrollback(usize),
     TerminalTheme(TerminalTheme),
+    /// The interface language; applies at once.
+    Language(LanguageChoice),
     /// Seconds between keepalives (clamped to `10..=300`), for the next connections.
     Keepalive(u64),
     /// The editor command as typed: applied (and saved) when not empty.
@@ -152,7 +154,7 @@ impl Backup {
 fn path_of(field: &str) -> Result<PathBuf, &'static str> {
     let trimmed = field.trim();
     if trimmed.is_empty() {
-        Err(strings::BACKUP_PATH_REQUIRED)
+        Err(strings::backup_path_required())
     } else {
         Ok(PathBuf::from(trimmed))
     }
@@ -219,6 +221,14 @@ impl App {
                         terminal.model.set_theme(theme.colors());
                     }
                 }
+                self.save_settings_effect().into_iter().collect()
+            }
+            SettingsMsg::Language(choice) => {
+                if choice == self.settings.language {
+                    return Vec::new();
+                }
+                self.settings.language = choice;
+                crate::i18n::set_language(crate::i18n::resolve(choice));
                 self.save_settings_effect().into_iter().collect()
             }
             SettingsMsg::Keepalive(secs) => {
@@ -328,11 +338,11 @@ impl App {
                     }
                 };
                 if backup.export_password.0.is_empty() {
-                    backup.field_error = Some(strings::BACKUP_PASSWORD_REQUIRED);
+                    backup.field_error = Some(strings::backup_password_required());
                     return Vec::new();
                 }
                 if backup.export_password != backup.export_confirm {
-                    backup.field_error = Some(strings::BACKUP_PASSWORDS_DIFFER);
+                    backup.field_error = Some(strings::backup_passwords_differ());
                     return Vec::new();
                 }
                 backup.field_error = None;
@@ -368,7 +378,7 @@ impl App {
                     return Vec::new();
                 }
                 if backup.restore_password.0.is_empty() {
-                    backup.field_error = Some(strings::BACKUP_PASSWORD_REQUIRED);
+                    backup.field_error = Some(strings::backup_password_required());
                     return Vec::new();
                 }
                 backup.field_error = None;

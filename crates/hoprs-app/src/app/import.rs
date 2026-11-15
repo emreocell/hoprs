@@ -143,7 +143,7 @@ impl App {
             ImportMsg::Next => {
                 if flow.step == ImportStep::File {
                     if flow.path.trim().is_empty() {
-                        flow.path_error = Some(strings::IMPORT_PATH_REQUIRED);
+                        flow.path_error = Some(strings::import_path_required());
                     } else {
                         flow.error = None;
                         flow.step = ImportStep::Folders;

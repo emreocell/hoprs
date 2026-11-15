@@ -112,7 +112,7 @@ async fn mkdir_then_refresh() {
     assert!(app.update(key(FileKey::Enter)).is_empty());
     assert!(matches!(
         &app.tabs[0].remote().action,
-        Some(PaneAction::Edit(Edit { error: Some(e), .. })) if *e == strings::NAME_TAKEN
+        Some(PaneAction::Edit(Edit { error: Some(e), .. })) if *e == strings::name_taken()
     ));
     // Typing clears it; Enter creates the folder on the session.
     app.update(pane_msg(
@@ -272,7 +272,7 @@ async fn rename_inline_commits_on_enter_cancels_on_escape() {
     assert!(app.update(key(FileKey::Enter)).is_empty());
     assert!(matches!(
         &app.tabs[0].remote().action,
-        Some(PaneAction::Edit(Edit { error: Some(e), .. })) if *e == strings::NAME_TAKEN
+        Some(PaneAction::Edit(Edit { error: Some(e), .. })) if *e == strings::name_taken()
     ));
 }
 
