@@ -1878,15 +1878,19 @@ mod tests {
             "As alterações não enviadas são copiadas para /c"
         );
         let cat = Catalog::new(Language::PtBr);
-        for key in [
-            "editor-command-hint",
-            "editor-command-hint-macos",
-            "editor-command-hint-windows",
+        let base = "system abre os arquivos remotos no editor padrão do sistema. Ou digite um comando; o caminho do arquivo é adicionado no fim. Por exemplo: ";
+        for (key, example) in [
+            ("editor-command-hint", "gedit, code --wait."),
+            (
+                "editor-command-hint-macos",
+                "open -W -a \"Visual Studio Code\" (um caminho completo também funciona).",
+            ),
+            (
+                "editor-command-hint-windows",
+                "notepad++.exe, code.cmd --wait.",
+            ),
         ] {
-            assert!(
-                cat.tr(key).starts_with("system abre os arquivos remotos"),
-                "{key}"
-            );
+            assert_eq!(cat.tr(key), format!("{base}{example}"), "{key}");
         }
     }
 

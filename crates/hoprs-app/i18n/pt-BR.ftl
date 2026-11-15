@@ -553,7 +553,7 @@ editor-command = Editor
 # Windows' example names `code.cmd`: the command runs without a shell, which does not
 # find `.cmd` shims from a bare name.
 editor-command-hint-windows = system abre os arquivos remotos no editor padrão do sistema. Ou digite um comando; o caminho do arquivo é adicionado no fim. Por exemplo: notepad++.exe, code.cmd --wait.
-editor-command-hint-macos = system abre os arquivos remotos no editor padrão do sistema. Ou digite um comando; o caminho do arquivo é adicionado no fim. Por exemplo: open -W -a "Visual Studio Code" (a full path also works).
+editor-command-hint-macos = system abre os arquivos remotos no editor padrão do sistema. Ou digite um comando; o caminho do arquivo é adicionado no fim. Por exemplo: open -W -a "Visual Studio Code" (um caminho completo também funciona).
 editor-command-hint = system abre os arquivos remotos no editor padrão do sistema. Ou digite um comando; o caminho do arquivo é adicionado no fim. Por exemplo: gedit, code --wait.
 # Next to the editor field when it holds `system`.
 editor-system-default = Padrão do sistema
