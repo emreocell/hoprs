@@ -2300,6 +2300,7 @@ dependencies = [
  "hoprs-remote",
  "hoprs-ssh",
  "rusqlite",
+ "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "tokio",

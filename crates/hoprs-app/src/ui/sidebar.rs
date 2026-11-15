@@ -66,7 +66,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             container(
                 column![
                     text(strings::cannot_load_sites()).color(palette().error),
-                    text(&error.message)
+                    text(crate::ui::strings::error(error))
                         .size(theme::TEXT_XS)
                         .color(palette().muted),
                     action(strings::retry(), Message::ReloadProfiles),
@@ -369,7 +369,7 @@ fn unreadable(app: &App) -> Element<'_, Message> {
     ));
     if let Some(error) = &app.sidebar_error {
         list = list.push(
-            text(strings::cannot_open_folder(&error.message))
+            text(strings::cannot_open_folder(&strings::error(error)))
                 .size(theme::TEXT_XS)
                 .color(palette().error),
         );

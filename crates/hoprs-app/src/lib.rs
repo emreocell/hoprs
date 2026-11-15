@@ -124,6 +124,9 @@ struct Hoprs {
 
 /// What iced carries: the app's messages, and the start-up probe's steps, which never
 /// reach the [`App`].
+// `Message` is large; boxing it would allocate on every message for a probe that is
+// rarely on.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 enum Root {
     App(Message),

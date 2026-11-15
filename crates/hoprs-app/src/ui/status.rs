@@ -50,7 +50,7 @@ pub fn line(app: &App) -> StatusLine {
         }
         Some(ConnStatus::Waiting) => (strings::waiting_for_you().to_owned(), Tone::Muted),
         Some(ConnStatus::Disconnected(error)) => {
-            (strings::disconnected(&error.message), Tone::Error)
+            (strings::disconnected(&strings::error(error)), Tone::Error)
         }
     };
     let auth = match (tab, site) {

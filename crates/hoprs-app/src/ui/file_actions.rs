@@ -307,9 +307,13 @@ fn bar(content: Element<'_, Message>) -> Element<'_, Message> {
 /// The operation's error: its message, its detail in mono, "Dismiss".
 pub fn error_bar(error: &Error, dismiss: Message) -> Element<'_, Message> {
     let p = palette();
-    let mut lines = column![text(&error.message).size(theme::TEXT_XS).color(p.error)]
-        .spacing(theme::SPACE_3XS)
-        .width(Length::Fill);
+    let mut lines = column![
+        text(crate::ui::strings::error(error))
+            .size(theme::TEXT_XS)
+            .color(p.error)
+    ]
+    .spacing(theme::SPACE_3XS)
+    .width(Length::Fill);
     if let Some(detail) = &error.detail {
         lines = lines.push(
             text(detail)

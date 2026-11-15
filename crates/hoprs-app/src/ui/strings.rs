@@ -690,6 +690,30 @@ pub fn queue_unavailable(reason: &str) -> String {
     tr_args("queue-unavailable", &[("reason", reason.into())])
 }
 
+/// The text of an error in the user's language (see `error_in`).
+pub fn error(err: &hoprs_core::Error) -> String {
+    error_in(crate::i18n::catalog_for(crate::i18n::language()), err)
+}
+
+/// The text of an error in `catalog`'s language. An error with a code is looked up as
+/// `error-<code>` with its arguments; it falls back to the English `message` when there
+/// is no code, no such key, or the translation needs an argument the error lacks. This is
+/// the one sanctioned computed catalog key: the coverage tests ignore it and check
+/// the codes themselves.
+pub fn error_in(catalog: &crate::i18n::Catalog, err: &hoprs_core::Error) -> String {
+    let Some(code) = err.code else {
+        return err.message.clone();
+    };
+    let args: Vec<(&str, crate::i18n::Arg)> = err
+        .args
+        .iter()
+        .map(|(name, value)| (*name, crate::i18n::Arg::Str(value)))
+        .collect();
+    catalog
+        .tr_args_checked(&format!("error-{code}"), &args)
+        .unwrap_or_else(|| err.message.clone())
+}
+
 /// A skip reason the engine stored, in the user's language; an unknown one passes through.
 pub fn skip_reason(raw: &str) -> String {
     match raw {
@@ -1550,6 +1574,34 @@ pub fn delete_site_edits(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use crate::i18n::{Catalog, Language};
+    use hoprs_core::{Error, ErrorKind};
+
+    #[test]
+    fn error_text_uses_translation_then_message() {
+        let en = "error-dns = Cannot resolve { $host }\nerror-bare = Bare\n";
+        let pt = "error-dns = Nao foi possivel resolver { $host }\nerror-bare = Simples\n";
+        let c = Catalog::from_sources(Language::PtBr, en, Some(pt));
+        let e = Error::coded(ErrorKind::Network, "dns", "Cannot resolve h").arg("host", "h");
+        assert_eq!(super::error_in(&c, &e), "Nao foi possivel resolver h");
+        let en_only = Catalog::from_sources(Language::En, en, None);
+        assert_eq!(super::error_in(&en_only, &e), "Cannot resolve h");
+        // A missing argument: the English message, never a `{$host}`.
+        let missing = Error::coded(ErrorKind::Network, "dns", "Cannot resolve h");
+        assert_eq!(super::error_in(&c, &missing), "Cannot resolve h");
+        // Unknown code and no code.
+        let unknown = Error::coded(ErrorKind::Io, "nothing", "Plain English");
+        assert_eq!(super::error_in(&c, &unknown), "Plain English");
+        assert_eq!(
+            super::error_in(&c, &Error::new(ErrorKind::Io, "Uncoded")),
+            "Uncoded"
+        );
+        assert_eq!(
+            super::error_in(&c, &Error::coded(ErrorKind::Io, "bare", "Bare")),
+            "Simples"
+        );
+        // The active-language wrapper uses English here.
+        assert_eq!(super::error(&unknown), "Plain English");
+    }
 
     fn pt(key: &str, args: &[(&str, crate::i18n::Arg)]) -> String {
         Catalog::new(Language::PtBr).tr_args(key, args)

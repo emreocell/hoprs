@@ -295,7 +295,7 @@ impl Catalog {
     }
 
     /// A catalog from explicit sources (the tests build partial ones).
-    fn from_sources(lang: Language, english: &str, primary: Option<&str>) -> Catalog {
+    pub(crate) fn from_sources(lang: Language, english: &str, primary: Option<&str>) -> Catalog {
         let mut catalog = Catalog {
             lang,
             primary: primary.map(|source| bundle(lang, source)),
@@ -338,6 +338,12 @@ impl Catalog {
             });
             key.to_owned()
         })
+    }
+
+    /// Like `tr_args`, but `None` (and no warning) when neither language has the key or
+    /// formatting reports any error, so the caller can fall back to its own text.
+    pub fn tr_args_checked(&self, key: &str, args: &[(&str, Arg)]) -> Option<String> {
+        self.format_checked(key, args)
     }
 
     /// The message in the catalog's language, else in English; `None` when neither has
@@ -457,6 +463,25 @@ pub fn tr_args(key: &str, args: &[(&str, Arg)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tr_args_checked_is_none_on_missing_key_or_variable() {
+        let en = "hello = Hello { $name }\nplain = Plain\n";
+        let pt = "hello = Ola { $name }\n";
+        let c = Catalog::from_sources(Language::PtBr, en, Some(pt));
+        assert_eq!(
+            c.tr_args_checked("hello", &[("name", "Ana".into())])
+                .as_deref(),
+            Some("Ola Ana")
+        );
+        assert_eq!(c.tr_args_checked("plain", &[]).as_deref(), Some("Plain"));
+        assert_eq!(c.tr_args_checked("hello", &[]), None);
+        assert_eq!(c.tr_args_checked("nope", &[]), None);
+        assert_eq!(
+            catalog_for(Language::En).tr_args_checked("no-such-key", &[]),
+            None
+        );
+    }
 
     const SAME_IN_BOTH: &[&str] = &[
         "app-title",

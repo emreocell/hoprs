@@ -267,7 +267,11 @@ impl TerminalTab {
                 strings::terminal_restart(),
             ),
             ShellEnd::Failed(error) => (
-                format!("{}: {}", strings::terminal_open_failed(), error.message),
+                format!(
+                    "{}: {}",
+                    strings::terminal_open_failed(),
+                    strings::error(error)
+                ),
                 error.detail.clone(),
                 strings::terminal_retry(),
             ),

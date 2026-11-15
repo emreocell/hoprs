@@ -541,7 +541,10 @@ impl App {
         if let Err(mut error) = result {
             // A delete that stopped half way: say how far it got.
             if busy.kind == BusyKind::Delete && busy.done > 0 {
-                error.message = strings::deleted_then(busy.done, &error.message);
+                error.message = strings::deleted_then(busy.done, &strings::error(&error));
+                // The composed text is the message now: no code to translate it again.
+                error.code = None;
+                error.args.clear();
             }
             pane.action_error = Some(error);
             pane.select_after = None;

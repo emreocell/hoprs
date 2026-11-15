@@ -287,7 +287,7 @@ fn queue_row<'a>(app: &'a App, row: &'a QueueRow) -> Element<'a, Message> {
             .into()
     };
     let status: Element<'a, Message> = match app.queue.status(row) {
-        RowStatus::Error(error) => error_text(&error.message),
+        RowStatus::Error(error) => error_text(crate::ui::strings::error(error)),
         RowStatus::Progress {
             fraction,
             bytes_per_sec,
@@ -366,7 +366,7 @@ fn queue_row<'a>(app: &'a App, row: &'a QueueRow) -> Element<'a, Message> {
     .into()
 }
 
-fn error_text<'a>(message: &'a str) -> Element<'a, Message> {
+fn error_text<'a>(message: String) -> Element<'a, Message> {
     text(message)
         .size(theme::TEXT_SM)
         .color(palette().error)

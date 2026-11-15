@@ -1404,6 +1404,7 @@ struct Cut {
 }
 
 /// Uploads `data` by `mode` (see the module docs).
+#[allow(clippy::result_large_err)] // `Cut` holds an `Error`, rare and short-lived
 async fn upload(
     fs: &dyn RemoteFs,
     remote: &RemotePath,

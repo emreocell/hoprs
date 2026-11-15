@@ -46,7 +46,7 @@ pub fn failure(error: Option<&Error>) -> Element<'_, Message> {
     match error {
         None => space().into(),
         Some(error) => {
-            let mut lines = column![text(&error.message).color(palette().error)];
+            let mut lines = column![text(crate::ui::strings::error(error)).color(palette().error)];
             if let Some(detail) = &error.detail {
                 lines = lines.push(
                     text(detail)
