@@ -88,7 +88,7 @@ export const ptBr: Dict = {
       { q: "Onde ficam as senhas?", a: "No chaveiro do sistema: Secret Service no Linux, Keychain (Acesso às Chaves) no macOS, Gerenciador de Credenciais no Windows. Os arquivos de sites não guardam segredos." },
       { q: "Dá para usar FTP sem criptografia?", a: "Dá. Ele aparece como ftp (unencrypted). FTPS, explícito e implícito, também é suportado." },
       { q: "Ele importa do FileZilla?", a: "Importa. Ele lê o sitemanager.xml e mostra o que foi importado e o que ficou de fora." },
-      { q: "Ele coleta dados?", a: "Não. Não tem conta e só se conecta aos servidores que você adicionar." },
+      { q: "Ele coleta dados?", a: "O app, não. Ele não tem conta e só se conecta aos servidores que você adicionar. Este site conta as visitas com o Cloudflare Web Analytics, que não usa cookies nem guarda dados pessoais." },
       { q: "Como desinstalo?", a: "Linux: sudo apt remove hoprs. macOS: arraste o hoprs para fora de Aplicativos. Windows: remova em Aplicativos instalados. Seus dados ficam; para apagá-los também, exclua ~/.config/hoprs e ~/.local/share/hoprs (Linux), ~/Library/Application Support/hoprs (macOS) ou %APPDATA%\\hoprs (Windows), e as entradas do chaveiro do serviço hoprs/<site-id> (no Gerenciador de Credenciais do Windows aparecem como password.hoprs/<site-id> e key-passphrase.hoprs/<site-id>)." },
       { q: "Como reporto um bug?", a: "Abra uma issue no GitHub. Para vulnerabilidades, use o reporte privado do GitHub (Security Advisories)." },
     ],

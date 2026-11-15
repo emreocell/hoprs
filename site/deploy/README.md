@@ -12,10 +12,10 @@ The landing page is a static build (`site/dist`) served by the author's VPS
 | Live release | `/var/www/hoprs/current` → symlink to one release |
 | Receive script | `/usr/local/bin/hoprs-site-receive` (`0755 root:root`), a copy of [`hoprs-site-receive`](hoprs-site-receive) |
 | Deploy key | `~hoprs-site/.ssh/authorized_keys`, one ed25519 key with `restrict,command="/usr/local/bin/hoprs-site-receive"`; its private half is the `SITE_DEPLOY_KEY` repository secret only |
-| KoreGo domain | `hoprs.online`: static route `/` → `/var/www/hoprs/current`, `immutablePrefix /assets/` (one-year `immutable` cache), `www` → apex redirect, force HTTPS, compression, Cloudflare-only, security headers incl. a `'self'`-only CSP |
+| KoreGo domain | `hoprs.online`: static route `/` → `/var/www/hoprs/current`, `immutablePrefix /assets/` (one-year `immutable` cache), `www` → apex redirect, force HTTPS, compression, Cloudflare-only, security headers incl. a CSP that is `'self'`-only except for the Cloudflare Web Analytics beacon (`script-src` `https://static.cloudflareinsights.com`, `connect-src` `https://cloudflareinsights.com`) |
 | TLS | Cloudflare Origin CA certificate (ECC, `hoprs.online` + `*.hoprs.online`, expires 2041-11-10), stored in KoreGo as "Cloudflare origin hoprs"; Cloudflare SSL mode is Full (strict) |
 | DNS | Cloudflare zone `hoprs.online`: `A @ → 92.113.39.90` and `CNAME www → hoprs.online`, both proxied |
-| Web Analytics | off: Cloudflare would inject its beacon script, which the CSP blocks; a Configuration Rule (`disable_rum: true`, all requests) stops the injection |
+| Web Analytics | Cloudflare Web Analytics, automatic setup (Cloudflare injects the beacon; no cookies, no personal data); the CSP allows its two hosts. Search Console verification is a `google-site-verification` TXT record on the apex. Crawler Hints (IndexNow) is on. |
 
 ## What is in `dist/`
 
