@@ -1,0 +1,71 @@
+name: Bug report
+description: Something in hoprs doesn't work as it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Security problems go through a [private report](https://github.com/engviniciusbs/hoprs/security/advisories/new), not here.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open a site using sftp
+        2. Drag a folder to the remote pane
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: hoprs version
+      description: Shown next to the name in the top bar, or `hoprs --version`.
+      placeholder: "1.1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Windows
+    validations:
+      required: true
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version
+      placeholder: "Ubuntu 24.04, macOS 15.1, Windows 11 24H2…"
+  - type: dropdown
+    id: protocol
+    attributes:
+      label: Protocol involved
+      multiple: true
+      options:
+        - SSH (terminal)
+        - SFTP
+        - FTP
+        - FTPS (explicit)
+        - FTPS (implicit)
+        - Not protocol related
+  - type: input
+    id: server
+    attributes:
+      label: Server software, if you know it
+      placeholder: "OpenSSH 9.6, vsftpd 3.0.5, ProFTPD, a NAS…"
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: The relevant lines from the technical log (the Log button in the status bar). It never contains passwords or file contents, but check host names you'd rather not share.
+      render: text

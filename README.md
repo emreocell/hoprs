@@ -484,19 +484,16 @@ accept the new key. Check with the server's administrator first.
 
 ## Contributing
 
-Issues and pull requests are welcome.
-
-- Keep `cargo fmt` and `cargo clippy -D warnings` clean (see [Testing](#testing)).
-- Only `hoprs-app` may depend on iced, and the crate graph above is fixed.
-- Tests must be portable: use `tempfile`, never a literal `/tmp`.
-- Logs must never contain a password, passphrase, file contents or terminal bytes.
-- Code, identifiers, UI strings and commit messages are in English.
+Issues, translations, packaging and pull requests are welcome. Start with
+[CONTRIBUTING.md](CONTRIBUTING.md) (setup, checks, translating), the
+[architecture guide](docs/ARCHITECTURE.md) and the [roadmap](docs/ROADMAP.md). Questions and
+ideas go to [Discussions](https://github.com/engviniciusbs/hoprs/discussions).
 
 ## Security
 
 Please report vulnerabilities privately through
 [GitHub security advisories](https://github.com/engviniciusbs/hoprs/security/advisories/new)
-rather than in a public issue.
+rather than in a public issue. See [SECURITY.md](SECURITY.md).
 
 ## License
 
