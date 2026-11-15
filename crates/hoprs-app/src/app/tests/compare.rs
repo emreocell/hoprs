@@ -841,3 +841,504 @@ async fn a_new_run_and_hide_release_the_panels_keyboard() {
     assert!(!state(&app).focused);
     assert_eq!(state(&app).cursor, None);
 }
+
+// ---- Task 7: Upload / Download / Open ----
+
+use hoprs_core::{EntryKind, RemoteEntry};
+use hoprs_remote::CompareSide;
+use hoprs_transfer::{ConflictPolicy, Direction, EventKind, TransferState};
+
+fn entry(name: &str, kind: EntryKind, size: u64) -> RemoteEntry {
+    RemoteEntry {
+        name: name.to_owned(),
+        path: rpath(&format!("/x/{name}")),
+        kind,
+        size,
+        modified: Some(SystemTime::UNIX_EPOCH),
+        mode: None,
+    }
+}
+
+/// A difference found by the run, selected.
+fn diff_row(
+    app: &mut App,
+    tab: TabId,
+    run: CompareRunId,
+    path: &str,
+    kind: EntryKind,
+    status: Status,
+    sizes: (Option<u64>, Option<u64>),
+) {
+    let name = path.rsplit('/').next().unwrap();
+    app.update(msg(CompareMsg::Progress {
+        tab,
+        run,
+        progress: Progress::Found(Difference {
+            path: path.to_owned(),
+            kind,
+            status,
+            local: sizes.0.map(|s| entry(name, kind, s)),
+            remote: sizes.1.map(|s| entry(name, kind, s)),
+            entries_inside: None,
+        }),
+    }));
+    let index = state(app).rows.len() - 1;
+    app.update(msg(CompareMsg::Select {
+        tab,
+        index,
+        on: true,
+    }));
+}
+
+fn enqueue_effect(effects: &[Effect]) -> Vec<crate::app::CompareItem> {
+    effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::EnqueueCompare { items, .. } => Some(items.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Runs the panel's enqueue effect against the fake and delivers the ids.
+async fn deliver_enqueue(
+    app: &mut App,
+    fake: &Arc<FakeBackend>,
+    effects: Vec<Effect>,
+) -> Vec<Effect> {
+    let backend: Arc<dyn BackendApi> = fake.clone();
+    let mut out = Vec::new();
+    for effect in effects {
+        if let Effect::EnqueueCompare { tab, items } = effect {
+            let results = effects::enqueue_compare(backend.clone(), items).await;
+            out.extend(app.update(msg(CompareMsg::Enqueued { tab, results })));
+        }
+    }
+    out
+}
+
+fn ended(seq: u64, id: TransferId, state: TransferState) -> Message {
+    Message::TransferEvent(hoprs_transfer::Event {
+        seq,
+        kind: EventKind::StateChanged { id, state },
+    })
+}
+
+fn row_state(app: &App, path: &str) -> RowState {
+    state(app)
+        .rows
+        .iter()
+        .find(|r| r.diff.path == path)
+        .unwrap()
+        .state
+        .clone()
+}
+
+use crate::app::compare::RowState;
+
+#[tokio::test]
+async fn upload_selected_queues_files_with_overwrite_and_folders_plainly() {
+    let (mut app, fake, _a, tab, run) = running().await;
+    let sizes = |l, r| (l, r);
+    diff_row(
+        &mut app,
+        tab,
+        run,
+        "new.txt",
+        EntryKind::File,
+        Status::OnlyLocal,
+        sizes(Some(3), None),
+    );
+    diff_row(
+        &mut app,
+        tab,
+        run,
+        "sub/old.txt",
+        EntryKind::File,
+        Status::LocalNewer,
+        sizes(Some(5), Some(4)),
+    );
+    diff_row(
+        &mut app,
+        tab,
+        run,
+        "dir",
+        EntryKind::Dir,
+        Status::OnlyLocal,
+        sizes(Some(0), None),
+    );
+    // Not eligible: only on the server, a file against a folder, a symlink, unreadable.
+    diff_row(
+        &mut app,
+        tab,
+        run,
+        "r.txt",
+        EntryKind::File,
+        Status::OnlyRemote,
+        sizes(None, Some(1)),
+    );
+    diff_row(
+        &mut app,
+        tab,
+        run,
+        "k",
+        EntryKind::File,
+        Status::KindDiffers,
+        sizes(Some(1), Some(1)),
+    );
+    diff_row(
+        &mut app,
+        tab,
+        run,
+        "l",
+        EntryKind::Symlink,
+        Status::OnlyLocal,
+        sizes(Some(1), None),
+    );
+
+    let effects = app.update(msg(CompareMsg::UploadSelected { tab }));
+    let items = enqueue_effect(&effects);
+    assert_eq!(
+        items
+            .iter()
+            .map(|i| (i.path.as_str(), i.overwrite))
+            .collect::<Vec<_>>(),
+        [("new.txt", true), ("sub/old.txt", true), ("dir", false)]
+    );
+    assert_eq!(items[1].spec.direction, Direction::Upload);
+    assert_eq!(items[1].spec.local.to_string(), "/home/me/sub/old.txt");
+    assert_eq!(items[1].spec.remote.to_string(), "/srv/sub/old.txt");
+    assert!(
+        state(&app)
+            .rows
+            .iter()
+            .filter(|r| r.diff.status == Status::OnlyLocal || r.diff.status == Status::LocalNewer)
+            .filter(|r| r.diff.kind != EntryKind::Symlink)
+            .all(|r| !r.selected),
+        "checkboxes of the queued rows cleared"
+    );
+    assert!(
+        state(&app)
+            .rows
+            .iter()
+            .any(|r| r.diff.path == "r.txt" && r.selected),
+        "a row that was not sent stays selected"
+    );
+
+    deliver_enqueue(&mut app, &fake, effects).await;
+    assert!(matches!(row_state(&app, "new.txt"), RowState::Queued(_)));
+    assert!(matches!(row_state(&app, "dir"), RowState::Queued(_)));
+    assert_eq!(row_state(&app, "r.txt"), RowState::Idle);
+    let policies: Vec<_> = fake
+        .enqueued_with_policy()
+        .into_iter()
+        .map(|(_, p)| p)
+        .collect();
+    assert_eq!(
+        policies,
+        [
+            Some(ConflictPolicy::Overwrite),
+            Some(ConflictPolicy::Overwrite),
+            None
+        ]
+    );
+}
+
+#[tokio::test]
+async fn download_selected_goes_the_other_way() {
+    let (mut app, fake, _a, tab, run) = running().await;
+    diff_row(
+        &mut app,
+        tab,
+        run,
+        "r.txt",
+        EntryKind::File,
+        Status::OnlyRemote,
+        (None, Some(1)),
+    );
+    diff_row(
+        &mut app,
+        tab,
+        run,
+        "n.txt",
+        EntryKind::File,
+        Status::OnlyLocal,
+        (Some(1), None),
+    );
+    let effects = app.update(msg(CompareMsg::DownloadSelected { tab }));
+    let items = enqueue_effect(&effects);
+    assert_eq!(items.len(), 1, "the local-only row is not downloadable");
+    assert_eq!(items[0].spec.direction, Direction::Download);
+    assert_eq!(items[0].spec.remote.to_string(), "/srv/r.txt");
+    deliver_enqueue(&mut app, &fake, effects).await;
+    assert!(matches!(row_state(&app, "r.txt"), RowState::Queued(_)));
+    // Nothing selected: nothing happens.
+    assert!(enqueue_effect(&app.update(msg(CompareMsg::DownloadSelected { tab }))).is_empty());
+}
+
+#[tokio::test]
+async fn transfer_events_move_rows_and_unreadable_is_never_queued() {
+    let (mut app, fake, _a, tab, run) = running().await;
+    app.settings.compare_auto = false; // no re-run clearing the rows
+    for p in ["a", "b", "c", "d"] {
+        diff_row(
+            &mut app,
+            tab,
+            run,
+            p,
+            EntryKind::File,
+            Status::OnlyLocal,
+            (Some(1), None),
+        );
+    }
+    diff_row(
+        &mut app,
+        tab,
+        run,
+        "u",
+        EntryKind::Dir,
+        Status::Unreadable {
+            side: CompareSide::Remote,
+            error: Error::new(ErrorKind::Permission, "no"),
+        },
+        (Some(0), None),
+    );
+    let effects = app.update(msg(CompareMsg::UploadSelected { tab }));
+    assert_eq!(enqueue_effect(&effects).len(), 4);
+    deliver_enqueue(&mut app, &fake, effects).await;
+    let ids: std::collections::HashMap<String, TransferId> = ["a", "b", "c", "d"]
+        .iter()
+        .map(|p| match row_state(&app, p) {
+            RowState::Queued(id) => (p.to_string(), id),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    let id = |p: &str| ids[p];
+    app.update(ended(1, id("a"), TransferState::Active));
+    assert!(matches!(row_state(&app, "a"), RowState::Queued(_)));
+    app.update(ended(2, id("a"), TransferState::Done));
+    app.update(ended(
+        3,
+        id("b"),
+        TransferState::Failed(Error::new(ErrorKind::Io, "boom")),
+    ));
+    app.update(ended(4, id("c"), TransferState::Skipped("exists".into())));
+    app.update(ended(5, id("d"), TransferState::Cancelled));
+    assert_eq!(row_state(&app, "a"), RowState::Done);
+    assert!(matches!(row_state(&app, "b"), RowState::Failed(_)));
+    assert_eq!(row_state(&app, "c"), RowState::Skipped("exists".into()));
+    assert_eq!(row_state(&app, "d"), RowState::Idle, "selectable again");
+    assert_eq!(row_state(&app, "u"), RowState::Idle);
+}
+
+#[tokio::test]
+async fn an_ending_that_beats_the_ids_is_not_lost() {
+    let (mut app, fake, _a, tab, run) = running().await;
+    app.settings.compare_auto = false; // no re-run clearing the rows
+    diff_row(
+        &mut app,
+        tab,
+        run,
+        "a",
+        EntryKind::File,
+        Status::OnlyLocal,
+        (Some(1), None),
+    );
+    let effects = app.update(msg(CompareMsg::UploadSelected { tab }));
+    let backend: Arc<dyn BackendApi> = fake.clone();
+    let items = enqueue_effect(&effects);
+    let results = effects::enqueue_compare(backend, items).await;
+    let id = *results[0].result.as_ref().unwrap();
+    // The engine's event comes before the result.
+    app.update(ended(1, id, TransferState::Done));
+    app.update(msg(CompareMsg::Enqueued { tab, results }));
+    assert_eq!(row_state(&app, "a"), RowState::Done);
+}
+
+#[tokio::test]
+async fn done_files_are_remembered_and_the_next_run_gets_them() {
+    let (mut app, fake, _a, tab, run) = running().await;
+    diff_row(
+        &mut app,
+        tab,
+        run,
+        "d/f.bin",
+        EntryKind::File,
+        Status::LocalNewer,
+        (Some(7), Some(5)),
+    );
+    diff_row(
+        &mut app,
+        tab,
+        run,
+        "dir",
+        EntryKind::Dir,
+        Status::OnlyLocal,
+        (Some(0), None),
+    );
+    let effects = app.update(msg(CompareMsg::UploadSelected { tab }));
+    deliver_enqueue(&mut app, &fake, effects).await;
+    let (RowState::Queued(f), RowState::Queued(d)) =
+        (row_state(&app, "d/f.bin"), row_state(&app, "dir"))
+    else {
+        panic!()
+    };
+    app.update(ended(1, f, TransferState::Done));
+    app.update(ended(2, d, TransferState::Done));
+    assert_eq!(state(&app).synced.len(), 1, "folders are not remembered");
+    assert_eq!(state(&app).synced["d/f.bin"], (7, 7));
+
+    let effects = app.update(msg(CompareMsg::Start { tab }));
+    let known = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::Compare { options, .. } => Some(options.known_synced.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(known["d/f.bin"], (7, 7));
+}
+
+#[tokio::test]
+async fn auto_reruns_once_when_the_whole_batch_has_ended() {
+    let (mut app, fake, _a, tab, run) = running().await;
+    for p in ["a", "b"] {
+        diff_row(
+            &mut app,
+            tab,
+            run,
+            p,
+            EntryKind::File,
+            Status::OnlyLocal,
+            (Some(1), None),
+        );
+    }
+    let effects = app.update(msg(CompareMsg::UploadSelected { tab }));
+    deliver_enqueue(&mut app, &fake, effects).await;
+    let (RowState::Queued(a), RowState::Queued(b)) = (row_state(&app, "a"), row_state(&app, "b"))
+    else {
+        panic!()
+    };
+    let first = app.update(ended(1, a, TransferState::Done));
+    assert!(started(&first).is_empty(), "b is still going");
+    let last = app.update(ended(
+        2,
+        b,
+        TransferState::Failed(Error::new(ErrorKind::Io, "x")),
+    ));
+    assert_eq!(started(&last).len(), 1, "one re-run: {last:?}");
+    assert_eq!(
+        cancelled(&last),
+        [run],
+        "it replaces the finished-looking run"
+    );
+    // Late duplicates start nothing more.
+    assert!(started(&app.update(ended(3, b, TransferState::Done))).is_empty());
+
+    // With automatic off there is no re-run.
+    app.settings.compare_auto = false;
+    let run2 = state(&app).run.unwrap();
+    diff_row(
+        &mut app,
+        tab,
+        run2,
+        "c",
+        EntryKind::File,
+        Status::OnlyLocal,
+        (Some(1), None),
+    );
+    let effects = app.update(msg(CompareMsg::UploadSelected { tab }));
+    deliver_enqueue(&mut app, &fake, effects).await;
+    let RowState::Queued(c) = row_state(&app, "c") else {
+        panic!()
+    };
+    assert!(started(&app.update(ended(4, c, TransferState::Done))).is_empty());
+}
+
+#[tokio::test]
+async fn open_goes_to_the_items_folder_without_a_new_run() {
+    let (mut app, fake, _a, tab, run) = running().await;
+    app.update(msg(CompareMsg::Progress {
+        tab,
+        run,
+        progress: Progress::Found(Difference {
+            path: "sub/deep/x.txt".into(),
+            kind: EntryKind::File,
+            status: Status::OnlyLocal,
+            local: Some(entry("x.txt", EntryKind::File, 1)),
+            remote: None,
+            entries_inside: None,
+        }),
+    }));
+    let nav = app.update(msg(CompareMsg::Open { tab, index: 0 }));
+    assert_eq!(listings(&nav).len(), 2, "both panes list: {nav:?}");
+    assert!(cancelled(&nav).is_empty(), "the run stays");
+    assert_eq!(
+        app.tabs[0].pane(Side::Local).unwrap().path.to_string(),
+        "/home/me/sub/deep"
+    );
+    assert_eq!(
+        app.tabs[0].pane(Side::Remote).unwrap().path.to_string(),
+        "/srv/sub/deep"
+    );
+    let effects = settle_all(&mut app, &fake, run_listings(&fake, &nav).await).await;
+    assert!(debounces(&effects).is_empty() && started(&effects).is_empty());
+    assert_eq!(state(&app).run, Some(run));
+    assert_eq!(state(&app).rows.len(), 1);
+    assert_eq!(
+        state(&app).roots.as_ref().map(|r| r.0.to_string()),
+        Some("/home/me".into())
+    );
+    assert!(!state(&app).suppress_auto);
+}
+
+#[tokio::test]
+async fn open_inside_a_one_sided_folder_goes_up_to_the_nearest_existing_one() {
+    let (mut app, _fake, _a, tab, run) = running().await;
+    // `sub` exists only locally: the server side stops at the root.
+    diff_row(
+        &mut app,
+        tab,
+        run,
+        "sub",
+        EntryKind::Dir,
+        Status::OnlyLocal,
+        (Some(0), None),
+    );
+    diff_row(
+        &mut app,
+        tab,
+        run,
+        "sub/in/f",
+        EntryKind::File,
+        Status::OnlyLocal,
+        (Some(1), None),
+    );
+    let nav = app.update(msg(CompareMsg::Open { tab, index: 1 }));
+    assert_eq!(
+        app.tabs[0].pane(Side::Local).unwrap().path.to_string(),
+        "/home/me/sub/in"
+    );
+    assert_eq!(
+        app.tabs[0].pane(Side::Remote).unwrap().path.to_string(),
+        "/srv"
+    );
+    assert_eq!(listings(&nav).len(), 1, "the remote pane is already there");
+}
+
+#[tokio::test]
+async fn open_at_the_roots_does_not_arm_the_suppression() {
+    let (mut app, _fake, _a, tab, run) = running().await;
+    diff_row(
+        &mut app,
+        tab,
+        run,
+        "top.txt",
+        EntryKind::File,
+        Status::OnlyLocal,
+        (Some(1), None),
+    );
+    let nav = app.update(msg(CompareMsg::Open { tab, index: 0 }));
+    assert!(nav.is_empty());
+    assert!(!state(&app).suppress_auto, "no listing would consume it");
+}

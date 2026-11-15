@@ -440,7 +440,7 @@ impl App {
 
     /// Goes to `path`: the old entries go, with any editor or dialog about them, and the
     /// list scrolls to the top.
-    fn navigate(&mut self, index: usize, side: Side, path: RemotePath) -> Vec<Effect> {
+    pub(super) fn navigate(&mut self, index: usize, side: Side, path: RemotePath) -> Vec<Effect> {
         let Some(pane) = self.tabs[index].pane_mut(side) else {
             return Vec::new();
         };

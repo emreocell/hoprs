@@ -75,7 +75,7 @@ pub mod terminal;
 pub mod transfers;
 
 pub use actions::FileAction;
-pub use compare::{CompareMsg, CompareRunId};
+pub use compare::{CompareItem, CompareMsg, CompareRunId};
 pub use dialogs::{Dialog, DialogMsg, Dialogs, FailureAction, KnownHostsFix, KnownHostsMsg, Typed};
 pub use edit::EditMsg;
 pub use files::{FileKey, Mods, PaneMsg, RequestId};
@@ -529,6 +529,12 @@ pub enum Effect {
     },
     /// Adds transfers to the engine's queue; one [`Message::Enqueued`] for all.
     Enqueue(Vec<TransferSpec>),
+    /// Queues the compare panel's transfers (files with their own `Overwrite` policy); one
+    /// [`CompareMsg::Enqueued`] with each item's id.
+    EnqueueCompare {
+        tab: TabId,
+        items: Vec<compare::CompareItem>,
+    },
     /// Pause, resume, cancel, retry or resolve one item.
     Control {
         id: TransferId,

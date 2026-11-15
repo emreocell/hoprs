@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use hoprs_core::{Error, RemotePath, Result};
 use hoprs_remote::{CompareOptions, Difference, Progress, RelPath, Status, Summary};
-use hoprs_transfer::TransferId;
+use hoprs_transfer::{Direction, Event, EventKind, TransferId, TransferSpec, TransferState};
 
 use super::files::Listing;
 use super::settings::SettingsMsg;
@@ -54,8 +54,6 @@ pub enum Phase {
 
 /// What a row of the panel is doing.
 #[derive(Debug, Clone, PartialEq)]
-// The transfer states are set by the panel's actions (Task 7).
-#[allow(dead_code)]
 pub enum RowState {
     Idle,
     Queued(TransferId),
@@ -152,6 +150,38 @@ fn scroll_to_show(state: &CompareState, row: usize) -> f32 {
     }
 }
 
+/// A transfer the panel queued.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueuedItem {
+    /// The row's path, relative to `roots`.
+    pub path: RelPath,
+    /// The roots it was queued under.
+    pub roots: (RemotePath, RemotePath),
+    /// A file's size at its source (what both sides hold after the transfer); `None` for
+    /// a folder.
+    pub file_size: Option<u64>,
+}
+
+/// One transfer the panel asks the engine for.
+#[derive(Debug, Clone)]
+pub struct CompareItem {
+    pub spec: TransferSpec,
+    /// The row's path, relative to the compared roots.
+    pub path: RelPath,
+    /// Files replace what is there (their own policy); a one-sided folder cannot conflict.
+    pub overwrite: bool,
+    /// A file's size at its source; `None` for a folder.
+    pub size: Option<u64>,
+}
+
+/// What queuing one [`CompareItem`] gave.
+#[derive(Debug, Clone)]
+pub struct Queued {
+    pub path: RelPath,
+    pub size: Option<u64>,
+    pub result: Result<TransferId>,
+}
+
 /// A files tab's comparison.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CompareState {
@@ -170,8 +200,14 @@ pub struct CompareState {
     /// Files the panel transferred this session: relative path -> (local size, remote size)
     /// after the transfer (servers that cannot set mtimes).
     pub synced: HashMap<RelPath, (u64, u64)>,
-    /// Transfers the panel queued, and the row's path each is for.
-    pub queued: HashMap<TransferId, RelPath>,
+    /// Transfers the panel queued that have not finished, and what each is for.
+    pub queued: HashMap<TransferId, QueuedItem>,
+    /// The roots `synced` belongs to (its paths are relative to them).
+    pub synced_roots: Option<(RemotePath, RemotePath)>,
+    /// Panel enqueues whose ids have not come back yet.
+    pub enqueuing: usize,
+    /// Terminal states that arrived while ids were still on their way back.
+    pub early: HashMap<TransferId, TransferState>,
     /// Bumped by every start and cancel: a debounce timer only counts if its number is
     /// still the latest.
     pub generation: u64,
@@ -291,12 +327,14 @@ pub enum CompareMsg {
     Select { tab: TabId, index: usize, on: bool },
     /// A group header's select-all.
     SelectGroup { tab: TabId, group: Group, on: bool },
-    /// Double-click on a row: the panes go to the item (Task 7).
+    /// Double-click on a row: the panes go to the item.
     Open { tab: TabId, index: usize },
-    /// "Upload selected" (Task 7 queues the transfers).
+    /// "Upload selected".
     UploadSelected { tab: TabId },
-    /// "Download selected" (Task 7 queues the transfers).
+    /// "Download selected".
     DownloadSelected { tab: TabId },
+    /// The ids of what [`Effect::EnqueueCompare`] queued, per row path.
+    Enqueued { tab: TabId, results: Vec<Queued> },
     /// The head's Collapse / Expand.
     ToggleCollapsed { tab: TabId },
     /// A press in the panel: the keyboard drives it from now on; `cursor` is the row
@@ -416,10 +454,19 @@ impl App {
                 }
                 Vec::new()
             }
-            // Task 7: the panes go to the item.
-            CompareMsg::Open { .. } => Vec::new(),
-            // Task 7: queue the selected rows' transfers.
-            CompareMsg::UploadSelected { .. } | CompareMsg::DownloadSelected { .. } => Vec::new(),
+            CompareMsg::Open { tab, index } => match self.files_tab_index(tab) {
+                Some(i) => self.compare_open(i, index),
+                None => Vec::new(),
+            },
+            CompareMsg::UploadSelected { tab } => match self.files_tab_index(tab) {
+                Some(i) => self.compare_transfer(i, Side::Local),
+                None => Vec::new(),
+            },
+            CompareMsg::DownloadSelected { tab } => match self.files_tab_index(tab) {
+                Some(i) => self.compare_transfer(i, Side::Remote),
+                None => Vec::new(),
+            },
+            CompareMsg::Enqueued { tab, results } => self.compare_enqueued(tab, results),
             CompareMsg::ToggleCollapsed { tab } => {
                 if let Some(state) = self
                     .files_tab_index(tab)
@@ -604,6 +651,11 @@ impl App {
         state.focused = false;
         state.cursor = None;
         state.suppress_auto = false;
+        if state.synced_roots.as_ref() != Some(&(local.clone(), remote.clone())) {
+            // What was sent under other folders says nothing about these.
+            state.synced.clear();
+            state.synced_roots = None;
+        }
         let options = CompareOptions {
             ignore,
             limit: Some(LIMIT),
@@ -756,5 +808,263 @@ impl App {
             .map(|run| Effect::CompareAbort { tab: tab.id, run })
             .into_iter()
             .collect()
+    }
+}
+
+/// The parts of a relative path.
+fn components(rel: &str) -> impl Iterator<Item = &str> {
+    rel.split('/').filter(|part| !part.is_empty())
+}
+
+/// `root` with the relative path's components appended.
+fn under(root: &RemotePath, rel: &str) -> RemotePath {
+    components(rel).fold(root.clone(), |path, part| path.join(part))
+}
+
+impl App {
+    /// "Upload selected" (`from` local) / "Download selected" (remote): one transfer per
+    /// eligible selected row. Files carry `Overwrite` for themselves (the user chose the
+    /// row); a folder only one side has uses the normal policy. Checkboxes clear at once;
+    /// rows become `Queued` when the ids come back.
+    fn compare_transfer(&mut self, index: usize, from: Side) -> Vec<Effect> {
+        if !self.can_act(index, Side::Local) || !self.can_act(index, Side::Remote) {
+            return Vec::new();
+        }
+        let tab = &mut self.tabs[index];
+        let id = tab.id;
+        let site = tab.site.clone();
+        let Some(state) = tab.compare_mut() else {
+            return Vec::new();
+        };
+        let Some((local_root, remote_root)) = state.roots.clone() else {
+            return Vec::new();
+        };
+        let rows: Vec<usize> = match from {
+            Side::Local => state.selected_uploads().collect(),
+            Side::Remote => state.selected_downloads().collect(),
+        };
+        let mut items = Vec::with_capacity(rows.len());
+        for row in rows {
+            let row = &mut state.rows[row];
+            row.selected = false;
+            let is_file = row.diff.kind == hoprs_core::EntryKind::File;
+            let source = match from {
+                Side::Local => row.diff.local.as_ref(),
+                Side::Remote => row.diff.remote.as_ref(),
+            };
+            let direction = match from {
+                Side::Local => Direction::Upload,
+                Side::Remote => Direction::Download,
+            };
+            items.push(CompareItem {
+                spec: TransferSpec {
+                    site: site.clone(),
+                    direction,
+                    local: under(&local_root, &row.diff.path),
+                    remote: under(&remote_root, &row.diff.path),
+                },
+                path: row.diff.path.clone(),
+                overwrite: is_file,
+                size: is_file.then(|| source.map_or(0, |e| e.size)),
+            });
+        }
+        if items.is_empty() {
+            return Vec::new();
+        }
+        state.enqueuing += 1;
+        vec![Effect::EnqueueCompare { tab: id, items }]
+    }
+
+    /// The ids came back: rows become queued (or failed), and terminal states that beat the
+    /// ids here are applied.
+    fn compare_enqueued(&mut self, tab: TabId, results: Vec<Queued>) -> Vec<Effect> {
+        let Some(index) = self.files_tab_index(tab) else {
+            return Vec::new();
+        };
+        let Some(state) = self.tabs[index].compare_mut() else {
+            return Vec::new();
+        };
+        state.enqueuing = state.enqueuing.saturating_sub(1);
+        let Some(roots) = state.roots.clone() else {
+            state.early.clear();
+            return Vec::new();
+        };
+        let mut ids = Vec::new();
+        for Queued { path, size, result } in results {
+            let Some(row) = state
+                .rows
+                .iter_mut()
+                .find(|r| r.diff.path == path && r.state == RowState::Idle)
+            else {
+                continue;
+            };
+            match result {
+                Ok(id) => {
+                    row.state = RowState::Queued(id);
+                    state.queued.insert(
+                        id,
+                        QueuedItem {
+                            path,
+                            roots: roots.clone(),
+                            file_size: size,
+                        },
+                    );
+                    ids.push(id);
+                }
+                Err(error) => row.state = RowState::Failed(error),
+            }
+        }
+        let early = std::mem::take(&mut state.early);
+        let mut effects = Vec::new();
+        if state.enqueuing > 0 {
+            state.early = early.clone();
+        }
+        for id in ids {
+            if let Some(done) = early.get(&id) {
+                effects.extend(self.compare_settle(index, id, done));
+            }
+        }
+        effects
+    }
+
+    /// An engine event: a panel transfer that ended moves its row.
+    pub(super) fn compare_transfer_event(&mut self, event: &Event) -> Vec<Effect> {
+        let EventKind::StateChanged { id, state } = &event.kind else {
+            return Vec::new();
+        };
+        if !state.is_terminal() {
+            return Vec::new();
+        }
+        let mut effects = Vec::new();
+        for index in 0..self.tabs.len() {
+            let Some(compare) = self.tabs[index].compare_mut() else {
+                continue;
+            };
+            if compare.queued.contains_key(id) {
+                effects.extend(self.compare_settle(index, *id, state));
+            } else if compare.enqueuing > 0 {
+                compare.early.insert(*id, state.clone());
+            }
+        }
+        effects
+    }
+
+    /// A snapshot (after a lag or a restart of the feed) may hold endings whose events were
+    /// lost.
+    pub(super) fn compare_snapshot(
+        &mut self,
+        items: &[hoprs_transfer::TransferItem],
+    ) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        for index in 0..self.tabs.len() {
+            let Some(compare) = self.tabs[index].compare() else {
+                continue;
+            };
+            let ended: Vec<_> = items
+                .iter()
+                .filter(|i| i.state.is_terminal() && compare.queued.contains_key(&i.id))
+                .collect();
+            for item in ended {
+                effects.extend(self.compare_settle(index, item.id, &item.state));
+            }
+        }
+        effects
+    }
+
+    /// Applies the end of panel transfer `id` to its row; when the last transfer waiting
+    /// ends and the automatic setting is on, the comparison runs once more.
+    fn compare_settle(
+        &mut self,
+        index: usize,
+        id: TransferId,
+        ended: &TransferState,
+    ) -> Vec<Effect> {
+        let Some(state) = self.tabs[index].compare_mut() else {
+            return Vec::new();
+        };
+        let Some(item) = state.queued.remove(&id) else {
+            return Vec::new();
+        };
+        if let Some(row) = state
+            .rows
+            .iter_mut()
+            .find(|r| r.state == RowState::Queued(id))
+        {
+            row.state = match ended {
+                TransferState::Done => RowState::Done,
+                TransferState::Failed(error) => RowState::Failed(error.clone()),
+                TransferState::Skipped(reason) => RowState::Skipped(reason.clone()),
+                // Selectable again.
+                _ => RowState::Idle,
+            };
+        }
+        if *ended == TransferState::Done
+            && let Some(size) = item.file_size
+        {
+            if state.synced_roots.as_ref() != Some(&item.roots) {
+                state.synced.clear();
+                state.synced_roots = Some(item.roots.clone());
+            }
+            state.synced.insert(item.path.clone(), (size, size));
+        }
+        // The batch is over when nothing queued is left; one run follows, for these folders.
+        let over = state.queued.is_empty() && state.enqueuing == 0;
+        let same_folders = state.roots.as_ref() == Some(&item.roots);
+        if over && same_folders && self.settings.compare_auto {
+            return self.start_compare(index);
+        }
+        Vec::new()
+    }
+
+    /// Double-click / Enter on a row: each pane goes to the item's folder if it exists on
+    /// that side, else to the nearest existing ancestor up to the compared root. The panes
+    /// listing again does not start a run (the current rows stay).
+    fn compare_open(&mut self, index: usize, row: usize) -> Vec<Effect> {
+        let tab = &self.tabs[index];
+        let Some(state) = tab.compare() else {
+            return Vec::new();
+        };
+        let (Some(row), Some((local_root, remote_root))) = (state.rows.get(row), &state.roots)
+        else {
+            return Vec::new();
+        };
+        // A folder only one side has is never walked, so every walked folder (an item's
+        // parent) is on both sides unless it lies inside such a one-sided folder.
+        let mut parent: Vec<&str> = components(&row.diff.path).collect();
+        parent.pop();
+        let target =
+            |root: &RemotePath, absent: Status| {
+                let mut depth = parent.len();
+                // Up while an ancestor (or the folder itself) is a folder this side lacks.
+                for r in state.rows.iter().filter(|r| {
+                    r.diff.status == absent && r.diff.kind != hoprs_core::EntryKind::File
+                }) {
+                    let parts: Vec<&str> = components(&r.diff.path).collect();
+                    if parts.len() <= depth && parent[..parts.len()] == parts[..] {
+                        depth = depth.min(parts.len() - 1);
+                    }
+                }
+                parent[..depth]
+                    .iter()
+                    .fold(root.clone(), |path, part| path.join(part))
+            };
+        let local = target(local_root, Status::OnlyRemote);
+        let remote = target(remote_root, Status::OnlyLocal);
+        let moves: Vec<(Side, RemotePath)> = [(Side::Local, local), (Side::Remote, remote)]
+            .into_iter()
+            .filter(|(side, path)| tab.pane(*side).is_some_and(|p| &p.path != path))
+            .collect();
+        if moves.is_empty() {
+            return Vec::new();
+        }
+        // At least one pane's folder changes, so a listing follows and consumes the flag.
+        if let Some(state) = self.tabs[index].compare_mut() {
+            state.suppress_auto = true;
+        }
+        let mut effects = Vec::new();
+        for (side, path) in moves {
+            effects.extend(self.navigate(index, side, path));
+        }
+        effects
     }
 }

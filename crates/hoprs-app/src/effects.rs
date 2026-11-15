@@ -18,8 +18,8 @@ use secrecy::SecretString;
 use crate::app::edit::{EditsFor, FLUSH_LIMIT, Settle, Settled};
 use crate::app::terminal::ShellSignal;
 use crate::app::{
-    CompareMsg, CompareRunId, EditMsg, Effect, FileAction, Message, PickTarget, ProfileOp,
-    RequestId, TabId, TerminalMsg,
+    CompareItem, CompareMsg, CompareRunId, EditMsg, Effect, FileAction, Message, PickTarget,
+    ProfileOp, RequestId, TabId, TerminalMsg,
 };
 use crate::backend::{
     BackendApi, KeptEdit, KnownHostEntry, PromptAnswer, PromptId, SessionId, ShellId, ShellOutput,
@@ -180,6 +180,11 @@ pub fn run(
             Task::none()
         }
         Effect::Enqueue(specs) => Task::perform(enqueue_all(backend, specs), Message::Enqueued),
+        Effect::EnqueueCompare { tab, items } => {
+            Task::perform(enqueue_compare(backend, items), move |results| {
+                Message::Compare(CompareMsg::Enqueued { tab, results })
+            })
+        }
         Effect::Control { id, op } => Task::perform(
             async move { backend.control(id, op).await },
             move |result| Message::ControlDone { id, result },
@@ -919,6 +924,31 @@ pub async fn enqueue_all(
         backend.enqueue(spec).await?;
     }
     Ok(())
+}
+
+/// Queues the compare panel's items in order: a file with `Overwrite` for itself alone, a
+/// folder with the normal policy. Each item has its own result (a failure does not stop the
+/// rest).
+pub async fn enqueue_compare(
+    backend: Arc<dyn BackendApi>,
+    items: Vec<CompareItem>,
+) -> Vec<crate::app::compare::Queued> {
+    let mut results = Vec::with_capacity(items.len());
+    for item in items {
+        let result = if item.overwrite {
+            backend
+                .enqueue_with_policy(item.spec, hoprs_transfer::ConflictPolicy::Overwrite)
+                .await
+        } else {
+            backend.enqueue(item.spec).await
+        };
+        results.push(crate::app::compare::Queued {
+            path: item.path,
+            size: item.size,
+            result,
+        });
+    }
+    results
 }
 
 /// The engine's events for the queue's subscription. It subscribes at once, then starts

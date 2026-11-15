@@ -241,7 +241,6 @@ pub trait BackendApi: Send + Sync {
     async fn enqueue(&self, spec: TransferSpec) -> Result<TransferId>;
     /// Like [`enqueue`](Self::enqueue), with a conflict policy for this item
     /// alone (persisted, so it survives a restart).
-    #[allow(dead_code, reason = "used by the compare panel (Plan 12, Task 7)")]
     async fn enqueue_with_policy(
         &self,
         spec: TransferSpec,
