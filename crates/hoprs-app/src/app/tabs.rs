@@ -625,9 +625,10 @@ impl App {
                 let session = connected.session;
                 let failure = ConnectError {
                     session: None,
-                    error: Error::new(
+                    error: Error::coded(
                         hoprs_core::ErrorKind::Conflict,
-                        crate::ui::strings::site_endpoint_changed(),
+                        "app-site-endpoint-changed",
+                        "The site's host or port changed: this session was closed. Reconnect to use the new settings.",
                     ),
                     keyring_unavailable: false,
                 };

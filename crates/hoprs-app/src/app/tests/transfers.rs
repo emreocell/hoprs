@@ -279,7 +279,7 @@ async fn drop_from_os_targets_remote_dir() {
     assert!(effects.is_empty());
     assert_eq!(
         app.queue.error.as_ref().map(|e| e.message.as_str()),
-        Some(strings::drop_needs_site())
+        Some("Open a connected site to drop files into it")
     );
     assert!(app.queue_open);
     app.update(Message::Queue(QueueMsg::DismissError));
@@ -327,7 +327,7 @@ async fn drop_from_os_targets_remote_dir() {
     assert!(no_enqueue(&effects));
     assert_eq!(
         app.queue.error.as_ref().map(|e| e.message.as_str()),
-        Some(strings::drop_pane_busy())
+        Some("The remote folder is busy or not listed yet; drop again in a moment")
     );
     app.update(Message::Queue(QueueMsg::DismissError));
 

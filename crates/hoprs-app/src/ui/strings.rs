@@ -613,17 +613,12 @@ pub fn pause() -> &'static str {
 pub fn apply_to_all() -> &'static str {
     tr("apply-to-all")
 }
+/// After an edit's file name once a save went up: "saved 14:02" (a dash precedes it).
+pub fn saved_at(time: &str) -> String {
+    tr_args("saved-at", &[("time", time.into())])
+}
 pub fn site_paused() -> &'static str {
     tr("site-paused")
-}
-pub fn drop_needs_site() -> &'static str {
-    tr("drop-needs-site")
-}
-pub fn drop_pane_busy() -> &'static str {
-    tr("drop-pane-busy")
-}
-pub fn drop_unsupported() -> &'static str {
-    tr("drop-unsupported")
 }
 
 /// A queue tab: "Active 3".
@@ -1106,10 +1101,6 @@ pub fn also_covers_other_hosts(lines: &[usize]) -> String {
             &[("lines", list.join(", ").as_str().into())],
         ),
     }
-}
-/// A connected tab whose site's host or port changed (an edit, a restore).
-pub fn site_endpoint_changed() -> &'static str {
-    tr("site-endpoint-changed")
 }
 // Import from FileZilla.
 pub fn import_title() -> &'static str {

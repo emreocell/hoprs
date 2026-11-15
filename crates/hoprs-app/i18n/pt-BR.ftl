@@ -244,10 +244,8 @@ resume = Retomar
 skip = Pular
 pause = Pausar
 apply-to-all = Aplicar a todos (nesta sessão)
+saved-at = salvo às { $time }
 site-paused = Pausada — conexão perdida
-drop-needs-site = Abra um site conectado para soltar arquivos nele
-drop-pane-busy = A pasta remota está ocupada ou ainda não foi listada; solte de novo em instantes
-drop-unsupported = Não é possível fazer upload deste caminho
 total-workers =
     { $workers ->
         [0] no total, { $workers } workers
@@ -400,7 +398,6 @@ remove-known-hosts-question =
 also-covers-one-host = A linha { $line } também cobre outros hosts (um padrão ou uma lista de nomes): removê-la esquece esta chave para eles também.
 also-covers-other-hosts = As linhas { $lines } também cobrem outros hosts (padrões ou listas de nomes): removê-las esquece estas chaves para eles também.
 # A connected tab whose site's host or port changed (an edit, a restore).
-site-endpoint-changed = O host ou a porta do site mudou: esta sessão foi fechada. Reconecte para usar as novas configurações.
 
 ## Import from FileZilla
 import-title = Importar do FileZilla
@@ -445,7 +442,7 @@ settings-keepalive = Keepalive
 settings-keepalive-hint = Com que frequência uma conexão ociosa é verificada, para que servidores e roteadores a mantenham aberta. Vale para as próximas conexões.
 # A keepalive interval: "30 s".
 seconds = { $secs } s
-settings-unreadable = Não foi possível ler o settings.toml, então valem os padrões. As alterações duram até o hoprs fechar e não são salvas, para manter o arquivo como está: corrija ou apague o arquivo para salvar as configurações.
+settings-unreadable = Não foi possível ler o settings.toml, então valem os padrões. As alterações duram até o hoprs fechar e não são salvas, para manter o arquivo como está: corrija ou exclua o arquivo para salvar as configurações.
 settings-save-failed = Não foi possível salvar o settings.toml
 settings-terminal = Terminal
 settings-font-size = Tamanho da fonte
@@ -689,7 +686,7 @@ error-vault-keyring-unavailable = Keyring do sistema indisponível
 error-vault-unknown-site = Site desconhecido
 error-vault-unknown-workspace = Workspace desconhecido
 error-vault-workspace-unknown-site = Site desconhecido no workspace
-error-vault-site-secrets-not-deleted = Site removido, mas não foi possível apagar seus segredos do keyring
+error-vault-site-secrets-not-deleted = Site removido, mas não foi possível excluir seus segredos do keyring
 error-profile-invalid-path = Caminho de perfil inválido
 error-profile-symlink-loop = Links simbólicos demais encadeados
 error-profile-newer-version = O perfil foi gravado por uma versão mais nova do hoprs
@@ -708,7 +705,7 @@ error-transfer-not-awaiting-decision = A transferência não está aguardando um
 error-transfer-size-mismatch = Tamanho diferente após a transferência
 error-transfer-items-failed = { $failed } itens falharam
 error-transfer-duplicate-name = Nome duplicado na listagem da pasta
-error-transfer-worker-panicked = O worker falhou inesperadamente
+error-transfer-worker-panicked = O worker encerrou com um erro inesperado
 error-transfer-destination-not-file = O destino não é um arquivo comum
 error-transfer-invalid-listing-name = Nome inválido na listagem da pasta
 error-transfer-unknown = Transferência desconhecida
@@ -719,15 +716,19 @@ error-queue-newer-version = A fila de transferências foi salva por uma versão 
 ## Errors — import, settings, editing and sessions
 error-import-cannot-read = Não foi possível ler o sitemanager.xml
 error-import-file-too-large = O sitemanager.xml é grande demais
-error-import-delete-symlink = Não apagado: o caminho é um link simbólico
-error-import-delete-not-regular = Não apagado: não é um arquivo comum
-error-import-delete-not-filezilla = Não apagado: não é um arquivo do Gerenciador de Sites do FileZilla
+error-import-delete-symlink = Não excluído: o caminho é um link simbólico
+error-import-delete-not-regular = Não excluído: não é um arquivo comum
+error-import-delete-not-filezilla = Não excluído: não é um arquivo do Gerenciador de Sites do FileZilla
 error-settings-cannot-read = Não foi possível ler o settings.toml
 error-app-opener-task-failed = A tarefa de abrir a pasta falhou
 error-app-opener-failed = { $opener } falhou
 error-app-vault-task-failed = A tarefa do cofre falhou
 error-app-background-task-failed = A tarefa em segundo plano falhou
 error-app-no-config-dir = Sem pasta de configuração
+error-app-drop-needs-site = Abra um site conectado para soltar arquivos nele
+error-app-drop-pane-busy = A pasta remota está ocupada ou ainda não foi listada; solte de novo em instantes
+error-app-drop-unsupported = Não é possível fazer upload deste caminho
+error-app-site-endpoint-changed = O host ou a porta do site mudou: esta sessão foi fechada. Reconecte para usar as novas configurações.
 error-session-closed = Sessão encerrada
 error-session-shell-closed = Shell encerrado
 error-session-terminal-needs-ssh = Terminais exigem um site SSH

@@ -276,10 +276,8 @@ skip = Skip
 pause = Pause
 # The engine also makes the answer its policy for every later conflict of this run.
 apply-to-all = Apply to all (this session)
+saved-at = saved { $time }
 site-paused = Paused — connection lost
-drop-needs-site = Open a connected site to drop files into it
-drop-pane-busy = The remote folder is busy or not listed yet; drop again in a moment
-drop-unsupported = Can't upload this path
 # After the total speed: " total, 4 workers".
 total-workers =
     { $workers ->
@@ -449,7 +447,6 @@ remove-known-hosts-question =
 also-covers-one-host = Line { $line } also covers other hosts (a pattern or a list of names): removing it forgets this key for them too.
 also-covers-other-hosts = Lines { $lines } also cover other hosts (patterns or lists of names): removing them forgets these keys for them too.
 # A connected tab whose site's host or port changed (an edit, a restore).
-site-endpoint-changed = The site's host or port changed: this session was closed. Reconnect to use the new settings.
 
 ## Import from FileZilla
 import-title = Import from FileZilla
@@ -772,6 +769,10 @@ error-app-opener-failed = { $opener } failed
 error-app-vault-task-failed = Vault task failed
 error-app-background-task-failed = Background task failed
 error-app-no-config-dir = No configuration directory
+error-app-drop-needs-site = Open a connected site to drop files into it
+error-app-drop-pane-busy = The remote folder is busy or not listed yet; drop again in a moment
+error-app-drop-unsupported = Can't upload this path
+error-app-site-endpoint-changed = The site's host or port changed: this session was closed. Reconnect to use the new settings.
 error-session-closed = Session closed
 error-session-shell-closed = Shell closed
 error-session-terminal-needs-ssh = Terminals need an SSH site

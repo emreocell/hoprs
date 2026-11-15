@@ -921,7 +921,10 @@ async fn reloaded_profiles_reconcile_tabs() {
     match tab_state(&app, &b.id) {
         TabState::Failed(failure) => {
             assert_eq!(failure.session, None, "a new session on reconnect");
-            assert_eq!(failure.error.message, strings::site_endpoint_changed());
+            assert_eq!(
+                strings::error(&failure.error),
+                "The site's host or port changed: this session was closed. Reconnect to use the new settings."
+            );
         }
         other => panic!("{other:?}"),
     }

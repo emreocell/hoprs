@@ -29,7 +29,9 @@ pub fn edit_line_parts(edit: &RemoteEdit) -> (String, String, String) {
     let editing = |after: String| (format!("{} ", strings::editing()), after);
     let (before, after) = match &edit.status {
         EditStatus::Editing { saved: None } => editing(String::new()),
-        EditStatus::Editing { saved: Some(at) } => editing(format!(" — saved {}", clock(*at))),
+        EditStatus::Editing { saved: Some(at) } => {
+            editing(format!(" — {}", strings::saved_at(&clock(*at))))
+        }
         EditStatus::Waiting { truncated } => {
             let mut after = format!(" — {}", strings::waiting_for_connection());
             if *truncated {

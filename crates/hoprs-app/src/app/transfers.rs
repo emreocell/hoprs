@@ -12,7 +12,6 @@ use super::queue::QueueMsg;
 use super::{App, Effect};
 use crate::app::TabId;
 use crate::backend::{ControlOp, Side, TransferSnapshot};
-use crate::ui::strings;
 
 /// The other pane.
 pub fn other(side: Side) -> Side {
@@ -114,11 +113,19 @@ impl App {
             .and_then(|id| self.tab_index(id))
             .filter(|&i| self.tabs[i].is_files() && self.tab_session(i).is_some());
         let Some(index) = connected else {
-            self.queue_error(Error::new(ErrorKind::NotFound, strings::drop_needs_site()));
+            self.queue_error(Error::coded(
+                ErrorKind::NotFound,
+                "app-drop-needs-site",
+                "Open a connected site to drop files into it",
+            ));
             return Vec::new();
         };
         if !self.can_act(index, Side::Remote) {
-            self.queue_error(Error::new(ErrorKind::Conflict, strings::drop_pane_busy()));
+            self.queue_error(Error::coded(
+                ErrorKind::Conflict,
+                "app-drop-pane-busy",
+                "The remote folder is busy or not listed yet; drop again in a moment",
+            ));
             return Vec::new();
         }
         let local = local_path(path);
@@ -128,8 +135,12 @@ impl App {
             .map(str::to_owned);
         let (Some(local), Some(name)) = (local, name) else {
             self.queue_error(
-                Error::new(ErrorKind::Io, strings::drop_unsupported())
-                    .with_detail(path.display().to_string()),
+                Error::coded(
+                    ErrorKind::Io,
+                    "app-drop-unsupported",
+                    "Can't upload this path",
+                )
+                .with_detail(path.display().to_string()),
             );
             return Vec::new();
         };
