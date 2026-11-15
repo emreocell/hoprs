@@ -1,0 +1,34 @@
+name: Feature request
+description: Suggest something hoprs could do.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a larger idea, a [discussion](https://github.com/engviniciusbs/hoprs/discussions/categories/ideas) is a good first step. Check the [roadmap](https://github.com/engviniciusbs/hoprs/blob/main/docs/ROADMAP.md) too.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you'd like
+      description: How it could work from your point of view. Screens or examples from other tools help.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do today instead
+  - type: dropdown
+    id: help
+    attributes:
+      label: Would you like to work on it?
+      options:
+        - "No"
+        - Yes, with some guidance
+        - Yes

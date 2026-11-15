@@ -21,6 +21,7 @@ Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI) for Linux, Windows and m
 - QA checklists (manual runs, NEEDS HUMAN rows with steps): `docs/qa/plan-5-checklist.md`, `docs/qa/plan-6-checklist.md`, `docs/qa/release-1.0-checklist.md`, `docs/qa/release-1.1-checklist.md`, `docs/qa/i18n-checklist.md`
 - Performance targets, how they are measured, last numbers: `docs/perf/README.md` (`scripts/perf.sh`, `.github/workflows/perf.yml`)
 - Deferred follow-ups: `docs/superpowers/plans/2026-11-12-01-followups.md`
+- Contributor docs: `CONTRIBUTING.md` (setup, checks, translating), `docs/ARCHITECTURE.md` (crates, app data flow, where to put a change), `docs/ROADMAP.md` (public roadmap: keep it in sync when plans land), `SECURITY.md`, issue and PR templates in `.github/`
 
 ## Current status (2026-11-15)
 

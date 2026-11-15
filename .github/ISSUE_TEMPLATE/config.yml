@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or idea
+    url: https://github.com/engviniciusbs/hoprs/discussions
+    about: Ask a question or share an idea in Discussions.
+  - name: Security vulnerability
+    url: https://github.com/engviniciusbs/hoprs/security/advisories/new
+    about: Report it privately, never in a public issue.
