@@ -222,7 +222,7 @@ struct State {
     keyring_locked: bool,
     remotes: HashMap<SiteId, MemFs>,
     local: MemFs,
-    enqueued: Vec<TransferSpec>,
+    enqueued: Vec<(TransferSpec, Option<ConflictPolicy>)>,
     controls: Vec<(TransferId, ControlOp)>,
     /// What `transfer_snapshot` returns, as the test set it.
     queue: (u64, Vec<TransferItem>),
@@ -463,6 +463,15 @@ impl FakeBackend {
     }
 
     pub fn enqueued(&self) -> Vec<TransferSpec> {
+        self.state()
+            .enqueued
+            .iter()
+            .map(|(spec, _)| spec.clone())
+            .collect()
+    }
+
+    /// Every enqueue with the per-item policy it carried (`None`: plain `enqueue`).
+    pub fn enqueued_with_policy(&self) -> Vec<(TransferSpec, Option<ConflictPolicy>)> {
         self.state().enqueued.clone()
     }
 
@@ -1009,7 +1018,18 @@ impl BackendApi for FakeBackend {
     }
 
     async fn enqueue(&self, spec: TransferSpec) -> Result<TransferId> {
-        self.state().enqueued.push(spec);
+        self.state().enqueued.push((spec, None));
+        Ok(TransferId(
+            self.next_transfer.fetch_add(1, Ordering::SeqCst),
+        ))
+    }
+
+    async fn enqueue_with_policy(
+        &self,
+        spec: TransferSpec,
+        policy: ConflictPolicy,
+    ) -> Result<TransferId> {
+        self.state().enqueued.push((spec, Some(policy)));
         Ok(TransferId(
             self.next_transfer.fetch_add(1, Ordering::SeqCst),
         ))
@@ -1358,7 +1378,17 @@ mod tests {
         fake.answer_prompt(PromptId(7), PromptAnswer::Decision(true))
             .await;
         fake.close(id).await;
-        assert_eq!(fake.enqueued(), vec![spec]);
+        assert_eq!(fake.enqueued(), vec![spec.clone()]);
+        fake.enqueue_with_policy(spec.clone(), ConflictPolicy::Overwrite)
+            .await
+            .unwrap();
+        assert_eq!(
+            fake.enqueued_with_policy(),
+            vec![
+                (spec.clone(), None),
+                (spec, Some(ConflictPolicy::Overwrite))
+            ]
+        );
         assert_eq!(fake.controls(), vec![(tid, ControlOp::Pause)]);
         assert!(matches!(
             fake.answers()[..],

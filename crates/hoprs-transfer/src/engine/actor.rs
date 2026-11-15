@@ -82,6 +82,8 @@ pub(super) enum Command {
     },
     Enqueue {
         spec: TransferSpec,
+        /// Conflict policy for this item's own run, stored as its `next_policy`.
+        policy: Option<ConflictPolicy>,
         reply: oneshot::Sender<Result<TransferId>>,
     },
     SetPolicy {
@@ -360,7 +362,11 @@ impl Actor {
                 let _ = reply.send(());
                 self.dispatch();
             }
-            Command::Enqueue { spec, reply } => {
+            Command::Enqueue {
+                spec,
+                policy,
+                reply,
+            } => {
                 let id = match self.store.insert(None, &spec) {
                     Ok(id) => id,
                     Err(e) => {
@@ -378,6 +384,16 @@ impl Actor {
                     bytes_done: 0,
                     state: TransferState::Queued,
                 });
+                if let Some(policy) = policy {
+                    // Persisted like any continuation, so it survives a restart
+                    // (recovery and `resume` read it back as the override).
+                    if let Err(e) = self.store.set_next_policy(id, Some(policy)) {
+                        self.transition(id, TransferState::Failed(e.clone()));
+                        let _ = reply.send(Err(e));
+                        return;
+                    }
+                    self.overrides.insert(id, policy);
+                }
                 let _ = reply.send(Ok(id));
                 self.dispatch();
             }

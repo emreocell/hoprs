@@ -223,6 +223,14 @@ pub trait BackendApi: Send + Sync {
     ) -> Result<()>;
 
     async fn enqueue(&self, spec: TransferSpec) -> Result<TransferId>;
+    /// Like [`enqueue`](Self::enqueue), with a conflict policy for this item
+    /// alone (persisted, so it survives a restart).
+    #[allow(dead_code, reason = "used by the compare panel (Plan 12, Task 7)")]
+    async fn enqueue_with_policy(
+        &self,
+        spec: TransferSpec,
+        policy: ConflictPolicy,
+    ) -> Result<TransferId>;
     async fn control(&self, id: TransferId, op: ControlOp) -> Result<()>;
     /// A new receiver of the engine's events. Subscribe first, then take
     /// [`transfer_snapshot`](Self::transfer_snapshot): events at or below its `seq` are
@@ -671,6 +679,14 @@ impl BackendApi for Backend {
 
     async fn enqueue(&self, spec: TransferSpec) -> Result<TransferId> {
         self.engine.enqueue(spec).await
+    }
+
+    async fn enqueue_with_policy(
+        &self,
+        spec: TransferSpec,
+        policy: ConflictPolicy,
+    ) -> Result<TransferId> {
+        self.engine.enqueue_with_policy(spec, policy).await
     }
 
     async fn control(&self, id: TransferId, op: ControlOp) -> Result<()> {

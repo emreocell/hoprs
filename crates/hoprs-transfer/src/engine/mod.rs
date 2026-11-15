@@ -150,9 +150,32 @@ impl TransferEngine {
 
     /// Adds a transfer to the queue and returns its id.
     pub async fn enqueue(&self, spec: TransferSpec) -> Result<TransferId> {
+        self.enqueue_inner(spec, None).await
+    }
+
+    /// Like `enqueue`, but the item's own conflict decision uses `policy`
+    /// instead of the global one. Stored as the item's `next_policy`, so it
+    /// also holds after a restart (the item resumes under it).
+    pub async fn enqueue_with_policy(
+        &self,
+        spec: TransferSpec,
+        policy: ConflictPolicy,
+    ) -> Result<TransferId> {
+        self.enqueue_inner(spec, Some(policy)).await
+    }
+
+    async fn enqueue_inner(
+        &self,
+        spec: TransferSpec,
+        policy: Option<ConflictPolicy>,
+    ) -> Result<TransferId> {
         let (reply, rx) = oneshot::channel();
         self.commands
-            .send(Command::Enqueue { spec, reply })
+            .send(Command::Enqueue {
+                spec,
+                policy,
+                reply,
+            })
             .await
             .map_err(|_| stopped())?;
         rx.await.map_err(|_| stopped())?
