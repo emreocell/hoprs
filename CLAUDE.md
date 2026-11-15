@@ -16,8 +16,9 @@ Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI) for Linux, Windows and m
 - Plan 7 (same-destination serialisation): `docs/superpowers/plans/2026-11-13-07-same-destination.md`
 - Plan 8 (release 1.0.0: icons, `.deb`, release workflow): `docs/superpowers/plans/2026-11-13-08-release-1.0.md`
 - Plan 10 (Windows and macOS, release 1.1.0): spec `docs/superpowers/specs/2026-11-14-windows-macos-design.md`, plan `docs/superpowers/plans/2026-11-14-10-windows-macos.md`
+- Plan 11 (app in Brazilian Portuguese, Fluent catalogs): spec `docs/superpowers/specs/2026-11-15-app-i18n-pt-br-design.md`, plan `docs/superpowers/plans/2026-11-15-11-app-i18n-pt-br.md`
 - Landing page for https://hoprs.online: code in `site/` (Vite + React + Tailwind, prerendered), spec `docs/superpowers/specs/2026-11-14-landing-page-design.md`, plan `docs/superpowers/plans/2026-11-14-09-landing-page.md`, deploy notes `site/deploy/README.md`, workflow `.github/workflows/site.yml`
-- QA checklists (manual runs, NEEDS HUMAN rows with steps): `docs/qa/plan-5-checklist.md`, `docs/qa/plan-6-checklist.md`, `docs/qa/release-1.0-checklist.md`, `docs/qa/release-1.1-checklist.md`
+- QA checklists (manual runs, NEEDS HUMAN rows with steps): `docs/qa/plan-5-checklist.md`, `docs/qa/plan-6-checklist.md`, `docs/qa/release-1.0-checklist.md`, `docs/qa/release-1.1-checklist.md`, `docs/qa/i18n-checklist.md`
 - Performance targets, how they are measured, last numbers: `docs/perf/README.md` (`scripts/perf.sh`, `.github/workflows/perf.yml`)
 - Deferred follow-ups: `docs/superpowers/plans/2026-11-12-01-followups.md`
 
@@ -35,6 +36,8 @@ Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI) for Linux, Windows and m
 - **v1.1.0 released (2026-11-14), Plan 10 merged (PR #11):** tag `v1.1.0` on `1f06850`, GitHub Release with `.deb`, universal `.dmg`, `.msi`, portable `.zip` and `SHA256SUMS` (checksums verified after download); the site switched to 1.1.0 through the post-release deploy. Follow-ups: `docs/superpowers/plans/2026-11-12-01-followups.md` section Plan 10.
 - **Next step (Plan 10):** the author runs the NEEDS HUMAN rows of `docs/qa/release-1.1-checklist.md` on real Windows and macOS machines (the macOS Cmd+Q known issue first).
 
+- **Plan 11 (pt-BR UI)** is on branch `app-i18n-pt-br` (PR pending); then the author runs the NEEDS HUMAN rows of `docs/qa/i18n-checklist.md`.
+
 ## Decisions already made (do not re-litigate)
 
 - Target platforms: **Linux (Ubuntu), Windows and macOS** (Plan 10 changed this; v1.0.0 was Linux-only). Tests must pass on all three (use `tempfile`, never literal `/tmp`). macOS and Windows builds are unsigned (ad-hoc signature only on macOS).
@@ -43,7 +46,7 @@ Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI) for Linux, Windows and m
 - **Workspace = a bundle of sites**; "Open workspace" connects all of them and restores tabs. A site can be in several workspaces.
 - Credentials: OS keyring (Secret Service) + encrypted export/import (Argon2id + XChaCha20-Poly1305). Profile TOML never holds secrets. ssh-agent preferred.
 - Import from FileZilla (`sitemanager.xml`) is in v1.
-- UI language: **English** (i18n-ready). Visual: mockup v2 — neutral near-black, **white accent**, Inter for UI, JetBrains Mono for data (file names, paths, permissions), 4px radius, 1px rules, no shadows, no modal cascades (errors inline).
+- UI language: **English and Brazilian Portuguese** (Fluent catalogs in `crates/hoprs-app/i18n/`; `en.ftl` is the reference, tests keep both in step). Visual: mockup v2 — neutral near-black, **white accent**, Inter for UI, JetBrains Mono for data (file names, paths, permissions), 4px radius, 1px rules, no shadows, no modal cascades (errors inline).
 - Unencrypted FTP is allowed, labelled `ftp (unencrypted)`, no nagging.
 - Terminal: Ctrl+K goes to the shell; the palette opens with Ctrl+Shift+K there. Copy/paste are Ctrl+Shift+C/V. OSC 52 (server writing the clipboard) is off.
 - Remote-edit uploads go straight through `RemoteFs`, not the transfer queue. The perf job is separate and never a required PR check.

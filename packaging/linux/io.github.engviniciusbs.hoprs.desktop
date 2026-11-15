@@ -2,7 +2,9 @@
 Type=Application
 Name=hoprs
 GenericName=SSH and FTP client
+GenericName[pt_BR]=Cliente SSH e FTP
 Comment=SSH terminal, SFTP and FTP/FTPS file transfers
+Comment[pt_BR]=Terminal SSH e transferência de arquivos por SFTP e FTP/FTPS
 Exec=hoprs
 Icon=io.github.engviniciusbs.hoprs
 Terminal=false

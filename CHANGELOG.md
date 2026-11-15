@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.0 — unreleased
+
+hoprs speaks Brazilian Portuguese.
+
+- The whole interface is available in English and Brazilian Portuguese: menus, dialogs, errors, the queue, dates and numbers (`4,1 KB`, `11 nov 14:02`).
+- New "Language" setting (Settings, Idioma): System (the default, follows the OS language), English, or Português (Brasil). It switches at once, no restart.
+- Texts live in Fluent catalogs (`crates/hoprs-app/i18n/en.ftl` and `pt-BR.ftl`), so adding a language is a new file. Tests keep both catalogs in step.
+- Errors carry a stable code, so their text follows the language. Messages from servers and the OS stay as they come.
+- The queue file moves to schema v3 (it keeps error codes). Once 1.2 has opened it, 1.1 cannot open the file (it refuses a newer schema and runs on an in-memory queue, leaving the file untouched), so do not downgrade with transfers pending.
+- The Linux desktop entry has Portuguese names.
+
 ## 1.1.0 — 2026-11-14
 
 hoprs now ships for macOS and Windows as well as Linux.
