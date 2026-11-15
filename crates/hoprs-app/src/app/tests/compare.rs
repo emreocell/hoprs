@@ -491,3 +491,180 @@ async fn select_and_select_group_mark_rows() {
     }));
     assert!(state(&app).rows.iter().all(|r| !r.selected));
 }
+
+/// Task 7's Open: with `suppress_auto`, navigating both panes keeps the run, rows and roots
+/// and starts nothing.
+#[tokio::test]
+async fn suppress_auto_keeps_run_rows_and_roots_over_navigation() {
+    let (mut app, fake, _a, tab, run) = running().await;
+    app.update(found(tab, run, "kept"));
+    let roots = state(&app).roots.clone();
+    app.tabs[0].compare_mut().unwrap().suppress_auto = true;
+    let mut all = Vec::new();
+    let local = app.update(pane_msg(
+        tab,
+        Side::Local,
+        PaneMsg::Navigate(rpath("/home/me/sub")),
+    ));
+    let remote = app.update(pane_msg(
+        tab,
+        Side::Remote,
+        PaneMsg::Navigate(rpath("/srv")),
+    ));
+    let mut pending = run_listings(&fake, &local).await;
+    pending.extend(run_listings(&fake, &remote).await);
+    all.extend(local);
+    all.extend(remote);
+    all.extend(settle_all(&mut app, &fake, pending).await);
+    assert!(cancelled(&all).is_empty() && started(&all).is_empty() && debounces(&all).is_empty());
+    assert_eq!(state(&app).rows.len(), 1);
+    assert_eq!(state(&app).roots, roots);
+    assert_eq!(state(&app).run, Some(run));
+    assert!(!state(&app).suppress_auto, "one-shot");
+    // The next change behaves as usual again.
+    let nav = app.update(pane_msg(
+        tab,
+        Side::Local,
+        PaneMsg::Navigate(rpath("/home/me")),
+    ));
+    assert_eq!(cancelled(&nav), [run]);
+}
+
+/// Ruling R3: a re-list after a file operation neither cancels nor re-arms.
+#[tokio::test]
+async fn file_operation_refresh_does_not_touch_the_comparison() {
+    let (mut app, fake, _a, tab, run) = running().await;
+    app.update(found(tab, run, "kept"));
+    let effects = app.update(pane_msg(tab, Side::Remote, PaneMsg::NewFolder));
+    assert!(effects.is_empty() || started(&effects).is_empty());
+    app.update(pane_msg(
+        tab,
+        Side::Remote,
+        PaneMsg::EditChanged("made".into()),
+    ));
+    let commit = app.update(pane_msg(tab, Side::Remote, PaneMsg::EditCommit));
+    let done = run_file_ops(&fake, &commit).await;
+    let mut refresh = Vec::new();
+    for m in done {
+        refresh.extend(app.update(m));
+    }
+    assert_eq!(
+        listings(&refresh).len(),
+        1,
+        "the pane re-lists: {refresh:?}"
+    );
+    assert!(cancelled(&refresh).is_empty());
+    let after = settle_all(&mut app, &fake, run_listings(&fake, &refresh).await).await;
+    assert!(debounces(&after).is_empty() && started(&after).is_empty());
+    assert_eq!(state(&app).run, Some(run));
+    assert_eq!(state(&app).rows.len(), 1);
+    assert!(matches!(state(&app).phase, Phase::Running { .. }));
+}
+
+#[tokio::test]
+async fn debouncing_never_sticks() {
+    // Session gone with nothing running.
+    let (mut app, _fake, a, effects) = open(true).await;
+    assert_eq!(state(&app).phase, Phase::Debouncing);
+    let _ = effects;
+    let TabState::Connected(connected) = tab_state(&app, &a.id).clone() else {
+        panic!("connected");
+    };
+    app.update(Message::SessionState {
+        session: connected.session,
+        state: ConnectionState::Disconnected(Error::new(ErrorKind::Network, "x")),
+        auth: None,
+    });
+    assert_eq!(state(&app).phase, Phase::Idle);
+
+    // Debounce fires, but the run cannot start (not connected any more).
+    let (mut app, _fake, _a, effects) = open(true).await;
+    let tab = app.tabs[0].id;
+    let generation = debounces(&effects)[0].1;
+    app.tabs[0].pane_mut(Side::Remote).unwrap().listing = crate::app::files::Listing::Loading;
+    assert!(started(&app.update(msg(CompareMsg::Debounced { tab, generation }))).is_empty());
+    assert_eq!(state(&app).phase, Phase::Idle);
+
+    // Auto turned off in Settings while debouncing.
+    let (mut app, _fake, _a, effects) = open(true).await;
+    let tab = app.tabs[0].id;
+    let generation = debounces(&effects)[0].1;
+    app.update(Message::Settings(settings::SettingsMsg::CompareAuto(false)));
+    assert_eq!(state(&app).phase, Phase::Idle);
+    assert!(started(&app.update(msg(CompareMsg::Debounced { tab, generation }))).is_empty());
+}
+
+#[tokio::test]
+async fn new_folders_clear_stale_rows_but_a_refresh_keeps_them() {
+    // The previous run finished, auto is off.
+    let (mut app, fake, _a, _e) = open(false).await;
+    let tab = app.tabs[0].id;
+    let effects = app.update(msg(CompareMsg::Start { tab }));
+    let run = started(&effects)[0].0;
+    app.update(found(tab, run, "old"));
+    app.update(msg(CompareMsg::Finished {
+        tab,
+        run,
+        result: Ok(Summary {
+            identical: 2,
+            differences: 1,
+            partial: false,
+            stopped: false,
+        }),
+    }));
+    // A refresh keeps the result.
+    let retry = app.update(pane_msg(tab, Side::Remote, PaneMsg::Retry));
+    settle_all(&mut app, &fake, run_listings(&fake, &retry).await).await;
+    assert_eq!(state(&app).rows.len(), 1);
+    assert!(state(&app).roots.is_some());
+    // A folder change drops it.
+    let nav = app.update(pane_msg(
+        tab,
+        Side::Local,
+        PaneMsg::Navigate(rpath("/home/me/sub")),
+    ));
+    assert!(cancelled(&nav).is_empty());
+    assert!(state(&app).rows.is_empty() && state(&app).roots.is_none());
+    assert_eq!(
+        (state(&app).identical, &state(&app).phase),
+        (0, &Phase::Idle)
+    );
+}
+
+/// Reconnecting mid-run: the run goes on (only a `Disconnected` aborts it); once back, a
+/// remote pane that failed meanwhile is re-listed, which cancels the run and re-arms the
+/// automatic one.
+#[tokio::test]
+async fn reconnecting_keeps_the_run_and_the_relist_rearms() {
+    let (mut app, fake, a, tab, run) = running().await;
+    let TabState::Connected(connected) = tab_state(&app, &a.id).clone() else {
+        panic!("connected");
+    };
+    let session = connected.session;
+    let effects = app.update(Message::SessionState {
+        session,
+        state: ConnectionState::Reconnecting { attempt: 1 },
+        auth: None,
+    });
+    assert!(aborted(&effects).is_empty() && cancelled(&effects).is_empty());
+    assert_eq!(state(&app).run, Some(run));
+    assert!(matches!(state(&app).phase, Phase::Running { .. }));
+
+    app.tabs[0].pane_mut(Side::Remote).unwrap().listing =
+        crate::app::files::Listing::Failed(Error::new(ErrorKind::Network, "lost"));
+    let back = app.update(Message::SessionState {
+        session,
+        state: ConnectionState::Connected,
+        auth: None,
+    });
+    assert_eq!(cancelled(&back), [run]);
+    assert_eq!(listings(&back).len(), 1);
+    let after = settle_all(&mut app, &fake, run_listings(&fake, &back).await).await;
+    let waits = debounces(&after);
+    assert_eq!(waits.len(), 1);
+    let effects = app.update(msg(CompareMsg::Debounced {
+        tab,
+        generation: waits[0].1,
+    }));
+    assert_eq!(started(&effects).len(), 1);
+}

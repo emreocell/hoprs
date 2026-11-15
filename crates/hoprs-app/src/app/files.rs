@@ -399,7 +399,7 @@ impl App {
     }
 
     /// The listing effects of [`request_listing`](Self::request_listing).
-    fn list_pane(&mut self, index: usize, side: Side) -> Vec<Effect> {
+    pub(super) fn list_pane(&mut self, index: usize, side: Side) -> Vec<Effect> {
         let request_id = RequestId(self.next_id());
         let session = self.tab_session(index);
         let tab = &mut self.tabs[index];
@@ -592,6 +592,9 @@ impl App {
         let Some(index) = self.tab_index(tab) else {
             return Vec::new();
         };
+        let quiet = self.tabs[index]
+            .compare()
+            .is_some_and(|s| s.quiet_request == Some(request_id));
         let Some(pane) = self.tabs[index].pane_mut(side) else {
             return Vec::new();
         };
@@ -628,7 +631,9 @@ impl App {
         }
         if listed {
             let mut effects = self.select_new_entry(index, side);
-            effects.extend(self.compare_after_listing(index));
+            if !quiet {
+                effects.extend(self.compare_after_listing(index));
+            }
             effects
         } else {
             Vec::new()

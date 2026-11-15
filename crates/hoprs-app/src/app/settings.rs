@@ -264,6 +264,17 @@ impl App {
                     return Vec::new();
                 }
                 self.settings.compare_auto = on;
+                if !on {
+                    // Nothing waits for a debounce any more.
+                    for tab in &mut self.tabs {
+                        if let Some(state) = tab.compare_mut()
+                            && state.phase == super::compare::Phase::Debouncing
+                        {
+                            state.generation += 1;
+                            state.phase = super::compare::Phase::Idle;
+                        }
+                    }
+                }
                 self.save_settings_effect().into_iter().collect()
             }
             SettingsMsg::CompareIgnore(typed) => {

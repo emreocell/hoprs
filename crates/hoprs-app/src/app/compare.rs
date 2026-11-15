@@ -131,6 +131,13 @@ pub struct CompareState {
     /// Bumped by every start and cancel: a debounce timer only counts if its number is
     /// still the latest.
     pub generation: u64,
+    /// Task 7's Open: set this before navigating the panes to an item, and the navigation
+    /// keeps the current run, rows and roots and starts no run. One-shot: consumed when the
+    /// panes have listed again (or by the next explicit run).
+    pub suppress_auto: bool,
+    /// The listing a file operation's refresh asked for: it neither cancels nor re-arms
+    /// anything.
+    pub quiet_request: Option<super::RequestId>,
 }
 
 impl CompareState {
@@ -208,11 +215,21 @@ impl App {
                 let due = self.tabs[index]
                     .compare()
                     .is_some_and(|c| c.generation == generation && c.phase == Phase::Debouncing);
-                if due && self.settings.compare_auto {
+                if !due {
+                    return Vec::new();
+                }
+                let effects = if self.settings.compare_auto {
                     self.start_compare(index)
                 } else {
                     Vec::new()
+                };
+                // Not started (auto went off, not ready): nothing is waiting any more.
+                if let Some(state) = self.tabs[index].compare_mut()
+                    && state.phase == Phase::Debouncing
+                {
+                    state.phase = Phase::Idle;
                 }
+                effects
             }
             CompareMsg::Continue { tab } => {
                 let Some(index) = self.files_tab_index(tab) else {
@@ -386,6 +403,7 @@ impl App {
         state.rows.clear();
         state.identical = 0;
         state.hidden = false;
+        state.suppress_auto = false;
         let options = CompareOptions {
             ignore,
             limit: Some(LIMIT),
@@ -446,13 +464,54 @@ impl App {
     /// A pane of the tab is about to list again (a new folder, a refresh): the run on the old
     /// folders is cancelled and pending debounces are dropped.
     pub(super) fn compare_folders_changing(&mut self, index: usize) -> Vec<Effect> {
-        self.stop_compare(index, false)
+        if self.tabs[index].compare().is_some_and(|s| s.suppress_auto) {
+            return Vec::new();
+        }
+        let effects = self.stop_compare(index, false);
+        // Rows of other folders than the panes' now are stale (a refresh keeps them).
+        let now = (
+            self.tabs[index].pane(Side::Local).map(|p| p.path.clone()),
+            self.tabs[index].pane(Side::Remote).map(|p| p.path.clone()),
+        );
+        if let Some(state) = self.tabs[index].compare_mut()
+            && let Some((local, remote)) = &state.roots
+            && (Some(local), Some(remote)) != (now.0.as_ref(), now.1.as_ref())
+        {
+            state.roots = None;
+            state.rows.clear();
+            state.identical = 0;
+            state.phase = Phase::Idle;
+        }
+        effects
+    }
+
+    /// Lists a pane again after a file operation (rename, new folder, delete, permissions):
+    /// the run and the rows stay, and no automatic run follows.
+    pub(super) fn request_listing_quiet(&mut self, index: usize, side: Side) -> Vec<Effect> {
+        if !self.tabs[index].is_files() {
+            return Vec::new();
+        }
+        let effects = self.list_pane(index, side);
+        let request = self.tabs[index].pane(side).and_then(|p| p.request);
+        if let Some(state) = self.tabs[index].compare_mut() {
+            state.quiet_request = request;
+        }
+        effects
     }
 
     /// A pane listed: with both listed and the automatic setting on, a run follows after the
     /// debounce.
     pub(super) fn compare_after_listing(&mut self, index: usize) -> Vec<Effect> {
-        if !self.settings.compare_auto || !self.compare_ready(index) {
+        if !self.compare_ready(index) {
+            return Vec::new();
+        }
+        if let Some(state) = self.tabs[index].compare_mut()
+            && state.suppress_auto
+        {
+            state.suppress_auto = false;
+            return Vec::new();
+        }
+        if !self.settings.compare_auto {
             return Vec::new();
         }
         let tab = &mut self.tabs[index];
@@ -481,6 +540,9 @@ impl App {
         };
         state.generation += 1;
         let Some(run) = state.run.take() else {
+            if state.phase == Phase::Debouncing {
+                state.phase = Phase::Idle;
+            }
             return Vec::new();
         };
         state.phase = Phase::Stopped(error.clone());
