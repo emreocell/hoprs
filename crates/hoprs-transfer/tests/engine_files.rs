@@ -734,3 +734,41 @@ async fn per_item_policy_survives_restart() {
     assert_eq!(wait_terminal(&mut rx, id).await, TransferState::Done);
     assert_eq!(remote.read_file("/srv/a.bin").unwrap(), new);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn enqueue_with_overwrite_after_earlier_transfer_to_same_destination() {
+    let (engine, local, remote, mut rx) = engine_with_memfs(1).await;
+    local.add_file("/w/a.bin", &data(100), mtime());
+    remote.add_dir("/srv");
+
+    let first = engine
+        .enqueue(spec(Direction::Upload, "/w/a.bin", "/srv/a.bin"))
+        .await
+        .unwrap();
+    assert_eq!(wait_terminal(&mut rx, first).await, TransferState::Done);
+
+    // The file is edited and compared again; the user chooses overwrite.
+    let new = data(3_000);
+    local.add_file("/w/a.bin", &new, mtime());
+    let mut seen = Vec::new();
+    let second = engine
+        .enqueue_with_policy(
+            spec(Direction::Upload, "/w/a.bin", "/srv/a.bin"),
+            ConflictPolicy::Overwrite,
+        )
+        .await
+        .unwrap();
+    wait_for(&mut rx, |e| {
+        seen.push(e.clone());
+        matches!(e, EventKind::StateChanged { id, state } if *id == second && state.is_terminal())
+    })
+    .await;
+    assert!(!seen.iter().any(|e| matches!(
+        e,
+        EventKind::StateChanged {
+            state: TransferState::AwaitingDecision(_),
+            ..
+        }
+    )));
+    assert_eq!(remote.read_file("/srv/a.bin").unwrap(), new);
+}

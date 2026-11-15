@@ -155,7 +155,10 @@ impl TransferEngine {
 
     /// Like `enqueue`, but the item's own conflict decision uses `policy`
     /// instead of the global one. Stored as the item's `next_policy`, so it
-    /// also holds after a restart (the item resumes under it).
+    /// also holds after a restart. Meant for file items (the compare panel
+    /// enqueues files with it). Items recovered at startup always come back
+    /// `Paused`, so after a restart the item runs under this policy once
+    /// resumed.
     pub async fn enqueue_with_policy(
         &self,
         spec: TransferSpec,

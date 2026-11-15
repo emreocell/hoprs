@@ -375,6 +375,7 @@ impl Actor {
                     }
                 };
                 self.drop_overlapping_fresh(id, destination(&spec));
+                let key = dest_key(&spec);
                 self.add_item(TransferItem {
                     id,
                     parent: None,
@@ -393,6 +394,10 @@ impl Actor {
                         return;
                     }
                     self.overrides.insert(id, policy);
+                    // An explicit policy is not a continuation of an earlier
+                    // copy by another item: make this item the destination's
+                    // writer so dispatch does not drop it as superseded.
+                    self.last_writer.insert(key, id);
                 }
                 let _ = reply.send(Ok(id));
                 self.dispatch();
