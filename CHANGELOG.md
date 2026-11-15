@@ -2,7 +2,12 @@
 
 ## 1.2.0 — unreleased
 
-hoprs speaks Brazilian Portuguese.
+hoprs speaks Brazilian Portuguese and compares folders.
+
+- Folder compare: the Compare button (or Ctrl+K › Compare folders) opens a panel that lists what exists only locally, only on the server, or differs (size or time) between the two open folders. Upload or download the selected rows; they replace the file on the other side, and nothing is ever deleted.
+- It re-runs by itself when you change folders (Settings › Folder compare turns that off), skips `.git`, `node_modules` and `.DS_Store` (an editable list, `*` allowed), pauses at 10 000 entries per side and asks before going on, and reports a subfolder it cannot read without stopping.
+- It uses the tab's own connection. On FTP the walk lists one folder at a time, so the panes stay responsive. FTP listings without `MLSD` compare times to the minute.
+- Files hoprs transferred stay "identical" for the session on servers that cannot set times.
 
 - The whole interface is available in English and Brazilian Portuguese: menus, dialogs, errors, the queue, dates and numbers (`4,1 KB`, `11 nov 14:02`).
 - New "Language" setting (Settings, Idioma): System (the default, follows the OS language), English, or Português (Brasil). It switches at once, no restart.

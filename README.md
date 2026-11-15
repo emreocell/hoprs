@@ -42,6 +42,8 @@ it, in one quiet window that opens in under 100 ms and idles at about 33 MB.
   find in scrollback, copy and paste, and a reconnect bar when the connection drops.
 - **Two-pane file browser:** local and remote side by side, virtualised lists that stay
   smooth at 100 000 entries, rename, new folder, delete, upload and download.
+- **Folder compare:** a panel lists what is new, changed or missing on each side of the two
+  open folders, and uploads or downloads only the difference. Nothing is deleted.
 - **Transfer queue:** persistent (SQLite), parallel, resumes after a dropped connection or
   a restart, checks size and time, and handles conflicts per item or for the whole batch
   (ask, overwrite, overwrite if newer, skip, resume). Two items never write the same
@@ -193,6 +195,33 @@ Font size (10 to 24 px) and scrollback (1 000 to 100 000 lines) are in Settings.
 connection drops, a bar offers "Reconnect" and a new shell opens.
 
 The server cannot write to your clipboard (OSC 52 is off).
+
+### Compare folders
+
+The Compare button in a files tab (or "Compare folders" in the Ctrl+K palette) opens a
+panel between the two panes that walks the local and the remote folder you have open and
+lists what differs, grouped as "Only on this computer", "Only on the server", "Different"
+(size or modification time; the tooltip shows both times) and "Could not read" (a
+subfolder that could not be listed; the rest is still compared). A folder that exists on
+one side only is one row and is not walked.
+
+- **Automatic:** with "Compare automatically" on (the panel's checkbox, or Settings ›
+  Folder compare), changing folders in either pane starts a new comparison after a short
+  pause. Turn it off to compare only when you press Compare. The comparison uses the tab's
+  connection; it never opens its own.
+- **Ignore list:** `.git, node_modules, .DS_Store` by default, editable in Settings. Names
+  are matched at any depth on both sides, and `*` matches any run of characters (`*.log`).
+- **Limit:** a side with more than 10 000 entries pauses the walk and shows what was found
+  so far, marked as partial; "Compare everything" continues without the limit.
+- **Transfers:** select rows and press Upload selected or Download selected. Each file goes
+  into the queue with the overwrite policy, so it replaces the file on the other side
+  (you chose it after seeing the difference). Nothing is deleted, ever, and nothing moves
+  without a click. Double-click a row to take both panes to its folder. The panel is
+  keyboard-friendly: arrows move, Space toggles, Enter opens.
+- **Servers that cannot set times:** a file hoprs just transferred is shown as identical
+  for the rest of the tab's life when its sizes match, even if the server kept an old time.
+  FTP listings without `MLSD` only have minute precision, so times within a minute count
+  as equal.
 
 ### Transfers
 
@@ -404,6 +433,9 @@ docker compose -f docker/compose.yml up -d --build --wait
 cargo test --workspace --all-features -- --ignored --test-threads=1
 docker compose -f docker/compose.yml -p hoprs-test down -v
 ```
+
+`crates/hoprs-remote/tests/compare.rs` plants a tree on both servers and checks folder
+compare over SFTP and over FTP (`LIST` listings, as vsftpd has no `MLSD`).
 
 The private keys and certificates under `docker/fixtures/` and
 `crates/*/tests/fixtures/` exist only for these test servers. They protect nothing.
