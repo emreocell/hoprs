@@ -327,16 +327,16 @@ fn transfers(app: &App) -> Element<'_, Message> {
     .style(theme::pick_list)
     .menu_style(theme::menu);
 
-    let transfers = column![];
-    let transfers = transfers
-        .push(field(strings::settings_workers(), stepper.into(), None))
-        .push(muted(strings::settings_workers_hint()))
-        .push(field(strings::settings_policy(), policy.into(), None))
-        .push(muted(strings::settings_policy_hint()))
-        .push(field(strings::settings_keepalive(), keepalive.into(), None))
-        .push(muted(strings::settings_keepalive_hint()))
-        .spacing(theme::SPACE_SM);
-    transfers.into()
+    column![
+        field(strings::settings_workers(), stepper.into(), None),
+        muted(strings::settings_workers_hint()),
+        field(strings::settings_policy(), policy.into(), None),
+        muted(strings::settings_policy_hint()),
+        field(strings::settings_keepalive(), keepalive.into(), None),
+        muted(strings::settings_keepalive_hint()),
+    ]
+    .spacing(theme::SPACE_SM)
+    .into()
 }
 
 fn terminal(app: &App) -> Element<'_, Message> {

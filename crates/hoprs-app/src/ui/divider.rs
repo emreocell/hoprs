@@ -39,8 +39,8 @@ pub fn view<'a>(panel: Panel, height: f32, cap: f32, hovered_grip: bool) -> Elem
         .into()
 }
 
-/// The same band for a panel that cannot be resized now (a collapsed compare panel, a
-/// hidden queue): the rule, no cursor, no grip, so the layout does not move.
+/// The same band for a panel that cannot be resized now (the hidden queue): the rule,
+/// no cursor, no grip, so the layout does not move.
 pub fn inert<'a>() -> Element<'a, Message> {
     band()
 }
