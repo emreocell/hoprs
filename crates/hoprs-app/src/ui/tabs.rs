@@ -12,9 +12,20 @@ use iced::widget::{Id, button, column, container, row, scrollable, space, text, 
 use iced::{Alignment, Element, Length, Padding};
 
 use crate::app::{App, Message, Tab};
+use crate::ui::icons::{self, Icon};
 use crate::ui::layout::UNDERLINE;
 use crate::ui::theme::{self, palette};
-use crate::ui::{sidebar, strings};
+use crate::ui::{fit, sidebar, strings, widgets};
+
+/// A tab's name is cut to this width (the full name shows on hover).
+const NAME_MAX_WIDTH: f32 = 200.0;
+
+/// The room a tab's name gets: its estimated width, up to [`NAME_MAX_WIDTH`] (with a
+/// little slack, since Inter's advance is estimated).
+fn name_width(name: &str) -> f32 {
+    let natural = name.chars().count() as f32 * theme::TEXT_SM * fit::INTER_ADVANCE;
+    (natural + 2.0).min(NAME_MAX_WIDTH)
+}
 
 /// The id of the tab strip's scrollable ([`crate::app::Effect::ScrollTabs`]).
 pub fn strip_id() -> Id {
@@ -69,20 +80,31 @@ pub fn tab_tag(site: &Site, kind: TabKind) -> &'static str {
     }
 }
 
+/// The icon of one tab: a terminal's window, or the drive of a files tab.
+///
+/// By tab kind, not [`sidebar::site_icon`]: an SSH site's files tab is a drive too.
+pub fn tab_icon(_site: &Site, kind: TabKind) -> Icon {
+    match kind {
+        TabKind::Terminal => Icon::TerminalWindow,
+        TabKind::Files => Icon::HardDrives,
+    }
+}
+
 /// "New terminal tab" and "New files tab", for the active tab when it can have more.
 fn session_actions(app: &App) -> Option<Element<'_, Message>> {
     let index = app.active_tab.filter(|&i| app.can_open_session_tab(i))?;
     let tab = app.tabs[index].id;
-    let action = |label, kind| {
-        button(text(label).size(theme::TEXT_XS))
-            .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
-            .style(theme::button_text)
-            .on_press(Message::NewTab { tab, kind })
+    let action = |icon, label, kind| {
+        widgets::icon_button(icon, label, None, Some(Message::NewTab { tab, kind }))
     };
     Some(
         row![
-            action(strings::new_terminal_tab(), TabKind::Terminal),
-            action(strings::new_files_tab(), TabKind::Files),
+            action(
+                Icon::TerminalWindow,
+                strings::new_terminal_tab(),
+                TabKind::Terminal
+            ),
+            action(Icon::FolderPlus, strings::new_files_tab(), TabKind::Files),
         ]
         .spacing(theme::SPACE_3XS)
         .padding(Padding::ZERO.left(theme::SPACE_XS).right(theme::SPACE_XS))
@@ -92,15 +114,23 @@ fn session_actions(app: &App) -> Option<Element<'_, Message>> {
 
 fn session_tab<'a>(app: &'a App, index: usize, tab: &'a Tab) -> Element<'a, Message> {
     let active = app.active_tab == Some(index);
-    let (name, tag) = match app.site(&tab.site) {
+    let site = app.site(&tab.site);
+    let (name, tag) = match site {
         Some(site) => (site.name.as_str(), tab_tag(site, tab.kind())),
         None => (strings::site_missing(), ""),
     };
     let p = palette();
-    let close = button(text(strings::close_tab()).size(theme::TEXT_SM))
-        .padding(Padding::from([0.0, theme::SPACE_2XS]))
-        .style(theme::button_text)
-        .on_press(Message::CloseTab(tab.id));
+    let kind_icon = icons::icon(
+        site.map_or(Icon::HardDrives, |s| tab_icon(s, tab.kind())),
+        icons::SMALL,
+    )
+    .color(if active { p.ink } else { p.muted });
+    let close = widgets::icon_button(
+        Icon::X,
+        strings::close_tab(),
+        None,
+        Some(Message::CloseTab(tab.id)),
+    );
     // The site's transfers stopped on a lost connection, until they run again.
     let paused = app.queue.site_paused(&tab.site).map(|_| {
         text(strings::site_paused())
@@ -109,7 +139,8 @@ fn session_tab<'a>(app: &'a App, index: usize, tab: &'a Tab) -> Element<'a, Mess
             .wrapping(text::Wrapping::None)
     });
     let label = row![
-        text(name),
+        kind_icon,
+        widgets::fitted(name, name_width(name), theme::TEXT_SM, theme::INTER),
         text(tag)
             .font(theme::MONO)
             .size(theme::TEXT_TAG)
@@ -165,5 +196,14 @@ mod tests {
         assert_eq!(tab_tag(&ssh, TabKind::Files), "sftp");
         let ftp = Site::new("f", "h", "u", Protocol::FtpsExplicit);
         assert_eq!(tab_tag(&ftp, TabKind::Files), "ftps");
+    }
+
+    #[test]
+    fn tab_icons_by_kind() {
+        let ssh = Site::new("s", "h", "u", Protocol::Ssh);
+        assert_eq!(tab_icon(&ssh, TabKind::Terminal), Icon::TerminalWindow);
+        assert_eq!(tab_icon(&ssh, TabKind::Files), Icon::HardDrives);
+        let ftp = Site::new("f", "h", "u", Protocol::Ftp);
+        assert_eq!(tab_icon(&ftp, TabKind::Files), Icon::HardDrives);
     }
 }

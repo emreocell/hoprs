@@ -51,6 +51,17 @@ pub fn icon_button<'a>(
     shortcut: Option<&'a str>,
     on_press: Option<Message>,
 ) -> Element<'a, Message> {
+    icon_toggle(icon, label, shortcut, on_press, false)
+}
+
+/// [`icon_button`] that keeps its ink look while `active` (the panel it toggles is open).
+pub fn icon_toggle<'a>(
+    icon: Icon,
+    label: &'a str,
+    shortcut: Option<&'a str>,
+    on_press: Option<Message>,
+    active: bool,
+) -> Element<'a, Message> {
     let glyph = container(icons::icon(icon, icons::ROW))
         .center_x(Length::Fill)
         .center_y(Length::Fill);
@@ -58,7 +69,7 @@ pub fn icon_button<'a>(
         .width(ICON_HIT)
         .height(ICON_HIT)
         .padding(0)
-        .style(theme::icon_button)
+        .style(theme::icon_button_active(active))
         .on_press_maybe(on_press);
     tooltip(body, hint(label, shortcut), tooltip::Position::Bottom).into()
 }
@@ -95,7 +106,7 @@ pub fn tool_button<'a>(
 }
 
 /// An outlined text button; while disabled (`on_press` is `None`) its outline is dashed.
-#[allow(dead_code)] // Used from Plan 13 task 7 (dialogs).
+#[allow(dead_code)] // No caller yet: the dashed disabled outline waits for a dialog that needs it.
 pub fn outline_button<'a>(label: &'a str, on_press: Option<Message>) -> Element<'a, Message> {
     // `disabled` (about 3:1 on `paper`): `rule_2` was too faint to read as dashes.
     let dash = on_press.is_none().then(|| palette().disabled);
@@ -110,7 +121,6 @@ pub fn outline_button<'a>(label: &'a str, on_press: Option<Message>) -> Element<
 
 /// `full` cut with an ellipsis to the `width` it has, on one clipped line; the tooltip
 /// shows `full` only when it was cut.
-#[allow(dead_code)] // Used from Plan 13 task 7 (tab labels).
 pub fn fitted<'a>(full: &'a str, width: f32, size: f32, font: Font) -> Element<'a, Message> {
     let advance = if font.family == theme::MONO.family {
         fit::MONO_ADVANCE

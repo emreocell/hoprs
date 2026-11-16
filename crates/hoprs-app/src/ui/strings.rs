@@ -547,10 +547,6 @@ pub fn nothing_done() -> &'static str {
 pub fn clear_finished() -> &'static str {
     tr("clear-finished")
 }
-/// [`CLEAR_FINISHED`] in a narrow window.
-pub fn clear_finished_short() -> &'static str {
-    tr("clear-finished-short")
-}
 // Technical log panel.
 pub fn log() -> &'static str {
     tr("log")
@@ -595,12 +591,6 @@ pub fn log_lines(n: usize) -> String {
     tr_args("log-lines", &[("count", n.into())])
 }
 
-pub fn upload_arrow() -> &'static str {
-    tr("upload-arrow")
-}
-pub fn download_arrow() -> &'static str {
-    tr("download-arrow")
-}
 pub fn waiting_for_worker() -> &'static str {
     tr("waiting-for-worker")
 }

@@ -49,3 +49,12 @@ real display.
    clipped), and under about 1130 px every button is icons only with their label and key on hover. In the
    compare panel: group headers have icons, rows have kind icons and a selection bar, the
    collapse and close buttons are icons.
+
+7. **Tabs, queue and status bar.** NEEDS HUMAN. Open an SSH site with a terminal and a
+   files tab and start a few transfers. Expect: each tab has its kind icon, the name is cut
+   with "…" past about 200 px (full name on hover), and the tab × and the queue row actions
+   (pause, resume, cancel, retry, dismiss) are easy to hit (22 px). Every icon-only button
+   (tab ×, new terminal and files tabs, clear finished, hide and show, log) shows a tooltip
+   with its label. The status bar shows a green plug when connected, a red warning when the
+   connection is lost, and a lock before the login method on SSH and FTPS but not on plain
+   FTP. The Log button stays highlighted while the panel is open.

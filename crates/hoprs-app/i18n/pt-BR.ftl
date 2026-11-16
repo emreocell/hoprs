@@ -144,7 +144,7 @@ edit-site = Editar site
 
 ## Tabs
 
-close-tab = ×
+close-tab = Fechar aba
 new-terminal-tab = Nova aba de terminal
 new-files-tab = Nova aba de arquivos
 terminal-overflowed = A saída chegou rápido demais e o shell foi encerrado
@@ -214,7 +214,6 @@ nothing-queued = Nada aguardando
 nothing-failed = Nenhuma falha
 nothing-done = Nada concluído ainda
 clear-finished = Limpar concluídas e com falha
-clear-finished-short = Limpar concluídas
 
 ## Technical log panel
 log = Log
@@ -235,8 +234,6 @@ log-lines =
         [one] { $count } linha
        *[other] { $count } linhas
     }
-upload-arrow = ↑
-download-arrow = ↓
 waiting-for-worker = Aguardando um worker
 starting = Iniciando…
 transferring = Transferindo…

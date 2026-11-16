@@ -7,6 +7,8 @@ Released work is in the [CHANGELOG](../CHANGELOG.md).
 
 ## Next
 
+- **UI polish (1.3.0)**: icons, Settings as a tab, right-click menus, visible drag, resizable
+  panels — in progress.
 - **1.2.0: the app in Brazilian Portuguese.** Done on `main`, not released yet: the whole UI
   and hoprs's own error messages, with the language following the OS or set in Settings.
 - **Folder compare.** Done on `main`, not released yet (1.2.0): a panel lists what is new,

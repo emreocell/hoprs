@@ -510,6 +510,21 @@ pub fn icon_button(_: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// [`icon_button`] that shows ink while `active` (a panel it toggles is open).
+pub fn icon_button_active(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let style = icon_button(theme, status);
+        if active && status == button::Status::Active {
+            button::Style {
+                text_color: palette().ink,
+                ..style
+            }
+        } else {
+            style
+        }
+    }
+}
+
 /// The 1 px line on top of a pane: the accent on the focused pane, the ground on the
 /// other (so both keep the same height).
 pub fn pane_focus(focused: bool) -> impl Fn(&Theme) -> container::Style {

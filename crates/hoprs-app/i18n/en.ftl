@@ -160,7 +160,7 @@ edit-site = Edit site
 
 ## Tabs
 
-close-tab = ×
+close-tab = Close tab
 # The tab strip's actions on a connected SSH tab: another tab on its session.
 new-terminal-tab = New terminal tab
 new-files-tab = New files tab
@@ -241,8 +241,6 @@ nothing-failed = No failures
 nothing-done = Nothing finished yet
 # Removes done, skipped, cancelled and failed rows (the engine's `clear_finished`).
 clear-finished = Clear finished and failed
-# [`CLEAR_FINISHED`] in a narrow window.
-clear-finished-short = Clear finished
 
 ## Technical log panel
 log = Log
@@ -264,8 +262,6 @@ log-lines =
         [one] { $count } line
        *[other] { $count } lines
     }
-upload-arrow = ↑
-download-arrow = ↓
 waiting-for-worker = Waiting for a worker
 starting = Starting…
 # A folder whose files are being copied.

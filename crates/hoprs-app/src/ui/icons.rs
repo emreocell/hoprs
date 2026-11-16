@@ -16,8 +16,8 @@ pub const ROW: f32 = 16.0;
 pub const SMALL: f32 = 15.0;
 
 /// One glyph of the icon font.
-// Some variants are drawn only from Plan 13 task 7 (menus, tabs, sidebar, queue).
-#[allow(dead_code)]
+// Variants for menus (Plan 13 tasks 13-14) are named by the font check only until then.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Icon {
     Folder,
@@ -74,7 +74,7 @@ pub enum Icon {
 }
 
 impl Icon {
-    #[allow(dead_code)] // Used by the tests; the font check lists every icon.
+    #[cfg(test)] // The font check lists every icon.
     pub const ALL: [Icon; 51] = [
         Icon::Folder,
         Icon::FolderPlus,
@@ -187,7 +187,7 @@ impl Icon {
     }
 
     /// The Phosphor kebab-case name.
-    #[allow(dead_code)] // Used by the tests.
+    #[cfg(test)]
     pub const fn name(self) -> &'static str {
         match self {
             Icon::Folder => "folder",
