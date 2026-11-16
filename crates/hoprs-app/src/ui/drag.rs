@@ -136,7 +136,7 @@ fn chip<'a>(ghost: Ghost) -> Element<'a, Message> {
     }
     container(line)
         .padding(GHOST_PADDING)
-        .style(theme::drag_chip)
+        .style(theme::drag_ghost)
         .into()
 }
 
@@ -201,7 +201,7 @@ pub fn drop_layer<'a>(label: &str, folder: &str, upload: bool, width: f32) -> El
     }
     let label = container(line)
         .padding(LABEL_PADDING)
-        .style(theme::drag_chip)
+        .style(theme::drag_label)
         .clip(true);
     let wash = container(label)
         .width(Length::Fill)

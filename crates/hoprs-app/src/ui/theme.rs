@@ -651,9 +651,20 @@ pub fn drop_wash(_: &Theme) -> container::Style {
     surface(Color { a: 0.04, ..ink })
 }
 
-/// The drag chip that follows the pointer and the drop label: `paper_3`, a 1 px `rule_2`
-/// border, 4 px radius.
-pub fn drag_chip(_: &Theme) -> container::Style {
+/// The drag ghost that follows the pointer: `paper_3`, a 1 px `ink_2` border, 4 px radius
+/// (the mockup's `.ghost`).
+pub fn drag_ghost(_: &Theme) -> container::Style {
+    container::Style {
+        border: Border {
+            color: palette().ink_2,
+            ..drag_label(&Theme::Dark).border
+        },
+        ..drag_label(&Theme::Dark)
+    }
+}
+
+/// The drop label over the target pane: `paper_3`, a 1 px `rule_2` border, 4 px radius.
+pub fn drag_label(_: &Theme) -> container::Style {
     let p = palette();
     container::Style {
         text_color: Some(p.ink),
@@ -877,6 +888,20 @@ mod tests {
         let hovered = icon_button(&Theme::Dark, button::Status::Hovered);
         assert_eq!(hovered.background, Some(Background::Color(p.paper_3)));
         assert_eq!(hovered.text_color, p.ink);
+    }
+
+    #[test]
+    fn drag_ghost_has_an_ink_2_border_and_the_drop_label_rule_2() {
+        let p = palette();
+        let ghost = drag_ghost(&Theme::Dark);
+        let label = drag_label(&Theme::Dark);
+        assert_eq!(ghost.border.color, p.ink_2);
+        assert_eq!(label.border.color, p.rule_2);
+        for style in [ghost, label] {
+            assert_eq!(style.background, Some(Background::Color(p.paper_3)));
+            assert_eq!(style.border.width, HAIRLINE);
+            assert_eq!(style.text_color, Some(p.ink));
+        }
     }
 
     #[test]
