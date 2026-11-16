@@ -94,6 +94,8 @@ impl App {
     /// unchanged.
     pub(super) fn drag_key(&mut self, msg: Message) -> Option<Message> {
         if self.menu.is_none()
+            && !self.dialogs.is_open()
+            && self.palette.is_none()
             && matches!(
                 msg,
                 Message::KeyPressed {

@@ -13,7 +13,7 @@ fn open() -> Message {
     Message::Menu(MenuMsg::Open(MenuTarget::SidebarOptions))
 }
 
-fn host_key_prompt(id: u64) -> Message {
+pub(super) fn host_key_prompt(id: u64) -> Message {
     Message::Prompt(BrokerEvent::Request(PromptRequest {
         id: PromptId(id),
         session: SessionId(1),

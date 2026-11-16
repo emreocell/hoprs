@@ -1675,3 +1675,35 @@ async fn escape_closes_menu_before_drag() {
     app.update(escape);
     assert_eq!(app.drag, None);
 }
+
+/// A dialog or the palette opened during a drag: Escape closes it first, the next one
+/// cancels the drag.
+#[tokio::test]
+async fn escape_closes_dialog_or_palette_before_drag() {
+    let (_fake, mut app, _a, tab) = transfer_tab().await;
+    let b_row = row_of(&app, Side::Local, "b.txt");
+    let escape = Message::KeyPressed {
+        key: FileKey::Escape,
+        shift: false,
+    };
+    // The palette.
+    press(&mut app, tab, Side::Local, b_row, IN_LOCAL);
+    move_over(&mut app, tab, Side::Remote, IN_REMOTE);
+    app.update(Message::Palette(crate::app::palette::PaletteMsg::Open));
+    assert!(app.palette.is_some());
+    app.update(escape.clone());
+    assert!(app.palette.is_none());
+    assert!(app.drag.is_some_and(|d| d.active));
+    app.update(escape.clone());
+    assert_eq!(app.drag, None);
+    // A security dialog.
+    press(&mut app, tab, Side::Local, b_row, IN_LOCAL);
+    move_over(&mut app, tab, Side::Remote, IN_REMOTE);
+    app.update(super::menu::host_key_prompt(1));
+    assert!(app.dialogs.is_open());
+    app.update(escape.clone());
+    assert!(!app.dialogs.is_open());
+    assert!(app.drag.is_some_and(|d| d.active));
+    app.update(escape);
+    assert_eq!(app.drag, None);
+}
