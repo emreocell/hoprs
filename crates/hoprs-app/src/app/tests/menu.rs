@@ -123,7 +123,7 @@ fn menu_ignored_while_closing() {
 // ---- Plan 13 Task 13: the pane menus ----
 
 use crate::app::actions::{Busy, BusyKind, PaneAction};
-use crate::app::files::local_fs_path;
+use crate::app::files::local_os_path;
 use crate::app::menu::{MenuAction, MenuItem};
 use crate::backend::ConnectError;
 
@@ -196,12 +196,6 @@ async fn right_click_unselected_row_selects_it_alone() {
     let menu = app.menu.as_ref().expect("the menu is open");
     assert_eq!(menu.at, Point::new(120.0, 300.0));
     assert_eq!(menu.target, pane_target(tab, Side::Local, Some(b)));
-    // The pane's own right press, published after the row's, keeps the row's menu.
-    app.update(right_click(tab, Side::Local, None));
-    assert_eq!(
-        app.menu.as_ref().unwrap().target,
-        pane_target(tab, Side::Local, Some(b))
-    );
 }
 
 #[tokio::test]
@@ -295,7 +289,8 @@ async fn local_and_remote_items_and_enabled_state() {
     );
     assert!(enabled(&items, MenuAction::Open));
 
-    // Not connected: all but Copy path and Refresh are off (shown, not hidden).
+    // Not connected: all but Copy path are off (shown, not hidden); Refresh would list
+    // nothing without a session.
     app.conn_mut(&a.id).state = TabState::Failed(ConnectError {
         session: None,
         error: Error::new(ErrorKind::Network, "down"),
@@ -304,7 +299,7 @@ async fn local_and_remote_items_and_enabled_state() {
     let items = open_items(&app);
     assert_eq!(items.len(), 8);
     for item in &items {
-        let on = matches!(item.action, MenuAction::CopyPath | MenuAction::Refresh);
+        let on = item.action == MenuAction::CopyPath;
         assert_eq!(item.enabled, on, "{item:?}");
     }
 
@@ -463,7 +458,7 @@ async fn copy_path_one_and_several() {
     assert_eq!(app.copy_paths(0, Side::Local), None, "nothing selected");
     let a = row_of(&app, Side::Local, "a.txt");
     app.update(right_click(tab, Side::Local, Some(a)));
-    let expected = local_fs_path(&rpath("/home/me/a.txt"))
+    let expected = local_os_path(&rpath("/home/me/a.txt"))
         .display()
         .to_string();
     assert_eq!(app.copy_paths(0, Side::Local).as_deref(), Some(&*expected));
@@ -521,27 +516,41 @@ async fn refresh_relists_the_pane() {
     assert_eq!(lists(&effects), [(Side::Local, "/home/me".to_owned())]);
 }
 
+/// Shift+F10 / the Menu key: at the cursor's row of the focused pane, from where the list
+/// is (reported whether it scrolls or not), minus how far it is scrolled.
 #[tokio::test]
 async fn keyboard_menu_opens_at_the_cursor_row() {
     let (_fake, mut app, _a, tab) = transfer_tab().await;
-    app.update(pane_msg(
-        tab,
-        Side::Local,
-        PaneMsg::Scrolled {
-            offset_y: 0.0,
-            viewport_h: 600.0,
-            origin: Point::new(300.0, 200.0),
-        },
-    ));
-    app.update(pane_msg(tab, Side::Local, PaneMsg::Click(2)));
-    app.update(Message::Key {
+    let placed = |side, x, y| {
+        pane_msg(
+            tab,
+            side,
+            PaneMsg::Placed(iced::Rectangle::new(
+                Point::new(x, y),
+                Size::new(400.0, 600.0),
+            )),
+        )
+    };
+    let menu_key = || Message::Key {
         key: FileKey::Menu,
-        shift: false,
-    });
+        shift: true,
+    };
+    // The folder fits: the list never scrolled (no `Scrolled`, `viewport_h` 0 before it
+    // was placed), only placed.
+    assert_eq!(app.tabs[0].local().viewport_h, 0.0);
+    app.update(placed(Side::Local, 300.0, 200.0));
+    app.update(placed(Side::Remote, 720.0, 200.0));
+    app.update(pane_msg(tab, Side::Local, PaneMsg::Click(2)));
+    app.update(menu_key());
     let menu = app.menu.as_ref().expect("the menu is open");
     assert_eq!(menu.at, Point::new(324.0, 290.0));
     assert_eq!(menu.target, pane_target(tab, Side::Local, Some(2)));
-    // Scrolled down a row: the anchor follows.
+    // The window changed (a bar above the list, say): the anchor follows.
+    app.update(Message::Menu(MenuMsg::Close));
+    app.update(placed(Side::Local, 280.0, 250.0));
+    app.update(menu_key());
+    assert_eq!(app.menu.as_ref().unwrap().at, Point::new(304.0, 340.0));
+    // Scrolled down a row: one row higher.
     app.update(Message::Menu(MenuMsg::Close));
     app.update(pane_msg(
         tab,
@@ -549,14 +558,20 @@ async fn keyboard_menu_opens_at_the_cursor_row() {
         PaneMsg::Scrolled {
             offset_y: 30.0,
             viewport_h: 600.0,
-            origin: Point::new(300.0, 200.0),
         },
     ));
+    app.update(menu_key());
+    assert_eq!(app.menu.as_ref().unwrap().at, Point::new(304.0, 310.0));
+    // Tab to the other pane: its list, its cursor (none yet: the first row, no row target).
+    app.update(Message::Menu(MenuMsg::Close));
     app.update(Message::Key {
-        key: FileKey::Menu,
+        key: FileKey::SwitchPane,
         shift: false,
     });
-    assert_eq!(app.menu.as_ref().unwrap().at, Point::new(324.0, 260.0));
+    app.update(menu_key());
+    let menu = app.menu.as_ref().unwrap();
+    assert_eq!(menu.at, Point::new(744.0, 230.0));
+    assert_eq!(menu.target, pane_target(tab, Side::Remote, None));
 }
 
 #[tokio::test]
@@ -692,4 +707,53 @@ async fn right_click_behind_dialog_is_ignored() {
     assert!(app.palette.is_some());
     app.update(right_click(tab, Side::Local, Some(2)));
     assert!(app.menu.is_none());
+}
+
+/// Refresh needs a pane that can list: not busy, and on the remote side a session (a
+/// failed connection has none; one lost to the network reconnects instead, see
+/// `status::menu_action_on_dropped_session_reconnects_like_its_button`). The palette
+/// offers it only when the pane can act, like its other entries.
+#[tokio::test]
+async fn refresh_only_when_the_pane_can_list() {
+    let (_fake, mut app, a, tab) = transfer_tab().await;
+    let palette_refresh = |app: &mut App| {
+        app.update(Message::Palette(crate::app::PaletteMsg::Open));
+        let found = app
+            .palette_results()
+            .iter()
+            .any(|e| e.label == strings::menu_refresh());
+        app.update(Message::Palette(crate::app::PaletteMsg::Close));
+        found
+    };
+    app.tabs[0].set_focus(Side::Local);
+    assert!(palette_refresh(&mut app));
+    // Busy: neither the key, nor the menu item, nor the palette.
+    app.tabs[0].local_mut().busy = Some(Busy {
+        op: RequestId(999),
+        kind: BusyKind::Delete,
+        done: 0,
+        folder: rpath("/home/me"),
+    });
+    assert!(!palette_refresh(&mut app));
+    let f5 = Message::Key {
+        key: FileKey::Refresh,
+        shift: false,
+    };
+    assert!(app.update(f5.clone()).is_empty());
+    app.update(right_click(tab, Side::Local, None));
+    assert!(!enabled(&open_items(&app), MenuAction::Refresh));
+    app.update(Message::Menu(MenuMsg::Close));
+    // Remote, not connected: nothing listed, nothing reset.
+    app.conn_mut(&a.id).state = TabState::Failed(ConnectError {
+        session: None,
+        error: Error::new(ErrorKind::Network, "down"),
+        keyring_unavailable: false,
+    });
+    app.tabs[0].set_focus(Side::Remote);
+    assert!(app.update(f5).is_empty());
+    assert_eq!(
+        app.tabs[0].remote().listing,
+        crate::app::files::Listing::Loaded
+    );
+    assert!(!palette_refresh(&mut app));
 }

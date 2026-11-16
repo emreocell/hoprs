@@ -407,6 +407,10 @@ fn pane<'a>(
         PaneStatus::Failed(error) => failed(error, msg(PaneMsg::Retry)),
         PaneStatus::NotConnected => not_connected(app, tab),
     };
+    // Where the rows are, scrolling or not: a menu opened from the keyboard goes there.
+    let body = crate::ui::bounds::report(body, pane.bounds, move |bounds| {
+        msg(PaneMsg::Placed(bounds))
+    });
     let mut content = column![
         // The focused pane (the one the keyboard drives) has the accent line on top.
         container(space())
@@ -666,7 +670,6 @@ fn list<'a>(
             msg: PaneMsg::Scrolled {
                 offset_y: viewport.absolute_offset().y,
                 viewport_h: viewport.bounds().height,
-                origin: viewport.bounds().position(),
             },
         },
         move |i| file_row(tab, side, pane, i, this_year, focused, cols, width),

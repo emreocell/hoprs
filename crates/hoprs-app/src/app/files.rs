@@ -9,7 +9,7 @@
 use std::collections::{BTreeSet, HashSet};
 
 use hoprs_core::{EntryKind, Error, ErrorKind, RemoteEntry, RemotePath};
-use iced::Point;
+use iced::{Point, Rectangle};
 
 use super::actions::{Busy, PaneAction};
 use super::menu::{ContextMenu, MenuTarget};
@@ -132,9 +132,9 @@ pub struct Pane {
     /// The list's scroll offset and visible height, as `on_scroll` last reported them.
     pub offset_y: f32,
     pub viewport_h: f32,
-    /// The list's top left corner in the window, as `on_scroll` last reported it (where
+    /// Where the list is in the window, as [`crate::ui::bounds`] last reported it (where
     /// a menu opened from the keyboard goes).
-    pub origin: Point,
+    pub bounds: Rectangle,
     /// The request whose result this pane waits for.
     pub request: Option<RequestId>,
     /// The inline editor, delete confirmation or permissions dialog open, if any.
@@ -172,7 +172,7 @@ impl Pane {
             hovered: None,
             offset_y: 0.0,
             viewport_h: 0.0,
-            origin: Point::ORIGIN,
+            bounds: Rectangle::default(),
             request: None,
             action: None,
             busy: None,
@@ -250,8 +250,8 @@ impl Pane {
     /// bottom edge, in window coordinates.
     pub fn menu_anchor(&self, row: usize) -> Point {
         Point::new(
-            self.origin.x + MENU_INSET,
-            self.origin.y + (row + 1) as f32 * ROW_HEIGHT - self.offset_y,
+            self.bounds.x + MENU_INSET,
+            self.bounds.y + (row + 1) as f32 * ROW_HEIGHT - self.offset_y,
         )
     }
 
@@ -326,9 +326,9 @@ pub enum PaneMsg {
     Scrolled {
         offset_y: f32,
         viewport_h: f32,
-        /// The list's top left corner in the window.
-        origin: Point,
     },
+    /// Where the list is in the window (reported when it changes, scrolling or not).
+    Placed(Rectangle),
     Hover(usize),
     Unhover(usize),
     Retry,
@@ -408,6 +408,17 @@ pub fn local_path(path: &std::path::Path) -> Option<RemotePath> {
 /// workspace saves as `local_dir`).
 pub fn local_fs_path(path: &RemotePath) -> std::path::PathBuf {
     std::path::PathBuf::from(path.as_str())
+}
+
+/// The file the local side opens for `path`, as the system writes it: its components
+/// pushed onto the root, as `LocalFs::new("/")` does, made absolute without touching the
+/// disk (on Windows that adds the current drive: `/Users/me` is `C:\Users\me`).
+pub fn local_os_path(path: &RemotePath) -> std::path::PathBuf {
+    let mut out = std::path::PathBuf::from("/");
+    for comp in path.as_str().split('/').filter(|s| !s.is_empty()) {
+        out.push(comp);
+    }
+    std::path::absolute(&out).unwrap_or(out)
 }
 
 impl App {
@@ -513,7 +524,10 @@ impl App {
         // A press or action in a pane gives it the keyboard back from the differences panel.
         if !matches!(
             msg,
-            PaneMsg::Scrolled { .. } | PaneMsg::PointerIn | PaneMsg::PointerOut
+            PaneMsg::Scrolled { .. }
+                | PaneMsg::Placed(_)
+                | PaneMsg::PointerIn
+                | PaneMsg::PointerOut
         ) && let Some(state) = self.tabs[index].compare_mut()
         {
             state.focused = false;
@@ -545,11 +559,14 @@ impl App {
             PaneMsg::Scrolled {
                 offset_y,
                 viewport_h,
-                origin,
             } => {
                 pane.offset_y = offset_y;
                 pane.viewport_h = viewport_h;
-                pane.origin = origin;
+                return Vec::new();
+            }
+            PaneMsg::Placed(bounds) => {
+                pane.bounds = bounds;
+                pane.viewport_h = bounds.height;
                 return Vec::new();
             }
             PaneMsg::Hover(row) => {
@@ -618,12 +635,9 @@ impl App {
                 self.pointer(tab, side, matches!(msg, PaneMsg::PointerIn));
                 return Vec::new();
             }
+            // A row's `mouse_area` captures its right press, so the pane's own (`None`)
+            // comes only from outside the rows.
             PaneMsg::ContextMenu(row) => {
-                // The row's press comes first and opened its menu: the pane's own press
-                // for the same click keeps it.
-                if row.is_none() && self.menu.is_some() {
-                    return Vec::new();
-                }
                 let at = self.last_press;
                 self.open_pane_menu(index, side, row, at);
                 return Vec::new();
@@ -644,10 +658,19 @@ impl App {
         Vec::new()
     }
 
-    /// F5 / "Refresh": the folder again, unless an operation runs in the pane (it lists
-    /// the folder itself when done).
+    /// Whether F5 / "Refresh" would list pane `side` again: no operation runs in it (it
+    /// lists the folder itself when done) and, remote, the site has a session (one lost
+    /// to the network counts: the listing reconnects it).
+    pub(super) fn can_refresh(&self, index: usize, side: Side) -> bool {
+        self.tabs[index]
+            .pane(side)
+            .is_some_and(|p| p.busy.is_none())
+            && (side == Side::Local || self.tab_conn(index).session().is_some())
+    }
+
+    /// F5 / "Refresh": the folder again, when [`can_refresh`](Self::can_refresh).
     fn refresh(&mut self, index: usize, side: Side) -> Vec<Effect> {
-        if self.tabs[index].pane(side).is_none_or(|p| p.busy.is_some()) {
+        if !self.can_refresh(index, side) {
             return Vec::new();
         }
         self.request_listing(index, side)
@@ -681,8 +704,8 @@ impl App {
     }
 
     /// What "Copy path" copies from pane `side` of the tab at `index`: the selected
-    /// entries' full paths, one per line, in row order (local: the system's path; remote:
-    /// the remote one). `None` with nothing selected.
+    /// entries' full paths, one per line, in row order (local: the system's path, see
+    /// [`local_os_path`]; remote: the remote one). `None` with nothing selected.
     pub fn copy_paths(&self, index: usize, side: Side) -> Option<String> {
         let pane = self.tabs.get(index)?.pane(side)?;
         let paths: Vec<String> = pane
@@ -691,7 +714,7 @@ impl App {
             .map(|entry| {
                 let path = pane.path.join(&entry.name);
                 match side {
-                    Side::Local => local_fs_path(&path).display().to_string(),
+                    Side::Local => local_os_path(&path).display().to_string(),
                     Side::Remote => path.as_str().to_owned(),
                 }
             })
@@ -894,14 +917,9 @@ impl App {
             (None, FileKey::Transfer) => return self.transfer_selection(index, side),
             (None, FileKey::Refresh) => return self.refresh(index, side),
             (None, FileKey::Menu) => {
-                // At the cursor's row; before the list ever reported where it is (a
-                // folder that fits never scrolls), where the pointer last pressed.
+                // At the cursor's row (the first one without a cursor).
                 let row = pane.selection.cursor;
-                let at = if pane.viewport_h > 0.0 {
-                    pane.menu_anchor(row.unwrap_or(0))
-                } else {
-                    self.last_press
-                };
+                let at = pane.menu_anchor(row.unwrap_or(0));
                 self.open_pane_menu(index, side, row, at);
                 return Vec::new();
             }
@@ -1076,6 +1094,27 @@ mod tests {
         assert_eq!(pane.row(7), Some(Row::Entry(&pane.entries[6])));
         assert_eq!(pane.row(0), Some(Row::Up));
         assert_eq!(pane.row(8), None);
+    }
+
+    #[test]
+    fn local_os_path_is_the_native_path() {
+        let path = RemotePath::new("/home/me/a b.txt").unwrap();
+        let os = local_os_path(&path);
+        assert!(os.is_absolute(), "{os:?}");
+        assert!(os.ends_with(std::path::Path::new("home").join("me").join("a b.txt")));
+        #[cfg(unix)]
+        assert_eq!(os, std::path::PathBuf::from("/home/me/a b.txt"));
+        // On Windows: a drive, backslashes (`C:\home\me\a b.txt`).
+        #[cfg(windows)]
+        {
+            let text = os.display().to_string();
+            assert!(text.ends_with(r"\home\me\a b.txt"), "{text}");
+            assert_eq!(text.chars().nth(1), Some(':'), "{text}");
+        }
+        assert_eq!(
+            local_os_path(&RemotePath::root()),
+            std::path::absolute("/").unwrap()
+        );
     }
 
     #[test]

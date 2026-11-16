@@ -1291,7 +1291,6 @@ async fn keyboard_and_clicks_drive_the_focused_pane() {
         PaneMsg::Scrolled {
             offset_y: 0.0,
             viewport_h: 60.0,
-            origin: iced::Point::ORIGIN,
         },
     ));
     app.update(key(FileKey::Home));

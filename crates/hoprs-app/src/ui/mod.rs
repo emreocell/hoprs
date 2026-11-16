@@ -1,5 +1,6 @@
 //! Everything iced draws: theme, strings and the views.
 
+pub mod bounds;
 pub mod compare;
 pub mod dashed;
 pub mod dialogs;

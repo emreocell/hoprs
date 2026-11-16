@@ -157,7 +157,7 @@ impl App {
         let idle = pane.busy.is_none();
         let can = tab.can_act(conn, side);
         let selected = !pane.selected_entries().is_empty();
-        let refresh = MenuItem::enabled(MenuAction::Refresh, idle);
+        let refresh = MenuItem::enabled(MenuAction::Refresh, self.can_refresh(index, side));
         let new_folder = MenuItem::enabled(MenuAction::NewFolder, can);
         let Some(row) = row else {
             let compare = tab.can_act(conn, Side::Remote);

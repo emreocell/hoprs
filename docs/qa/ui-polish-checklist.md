@@ -102,7 +102,16 @@ real display.
     selected rows the selection stays and Delete asks about all of them. A right-click
     below the rows gives New folder, Refresh, Compare. Copy path pastes the full path (one
     per line for several). Hovering an item lights it up with a white icon. F5 refreshes the
-    focused pane. Select a row, then press Shift+F10 and the Menu key: the menu opens at the
-    row; ↑/↓ move (skipping dimmed items, wrapping), Enter runs the item, Escape closes;
+    focused pane. Select a row, then press Shift+F10 and the Menu key, in a short folder
+    (no scrollbar), a long scrolled one, after Tab to the other pane and after resizing the
+    window: the menu opens at the row each time; ↑/↓ move (skipping dimmed items, wrapping), Enter runs the item, Escape closes;
     another key (F7) closes the menu and acts. Opening Settings (Ctrl+,) or switching tabs
     closes an open menu.
+
+12. **Copy path on Windows.** NEEDS HUMAN. On Windows, right-click a file in the local pane
+    (for example under `Users\<you>\Documents`), choose Copy path and paste it into Explorer's
+    address bar or Notepad. Expect: a native path with the drive and backslashes
+    (`C:\Users\<you>\Documents\file.txt`) that Explorer opens; with several files selected,
+    one such path per line. Also with a rename editor open in a pane, right-click a row:
+    ↑/↓ move in the menu (not the editor's caret) and Enter runs the item (it does not
+    commit the rename).

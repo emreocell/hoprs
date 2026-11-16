@@ -619,7 +619,6 @@ async fn relisting_resets_the_scroll_offset() {
             PaneMsg::Scrolled {
                 offset_y: 300.0,
                 viewport_h: 600.0,
-                origin: iced::Point::ORIGIN,
             },
         ));
         assert_eq!(app.tabs[0].remote().offset_y, 300.0);
@@ -866,7 +865,6 @@ async fn rename_scrolls_its_row_into_view() {
         PaneMsg::Scrolled {
             offset_y: 0.0,
             viewport_h: 90.0,
-            origin: iced::Point::ORIGIN,
         },
     ));
     let start = app.update(key(FileKey::Rename));
