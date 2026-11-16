@@ -926,6 +926,7 @@ async fn dialog_takes_the_keyboard_from_a_rename_editor() {
         PaneMsg::Scrolled {
             offset_y: 30.0,
             viewport_h: 300.0,
+            origin: iced::Point::ORIGIN,
         },
     ));
     assert_eq!(app.tabs[0].remote().offset_y, 30.0);

@@ -913,7 +913,11 @@ impl App {
     pub fn update(&mut self, msg: Message) -> Vec<Effect> {
         // A palette row to run becomes the action's own message.
         let msg = self.palette_command(msg);
-        // So does a menu item chosen.
+        // An open menu has the keyboard first (Enter chooses its highlighted item).
+        let Some(msg) = self.menu_key(msg) else {
+            return Vec::new();
+        };
+        // A menu item chosen becomes the action's own message too.
         let msg = self.menu_command(msg);
         let shown = self.shown_tab();
         let active = self.active_tab;
@@ -963,6 +967,11 @@ impl App {
             // The same for the typed fields: the next visit starts from what is saved.
             self.compare_ignore_input = None;
             self.editor_input = None;
+        }
+        // The center shows another tab (or Settings, or a form): a menu about what it
+        // showed goes.
+        if self.shown_tab() != shown {
+            self.menu = None;
         }
         // The center now shows another tab (or a tab instead of a form): its lists'
         // scrollables must match the offsets the panes remember.
@@ -1067,11 +1076,6 @@ impl App {
                 request_id,
                 result,
             } => return self.listed(tab, side, request_id, result),
-            // Escape closes an open menu, and nothing else sees it.
-            Message::KeyPressed {
-                key: FileKey::Escape,
-                ..
-            } if self.menu.is_some() => self.menu = None,
             Message::KeyPressed { key, shift } => return self.key_pressed(key, shift),
             Message::Key { key, shift } => return self.file_key(key, shift),
             Message::Modifiers(mods) => self.mods = mods,

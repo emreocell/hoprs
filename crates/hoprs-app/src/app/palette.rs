@@ -539,6 +539,11 @@ impl App {
             };
             out.push(key(FileKey::Transfer, label, strings::key_transfer()));
         }
+        out.push(key(
+            FileKey::Refresh,
+            strings::menu_refresh(),
+            strings::key_refresh(),
+        ));
     }
 
     /// The terminal's copy (with a selection), paste (with a shell) and search.

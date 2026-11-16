@@ -288,6 +288,15 @@ async fn palette_lists_context_actions() {
         entry(&entries, strings::palette_download()).and_then(|e| e.shortcut),
         Some(strings::key_transfer())
     );
+    // Refresh (F5), the focused pane's folder again.
+    let refresh = entry(&entries, strings::menu_refresh()).expect("refresh");
+    assert_eq!(
+        (refresh.item.clone(), refresh.shortcut),
+        (
+            PaletteItem::FileKey(FileKey::Refresh, Side::Remote),
+            Some(strings::key_refresh())
+        )
+    );
 
     // The connection is lost: Reconnect, and no new tab on a dead session.
     let session = app.tab_session(1).expect("a session");

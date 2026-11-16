@@ -9,13 +9,22 @@
 //! - **Choosing:** [`App::menu_command`] turns a choice into the item's own message at the
 //!   top of `update`, as the palette does with a run row, so it is handled exactly as if
 //!   its button or key had sent it (the reconnection of a lost session included).
+//! - **Keyboard:** while a menu is open ↑/↓ move its highlight over the enabled items
+//!   (wrapping), Enter chooses the highlighted one, Escape closes it; any other key closes
+//!   it and then does what it always does ([`App::menu_key`]).
 //! - **Closing:** Escape, a press outside, a scroll, a window resize, choosing an item; a
-//!   security dialog or the palette closes it too. Like other window input it is blocked
-//!   behind a dialog or the palette, and ignored while the window closes.
+//!   security dialog or the palette closes it too, and so does the center showing another
+//!   tab (or Settings, or a form) and a new listing of the pane it is about. Like other
+//!   window input it is blocked behind a dialog or the palette, and ignored while the
+//!   window closes.
 
 use iced::Point;
 
-use super::{App, Effect, Message, SidebarMsg, SidebarSection};
+use super::files::Row;
+use super::{
+    App, CompareMsg, Effect, FileKey, Message, PaneMsg, SidebarMsg, SidebarSection, TabId,
+};
+use crate::backend::Side;
 
 /// The open menu.
 #[derive(Debug, Clone, PartialEq)]
@@ -32,12 +41,12 @@ pub struct ContextMenu {
 pub enum MenuTarget {
     /// The sidebar's ⋯ button: which sections show.
     SidebarOptions,
-    /// Tests only: one item that goes to `to` in the tab's remote pane (no real menu
-    /// sends a tab action before Plan 13 Part 3).
-    #[cfg(test)]
-    TestNavigate {
-        tab: super::TabId,
-        to: hoprs_core::RemotePath,
+    /// A file pane of a tab: on `row` (and the selection it is part of), or on the pane's
+    /// empty area (`None`).
+    Pane {
+        tab: TabId,
+        side: Side,
+        row: Option<usize>,
     },
 }
 
@@ -48,9 +57,26 @@ pub enum MenuAction {
     ShowWorkspaces,
     /// Show or hide the sites section.
     ShowSites,
-    /// Tests only: the item of [`MenuTarget::TestNavigate`].
-    #[cfg(test)]
-    TestNavigate,
+    /// Upload (from the local pane) / Download (from the remote one), Ctrl+Enter.
+    Transfer(Side),
+    /// Edit the remote file in the editor, F4.
+    Edit,
+    /// Enter the folder (`..` too), as a double click does.
+    Open,
+    /// F2.
+    Rename,
+    /// Permissions… (remote).
+    Permissions,
+    /// The selected entries' full paths to the clipboard.
+    CopyPath,
+    /// F5.
+    Refresh,
+    /// F7.
+    NewFolder,
+    /// Del.
+    Delete,
+    /// The tab's folder compare (the local toolbar's button).
+    Compare,
 }
 
 /// One item, as the menu shows it now.
@@ -77,6 +103,13 @@ impl MenuItem {
             rule_before: false,
         }
     }
+
+    fn enabled(action: MenuAction, enabled: bool) -> Self {
+        Self {
+            enabled,
+            ..Self::new(action)
+        }
+    }
 }
 
 /// Something in the menu.
@@ -86,6 +119,8 @@ pub enum MenuMsg {
     Open(MenuTarget),
     /// Chooses item `n` of the open menu: it closes, then the item runs if it is enabled.
     Choose(usize),
+    /// The pointer is over item `n`: it is highlighted (the keyboard goes on from there).
+    Hover(usize),
     /// A press outside, a scroll: closes it.
     Close,
 }
@@ -104,9 +139,69 @@ impl App {
                 ..MenuItem::new(action)
             })
             .collect(),
-            #[cfg(test)]
-            MenuTarget::TestNavigate { .. } => vec![MenuItem::new(MenuAction::TestNavigate)],
+            MenuTarget::Pane { tab, side, row } => self.pane_menu(*tab, *side, *row),
         }
+    }
+
+    /// A pane's items: each on when its toolbar button (or key) would act now, off (not
+    /// hidden) otherwise. Delete comes last, after a rule.
+    fn pane_menu(&self, tab: TabId, side: Side, row: Option<usize>) -> Vec<MenuItem> {
+        let Some(index) = self.tab_index(tab).filter(|&i| self.tabs[i].is_files()) else {
+            return Vec::new();
+        };
+        let tab = &self.tabs[index];
+        let conn = self.tab_conn(index);
+        let Some(pane) = tab.pane(side) else {
+            return Vec::new();
+        };
+        let idle = pane.busy.is_none();
+        let can = tab.can_act(conn, side);
+        let selected = !pane.selected_entries().is_empty();
+        let refresh = MenuItem::enabled(MenuAction::Refresh, idle);
+        let new_folder = MenuItem::enabled(MenuAction::NewFolder, can);
+        let Some(row) = row else {
+            let compare = tab.can_act(conn, Side::Remote);
+            return vec![
+                new_folder,
+                refresh,
+                MenuItem::enabled(MenuAction::Compare, compare),
+            ];
+        };
+        let (is_file, is_folder) = match pane.row(row) {
+            Some(Row::Up) => (false, true),
+            Some(Row::Entry(entry)) => (
+                entry.kind == hoprs_core::EntryKind::File,
+                entry.kind != hoprs_core::EntryKind::File,
+            ),
+            None => (false, false),
+        };
+        let mut items = vec![MenuItem::enabled(
+            MenuAction::Transfer(side),
+            tab.can_transfer(conn, side),
+        )];
+        if side == Side::Remote && is_file {
+            let edit = matches!(tab.edit_target(conn, side), Some(Ok(_)));
+            items.push(MenuItem::enabled(MenuAction::Edit, edit));
+        }
+        if is_folder {
+            items.push(MenuItem::enabled(MenuAction::Open, can));
+        }
+        items.push(MenuItem::enabled(MenuAction::Rename, can && selected));
+        if side == Side::Remote {
+            let chmod = can && !pane.permission_targets().is_empty();
+            items.push(MenuItem::enabled(MenuAction::Permissions, chmod));
+        }
+        items.extend([
+            MenuItem::enabled(MenuAction::CopyPath, idle && selected),
+            refresh,
+            new_folder,
+            MenuItem {
+                destructive: true,
+                rule_before: true,
+                ..MenuItem::enabled(MenuAction::Delete, can && selected)
+            },
+        ]);
+        items
     }
 
     /// The message that flips whether `section` is hidden.
@@ -126,16 +221,74 @@ impl App {
             (MenuTarget::SidebarOptions, MenuAction::ShowSites) => {
                 Some(self.set_hidden(SidebarSection::Sites))
             }
-            #[cfg(test)]
-            (MenuTarget::TestNavigate { tab, to }, MenuAction::TestNavigate) => {
-                Some(Message::Pane {
-                    tab: *tab,
-                    side: crate::backend::Side::Remote,
-                    msg: super::PaneMsg::Navigate(to.clone()),
-                })
+            (MenuTarget::SidebarOptions, _) => None,
+            (&MenuTarget::Pane { tab, side, row }, action) => {
+                let msg = match action {
+                    MenuAction::Compare => {
+                        return Some(Message::Compare(CompareMsg::Start { tab }));
+                    }
+                    MenuAction::Transfer(_) => PaneMsg::Transfer,
+                    MenuAction::Edit => PaneMsg::Edit,
+                    MenuAction::Open => PaneMsg::Open(row?),
+                    MenuAction::Rename => PaneMsg::Rename,
+                    MenuAction::Permissions => PaneMsg::Permissions,
+                    MenuAction::CopyPath => PaneMsg::CopyPath,
+                    MenuAction::Refresh => PaneMsg::Refresh,
+                    MenuAction::NewFolder => PaneMsg::NewFolder,
+                    MenuAction::Delete => PaneMsg::Delete,
+                    MenuAction::ShowWorkspaces | MenuAction::ShowSites => return None,
+                };
+                Some(Message::Pane { tab, side, msg })
             }
-            #[cfg(test)]
-            _ => None,
+        }
+    }
+
+    /// A key while a menu is open (`None`: the menu took it). ↑/↓ move the highlight over
+    /// the enabled items, wrapping (from none: the first or the last); Enter becomes the
+    /// choice of the highlighted item (nothing without one); Escape closes the menu. Any
+    /// other key closes it and goes on to do what it always does. Anything else, or no
+    /// open menu, passes unchanged.
+    pub(super) fn menu_key(&mut self, msg: Message) -> Option<Message> {
+        let Message::KeyPressed { key, .. } = msg else {
+            return Some(msg);
+        };
+        let Some(menu) = &self.menu else {
+            return Some(msg);
+        };
+        match key {
+            FileKey::Up | FileKey::Down => {
+                let enabled: Vec<usize> = self
+                    .menu_items(&menu.target)
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, item)| item.enabled)
+                    .map(|(i, _)| i)
+                    .collect();
+                let at = menu
+                    .cursor
+                    .and_then(|c| enabled.iter().position(|&i| i == c));
+                let count = enabled.len();
+                let next = match (key, at) {
+                    _ if count == 0 => None,
+                    (FileKey::Down, Some(p)) => Some((p + 1) % count),
+                    (FileKey::Down, None) => Some(0),
+                    (_, Some(p)) => Some((p + count - 1) % count),
+                    (_, None) => Some(count - 1),
+                };
+                if let (Some(p), Some(menu)) = (next, &mut self.menu) {
+                    menu.cursor = Some(enabled[p]);
+                }
+                None
+            }
+            FileKey::Enter => menu.cursor.map(|c| Message::Menu(MenuMsg::Choose(c))),
+            FileKey::Escape => {
+                self.menu = None;
+                None
+            }
+            _ => {
+                self.menu = None;
+                Some(msg)
+            }
         }
     }
 
@@ -165,6 +318,12 @@ impl App {
                     target,
                     cursor: None,
                 });
+                Vec::new()
+            }
+            MenuMsg::Hover(index) => {
+                if let Some(menu) = &mut self.menu {
+                    menu.cursor = Some(index);
+                }
                 Vec::new()
             }
             // `update` resolved it already ([`App::menu_command`]): what reaches here

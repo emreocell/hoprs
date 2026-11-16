@@ -525,6 +525,7 @@ mod tests {
         "key-rename",
         "key-delete",
         "key-edit",
+        "key-refresh",
         "key-transfer",
         "size-unit-b",
         "size-unit-kb",

@@ -165,10 +165,13 @@ pub fn key_message(event: Event, status: Status, _: window::Id) -> Option<Messag
             modifiers,
             ..
         } => {
-            // Ctrl+Enter sends the selection to the other pane.
-            let key = match file_key(named)? {
-                FileKey::Enter if modifiers.command() => FileKey::Transfer,
-                key => key,
+            // Ctrl+Enter sends the selection to the other pane; Shift+F10 is the Menu key.
+            let key = match named {
+                Named::F10 if modifiers.shift() => FileKey::Menu,
+                _ => match file_key(named)? {
+                    FileKey::Enter if modifiers.command() => FileKey::Transfer,
+                    key => key,
+                },
             };
             if status == Status::Captured && key != FileKey::Escape {
                 return None;
@@ -218,6 +221,8 @@ fn file_key(named: Named) -> Option<FileKey> {
         Named::F4 => FileKey::Edit,
         Named::Escape => FileKey::Escape,
         Named::Space => FileKey::Space,
+        Named::F5 => FileKey::Refresh,
+        Named::ContextMenu => FileKey::Menu,
         _ => return None,
     })
 }
@@ -433,9 +438,11 @@ fn pane<'a>(
         .height(Length::Fill)
         .style(theme::drop_target(target));
     // A press anywhere focuses the pane for the keyboard, without taking the click; the
-    // pointer going in and out tells a drag where it would drop.
+    // pointer going in and out tells a drag where it would drop. A right press outside
+    // the rows (a row's takes its own) opens the pane's menu.
     mouse_area(content)
         .on_release(msg(PaneMsg::Focus))
+        .on_right_press(msg(PaneMsg::ContextMenu(None)))
         .on_enter(msg(PaneMsg::PointerIn))
         .on_exit(msg(PaneMsg::PointerOut))
         .into()
@@ -659,6 +666,7 @@ fn list<'a>(
             msg: PaneMsg::Scrolled {
                 offset_y: viewport.absolute_offset().y,
                 viewport_h: viewport.bounds().height,
+                origin: viewport.bounds().position(),
             },
         },
         move |i| file_row(tab, side, pane, i, this_year, focused, cols, width),
@@ -832,6 +840,7 @@ fn file_row<'a>(
             .style(theme::file_row(selected, hovered, cursor, false)),
     )
     .on_press(msg(PaneMsg::Click(index)))
+    .on_right_press(msg(PaneMsg::ContextMenu(Some(index))))
     .on_double_click(msg(PaneMsg::Open(index)))
     .on_enter(msg(PaneMsg::Hover(index)))
     .on_exit(msg(PaneMsg::Unhover(index)))
@@ -1072,7 +1081,48 @@ mod tests {
             pressed(Named::Escape, Status::Captured),
             Some(FileKey::Escape)
         );
-        assert_eq!(pressed(Named::F5, Status::Ignored), None);
+        // F5: Refresh.
+        assert_eq!(pressed(Named::F5, Status::Ignored), Some(FileKey::Refresh));
+    }
+
+    /// Shift+F10 and the Menu key open the focused pane's menu; F10 alone does nothing.
+    #[test]
+    fn shift_f10_and_menu_key_open_the_menu() {
+        let id = window::Id::unique();
+        let with = |named, modifiers| {
+            let Event::Keyboard(keyboard::Event::KeyPressed {
+                key,
+                modified_key,
+                physical_key,
+                location,
+                text,
+                repeat,
+                ..
+            }) = press(named)
+            else {
+                unreachable!()
+            };
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key,
+                modified_key,
+                physical_key,
+                location,
+                modifiers,
+                text,
+                repeat,
+            })
+        };
+        let pressed = |event| match key_message(event, Status::Ignored, id) {
+            Some(Message::KeyPressed { key, .. }) => Some(key),
+            None => None,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            pressed(with(Named::F10, keyboard::Modifiers::SHIFT)),
+            Some(FileKey::Menu)
+        );
+        assert_eq!(pressed(press(Named::ContextMenu)), Some(FileKey::Menu));
+        assert_eq!(pressed(press(Named::F10)), None);
     }
 
     /// Ctrl+K opens the palette unless a widget took it: a focused terminal captures every

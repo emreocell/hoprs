@@ -132,6 +132,7 @@ impl FileList {
             msg: PaneMsg::Scrolled {
                 offset_y,
                 viewport_h: WINDOW.height,
+                origin: iced::Point::ORIGIN,
             },
         });
         let cache = self.cache.take().unwrap_or_default();

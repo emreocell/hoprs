@@ -35,6 +35,18 @@ pub fn sidebar_options() -> &'static str {
 pub fn menu_show_workspaces() -> &'static str {
     tr("menu-show-workspaces")
 }
+pub fn menu_open() -> &'static str {
+    tr("menu-open")
+}
+pub fn menu_copy_path() -> &'static str {
+    tr("menu-copy-path")
+}
+pub fn menu_refresh() -> &'static str {
+    tr("menu-refresh")
+}
+pub fn key_refresh() -> &'static str {
+    tr("key-refresh")
+}
 pub fn menu_show_sites() -> &'static str {
     tr("menu-show-sites")
 }

@@ -152,42 +152,6 @@ async fn run_queue(fake: &Arc<FakeBackend>, effects: Vec<Effect>) -> Vec<Message
     messages
 }
 
-/// A connected tab: local `/home/me` holds `a.txt`, `b.txt` and `dir/`; remote `/srv`
-/// holds `r.txt` and `sub/`.
-async fn transfer_tab() -> (Arc<FakeBackend>, App, Site, TabId) {
-    let a = srv_site();
-    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
-    let fake = &fake;
-    fake.remote_fs(&a.id)
-        .add_file("/srv/r.txt", b"r", SystemTime::UNIX_EPOCH);
-    fake.remote_fs(&a.id).add_dir("/srv/sub");
-    let local = fake.local_fs();
-    local.add_file("/home/me/a.txt", b"a", SystemTime::UNIX_EPOCH);
-    local.add_file("/home/me/b.txt", b"b", SystemTime::UNIX_EPOCH);
-    local.add_dir("/home/me/dir");
-    let app = connected_tab(fake, &a).await;
-    assert!(app.can_act(0, Side::Remote) && app.can_act(0, Side::Local));
-    let tab = app.tabs[0].id;
-    (fake.clone(), app, a, tab)
-}
-
-fn srv_site() -> Site {
-    let mut a = site("a", "h", "u", Protocol::Ftp);
-    a.remote_dir = Some("/srv".into());
-    a
-}
-
-/// The row of the entry called `name` in the first tab's pane.
-fn row_of(app: &App, side: Side, name: &str) -> usize {
-    let pane = app.tabs[0].pane(side).unwrap();
-    usize::from(pane.has_up())
-        + pane
-            .entries
-            .iter()
-            .position(|e| e.name == name)
-            .unwrap_or_else(|| panic!("no {name}"))
-}
-
 /// Upload / Download send the selection to the other pane's folder, folders as they are;
 /// Ctrl+Enter does the same from the focused pane. The backend gets each spec.
 #[tokio::test]

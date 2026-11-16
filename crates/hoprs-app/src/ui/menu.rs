@@ -12,6 +12,7 @@ use iced::{Alignment, Color, Element, Length, Padding, Point, Size};
 
 use crate::app::menu::{MenuAction, MenuItem};
 use crate::app::{App, MenuMsg, Message};
+use crate::backend::Side;
 use crate::ui::icons::{self, Icon};
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
@@ -36,8 +37,17 @@ pub fn label(action: MenuAction) -> &'static str {
     match action {
         MenuAction::ShowWorkspaces => strings::menu_show_workspaces(),
         MenuAction::ShowSites => strings::menu_show_sites(),
-        #[cfg(test)]
-        MenuAction::TestNavigate => "Test",
+        MenuAction::Transfer(Side::Local) => strings::upload(),
+        MenuAction::Transfer(Side::Remote) => strings::download(),
+        MenuAction::Edit => strings::edit_file(),
+        MenuAction::Open => strings::menu_open(),
+        MenuAction::Rename => strings::rename(),
+        MenuAction::Permissions => strings::permissions(),
+        MenuAction::CopyPath => strings::menu_copy_path(),
+        MenuAction::Refresh => strings::menu_refresh(),
+        MenuAction::NewFolder => strings::new_folder(),
+        MenuAction::Delete => strings::delete(),
+        MenuAction::Compare => strings::compare_button(),
     }
 }
 
@@ -46,17 +56,35 @@ pub fn icon(action: MenuAction) -> Icon {
     match action {
         MenuAction::ShowWorkspaces => Icon::Stack,
         MenuAction::ShowSites => Icon::HardDrives,
-        #[cfg(test)]
-        MenuAction::TestNavigate => Icon::Folder,
+        MenuAction::Transfer(Side::Local) => Icon::UploadSimple,
+        MenuAction::Transfer(Side::Remote) => Icon::DownloadSimple,
+        MenuAction::Edit => Icon::PencilSimpleLine,
+        MenuAction::Open => Icon::Folder,
+        MenuAction::Rename => Icon::Textbox,
+        MenuAction::Permissions => Icon::LockKey,
+        MenuAction::CopyPath => Icon::Copy,
+        MenuAction::Refresh => Icon::ArrowsClockwise,
+        MenuAction::NewFolder => Icon::FolderSimplePlus,
+        MenuAction::Delete => Icon::Trash,
+        MenuAction::Compare => Icon::GitDiff,
     }
 }
 
 /// The item's key, as the rest of the app shows it, if it has one.
 pub fn shortcut(action: MenuAction) -> Option<&'static str> {
     match action {
-        MenuAction::ShowWorkspaces | MenuAction::ShowSites => None,
-        #[cfg(test)]
-        MenuAction::TestNavigate => None,
+        MenuAction::Transfer(_) => Some(strings::key_transfer()),
+        MenuAction::Edit => Some(strings::key_edit()),
+        MenuAction::Rename => Some(strings::key_rename()),
+        MenuAction::Refresh => Some(strings::key_refresh()),
+        MenuAction::NewFolder => Some(strings::key_new_folder()),
+        MenuAction::Delete => Some(strings::key_delete()),
+        MenuAction::ShowWorkspaces
+        | MenuAction::ShowSites
+        | MenuAction::Open
+        | MenuAction::Permissions
+        | MenuAction::CopyPath
+        | MenuAction::Compare => None,
     }
 }
 
@@ -129,7 +157,9 @@ pub fn overlay<'a>(app: &'a App, base: Element<'a, Message>) -> Element<'a, Mess
     stack![base, backdrop, layer].into()
 }
 
-/// One item: icon, label, shortcut, check; chosen with a click when enabled.
+/// One item: icon, label, shortcut, check; chosen with a click when enabled. The pointer
+/// over an enabled item highlights it ([`MenuMsg::Hover`]), as the arrows do: the row
+/// lights up and its icon goes from `muted` to `ink`.
 fn item_row<'a>(index: usize, item: &MenuItem, highlighted: bool) -> Element<'a, Message> {
     let p = palette();
     // `None` lets the label follow the row's hover colour.
@@ -137,6 +167,8 @@ fn item_row<'a>(index: usize, item: &MenuItem, highlighted: bool) -> Element<'a,
         (Some(p.disabled), p.disabled)
     } else if item.destructive {
         (Some(p.error), p.error)
+    } else if highlighted {
+        (None, p.ink)
     } else {
         (None, p.muted)
     };
@@ -166,7 +198,7 @@ fn item_row<'a>(index: usize, item: &MenuItem, highlighted: bool) -> Element<'a,
     ]
     .spacing(theme::SPACE_XS)
     .align_y(Alignment::Center);
-    button(
+    let button = button(
         container(line)
             .height(Length::Fill)
             .align_y(Alignment::Center),
@@ -179,8 +211,14 @@ fn item_row<'a>(index: usize, item: &MenuItem, highlighted: bool) -> Element<'a,
     } else {
         theme::row
     })
-    .on_press_maybe(item.enabled.then(|| msg(MenuMsg::Choose(index))))
-    .into()
+    .on_press_maybe(item.enabled.then(|| msg(MenuMsg::Choose(index))));
+    if item.enabled {
+        mouse_area(button)
+            .on_enter(msg(MenuMsg::Hover(index)))
+            .into()
+    } else {
+        button.into()
+    }
 }
 
 #[cfg(test)]
@@ -250,5 +288,27 @@ mod tests {
             let _ = icon(action);
             assert_eq!(shortcut(action), None);
         }
+        // The pane items, with the keys the toolbar shows.
+        for (action, key) in [
+            (MenuAction::Transfer(Side::Local), Some("Ctrl ↵")),
+            (MenuAction::Transfer(Side::Remote), Some("Ctrl ↵")),
+            (MenuAction::Edit, Some("F4")),
+            (MenuAction::Open, None),
+            (MenuAction::Rename, Some("F2")),
+            (MenuAction::Permissions, None),
+            (MenuAction::CopyPath, None),
+            (MenuAction::Refresh, Some("F5")),
+            (MenuAction::NewFolder, Some("F7")),
+            (MenuAction::Delete, Some("Del")),
+            (MenuAction::Compare, None),
+        ] {
+            assert!(!label(action).is_empty(), "{action:?}");
+            let _ = icon(action);
+            assert_eq!(shortcut(action), key, "{action:?}");
+        }
+        assert_ne!(
+            label(MenuAction::Transfer(Side::Local)),
+            label(MenuAction::Transfer(Side::Remote))
+        );
     }
 }

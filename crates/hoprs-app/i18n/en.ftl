@@ -41,6 +41,10 @@ go-to-anything-key = Ctrl K
 sidebar-options = Sidebar options
 menu-show-workspaces = Show workspaces
 menu-show-sites = Show all sites
+menu-open = Open
+menu-copy-path = Copy path
+menu-refresh = Refresh
+key-refresh = F5
 
 ## The Ctrl+K palette
 

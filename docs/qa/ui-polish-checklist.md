@@ -91,3 +91,18 @@ real display.
     three counts (only here, only on the server, different) or the progress while a run has
     no rows yet, the auto checkbox, expand and close; no resize edge; expanding brings back
     the height it had.
+
+11. **File pane menus.** NEEDS HUMAN. Right-click a file and a folder in each pane on
+    Linux, macOS (also a two-finger click and Ctrl+click) and Windows. Expect: the menu opens
+    at the pointer (kept inside the window near the edges) with icons, labels and keys:
+    local rows Upload, Open (folders), Rename, Copy path, Refresh, New folder, a rule, then
+    Delete in red; remote rows Download, Edit (files), Open (folders), Rename,
+    Permissions…, Copy path, Refresh, New folder, rule, Delete. Unavailable items are dimmed,
+    not hidden. A right-click on an unselected row selects it alone; on one of several
+    selected rows the selection stays and Delete asks about all of them. A right-click
+    below the rows gives New folder, Refresh, Compare. Copy path pastes the full path (one
+    per line for several). Hovering an item lights it up with a white icon. F5 refreshes the
+    focused pane. Select a row, then press Shift+F10 and the Menu key: the menu opens at the
+    row; ↑/↓ move (skipping dimmed items, wrapping), Enter runs the item, Escape closes;
+    another key (F7) closes the menu and acts. Opening Settings (Ctrl+,) or switching tabs
+    closes an open menu.
