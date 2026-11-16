@@ -1,6 +1,8 @@
 //! Press positions: `mouse_area` tells a press happened, not where. [`tracker`] wraps the
 //! whole window and publishes [`Message::PointerPressed`] with the cursor's position for
-//! every left or right press, **before** the press reaches the widgets inside, so the
+//! every left or right press on the base widget tree, **before** the press reaches the
+//! widgets inside. iced's own overlays (tooltips, pick_list dropdowns) are updated first
+//! and may capture a press, which then is not published. On the base tree, the
 //! message a button or row sends for the same press finds [`crate::app::App::last_press`]
 //! already set (a menu opens there; drags and resizes start there). It never captures:
 //! the press goes on to the content as if the tracker were not there.

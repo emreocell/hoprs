@@ -862,6 +862,8 @@ impl App {
     pub fn update(&mut self, msg: Message) -> Vec<Effect> {
         // A palette row to run becomes the action's own message.
         let msg = self.palette_command(msg);
+        // So does a menu item chosen.
+        let msg = self.menu_command(msg);
         let shown = self.shown_tab();
         let active = self.active_tab;
         let user = reconnect::is_user_action(&msg);

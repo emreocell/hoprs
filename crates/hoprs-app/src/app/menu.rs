@@ -6,6 +6,9 @@
 //! - **What:** [`App::menu_items`] lists the items for the target as the app is now; an
 //!   item maps to the message the same action sends elsewhere (a button, a key, the
 //!   palette), so a menu never does anything the app cannot do without it.
+//! - **Choosing:** [`App::menu_command`] turns a choice into the item's own message at the
+//!   top of `update`, as the palette does with a run row, so it is handled exactly as if
+//!   its button or key had sent it (the reconnection of a lost session included).
 //! - **Closing:** Escape, a press outside, a scroll, a window resize, choosing an item; a
 //!   security dialog or the palette closes it too. Like other window input it is blocked
 //!   behind a dialog or the palette, and ignored while the window closes.
@@ -29,6 +32,13 @@ pub struct ContextMenu {
 pub enum MenuTarget {
     /// The sidebar's ⋯ button: which sections show.
     SidebarOptions,
+    /// Tests only: one item that goes to `to` in the tab's remote pane (no real menu
+    /// sends a tab action before Plan 13 Part 3).
+    #[cfg(test)]
+    TestNavigate {
+        tab: super::TabId,
+        to: hoprs_core::RemotePath,
+    },
 }
 
 /// What an item does.
@@ -38,6 +48,9 @@ pub enum MenuAction {
     ShowWorkspaces,
     /// Show or hide the sites section.
     ShowSites,
+    /// Tests only: the item of [`MenuTarget::TestNavigate`].
+    #[cfg(test)]
+    TestNavigate,
 }
 
 /// One item, as the menu shows it now.
@@ -91,6 +104,8 @@ impl App {
                     ..MenuItem::new(action)
                 })
                 .collect(),
+            #[cfg(test)]
+            MenuTarget::TestNavigate { .. } => vec![MenuItem::new(MenuAction::TestNavigate)],
         }
     }
 
@@ -101,7 +116,35 @@ impl App {
             (MenuTarget::SidebarOptions, MenuAction::ShowWorkspaces | MenuAction::ShowSites) => {
                 None
             }
+            #[cfg(test)]
+            (MenuTarget::TestNavigate { tab, to }, MenuAction::TestNavigate) => {
+                Some(Message::Pane {
+                    tab: *tab,
+                    side: crate::backend::Side::Remote,
+                    msg: super::PaneMsg::Navigate(to.clone()),
+                })
+            }
+            #[cfg(test)]
+            _ => None,
         }
+    }
+
+    /// A choice (`MenuMsg::Choose`) closes the menu and becomes the item's own message,
+    /// which `update` then handles as if its button or key had sent it; a missing or
+    /// disabled item, or no open menu, leaves the choice as it is (it does nothing).
+    /// Anything else passes unchanged.
+    pub(super) fn menu_command(&mut self, msg: Message) -> Message {
+        let Message::Menu(MenuMsg::Choose(index)) = msg else {
+            return msg;
+        };
+        let Some(menu) = self.menu.take() else {
+            return msg;
+        };
+        self.menu_items(&menu.target)
+            .get(index)
+            .filter(|item| item.enabled)
+            .and_then(|item| self.menu_message(&menu.target, item.action))
+            .unwrap_or(msg)
     }
 
     pub(super) fn menu_msg(&mut self, msg: MenuMsg) -> Vec<Effect> {
@@ -114,21 +157,9 @@ impl App {
                 });
                 Vec::new()
             }
-            MenuMsg::Choose(index) => {
-                let Some(menu) = self.menu.take() else {
-                    return Vec::new();
-                };
-                let message = self
-                    .menu_items(&menu.target)
-                    .get(index)
-                    .filter(|item| item.enabled)
-                    .and_then(|item| self.menu_message(&menu.target, item.action));
-                match message {
-                    Some(message) => self.apply(message),
-                    None => Vec::new(),
-                }
-            }
-            MenuMsg::Close => {
+            // `update` resolved it already ([`App::menu_command`]): what reaches here
+            // chose nothing, and the menu is closed.
+            MenuMsg::Choose(_) | MenuMsg::Close => {
                 self.menu = None;
                 Vec::new()
             }

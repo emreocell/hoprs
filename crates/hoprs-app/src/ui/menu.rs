@@ -36,6 +36,8 @@ pub fn label(action: MenuAction) -> &'static str {
     match action {
         MenuAction::ShowWorkspaces => strings::menu_show_workspaces(),
         MenuAction::ShowSites => strings::menu_show_sites(),
+        #[cfg(test)]
+        MenuAction::TestNavigate => "Test",
     }
 }
 
@@ -44,6 +46,8 @@ pub fn icon(action: MenuAction) -> Icon {
     match action {
         MenuAction::ShowWorkspaces => Icon::Stack,
         MenuAction::ShowSites => Icon::HardDrives,
+        #[cfg(test)]
+        MenuAction::TestNavigate => Icon::Folder,
     }
 }
 
@@ -51,6 +55,8 @@ pub fn icon(action: MenuAction) -> Icon {
 pub fn shortcut(action: MenuAction) -> Option<&'static str> {
     match action {
         MenuAction::ShowWorkspaces | MenuAction::ShowSites => None,
+        #[cfg(test)]
+        MenuAction::TestNavigate => None,
     }
 }
 
