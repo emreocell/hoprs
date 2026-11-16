@@ -22,7 +22,7 @@ export const ptBr: Dict = {
     sentence: "Um cliente de arquivos rápido e nativo para Linux, macOS e Windows.",
     downloadFor: "Baixar para",
     shotAlt:
-      "Aba de arquivos do hoprs: a pasta local do projeto à esquerda, a mesma pasta no servidor de build à direita, um upload em andamento na fila de transferências.",
+      "Aba de arquivos do hoprs: a pasta local do projeto à esquerda, a mesma pasta no servidor de build à direita, o painel de comparação de pastas embaixo listando o que difere entre elas e um upload em andamento na fila de transferências.",
   },
   fast: {
     title: "Leve na memória, rápido na rede.",

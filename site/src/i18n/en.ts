@@ -20,7 +20,7 @@ export const en = {
     sentence: "A fast, native file client for Linux, macOS and Windows.",
     downloadFor: "Download for",
     shotAlt:
-      "hoprs files tab: the local project folder on the left, the same folder on the build server on the right, one upload running in the transfer queue.",
+      "hoprs files tab: the local project folder on the left, the same folder on the build server on the right, the folder comparison panel below listing what differs between them, and one upload running in the transfer queue.",
   },
   fast: {
     title: "Light on memory, quick on the wire.",
