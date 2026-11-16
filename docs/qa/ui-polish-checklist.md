@@ -67,3 +67,8 @@ real display.
    sidebar gear or Ctrl+K › Settings: the same tab is focused, never a second one. Click a
    session tab and back; then close Settings with its ×: the tab you came from is selected
    again.
+
+9. **Settings sections.** NEEDS HUMAN. In the Settings tab click each of the six sections
+   in the left list (General, Transfers, Folder compare, Remote editing, Terminal, Backup),
+   in English and in Portuguese. Expect: the selected row has the white bar, each section
+   shows its title, a one-line description and its fields, and each one fits at 960 x 600.

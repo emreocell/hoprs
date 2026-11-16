@@ -10,11 +10,14 @@ use iced::widget::{
 };
 use iced::{Alignment, Element, Length, Padding};
 
-use crate::app::settings::{Backup, BackupMsg, BackupPanel, BackupState, SettingsMsg};
+use crate::app::settings::{
+    Backup, BackupMsg, BackupPanel, BackupState, SettingsMsg, SettingsSection, SettingsTab,
+};
 use crate::app::{App, Message, PickTarget};
 use crate::settings::{
     FONT_SIZE_MAX, FONT_SIZE_MIN, LanguageChoice, TerminalTheme, WORKERS_MAX, WORKERS_MIN,
 };
+use crate::ui::icons::{self, Icon};
 use crate::ui::site_form::Password;
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
@@ -164,7 +167,120 @@ fn input<'a>(
     }
 }
 
-pub fn view(app: &App) -> Element<'_, Message> {
+fn nav_row<'a>(section: SettingsSection, selected: bool) -> Element<'a, Message> {
+    let label = section_title(section);
+    let glyph = icons::icon(section_icon(section), icons::SMALL).color(if selected {
+        palette().ink
+    } else {
+        palette().muted
+    });
+    let bar = container(space())
+        .width(2)
+        .height(Length::Fill)
+        .style(move |t: &iced::Theme| {
+            if selected {
+                theme::selection_bar(true)(t)
+            } else {
+                container::Style::default()
+            }
+        });
+    let line = row![
+        glyph,
+        text(label).size(theme::TEXT_SM).font(if selected {
+            theme::INTER_SEMIBOLD
+        } else {
+            theme::INTER
+        }),
+    ]
+    .spacing(theme::SPACE_XS)
+    .align_y(Alignment::Center);
+    row![
+        bar,
+        button(line)
+            .width(Length::Fill)
+            .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
+            .style(if selected {
+                theme::row_selected
+            } else {
+                theme::row
+            })
+            .on_press(msg(SettingsMsg::Section(section))),
+    ]
+    .height(30)
+    .into()
+}
+
+/// The section's icon in the navigation.
+pub fn section_icon(section: SettingsSection) -> Icon {
+    match section {
+        SettingsSection::General => Icon::SlidersHorizontal,
+        SettingsSection::Transfers => Icon::ArrowsDownUp,
+        SettingsSection::Compare => Icon::GitDiff,
+        SettingsSection::Editing => Icon::PencilSimple,
+        SettingsSection::Terminal => Icon::TerminalWindow,
+        SettingsSection::Backup => Icon::ShieldCheck,
+    }
+}
+
+fn section_title(section: SettingsSection) -> &'static str {
+    match section {
+        SettingsSection::General => strings::settings_general(),
+        SettingsSection::Transfers => strings::settings_transfers(),
+        SettingsSection::Compare => strings::settings_compare(),
+        SettingsSection::Editing => strings::settings_editing(),
+        SettingsSection::Terminal => strings::settings_terminal(),
+        SettingsSection::Backup => strings::backup(),
+    }
+}
+
+fn section_description(section: SettingsSection) -> &'static str {
+    match section {
+        SettingsSection::General => strings::settings_general_description(),
+        SettingsSection::Transfers => strings::settings_transfers_description(),
+        SettingsSection::Compare => strings::settings_compare_description(),
+        SettingsSection::Editing => strings::settings_editing_description(),
+        SettingsSection::Terminal => strings::settings_terminal_description(),
+        SettingsSection::Backup => strings::settings_backup_description(),
+    }
+}
+
+/// The version line of General.
+fn version_line() -> String {
+    format!("hoprs {}", strings::VERSION)
+}
+
+fn general(app: &App) -> Element<'_, Message> {
+    let settings = &app.settings;
+    let languages: Vec<LanguageOption> = LanguageChoice::ALL
+        .into_iter()
+        .map(LanguageOption)
+        .collect();
+    let language = pick_list(
+        languages,
+        Some(LanguageOption(settings.language)),
+        |choice| msg(SettingsMsg::Language(choice.0)),
+    )
+    .text_size(theme::TEXT_SM)
+    .width(240)
+    .style(theme::pick_list)
+    .menu_style(theme::menu);
+
+    column![
+        field(strings::settings_language(), language.into(), None),
+        muted_owned(version_line()),
+    ]
+    .spacing(theme::SPACE_SM)
+    .into()
+}
+
+fn muted_owned<'a>(label: String) -> Element<'a, Message> {
+    text(label)
+        .size(theme::TEXT_SM)
+        .color(palette().muted)
+        .into()
+}
+
+fn transfers(app: &App) -> Element<'_, Message> {
     let settings = &app.settings;
     let workers = settings.workers_per_site;
     let stepper = row![
@@ -211,37 +327,20 @@ pub fn view(app: &App) -> Element<'_, Message> {
     .style(theme::pick_list)
     .menu_style(theme::menu);
 
-    let mut transfers = column![heading(strings::settings_transfers())].spacing(theme::SPACE_SM);
-    if app.settings_load_error.is_some() {
-        transfers = transfers.push(
-            column![
-                text(strings::settings_unreadable())
-                    .size(theme::TEXT_SM)
-                    .color(palette().error),
-                failure(app.settings_load_error.as_ref()),
-            ]
-            .spacing(theme::SPACE_2XS),
-        );
-    }
-    transfers = transfers
+    let transfers = column![];
+    let transfers = transfers
         .push(field(strings::settings_workers(), stepper.into(), None))
         .push(muted(strings::settings_workers_hint()))
         .push(field(strings::settings_policy(), policy.into(), None))
         .push(muted(strings::settings_policy_hint()))
         .push(field(strings::settings_keepalive(), keepalive.into(), None))
-        .push(muted(strings::settings_keepalive_hint()));
-    if let Some(error) = &app.settings_save_error {
-        transfers = transfers.push(
-            column![
-                text(strings::settings_save_failed())
-                    .size(theme::TEXT_SM)
-                    .color(palette().error),
-                failure(Some(error)),
-            ]
-            .spacing(theme::SPACE_2XS),
-        );
-    }
+        .push(muted(strings::settings_keepalive_hint()))
+        .spacing(theme::SPACE_SM);
+    transfers.into()
+}
 
+fn terminal(app: &App) -> Element<'_, Message> {
+    let settings = &app.settings;
     let font_size = settings.terminal_font_size;
     let font_stepper = row![
         outlined(
@@ -286,7 +385,6 @@ pub fn view(app: &App) -> Element<'_, Message> {
     .style(theme::pick_list)
     .menu_style(theme::menu);
     let terminal = column![
-        heading(strings::settings_terminal()),
         field(strings::settings_font_size(), font_stepper.into(), None),
         field(strings::settings_scrollback(), scrollback.into(), None),
         muted(strings::settings_scrollback_hint()),
@@ -294,6 +392,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
     ]
     .spacing(theme::SPACE_SM);
 
+    terminal.into()
+}
+
+fn editing(app: &App) -> Element<'_, Message> {
+    let settings = &app.settings;
     let editor_value = app
         .editor_input
         .as_deref()
@@ -311,7 +414,6 @@ pub fn view(app: &App) -> Element<'_, Message> {
         editor_field = editor_field.push(muted(strings::editor_system_default()));
     }
     let mut editing = column![
-        heading(strings::settings_editing()),
         field(strings::editor_command(), editor_field.into(), None),
         muted(strings::editor_command_hint()),
     ]
@@ -324,13 +426,17 @@ pub fn view(app: &App) -> Element<'_, Message> {
         );
     }
 
+    editing.into()
+}
+
+fn comparing(app: &App) -> Element<'_, Message> {
+    let settings = &app.settings;
     let ignore_value = app
         .compare_ignore_input
         .clone()
         .unwrap_or_else(|| settings.compare_ignore.join(", "));
     let ignore_default = crate::settings::compare_ignore_default().join(", ");
     let comparing = column![
-        heading(strings::settings_compare()),
         field(
             strings::settings_compare_auto(),
             checkbox(settings.compare_auto)
@@ -355,46 +461,70 @@ pub fn view(app: &App) -> Element<'_, Message> {
     ]
     .spacing(theme::SPACE_SM);
 
-    let languages: Vec<LanguageOption> = LanguageChoice::ALL
-        .into_iter()
-        .map(LanguageOption)
-        .collect();
-    let language = pick_list(
-        languages,
-        Some(LanguageOption(settings.language)),
-        |choice| msg(SettingsMsg::Language(choice.0)),
-    )
-    .text_size(theme::TEXT_SM)
-    .width(240)
-    .style(theme::pick_list)
-    .menu_style(theme::menu);
+    comparing.into()
+}
 
-    let content = column![
-        text(strings::settings_title())
+pub fn view<'a>(app: &'a App, tab: &SettingsTab) -> Element<'a, Message> {
+    let nav = column(
+        SettingsSection::ALL
+            .into_iter()
+            .map(|section| nav_row(section, section == tab.section)),
+    )
+    .spacing(theme::SPACE_3XS);
+    let nav = container(nav)
+        .width(200)
+        .height(Length::Fill)
+        .padding(theme::SPACE_XS);
+
+    let mut content = column![
+        text(section_title(tab.section))
             .size(theme::TEXT_MD)
             .font(theme::INTER_SEMIBOLD),
-        hrule(),
-        field(strings::settings_language(), language.into(), None),
-        hrule(),
-        transfers,
-        hrule(),
-        terminal,
-        hrule(),
-        editing,
-        hrule(),
-        comparing,
-        hrule(),
-        backup_view(&app.backup, app.busy_phase),
+        muted(section_description(tab.section)),
     ]
-    .spacing(theme::SPACE_MD)
-    .max_width(640);
+    .spacing(theme::SPACE_XS);
+    if app.settings_load_error.is_some() {
+        content = content.push(
+            column![
+                text(strings::settings_unreadable())
+                    .size(theme::TEXT_SM)
+                    .color(palette().error),
+                failure(app.settings_load_error.as_ref()),
+            ]
+            .spacing(theme::SPACE_2XS),
+        );
+    }
+    if let Some(error) = &app.settings_save_error {
+        content = content.push(
+            column![
+                text(strings::settings_save_failed())
+                    .size(theme::TEXT_SM)
+                    .color(palette().error),
+                failure(Some(error)),
+            ]
+            .spacing(theme::SPACE_2XS),
+        );
+    }
+    content = content.push(hrule()).push(match tab.section {
+        SettingsSection::General => general(app),
+        SettingsSection::Transfers => transfers(app),
+        SettingsSection::Compare => comparing(app),
+        SettingsSection::Editing => editing(app),
+        SettingsSection::Terminal => terminal(app),
+        SettingsSection::Backup => backup_view(&app.backup, app.busy_phase),
+    });
 
-    scrollable(
-        container(content)
-            .width(Length::Fill)
-            .padding(theme::SPACE_LG),
-    )
-    .height(Length::Fill)
+    row![
+        nav,
+        rule::vertical(theme::HAIRLINE).style(theme::rule_1px),
+        scrollable(
+            container(content.spacing(theme::SPACE_MD).max_width(640))
+                .width(Length::Fill)
+                .padding(theme::SPACE_LG),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill),
+    ]
     .into()
 }
 
@@ -411,12 +541,7 @@ fn backup_view(backup: &Backup, phase: u32) -> Element<'_, Message> {
         ),
     ]
     .spacing(theme::SPACE_XS);
-    let mut col = column![
-        heading(strings::backup()),
-        muted(strings::backup_hint()),
-        buttons
-    ]
-    .spacing(theme::SPACE_SM);
+    let mut col = column![muted(strings::backup_hint()), buttons].spacing(theme::SPACE_SM);
 
     // The running operation and the outcomes, above the panel (in view without
     // scrolling).
@@ -711,4 +836,45 @@ fn restore_report(report: &BackupImportReport) -> Element<'_, Message> {
         false,
     );
     col.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::i18n::{Language, set_language};
+
+    #[test]
+    fn every_section_has_title_description_and_icon() {
+        for language in [Language::En, Language::PtBr] {
+            set_language(language);
+            let titles: Vec<&str> = SettingsSection::ALL
+                .into_iter()
+                .map(section_title)
+                .collect();
+            let descriptions: Vec<&str> = SettingsSection::ALL
+                .into_iter()
+                .map(section_description)
+                .collect();
+            for list in [&titles, &descriptions] {
+                assert!(list.iter().all(|t| !t.is_empty()), "{language:?}");
+                let mut sorted = list.to_vec();
+                sorted.sort_unstable();
+                sorted.dedup();
+                assert_eq!(sorted.len(), 6, "{language:?}: {list:?}");
+            }
+        }
+        set_language(Language::En);
+        let mut icons: Vec<char> = SettingsSection::ALL
+            .into_iter()
+            .map(|s| section_icon(s).codepoint())
+            .collect();
+        icons.sort_unstable();
+        icons.dedup();
+        assert_eq!(icons.len(), 6);
+    }
+
+    #[test]
+    fn general_shows_the_version() {
+        assert!(version_line().contains(env!("CARGO_PKG_VERSION")));
+    }
 }

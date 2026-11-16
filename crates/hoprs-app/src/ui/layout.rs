@@ -142,8 +142,10 @@ fn center(app: &App) -> Element<'_, Message> {
         Some(Form::QuitEdits) => return edits::quit_view(app),
         None => {}
     }
-    if app.settings_shown() {
-        return settings::view(app);
+    if app.settings_shown()
+        && let Some(tab) = &app.settings_tab
+    {
+        return settings::view(app, tab);
     }
     if let Some(tab) = app.active_tab.and_then(|i| app.tabs.get(i)) {
         return match tab.terminal() {

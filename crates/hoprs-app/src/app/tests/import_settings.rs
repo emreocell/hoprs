@@ -1081,3 +1081,25 @@ async fn typed_passwords_forgotten_when_settings_not_shown() {
         assert_eq!(app.compare_ignore_input, None, "{leave:?}");
     }
 }
+
+#[test]
+fn section_msg_switches_section() {
+    use crate::app::settings::SettingsSection;
+    let mut app = App::new();
+    app.update(Message::OpenSettings);
+    assert_eq!(
+        app.settings_tab.as_ref().map(|tab| tab.section),
+        Some(SettingsSection::General)
+    );
+    for section in SettingsSection::ALL {
+        settings(&mut app, SettingsMsg::Section(section));
+        assert_eq!(
+            app.settings_tab.as_ref().map(|tab| tab.section),
+            Some(section)
+        );
+    }
+    // Without the tab it does nothing.
+    app.update(Message::CloseSettings);
+    settings(&mut app, SettingsMsg::Section(SettingsSection::Backup));
+    assert!(app.settings_tab.is_none());
+}

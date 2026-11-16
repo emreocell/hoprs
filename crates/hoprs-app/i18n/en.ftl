@@ -485,7 +485,13 @@ pick-sitemanager = Choose FileZilla's sitemanager.xml
 pick-filter-xml = XML files
 
 ## Settings
-settings-title = Settings
+settings-general = General
+settings-general-description = Language and version.
+settings-transfers-description = How many files move at once, what happens to existing files, and how connections stay open.
+settings-compare-description = When folders are compared, and the names left out.
+settings-editing-description = The editor that opens remote files.
+settings-terminal-description = How terminal tabs look and how much they remember.
+settings-backup-description = Save your sites, workspaces and passwords to a file, or restore them.
 settings-transfers = Transfers
 settings-workers = Workers per site
 settings-workers-hint = Parallel transfers per site, 1 to 16. Applies to the next connections.

@@ -438,7 +438,13 @@ pick-sitemanager = Escolha o sitemanager.xml do FileZilla
 pick-filter-xml = Arquivos XML
 
 ## Settings
-settings-title = Configurações
+settings-general = Geral
+settings-general-description = Idioma e versão.
+settings-transfers-description = Quantos arquivos andam ao mesmo tempo, o que fazer com arquivos que já existem e como manter as conexões abertas.
+settings-compare-description = Quando as pastas são comparadas e quais nomes ficam de fora.
+settings-editing-description = O editor que abre os arquivos remotos.
+settings-terminal-description = A aparência das abas de terminal e quanto elas lembram.
+settings-backup-description = Salve seus sites, workspaces e senhas em um arquivo, ou restaure-os.
 settings-transfers = Transferências
 settings-workers = Workers por site
 settings-workers-hint = Transferências paralelas por site, de 1 a 16. Vale para as próximas conexões.

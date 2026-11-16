@@ -16,8 +16,6 @@ pub fn cannot_open_profiles() -> &'static str {
 pub fn brand() -> &'static str {
     tr("brand")
 }
-// Shown in Settings -> General (Task 9 of Plan 13); no other use until then.
-#[allow(dead_code)]
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub fn no_sessions() -> &'static str {
     tr("no-sessions")
@@ -1234,8 +1232,26 @@ pub fn pick_filter_xml() -> &'static str {
     tr("pick-filter-xml")
 }
 // Settings.
-pub fn settings_title() -> &'static str {
-    tr("settings-title")
+pub fn settings_general() -> &'static str {
+    tr("settings-general")
+}
+pub fn settings_general_description() -> &'static str {
+    tr("settings-general-description")
+}
+pub fn settings_transfers_description() -> &'static str {
+    tr("settings-transfers-description")
+}
+pub fn settings_compare_description() -> &'static str {
+    tr("settings-compare-description")
+}
+pub fn settings_editing_description() -> &'static str {
+    tr("settings-editing-description")
+}
+pub fn settings_terminal_description() -> &'static str {
+    tr("settings-terminal-description")
+}
+pub fn settings_backup_description() -> &'static str {
+    tr("settings-backup-description")
 }
 pub fn settings_transfers() -> &'static str {
     tr("settings-transfers")

@@ -49,11 +49,11 @@ pub enum SettingsMsg {
     /// The compare's ignore list as typed (comma-separated): saved as parsed.
     CompareIgnore(String),
     Backup(BackupMsg),
+    /// A section of the left navigation.
+    Section(SettingsSection),
 }
 
 /// A section of the settings tab (its left navigation).
-// Drawn and switched by Task 9 of Plan 13; only `General` is built until then.
-#[allow(dead_code)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum SettingsSection {
     #[default]
@@ -63,6 +63,18 @@ pub enum SettingsSection {
     Editing,
     Terminal,
     Backup,
+}
+
+impl SettingsSection {
+    /// The navigation's order.
+    pub const ALL: [SettingsSection; 6] = [
+        SettingsSection::General,
+        SettingsSection::Transfers,
+        SettingsSection::Compare,
+        SettingsSection::Editing,
+        SettingsSection::Terminal,
+        SettingsSection::Backup,
+    ];
 }
 
 /// The settings tab in the strip.
@@ -344,6 +356,12 @@ impl App {
                     }
                 }
                 self.save_settings_effect().into_iter().collect()
+            }
+            SettingsMsg::Section(section) => {
+                if let Some(tab) = &mut self.settings_tab {
+                    tab.section = section;
+                }
+                Vec::new()
             }
             SettingsMsg::Language(choice) => {
                 if choice == self.settings.language {
