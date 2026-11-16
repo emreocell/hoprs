@@ -44,6 +44,9 @@ menu-show-sites = Show all sites
 menu-open = Open
 menu-copy-path = Copy path
 menu-refresh = Refresh
+menu-show-in-panes = Show in panes
+menu-open-files = Open files
+menu-close-other-tabs = Close other tabs
 key-refresh = F5
 
 ## The Ctrl+K palette

@@ -18,7 +18,7 @@ use crate::backend::Side;
 use crate::ui::virtual_list::ROW_HEIGHT;
 
 /// How far into a row a menu opened from the keyboard starts (past the kind icon).
-const MENU_INSET: f32 = 24.0;
+pub(super) const MENU_INSET: f32 = 24.0;
 
 /// One listing request; only a pane's latest one is applied.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]

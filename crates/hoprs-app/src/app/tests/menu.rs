@@ -757,3 +757,501 @@ async fn refresh_only_when_the_pane_can_list() {
     );
     assert!(!palette_refresh(&mut app));
 }
+
+// ---- Plan 13 Task 14: menus on compare rows, queue rows, sidebar items and tabs ----
+
+use hoprs_core::{EntryKind, OpenAs};
+use hoprs_remote::{Difference, Progress, Status};
+use hoprs_transfer::{TransferId, TransferState};
+
+use super::compare::{entry, running};
+use super::transfers::{conflict, failed, item, synced};
+use crate::app::menu::TabRef;
+
+fn compare_state(app: &App) -> &crate::app::compare::CompareState {
+    app.tabs[0].compare().expect("a files tab")
+}
+
+/// A difference found by `run`, not selected.
+fn found_diff(
+    app: &mut App,
+    tab: TabId,
+    run: crate::app::CompareRunId,
+    path: &str,
+    status: Status,
+    sides: (bool, bool),
+) {
+    app.update(Message::Compare(CompareMsg::Progress {
+        tab,
+        run,
+        progress: Progress::Found(Difference {
+            path: path.to_owned(),
+            kind: EntryKind::File,
+            status,
+            local: sides.0.then(|| entry(path, EntryKind::File, 1)),
+            remote: sides.1.then(|| entry(path, EntryKind::File, 2)),
+            entries_inside: None,
+        }),
+    }));
+}
+
+/// A running comparison with three rows: 0 only here, 1 only on the server, 2 on both.
+async fn compare_rows() -> (Arc<FakeBackend>, App, TabId) {
+    let (mut app, fake, _a, tab, run) = running().await;
+    found_diff(&mut app, tab, run, "up", Status::OnlyLocal, (true, false));
+    found_diff(
+        &mut app,
+        tab,
+        run,
+        "down",
+        Status::OnlyRemote,
+        (false, true),
+    );
+    found_diff(
+        &mut app,
+        tab,
+        run,
+        "both",
+        Status::SizeDiffers,
+        (true, true),
+    );
+    (fake, app, tab)
+}
+
+fn compare_selected(app: &App) -> Vec<usize> {
+    let state = compare_state(app);
+    (0..state.rows.len())
+        .filter(|&i| state.rows[i].selected)
+        .collect()
+}
+
+fn compare_right_click(tab: TabId, index: usize) -> Message {
+    Message::Compare(CompareMsg::ContextMenu { tab, index })
+}
+
+#[tokio::test]
+async fn compare_row_menu_items_and_selection_rule() {
+    let (_fake, mut app, tab) = compare_rows().await;
+    app.update(Message::Compare(CompareMsg::Select {
+        tab,
+        index: 0,
+        on: true,
+    }));
+    app.update(Message::PointerPressed(Point::new(400.0, 500.0)));
+    // A row not selected: selected alone, the list gets the keyboard on it.
+    assert!(app.update(compare_right_click(tab, 1)).is_empty());
+    assert_eq!(compare_selected(&app), [1]);
+    assert!(compare_state(&app).focused);
+    assert_eq!(compare_state(&app).cursor, Some(1));
+    let menu = app.menu.as_ref().expect("the menu is open");
+    assert_eq!(menu.at, Point::new(400.0, 500.0));
+    assert_eq!(menu.target, MenuTarget::CompareRow { tab, index: 1 });
+    let items = open_items(&app);
+    assert_eq!(
+        actions(&items),
+        [
+            MenuAction::CompareUpload,
+            MenuAction::CompareDownload,
+            MenuAction::ShowInPanes
+        ]
+    );
+    // Only on the server: nothing to upload.
+    assert!(!enabled(&items, MenuAction::CompareUpload));
+    assert!(enabled(&items, MenuAction::CompareDownload));
+    assert!(enabled(&items, MenuAction::ShowInPanes));
+    assert!(items.iter().all(|i| !i.destructive && !i.rule_before));
+
+    // A selected row keeps the selection: the menu acts on all of it.
+    app.update(Message::Compare(CompareMsg::Select {
+        tab,
+        index: 2,
+        on: true,
+    }));
+    app.update(compare_right_click(tab, 2));
+    assert_eq!(compare_selected(&app), [1, 2]);
+    let items = open_items(&app);
+    assert!(enabled(&items, MenuAction::CompareUpload));
+    assert!(enabled(&items, MenuAction::CompareDownload));
+
+    // A row that is not there opens nothing.
+    app.update(Message::Menu(MenuMsg::Close));
+    app.update(compare_right_click(tab, 99));
+    assert!(app.menu.is_none());
+    assert_eq!(compare_selected(&app), [1, 2]);
+
+    // Behind a dialog: nothing.
+    app.update(host_key_prompt(3));
+    app.update(compare_right_click(tab, 0));
+    assert!(app.menu.is_none());
+    assert_eq!(compare_selected(&app), [1, 2]);
+}
+
+/// Upload and Download are on exactly when the panel's buttons are, and send their
+/// messages; Show in panes is the double-click.
+#[tokio::test]
+async fn compare_menu_choose_matches_panel_buttons() {
+    let (_fake, mut app, tab) = compare_rows().await;
+    for index in 0..3 {
+        app.update(compare_right_click(tab, index));
+        let footer = crate::ui::compare::footer(compare_state(&app));
+        let items = open_items(&app);
+        assert_eq!(enabled(&items, MenuAction::CompareUpload), footer.upload);
+        assert_eq!(
+            enabled(&items, MenuAction::CompareDownload),
+            footer.download
+        );
+        app.update(Message::Menu(MenuMsg::Close));
+    }
+    let cases = [
+        (
+            0,
+            MenuAction::CompareUpload,
+            Message::Compare(CompareMsg::UploadSelected { tab }),
+        ),
+        (
+            1,
+            MenuAction::CompareDownload,
+            Message::Compare(CompareMsg::DownloadSelected { tab }),
+        ),
+        (
+            2,
+            MenuAction::ShowInPanes,
+            Message::Compare(CompareMsg::Open { tab, index: 2 }),
+        ),
+    ];
+    for (row, action, expected) in cases {
+        app.update(compare_right_click(tab, row));
+        let index = index_of(&app, action);
+        let chosen = app.menu_command(Message::Menu(MenuMsg::Choose(index)));
+        assert_eq!(format!("{chosen:?}"), format!("{expected:?}"), "{action:?}");
+        assert!(app.menu.is_none());
+    }
+    // Through `update`: the upload queues the selected row, as the button does.
+    app.update(compare_right_click(tab, 0));
+    let upload = index_of(&app, MenuAction::CompareUpload);
+    let effects = app.update(Message::Menu(MenuMsg::Choose(upload)));
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::EnqueueCompare { items, .. } if items.len() == 1)),
+        "{effects:?}"
+    );
+}
+
+/// Shift+F10 in the compare list: at the cursor's row, from where the list is (reported
+/// whether it scrolls or not), minus how far it is scrolled.
+#[tokio::test]
+async fn keyboard_menu_in_compare_list() {
+    let (_fake, mut app, tab) = compare_rows().await;
+    let menu_key = || Message::Key {
+        key: FileKey::Menu,
+        shift: true,
+    };
+    app.update(Message::Compare(CompareMsg::Placed {
+        tab,
+        bounds: iced::Rectangle::new(Point::new(260.0, 400.0), Size::new(800.0, 120.0)),
+    }));
+    app.update(Message::Compare(CompareMsg::Focus { tab, cursor: None }));
+    // No cursor: the first row shown (line 1, under its group's header).
+    app.update(menu_key());
+    let menu = app.menu.as_ref().expect("the menu is open");
+    assert_eq!(menu.target, MenuTarget::CompareRow { tab, index: 0 });
+    assert_eq!(menu.at, Point::new(284.0, 460.0));
+    assert_eq!(compare_selected(&app), [0], "the selection rule applies");
+    assert_eq!(compare_state(&app).cursor, Some(0));
+    // Down to the next row (the second group: line 3), scrolled by one line.
+    app.update(Message::Menu(MenuMsg::Close));
+    app.update(Message::Key {
+        key: FileKey::Down,
+        shift: false,
+    });
+    app.update(Message::Compare(CompareMsg::Scrolled {
+        tab,
+        offset_y: 30.0,
+    }));
+    app.update(menu_key());
+    let menu = app.menu.as_ref().unwrap();
+    assert_eq!(menu.target, MenuTarget::CompareRow { tab, index: 1 });
+    assert_eq!(menu.at, Point::new(284.0, 490.0));
+    // Arrows now drive the menu, not the list.
+    app.update(key_pressed(FileKey::Down));
+    assert_eq!(app.menu.as_ref().unwrap().cursor, Some(1));
+    assert_eq!(compare_state(&app).cursor, Some(1));
+    // The panes' keyboard is untouched: not focused, the key goes to the pane.
+    app.update(Message::Menu(MenuMsg::Close));
+    app.update(Message::Key {
+        key: FileKey::Escape,
+        shift: false,
+    });
+    assert!(!compare_state(&app).focused);
+    app.update(menu_key());
+    assert!(matches!(
+        app.menu.as_ref().unwrap().target,
+        MenuTarget::Pane { .. }
+    ));
+}
+
+#[tokio::test]
+async fn compare_menu_closes_when_its_rows_go() {
+    let (_fake, mut app, tab) = compare_rows().await;
+    app.update(compare_right_click(tab, 1));
+    assert!(app.menu.is_some());
+    app.update(Message::Compare(CompareMsg::Hide { tab }));
+    assert!(app.menu.is_none());
+}
+
+#[tokio::test]
+async fn queue_menu_matches_row_actions() {
+    let fake = Arc::new(FakeBackend::new());
+    let s = SiteId::new();
+    let mut app = loaded(&fake).await;
+    synced(
+        &mut app,
+        3,
+        vec![
+            item(1, &s, TransferState::Active),
+            item(2, &s, failed("boom")),
+            item(3, &s, conflict()),
+            item(4, &s, TransferState::Paused),
+        ],
+    );
+    let queue_menu = |app: &mut App, id: i64| {
+        app.update(Message::Menu(MenuMsg::Open(MenuTarget::QueueRow(
+            TransferId(id),
+        ))));
+        actions(&open_items(app))
+    };
+    assert_eq!(
+        queue_menu(&mut app, 1),
+        [
+            MenuAction::Queue(RowAction::Pause),
+            MenuAction::Queue(RowAction::Cancel)
+        ]
+    );
+    assert_eq!(
+        queue_menu(&mut app, 2),
+        [
+            MenuAction::Queue(RowAction::Retry),
+            MenuAction::Queue(RowAction::Dismiss)
+        ]
+    );
+    assert_eq!(
+        queue_menu(&mut app, 4),
+        [
+            MenuAction::Queue(RowAction::Resume),
+            MenuAction::Queue(RowAction::Cancel)
+        ]
+    );
+    // A conflict's answers stay in its row.
+    assert!(queue_menu(&mut app, 3).is_empty());
+    // Each item is the row's button.
+    queue_menu(&mut app, 1);
+    let effects = app.update(Message::Menu(MenuMsg::Choose(0)));
+    assert!(
+        matches!(
+            effects[..],
+            [Effect::Control {
+                id: TransferId(1),
+                op: crate::backend::ControlOp::Pause
+            }]
+        ),
+        "{effects:?}"
+    );
+    queue_menu(&mut app, 2);
+    let chosen = app.menu_command(Message::Menu(MenuMsg::Choose(0)));
+    assert_eq!(
+        format!("{chosen:?}"),
+        format!(
+            "{:?}",
+            Message::Queue(QueueMsg::Action(TransferId(2), RowAction::Retry))
+        )
+    );
+}
+
+#[tokio::test]
+async fn queue_menu_on_removed_row_does_nothing() {
+    let fake = Arc::new(FakeBackend::new());
+    let s = SiteId::new();
+    let mut app = loaded(&fake).await;
+    synced(&mut app, 3, vec![item(1, &s, TransferState::Active)]);
+    app.update(Message::Menu(MenuMsg::Open(MenuTarget::QueueRow(
+        TransferId(1),
+    ))));
+    assert_eq!(open_items(&app).len(), 2);
+    // The row goes (cleared, or a new snapshot without it) while the menu is open.
+    synced(&mut app, 4, Vec::new());
+    let effects = app.update(Message::Menu(MenuMsg::Choose(0)));
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::Control { .. })),
+        "{effects:?}"
+    );
+    assert!(app.menu.is_none());
+}
+
+#[tokio::test]
+async fn site_and_workspace_menus() {
+    let a = site("a", "h", "u", Protocol::Ftp);
+    let ws = workspace("w", &[&a.id]);
+    let fake = Arc::new(
+        FakeBackend::new()
+            .with_site(a.clone())
+            .with_workspace(ws.clone()),
+    );
+    let mut app = loaded(&fake).await;
+    let chosen = |app: &mut App, target: MenuTarget, action: MenuAction| {
+        app.update(Message::Menu(MenuMsg::Open(target)));
+        let index = index_of(app, action);
+        format!(
+            "{:?}",
+            app.menu_command(Message::Menu(MenuMsg::Choose(index)))
+        )
+    };
+    // A site: Open files and Edit, nothing else (no Disconnect, no Delete).
+    let target = MenuTarget::Site(a.id.clone());
+    app.update(Message::Menu(MenuMsg::Open(target.clone())));
+    let items = open_items(&app);
+    assert_eq!(
+        actions(&items),
+        [MenuAction::OpenSite, MenuAction::EditSite]
+    );
+    assert!(items.iter().all(|i| i.enabled && !i.destructive));
+    assert_eq!(
+        chosen(&mut app, target.clone(), MenuAction::OpenSite),
+        format!("{:?}", Message::ConnectSite(a.id.clone()))
+    );
+    assert_eq!(
+        chosen(&mut app, target, MenuAction::EditSite),
+        format!("{:?}", Message::EditSite(a.id.clone()))
+    );
+    // A workspace: Open workspace and Edit.
+    let target = MenuTarget::Workspace(ws.id.clone());
+    app.update(Message::Menu(MenuMsg::Open(target.clone())));
+    let items = open_items(&app);
+    assert_eq!(
+        actions(&items),
+        [MenuAction::OpenWorkspace, MenuAction::EditWorkspace]
+    );
+    assert!(items.iter().all(|i| i.enabled && !i.destructive));
+    assert_eq!(
+        chosen(&mut app, target.clone(), MenuAction::OpenWorkspace),
+        format!("{:?}", Message::OpenWorkspace(ws.id.clone()))
+    );
+    assert_eq!(
+        chosen(&mut app, target, MenuAction::EditWorkspace),
+        format!("{:?}", Message::EditWorkspace(ws.id.clone()))
+    );
+    // Gone since: no items, a choice does nothing.
+    app.update(Message::Menu(MenuMsg::Open(
+        MenuTarget::Site(SiteId::new()),
+    )));
+    assert!(open_items(&app).is_empty());
+    assert!(app.update(Message::Menu(MenuMsg::Choose(0))).is_empty());
+}
+
+/// Two sites: `a` (SSH, terminal and files tabs on one session) and `b` (FTP), connected,
+/// and the settings tab open.
+async fn three_tabs() -> (App, SessionId, SessionId) {
+    let mut a = site("a", "a.example", "u", Protocol::Ssh);
+    a.ssh.open_as = OpenAs::Both;
+    let b = site("b", "b.example", "u", Protocol::Ftp);
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()).with_site(b.clone()));
+    let mut app = loaded(&fake).await;
+    let mut sites = connect_effect(app.update(Message::ConnectSite(a.id.clone())));
+    sites.extend(connect_effect(
+        app.update(Message::ConnectSite(b.id.clone())),
+    ));
+    drive(&mut app, &fake, sites).await;
+    assert_eq!(app.tabs.len(), 3);
+    let sa = app.tab_conn(0).session().expect("a connected");
+    let sb = app.tab_conn(2).session().expect("b connected");
+    app.update(Message::OpenSettings);
+    (app, sa, sb)
+}
+
+fn closed_sessions(effects: &[Effect]) -> Vec<SessionId> {
+    effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::CloseSession(s) => Some(*s),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn close_other_tabs_keeps_one() {
+    let (mut app, _sa, sb) = three_tabs().await;
+    let keep = app.tabs[1].id;
+    let target = MenuTarget::Tab(TabRef::Session(keep));
+    app.update(Message::Menu(MenuMsg::Open(target.clone())));
+    let items = open_items(&app);
+    assert_eq!(
+        actions(&items),
+        [MenuAction::CloseTab, MenuAction::CloseOtherTabs]
+    );
+    assert!(items.iter().all(|i| i.enabled));
+    let chosen = app.menu_command(Message::Menu(MenuMsg::Choose(1)));
+    assert_eq!(
+        format!("{chosen:?}"),
+        format!("{:?}", Message::CloseOtherTabs(TabRef::Session(keep)))
+    );
+    // Close tab is the ×.
+    app.update(Message::Menu(MenuMsg::Open(target)));
+    let chosen = app.menu_command(Message::Menu(MenuMsg::Choose(0)));
+    assert_eq!(
+        format!("{chosen:?}"),
+        format!("{:?}", Message::CloseTab(keep))
+    );
+
+    let effects = app.update(Message::CloseOtherTabs(TabRef::Session(keep)));
+    assert_eq!(app.tabs.len(), 1);
+    assert_eq!(app.tabs[0].id, keep);
+    assert_eq!(app.active_tab, Some(0));
+    assert!(app.settings_tab.is_none());
+    // `a` keeps its session for the kept tab; only `b`'s goes.
+    assert_eq!(closed_sessions(&effects), [sb]);
+    // Alone now: Close other tabs is off.
+    app.update(Message::Menu(MenuMsg::Open(MenuTarget::Tab(
+        TabRef::Session(keep),
+    ))));
+    assert!(!enabled(&open_items(&app), MenuAction::CloseOtherTabs));
+}
+
+#[tokio::test]
+async fn close_other_tabs_from_settings() {
+    let (mut app, sa, sb) = three_tabs().await;
+    app.update(Message::SelectTab(0));
+    assert!(!app.settings_shown());
+    let target = MenuTarget::Tab(TabRef::Settings);
+    app.update(Message::Menu(MenuMsg::Open(target.clone())));
+    assert_eq!(
+        actions(&open_items(&app)),
+        [MenuAction::CloseTab, MenuAction::CloseOtherTabs]
+    );
+    let chosen = app.menu_command(Message::Menu(MenuMsg::Choose(0)));
+    assert_eq!(
+        format!("{chosen:?}"),
+        format!("{:?}", Message::CloseSettings)
+    );
+    app.update(Message::Menu(MenuMsg::Open(target)));
+    let effects = app.update(Message::Menu(MenuMsg::Choose(1)));
+    assert!(app.tabs.is_empty());
+    assert!(app.settings_shown(), "the settings tab stays, selected");
+    let mut closed = closed_sessions(&effects);
+    closed.sort_by_key(|s| s.0);
+    let mut expected = vec![sa, sb];
+    expected.sort_by_key(|s| s.0);
+    assert_eq!(closed, expected);
+}
+
+#[test]
+fn close_other_tabs_ignored_while_closing() {
+    let mut app = App::new();
+    app.update(Message::OpenSettings);
+    app.closing = true;
+    assert!(
+        app.update(Message::CloseOtherTabs(TabRef::Settings))
+            .is_empty()
+    );
+    assert!(app.settings_tab.is_some());
+}

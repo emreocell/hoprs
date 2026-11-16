@@ -80,7 +80,7 @@ pub use edit::EditMsg;
 pub use files::{FileKey, Mods, PaneMsg, RequestId};
 pub use lifecycle::ConnStatus;
 pub use log::{LogLevel, LogMsg};
-pub use menu::{ContextMenu, MenuMsg, MenuTarget};
+pub use menu::{ContextMenu, MenuMsg, MenuTarget, TabRef};
 pub use palette::PaletteMsg;
 pub use queue::{Queue, QueueMsg, QueueTab, RowAction};
 pub use settings::{SettingsTab, SidebarMsg, SidebarSection};
@@ -285,6 +285,9 @@ pub enum Message {
     ProfileFolderOpened(Result<(), Error>),
     /// The × of a tab: closes it, and its session if no other tab uses it.
     CloseTab(TabId),
+    /// A tab's menu, "Close other tabs": every other tab closes as its × would, and the
+    /// kept one is selected.
+    CloseOtherTabs(TabRef),
     /// "New terminal tab" / "New files tab" on a connected SSH tab: another tab of
     /// `kind` on the same session.
     NewTab {
@@ -1068,6 +1071,7 @@ impl App {
                     return self.close_tab(index);
                 }
             }
+            Message::CloseOtherTabs(keep) => return self.close_other_tabs(keep),
             Message::NewTab { tab, kind } => return self.new_session_tab(tab, kind),
             Message::Pane { tab, side, msg } => return self.pane_msg(tab, side, msg),
             Message::Listed {

@@ -9,20 +9,28 @@
 //! - **Choosing:** [`App::menu_command`] turns a choice into the item's own message at the
 //!   top of `update`, as the palette does with a run row, so it is handled exactly as if
 //!   its button or key had sent it (the reconnection of a lost session included).
+//! - **Opening from the keyboard:** Shift+F10 / the Menu key, only where the keyboard
+//!   already is: a file pane and the compare list (at the cursor's row). The queue,
+//!   sidebar and tab menus are mouse-only; their items have their buttons, keys and the
+//!   palette.
 //! - **Keyboard:** while a menu is open ↑/↓ move its highlight over the enabled items
 //!   (wrapping), Enter chooses the highlighted one, Escape closes it; any other key closes
 //!   it and then does what it always does ([`App::menu_key`]).
 //! - **Closing:** Escape, a press outside, a scroll, a window resize, choosing an item; a
 //!   security dialog or the palette closes it too, and so does the center showing another
-//!   tab (or Settings, or a form) and a new listing of the pane it is about. Like other
+//!   tab (or Settings, or a form), a new listing of the pane it is about, and the compare
+//!   rows it is about going (a new run, a folder change, the panel's cross). Like other
 //!   window input it is blocked behind a dialog or the palette, and ignored while the
 //!   window closes.
 
+use hoprs_core::{SiteId, WorkspaceId};
+use hoprs_transfer::TransferId;
 use iced::Point;
 
 use super::files::Row;
 use super::{
-    App, CompareMsg, Effect, FileKey, Message, PaneMsg, SidebarMsg, SidebarSection, TabId,
+    App, CompareMsg, Effect, FileKey, Message, PaneMsg, QueueMsg, RowAction, SidebarMsg,
+    SidebarSection, TabId,
 };
 use crate::backend::Side;
 
@@ -48,6 +56,24 @@ pub enum MenuTarget {
         side: Side,
         row: Option<usize>,
     },
+    /// Row `index` (into the panel's rows) of a tab's folder compare, and the selection
+    /// it is part of.
+    CompareRow { tab: TabId, index: usize },
+    /// A row of the transfer queue.
+    QueueRow(TransferId),
+    /// A site in the sidebar.
+    Site(SiteId),
+    /// A workspace's head in the sidebar.
+    Workspace(WorkspaceId),
+    /// A tab of the strip.
+    Tab(TabRef),
+}
+
+/// A tab of the strip: a session tab, or the settings tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabRef {
+    Session(TabId),
+    Settings,
 }
 
 /// What an item does.
@@ -77,6 +103,26 @@ pub enum MenuAction {
     Delete,
     /// The tab's folder compare (the local toolbar's button).
     Compare,
+    /// The compare panel's "Upload selected".
+    CompareUpload,
+    /// The compare panel's "Download selected".
+    CompareDownload,
+    /// The panes go to the compare row's item (its double-click, Enter).
+    ShowInPanes,
+    /// A queue row's button (never a conflict's answer: those stay in the row).
+    Queue(RowAction),
+    /// Connects the site, or shows its tab (a click on it).
+    OpenSite,
+    /// The site's form (its pencil).
+    EditSite,
+    /// The workspace's "Open workspace".
+    OpenWorkspace,
+    /// The workspace's form (its pencil).
+    EditWorkspace,
+    /// The tab's ×.
+    CloseTab,
+    /// Every other tab of the strip closes (each as its × would).
+    CloseOtherTabs,
 }
 
 /// One item, as the menu shows it now.
@@ -140,7 +186,67 @@ impl App {
             })
             .collect(),
             MenuTarget::Pane { tab, side, row } => self.pane_menu(*tab, *side, *row),
+            MenuTarget::CompareRow { tab, index } => self.compare_menu(*tab, *index),
+            MenuTarget::QueueRow(id) => self
+                .queue
+                .row(*id)
+                .map(|row| queue_menu_actions(&self.queue, row))
+                .unwrap_or_default()
+                .into_iter()
+                .map(|action| MenuItem::new(MenuAction::Queue(action)))
+                .collect(),
+            MenuTarget::Site(id) => match self.site(id) {
+                Some(_) => vec![
+                    MenuItem::new(MenuAction::OpenSite),
+                    MenuItem::new(MenuAction::EditSite),
+                ],
+                None => Vec::new(),
+            },
+            MenuTarget::Workspace(id) => match self.workspaces.iter().any(|w| &w.id == id) {
+                true => vec![
+                    MenuItem::new(MenuAction::OpenWorkspace),
+                    MenuItem::new(MenuAction::EditWorkspace),
+                ],
+                false => Vec::new(),
+            },
+            MenuTarget::Tab(tab) => {
+                let open = match tab {
+                    TabRef::Session(id) => self.tab_index(*id).is_some(),
+                    TabRef::Settings => self.settings_tab.is_some(),
+                };
+                if !open {
+                    return Vec::new();
+                }
+                let count = self.tabs.len() + usize::from(self.settings_tab.is_some());
+                vec![
+                    MenuItem::new(MenuAction::CloseTab),
+                    MenuItem::enabled(MenuAction::CloseOtherTabs, count > 1),
+                ]
+            }
         }
+    }
+
+    /// A compare row's items: Upload and Download on exactly when the panel's buttons
+    /// are (some selected row can go that way), Show in panes while the row is there.
+    fn compare_menu(&self, tab: TabId, index: usize) -> Vec<MenuItem> {
+        let Some(state) = self
+            .tab_index(tab)
+            .and_then(|i| self.tabs[i].compare())
+            .filter(|state| index < state.rows.len())
+        else {
+            return Vec::new();
+        };
+        vec![
+            MenuItem::enabled(
+                MenuAction::CompareUpload,
+                state.selected_uploads().next().is_some(),
+            ),
+            MenuItem::enabled(
+                MenuAction::CompareDownload,
+                state.selected_downloads().next().is_some(),
+            ),
+            MenuItem::new(MenuAction::ShowInPanes),
+        ]
     }
 
     /// A pane's items: each on when its toolbar button (or key) would act now, off (not
@@ -214,19 +320,18 @@ impl App {
 
     /// The message `action` sends for `target`, if it does anything now.
     fn menu_message(&self, target: &MenuTarget, action: MenuAction) -> Option<Message> {
-        match (target, action) {
+        Some(match (target, action) {
             (MenuTarget::SidebarOptions, MenuAction::ShowWorkspaces) => {
-                Some(self.set_hidden(SidebarSection::Workspaces))
+                self.set_hidden(SidebarSection::Workspaces)
             }
             (MenuTarget::SidebarOptions, MenuAction::ShowSites) => {
-                Some(self.set_hidden(SidebarSection::Sites))
+                self.set_hidden(SidebarSection::Sites)
             }
-            (MenuTarget::SidebarOptions, _) => None,
+            (&MenuTarget::Pane { tab, .. }, MenuAction::Compare) => {
+                Message::Compare(CompareMsg::Start { tab })
+            }
             (&MenuTarget::Pane { tab, side, row }, action) => {
                 let msg = match action {
-                    MenuAction::Compare => {
-                        return Some(Message::Compare(CompareMsg::Start { tab }));
-                    }
                     MenuAction::Transfer(_) => PaneMsg::Transfer,
                     MenuAction::Edit => PaneMsg::Edit,
                     MenuAction::Open => PaneMsg::Open(row?),
@@ -236,11 +341,32 @@ impl App {
                     MenuAction::Refresh => PaneMsg::Refresh,
                     MenuAction::NewFolder => PaneMsg::NewFolder,
                     MenuAction::Delete => PaneMsg::Delete,
-                    MenuAction::ShowWorkspaces | MenuAction::ShowSites => return None,
+                    _ => return None,
                 };
-                Some(Message::Pane { tab, side, msg })
+                Message::Pane { tab, side, msg }
             }
-        }
+            (&MenuTarget::CompareRow { tab, index }, action) => Message::Compare(match action {
+                MenuAction::CompareUpload => CompareMsg::UploadSelected { tab },
+                MenuAction::CompareDownload => CompareMsg::DownloadSelected { tab },
+                MenuAction::ShowInPanes => CompareMsg::Open { tab, index },
+                _ => return None,
+            }),
+            (&MenuTarget::QueueRow(id), MenuAction::Queue(action)) => {
+                Message::Queue(QueueMsg::Action(id, action))
+            }
+            (MenuTarget::Site(id), MenuAction::OpenSite) => Message::ConnectSite(id.clone()),
+            (MenuTarget::Site(id), MenuAction::EditSite) => Message::EditSite(id.clone()),
+            (MenuTarget::Workspace(id), MenuAction::OpenWorkspace) => {
+                Message::OpenWorkspace(id.clone())
+            }
+            (MenuTarget::Workspace(id), MenuAction::EditWorkspace) => {
+                Message::EditWorkspace(id.clone())
+            }
+            (&MenuTarget::Tab(TabRef::Session(id)), MenuAction::CloseTab) => Message::CloseTab(id),
+            (MenuTarget::Tab(TabRef::Settings), MenuAction::CloseTab) => Message::CloseSettings,
+            (&MenuTarget::Tab(tab), MenuAction::CloseOtherTabs) => Message::CloseOtherTabs(tab),
+            _ => return None,
+        })
     }
 
     /// A key while a menu is open (`None`: the menu took it). ↑/↓ move the highlight over
@@ -334,4 +460,17 @@ impl App {
             }
         }
     }
+}
+
+/// A queue row's menu: its buttons, but a conflict's answers (they stay in the row, next
+/// to its "Apply to all").
+pub fn queue_menu_actions(
+    queue: &super::queue::Queue,
+    row: &super::queue::QueueRow,
+) -> Vec<RowAction> {
+    queue
+        .actions(row)
+        .into_iter()
+        .filter(|action| !matches!(action, RowAction::Resolve(_)))
+        .collect()
 }

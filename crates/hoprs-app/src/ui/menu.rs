@@ -55,6 +55,15 @@ pub fn label(action: MenuAction) -> &'static str {
         MenuAction::NewFolder => strings::new_folder(),
         MenuAction::Delete => strings::delete(),
         MenuAction::Compare => strings::compare_button(),
+        MenuAction::CompareUpload => strings::upload(),
+        MenuAction::CompareDownload => strings::download(),
+        MenuAction::ShowInPanes => strings::menu_show_in_panes(),
+        MenuAction::Queue(action) => crate::ui::queue::action_label(action),
+        MenuAction::OpenSite => strings::menu_open_files(),
+        MenuAction::EditSite | MenuAction::EditWorkspace => strings::edit(),
+        MenuAction::OpenWorkspace => strings::open_workspace(),
+        MenuAction::CloseTab => strings::close_tab(),
+        MenuAction::CloseOtherTabs => strings::menu_close_other_tabs(),
     }
 }
 
@@ -74,6 +83,15 @@ pub fn icon(action: MenuAction) -> Icon {
         MenuAction::NewFolder => Icon::FolderSimplePlus,
         MenuAction::Delete => Icon::Trash,
         MenuAction::Compare => Icon::GitDiff,
+        MenuAction::CompareUpload => Icon::UploadSimple,
+        MenuAction::CompareDownload => Icon::DownloadSimple,
+        MenuAction::ShowInPanes => Icon::Folder,
+        // A conflict's answers have no icon, and are never in a menu.
+        MenuAction::Queue(action) => crate::ui::queue::action_icon(action).unwrap_or(Icon::Check),
+        MenuAction::OpenSite => Icon::HardDrives,
+        MenuAction::EditSite | MenuAction::EditWorkspace => Icon::PencilSimple,
+        MenuAction::OpenWorkspace => Icon::Stack,
+        MenuAction::CloseTab | MenuAction::CloseOtherTabs => Icon::X,
     }
 }
 
@@ -91,7 +109,17 @@ pub fn shortcut(action: MenuAction) -> Option<&'static str> {
         | MenuAction::Open
         | MenuAction::Permissions
         | MenuAction::CopyPath
-        | MenuAction::Compare => None,
+        | MenuAction::Compare
+        | MenuAction::CompareUpload
+        | MenuAction::CompareDownload
+        | MenuAction::ShowInPanes
+        | MenuAction::Queue(_)
+        | MenuAction::OpenSite
+        | MenuAction::EditSite
+        | MenuAction::OpenWorkspace
+        | MenuAction::EditWorkspace
+        | MenuAction::CloseTab
+        | MenuAction::CloseOtherTabs => None,
     }
 }
 

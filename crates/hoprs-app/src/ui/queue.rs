@@ -7,13 +7,15 @@
 
 use iced::event::Status;
 use iced::mouse;
-use iced::widget::{Id, button, checkbox, column, container, progress_bar, row, rule, space, text};
+use iced::widget::{
+    Id, button, checkbox, column, container, mouse_area, progress_bar, row, rule, space, text,
+};
 use iced::{Alignment, Element, Event, Length, Padding, window};
 
 use hoprs_transfer::{Direction, ResolveAction};
 
 use crate::app::queue::{QueueRow, RowStatus};
-use crate::app::{App, Message, Panel, QueueMsg, QueueTab, RowAction};
+use crate::app::{App, MenuMsg, MenuTarget, Message, Panel, QueueMsg, QueueTab, RowAction};
 use crate::ui::divider;
 use crate::ui::file_actions::error_bar;
 use crate::ui::fit;
@@ -128,6 +130,20 @@ pub fn action_icon(action: RowAction) -> Option<Icon> {
 }
 
 /// The id of the queue's list, for its scroll offset.
+/// A row button's label (its tooltip, or its text for a conflict's answers), also the
+/// row menu's item.
+pub fn action_label(action: RowAction) -> &'static str {
+    match action {
+        RowAction::Pause => strings::pause(),
+        RowAction::Resume | RowAction::Resolve(ResolveAction::Resume) => strings::resume(),
+        RowAction::Cancel => strings::cancel(),
+        RowAction::Retry => strings::retry(),
+        RowAction::Dismiss => strings::dismiss(),
+        RowAction::Resolve(ResolveAction::Skip) => strings::skip(),
+        RowAction::Resolve(ResolveAction::Overwrite) => strings::overwrite(),
+    }
+}
+
 fn scroll_id() -> Id {
     Id::new("queue")
 }
@@ -456,15 +472,7 @@ fn queue_row<'a>(app: &'a App, row: &'a QueueRow) -> Element<'a, Message> {
     };
     let mut actions = row![].spacing(theme::SPACE_3XS).align_y(Alignment::Center);
     for action in app.queue.actions(row) {
-        let label = match action {
-            RowAction::Pause => strings::pause(),
-            RowAction::Resume | RowAction::Resolve(ResolveAction::Resume) => strings::resume(),
-            RowAction::Cancel => strings::cancel(),
-            RowAction::Retry => strings::retry(),
-            RowAction::Dismiss => strings::dismiss(),
-            RowAction::Resolve(ResolveAction::Skip) => strings::skip(),
-            RowAction::Resolve(ResolveAction::Overwrite) => strings::overwrite(),
-        };
+        let label = action_label(action);
         let press = Message::Queue(QueueMsg::Action(id, action));
         actions = actions.push(match action_icon(action) {
             Some(icon) => widgets::icon_button(icon, label, None, Some(press)),
@@ -475,14 +483,20 @@ fn queue_row<'a>(app: &'a App, row: &'a QueueRow) -> Element<'a, Message> {
                 .into(),
         });
     }
-    row![
+    let line = row![
         cell(name.into(), Length::Fill, false),
         cell(muted(site.to_owned()), Length::Fixed(SITE_WIDTH), false),
         cell(status, Length::Fixed(STATUS_WIDTH), false),
         cell(actions.into(), Length::Fixed(ACTIONS_WIDTH), true),
     ]
-    .height(ROW_HEIGHT)
-    .into()
+    .height(ROW_HEIGHT);
+    // A right press: the row's buttons as a menu (none for a finished row or a conflict,
+    // whose answers stay in the row).
+    let mut line = mouse_area(line);
+    if !crate::app::menu::queue_menu_actions(&app.queue, row).is_empty() {
+        line = line.on_right_press(Message::Menu(MenuMsg::Open(MenuTarget::QueueRow(id))));
+    }
+    line.into()
 }
 
 fn error_text<'a>(message: String) -> Element<'a, Message> {

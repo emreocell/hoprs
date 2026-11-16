@@ -62,11 +62,11 @@ fn snapshot(seq: u64, items: Vec<TransferItem>) -> TransferSnapshot {
     }
 }
 
-fn failed(message: &str) -> TransferState {
+pub(super) fn failed(message: &str) -> TransferState {
     TransferState::Failed(Error::new(ErrorKind::Permission, message))
 }
 
-fn conflict() -> TransferState {
+pub(super) fn conflict() -> TransferState {
     TransferState::AwaitingDecision(ConflictInfo {
         src_size: 10,
         dst_size: 4,

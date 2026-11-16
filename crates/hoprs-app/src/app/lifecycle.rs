@@ -423,6 +423,8 @@ impl App {
             | Message::WorkspaceForm(_)
             | Message::OpenProfileFolder
             | Message::CloseTab(_)
+            | Message::CloseOtherTabs(_)
+            | Message::Compare(super::CompareMsg::ContextMenu { .. })
             | Message::NewTab { .. }
             | Message::Pane { .. }
             | Message::KeyPressed { .. }

@@ -115,3 +115,26 @@ real display.
     one such path per line. Also with a rename editor open in a pane, right-click a row:
     ↑/↓ move in the menu (not the editor's caret) and Enter runs the item (it does not
     commit the rename).
+
+13. **Menus on compare rows, queue rows, the sidebar and tabs.** NEEDS HUMAN. Expect every
+    menu in the spec's list where expected; keyboard reaches each action through shortcuts
+    or the palette. Steps:
+    - Compare: run a compare with rows in several groups. Right-click an unselected row: it
+      is selected alone and the menu shows Upload, Download (each dimmed unless the panel's
+      button of the same name is on) and Show in panes. Right-click one of several ticked
+      rows: the ticks stay and Upload/Download act on all of them. Show in panes goes to the
+      item, like a double-click. Click a row, move with ↑/↓, press Shift+F10 (and the Menu
+      key) with the list short (no scrollbar) and scrolled: the menu opens at the row.
+    - Queue: right-click an active row (Pause, Cancel), a paused one (Resume, Cancel), a
+      failed one (Retry, Dismiss); a conflict row and a finished row open no menu (the
+      conflict's answers stay in the row). An item on a row that finished meanwhile does
+      nothing.
+    - Sidebar: right-click a site (Open files, Edit; also a site inside an open workspace) and
+      a workspace head (Open workspace, Edit). No Disconnect, no Delete. Shift+F10 does
+      nothing there (mouse only).
+    - Tabs: right-click a session tab and the settings tab: Close tab, Close other tabs
+      (dimmed when it is the only tab). Close other tabs keeps the clicked tab, selected,
+      closes the rest (the settings tab too, unless it is the one kept); a site whose last tab
+      has unsent remote edits asks first, in its tab.
+    - Keyboard: Close tab, Open workspace, the sites, Upload/Download (compare panel
+      buttons), the queue's actions (Tab to their buttons) stay reachable as before.

@@ -127,7 +127,7 @@ fn found(tab: TabId, run: CompareRunId, path: &str) -> Message {
 }
 
 /// Opens the tab and delivers the debounce: a run is in flight.
-async fn running() -> (App, Arc<FakeBackend>, Site, TabId, CompareRunId) {
+pub(super) async fn running() -> (App, Arc<FakeBackend>, Site, TabId, CompareRunId) {
     let (mut app, fake, a, effects) = open(true).await;
     let tab = app.tabs[0].id;
     let (_, generation, _) = *debounces(&effects).last().expect("a debounce");
@@ -858,7 +858,7 @@ use hoprs_core::{EntryKind, RemoteEntry};
 use hoprs_remote::CompareSide;
 use hoprs_transfer::{ConflictPolicy, Direction, EventKind, TransferState};
 
-fn entry(name: &str, kind: EntryKind, size: u64) -> RemoteEntry {
+pub(super) fn entry(name: &str, kind: EntryKind, size: u64) -> RemoteEntry {
     RemoteEntry {
         name: name.to_owned(),
         path: rpath(&format!("/x/{name}")),

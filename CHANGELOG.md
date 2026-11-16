@@ -13,6 +13,7 @@ A UI polish release.
 - Settings open as a tab with a section list (Ctrl+, or ⌘,).
 - The compare panel and the transfer queue resize by dragging their top edge (double-click resets); heights are remembered; collapse leaves one summary line.
 - Right-click menus on files (with Copy path and Refresh, F5); Shift+F10 or the Menu key opens them from the keyboard.
+- Right-click menus on the compare list, the queue, the sidebar and the tabs (with Close other tabs); Shift+F10 opens the compare list's from the keyboard.
 
 ## 1.2.0 — 2026-11-16
 

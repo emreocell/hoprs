@@ -576,6 +576,8 @@ fn behind_overlay(msg: &Message) -> bool {
         | Message::WorkspaceForm(_)
         | Message::OpenProfileFolder
         | Message::CloseTab(_)
+        | Message::CloseOtherTabs(_)
+        | Message::Compare(super::CompareMsg::ContextMenu { .. })
         | Message::NewTab { .. }
         | Message::Pane { .. }
         | Message::Key { .. }

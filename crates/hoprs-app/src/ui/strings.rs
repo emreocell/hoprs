@@ -44,6 +44,15 @@ pub fn menu_copy_path() -> &'static str {
 pub fn menu_refresh() -> &'static str {
     tr("menu-refresh")
 }
+pub fn menu_show_in_panes() -> &'static str {
+    tr("menu-show-in-panes")
+}
+pub fn menu_open_files() -> &'static str {
+    tr("menu-open-files")
+}
+pub fn menu_close_other_tabs() -> &'static str {
+    tr("menu-close-other-tabs")
+}
 pub fn key_refresh() -> &'static str {
     tr("key-refresh")
 }

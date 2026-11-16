@@ -32,6 +32,9 @@ menu-show-sites = Mostrar todos os sites
 menu-open = Abrir
 menu-copy-path = Copiar caminho
 menu-refresh = Atualizar
+menu-show-in-panes = Mostrar nos painéis
+menu-open-files = Abrir arquivos
+menu-close-other-tabs = Fechar outras abas
 key-refresh = F5
 
 ## The Ctrl+K palette
