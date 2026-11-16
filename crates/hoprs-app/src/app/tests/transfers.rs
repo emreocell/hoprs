@@ -1613,3 +1613,65 @@ async fn held_file_op_of_a_closed_tab_is_dropped() {
         "{effects:?}"
     );
 }
+
+/// Files dropped from the system on a site whose connection is down: nothing uploads (the
+/// pane showed it takes no drop) and the queue says why.
+#[tokio::test]
+async fn os_drop_on_lost_session_does_nothing() {
+    let (_fake, mut app, a, _tab) = transfer_tab().await;
+    let session = app.conn(&a.id).session().unwrap();
+    app.update(Message::SessionState {
+        session,
+        state: ConnectionState::Disconnected(Error::new(ErrorKind::Network, "Connection reset")),
+        auth: None,
+    });
+    app.update(Message::FilesHovered(true));
+    assert_eq!(app.os_drop_label(), None);
+    let effects = app.update(Message::FileDropped(PathBuf::from("/home/me/a.txt")));
+    assert!(no_enqueue(&effects));
+    assert_eq!(
+        app.queue.error.as_ref().map(|e| e.message.as_str()),
+        Some("The site is not connected; reconnect it to drop files into it")
+    );
+}
+
+/// A drag that carries nothing (the only selected row deselected by Ctrl+click) has no
+/// target and drops nothing.
+#[tokio::test]
+async fn drag_with_nothing_selected_has_no_target() {
+    let (_fake, mut app, _a, tab) = transfer_tab().await;
+    let b_row = row_of(&app, Side::Local, "b.txt");
+    press(&mut app, tab, Side::Local, b_row, IN_LOCAL);
+    app.update(Message::DragCancel);
+    app.mods.ctrl = true;
+    press(&mut app, tab, Side::Local, b_row, IN_LOCAL);
+    app.mods.ctrl = false;
+    assert_eq!(app.drag_count(), 0);
+    move_over(&mut app, tab, Side::Remote, IN_REMOTE);
+    assert!(app.drag.is_some_and(|d| d.active));
+    assert_eq!((app.drop_target(), app.drop_label()), (None, None));
+    assert!(app.drag_invalid_over(tab, Side::Remote));
+    assert!(no_enqueue(&app.update(Message::DragEnd)));
+}
+
+/// A right press during a drag opens a menu: the first Escape closes the menu, the next
+/// cancels the drag.
+#[tokio::test]
+async fn escape_closes_menu_before_drag() {
+    let (_fake, mut app, _a, tab) = transfer_tab().await;
+    let b_row = row_of(&app, Side::Local, "b.txt");
+    press(&mut app, tab, Side::Local, b_row, IN_LOCAL);
+    move_over(&mut app, tab, Side::Remote, IN_REMOTE);
+    app.update(Message::PointerPressed(IN_REMOTE));
+    app.update(pane_msg(tab, Side::Remote, PaneMsg::ContextMenu(None)));
+    assert!(app.menu.is_some());
+    let escape = Message::KeyPressed {
+        key: FileKey::Escape,
+        shift: false,
+    };
+    app.update(escape.clone());
+    assert!(app.menu.is_none());
+    assert!(app.drag.is_some_and(|d| d.active));
+    app.update(escape);
+    assert_eq!(app.drag, None);
+}

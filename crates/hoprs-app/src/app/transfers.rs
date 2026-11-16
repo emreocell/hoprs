@@ -88,16 +88,20 @@ impl App {
         }
     }
 
-    /// Escape while a drag is under way cancels it (`None`: taken). Anything else, or a
-    /// press that has not moved yet, passes unchanged.
+    /// Escape while a drag is under way cancels it (`None`: taken). Anything else, a press
+    /// that has not moved yet, or Escape while a menu is open (a right press during the
+    /// drag opened it: that Escape closes the menu, the next one cancels the drag), passes
+    /// unchanged.
     pub(super) fn drag_key(&mut self, msg: Message) -> Option<Message> {
-        if matches!(
-            msg,
-            Message::KeyPressed {
-                key: FileKey::Escape,
-                ..
-            }
-        ) && self.drag.is_some_and(|d| d.active)
+        if self.menu.is_none()
+            && matches!(
+                msg,
+                Message::KeyPressed {
+                    key: FileKey::Escape,
+                    ..
+                }
+            )
+            && self.drag.is_some_and(|d| d.active)
         {
             self.drag = None;
             return None;
@@ -118,10 +122,13 @@ impl App {
     }
 
     /// The pane a drag would drop on now: the pane under the pointer, if a drag that moved
-    /// past the threshold started in the other pane of the same tab and that pane takes a
-    /// drop ([`takes_drop`](Self::takes_drop)).
+    /// past the threshold and carries something started in the other pane of the same tab
+    /// and that pane takes a drop ([`takes_drop`](Self::takes_drop)).
     pub fn drop_target(&self) -> Option<(TabId, Side)> {
         let drag = self.drag.filter(|d| d.active)?;
+        if self.drag_count() == 0 {
+            return None;
+        }
         let (tab, over) = self
             .pointer
             .filter(|&(over_tab, over)| over_tab == drag.tab && over == other(drag.from))?;
@@ -232,6 +239,15 @@ impl App {
                 ErrorKind::Conflict,
                 "app-drop-pane-busy",
                 "The remote folder is busy or not listed yet; drop again in a moment",
+            ));
+            return Vec::new();
+        }
+        // The session is lost or reconnecting: the pane showed it takes no drop.
+        if !self.takes_drop(index, Side::Remote) {
+            self.queue_error(Error::coded(
+                ErrorKind::Network,
+                "app-drop-not-connected",
+                "The site is not connected; reconnect it to drop files into it",
             ));
             return Vec::new();
         }

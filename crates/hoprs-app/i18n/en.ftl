@@ -812,6 +812,7 @@ error-app-background-task-failed = Background task failed
 error-app-no-config-dir = No configuration directory
 error-app-drop-needs-site = Open a connected site to drop files into it
 error-app-drop-pane-busy = The remote folder is busy or not listed yet; drop again in a moment
+error-app-drop-not-connected = The site is not connected; reconnect it to drop files into it
 error-app-drop-unsupported = Can't upload this path
 error-app-site-endpoint-changed = The site's host or port changed: this session was closed. Reconnect to use the new settings.
 error-session-closed = Session closed

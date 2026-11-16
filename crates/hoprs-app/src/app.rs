@@ -937,8 +937,8 @@ impl App {
     pub fn update(&mut self, msg: Message) -> Vec<Effect> {
         // A palette row to run becomes the action's own message.
         let msg = self.palette_command(msg);
-        // Escape cancels a drag under way first (no menu is open during one: its
-        // backdrop takes the press that would start it).
+        // Escape cancels a drag under way first, unless a menu is open (a right press
+        // during the drag opened it): then the menu takes that Escape.
         let Some(msg) = self.drag_key(msg) else {
             return Vec::new();
         };

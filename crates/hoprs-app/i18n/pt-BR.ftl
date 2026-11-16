@@ -773,6 +773,7 @@ error-app-background-task-failed = A tarefa em segundo plano falhou
 error-app-no-config-dir = Sem pasta de configuração
 error-app-drop-needs-site = Abra um site conectado para soltar arquivos nele
 error-app-drop-pane-busy = A pasta remota está ocupada ou ainda não foi listada; solte de novo em instantes
+error-app-drop-not-connected = O site não está conectado; reconecte-o para soltar arquivos nele
 error-app-drop-unsupported = Não é possível fazer upload deste caminho
 error-app-site-endpoint-changed = O host ou a porta do site mudou: esta sessão foi fechada. Reconecte para usar as novas configurações.
 error-session-closed = Sessão encerrada
