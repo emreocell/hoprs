@@ -900,3 +900,56 @@ async fn ctrl_comma_blocked_by_dialog() {
     app.update(Message::OpenSettings);
     assert!(app.settings_tab.is_none());
 }
+
+/// Review fix: the settings tab closes like any tab's neighbour: when the last session
+/// tab goes (its ×, or the workspace's close), the settings tab left is selected.
+#[tokio::test]
+async fn settings_selected_when_last_session_tab_closes() {
+    let s = ssh_site("prod", OpenAs::Files);
+    let (mut app, _fake, _) = connected(&s).await;
+    app.update(Message::OpenSettings);
+    app.update(Message::SelectTab(0));
+    assert!(!app.settings_shown());
+    let id = app.tabs[0].id;
+    app.update(Message::CloseTab(id));
+    assert!(app.tabs.is_empty());
+    assert!(app.settings_shown(), "the remaining tab is selected");
+
+    // The same through closing the workspace.
+    let ws = workspace("Shop", &[&s.id]);
+    let fake = Arc::new(
+        FakeBackend::new()
+            .with_site(s.clone())
+            .with_workspace(ws.clone()),
+    );
+    let mut app = loaded(&fake).await;
+    let sites = connect_effect(app.update(Message::OpenWorkspace(ws.id.clone())));
+    drive(&mut app, &fake, sites).await;
+    app.update(Message::OpenSettings);
+    app.update(Message::SelectTab(0));
+    app.update(Message::CloseWorkspace(ws.id.clone()));
+    assert!(app.tabs.is_empty());
+    assert!(app.settings_shown());
+}
+
+/// Review fix: the strip's scroll counts the settings tab after the session tabs.
+#[tokio::test]
+async fn strip_scroll_counts_the_settings_tab() {
+    let a = ssh_site("a", OpenAs::Files);
+    let b = ssh_site("b", OpenAs::Files);
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()).with_site(b.clone()));
+    let mut app = loaded(&fake).await;
+    app.update(Message::ConnectSite(a.id.clone()));
+    app.update(Message::ConnectSite(b.id.clone()));
+    app.update(Message::OpenSettings);
+    let effects = app.update(Message::SelectTab(1));
+    let offsets: Vec<f32> = effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::ScrollTabs { x } => Some(*x),
+            _ => None,
+        })
+        .collect();
+    // Tab 1 of three (two session tabs and Settings): the middle.
+    assert_eq!(offsets, [0.5]);
+}

@@ -887,8 +887,10 @@ impl App {
         if self.active_tab != active
             && let Some(index) = self.active_tab
         {
+            // The settings tab, last in the strip, counts too.
+            let count = self.tabs.len() + usize::from(self.settings_tab.is_some());
             effects.push(Effect::ScrollTabs {
-                x: tab_strip_offset(index, self.tabs.len()),
+                x: tab_strip_offset(index, count),
             });
         }
         // A security dialog wins over the palette, and a closing window has none.
@@ -906,6 +908,13 @@ impl App {
             && let Some(settings) = &mut self.settings_tab
         {
             settings.active = false;
+        }
+        // No session tab selected (the last one closed, or the workspace with it): the
+        // settings tab, if open, is the remaining tab and becomes selected.
+        if self.active_tab.is_none()
+            && let Some(settings) = &mut self.settings_tab
+        {
+            settings.active = true;
         }
         // Typed backup passwords never outlive the settings page, however it was left.
         if !self.settings_shown() {

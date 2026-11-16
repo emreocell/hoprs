@@ -142,9 +142,7 @@ pub fn key_message(event: Event, status: Status, _: window::Id) -> Option<Messag
             physical_key,
             modifiers,
             ..
-        } if modifiers.command() && !modifiers.alt() && key.to_latin(physical_key) == Some(',') => {
-            Some(Message::OpenSettings)
-        }
+        } if is_settings_key(&key, physical_key, modifiers) => Some(Message::OpenSettings),
         keyboard::Event::ModifiersChanged(modifiers) => Some(Message::Modifiers(Mods {
             ctrl: modifiers.command(),
             shift: modifiers.shift(),
@@ -169,6 +167,26 @@ pub fn key_message(event: Event, status: Status, _: window::Id) -> Option<Messag
         }
         _ => None,
     }
+}
+
+/// Whether a key press is Ctrl+, (Cmd+, on macOS, no Alt): Settings. The comma as the
+/// layout types it, or, on a non-Latin layout (a character from U+0370 on, which
+/// [`Key::to_latin`] maps back only for letters and digits), the physical comma key.
+/// The terminal widget asks the same, so the shell never gets a key that opens Settings.
+pub fn is_settings_key(
+    key: &Key,
+    physical_key: keyboard::key::Physical,
+    modifiers: keyboard::Modifiers,
+) -> bool {
+    if !modifiers.command() || modifiers.alt() {
+        return false;
+    }
+    if key.to_latin(physical_key) == Some(',') {
+        return true;
+    }
+    let non_latin =
+        matches!(key, Key::Character(s) if s.chars().next().is_some_and(|c| c >= '\u{370}'));
+    non_latin && physical_key == keyboard::key::Physical::Code(keyboard::key::Code::Comma)
 }
 
 /// The pane key a named key stands for.
@@ -1122,6 +1140,41 @@ mod tests {
         }
         let alt = keyboard::Modifiers::COMMAND | keyboard::Modifiers::ALT;
         assert!(key_message(press(",", alt), Status::Ignored, id).is_none());
+    }
+
+    /// The same check serves the terminal widget: a non-Latin layout's comma key counts
+    /// by its physical position; a Latin layout's own comma wherever it is.
+    #[test]
+    fn settings_key_on_non_latin_layouts() {
+        use keyboard::key::{Code, NativeCode, Physical};
+        let ctrl = keyboard::Modifiers::COMMAND;
+        let ch = |s: &str| Key::Character(s.into());
+        // Russian: the comma key types "б".
+        assert!(is_settings_key(&ch("б"), Physical::Code(Code::Comma), ctrl));
+        assert!(!is_settings_key(
+            &ch("б"),
+            Physical::Code(Code::Comma),
+            keyboard::Modifiers::default()
+        ));
+        // Another non-Latin key is not it.
+        assert!(!is_settings_key(
+            &ch("ж"),
+            Physical::Code(Code::Semicolon),
+            ctrl
+        ));
+        // A Latin layout whose Comma position types something else (AZERTY ";"): no.
+        assert!(!is_settings_key(
+            &ch(";"),
+            Physical::Code(Code::Comma),
+            ctrl
+        ));
+        // Its comma, at another position: yes.
+        assert!(is_settings_key(&ch(","), Physical::Code(Code::KeyM), ctrl));
+        assert!(is_settings_key(
+            &ch(","),
+            Physical::Unidentified(NativeCode::Unidentified),
+            ctrl
+        ));
     }
 
     #[test]

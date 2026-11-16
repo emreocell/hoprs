@@ -124,11 +124,6 @@ pub fn map_key(
         ctrl: modifiers.control(),
         alt: modifiers.alt(),
     };
-    // Ctrl+, (Cmd+, on macOS) opens Settings ([`crate::ui::files::key_message`]): the
-    // shell gets nothing, not even the comma.
-    if modifiers.command() && !modifiers.alt() && key.as_ref() == keyboard::Key::Character(",") {
-        return None;
-    }
     let key = match key {
         keyboard::Key::Named(named) => match named {
             Named::Enter => Key::Enter,
@@ -464,11 +459,17 @@ where
             Event::Keyboard(keyboard::Event::KeyPressed {
                 key,
                 modified_key,
+                physical_key,
                 modifiers,
                 text,
                 ..
             }) if self.focused => {
-                if let Some((key, mods)) = map_key(key, modified_key, text.as_deref(), *modifiers) {
+                // Ctrl+, (Cmd+, on macOS) opens Settings (the window's key subscription
+                // sees it even captured): the shell gets nothing, not even the comma.
+                if !crate::ui::files::is_settings_key(key, *physical_key, *modifiers)
+                    && let Some((key, mods)) =
+                        map_key(key, modified_key, text.as_deref(), *modifiers)
+                {
                     shell.publish(msg(tab, TerminalMsg::Key { key, mods }));
                 }
                 // Every key belongs to the terminal while it has the focus: the file panes'
@@ -820,12 +821,6 @@ mod tests {
         use keyboard::{Key as IcedKey, Modifiers as M};
         let ch = |s: &str| IcedKey::Character(s.into());
         let named = IcedKey::Named;
-        // Ctrl+, (Cmd+, on macOS) is Settings: nothing for the shell.
-        assert_eq!(map_key(&ch(","), &ch(","), Some(","), M::COMMAND), None);
-        assert_eq!(
-            map_key(&ch(","), &ch(","), Some(","), M::empty()).map(|(k, _)| k),
-            Some(Key::Char(','))
-        );
         // Plain typing: the text produced.
         assert_eq!(
             map_key(&ch("a"), &ch("a"), Some("a"), M::empty()),
