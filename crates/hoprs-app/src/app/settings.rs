@@ -285,12 +285,27 @@ impl App {
             return Vec::new();
         };
         if tab.active {
-            self.active_tab = tab
+            let back = tab
                 .return_to
                 .and_then(|id| self.tab_index(id))
                 .or_else(|| self.tabs.len().checked_sub(1));
+            match back {
+                Some(index) => self.select_session_tab(index),
+                None => self.active_tab = None,
+            }
         }
         Vec::new()
+    }
+
+    /// Shows a session tab. A terminal shown again takes the keyboard (its search bar
+    /// keeps it).
+    pub(super) fn select_session_tab(&mut self, index: usize) {
+        self.active_tab = Some(index);
+        if let Some(terminal) = self.tabs[index].terminal_mut()
+            && terminal.search.is_none()
+        {
+            terminal.focused = true;
+        }
     }
 
     /// The selected session tab's id, if any.

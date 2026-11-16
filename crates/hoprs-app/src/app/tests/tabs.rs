@@ -953,3 +953,16 @@ async fn strip_scroll_counts_the_settings_tab() {
     // Tab 1 of three (two session tabs and Settings): the middle.
     assert_eq!(offsets, [0.5]);
 }
+
+#[tokio::test]
+async fn closing_settings_gives_a_terminal_the_keyboard_back() {
+    let s = ssh_site("both", OpenAs::Both);
+    let (mut app, _fake, _) = connected(&s).await;
+    assert_eq!(app.active_tab, Some(0));
+    app.update(Message::OpenSettings);
+    // Whatever took the keyboard away while settings were up.
+    app.tabs[0].terminal_mut().unwrap().focused = false;
+    app.update(Message::CloseSettings);
+    assert_eq!(app.active_tab, Some(0));
+    assert!(app.tabs[0].terminal().unwrap().focused);
+}

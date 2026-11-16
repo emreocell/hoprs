@@ -1027,14 +1027,8 @@ impl App {
             Message::SiteConnected { site, result } => return self.site_connected(site, result),
             Message::SelectTab(index) => {
                 if index < self.tabs.len() {
-                    self.active_tab = Some(index);
+                    self.select_session_tab(index);
                     self.form = None;
-                    // A terminal shown again takes the keyboard (its search bar keeps it).
-                    if let Some(terminal) = self.tabs[index].terminal_mut()
-                        && terminal.search.is_none()
-                    {
-                        terminal.focused = true;
-                    }
                 }
             }
             Message::NewSite => self.form = Some(Form::Site(SiteForm::new_site())),
