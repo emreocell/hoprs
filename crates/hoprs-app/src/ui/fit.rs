@@ -2,6 +2,8 @@
 //! columns show, which form the pane toolbars use, and whether the queue head is compact.
 //! Pure functions of the window width the app last saw ([`crate::app::App::window_width`]).
 
+use std::borrow::Cow;
+
 use crate::backend::Side;
 use crate::ui::sidebar;
 
@@ -13,21 +15,47 @@ pub const PERMISSIONS_WIDTH: f32 = 110.0;
 /// (Permissions first, then Modified).
 pub const NAME_MIN: f32 = 120.0;
 
-/// From these pane widths the toolbar is [`Toolbar::Full`], labels and key hints (the
-/// remote toolbar, with Edit, needs ~490 px; the local one ~345 px): both panes of the
-/// default 1280 px window, the remote one down to a ~1240 px window. Narrower panes get
-/// [`Toolbar::Compact`] (no hints) down to [`TOOLBAR_NARROW`], then [`Toolbar::Narrow`].
-const TOOLBAR_FULL_REMOTE: f32 = 492.0;
+/// From these pane widths the toolbar is [`Toolbar::Full`], icons, labels and key hints
+/// (the remote toolbar, with Edit, needs ~610 px; the local one ~460 px, Compare included;
+/// every button carries a 16 px icon): both panes of a ~1480 px window. Narrower panes get
+/// [`Toolbar::Compact`] (no hints) down to the `TOOLBAR_NARROW_*` widths, then (remote
+/// only) [`Toolbar::Trimmed`] down to the `TOOLBAR_TRIMMED_*` widths, then [`Toolbar::Narrow`].
+const TOOLBAR_FULL_REMOTE: f32 = 612.0;
 /// The same in Portuguese, whose labels are wider ("Renomear", "Nova pasta",
-/// "Permissões…"): measured at ~510 px, so the default 1280 px window (512 px panes) just fits.
-const TOOLBAR_FULL_REMOTE_PT: f32 = 512.0;
-const TOOLBAR_FULL_LOCAL: f32 = 360.0;
-/// Below this pane width (either side) the toolbar also uses short labels ("Folder",
-/// "Perms…"): without them the six remote actions need ~385 px, more than the 352 px
-/// panes of the 960 px minimum window.
-const TOOLBAR_NARROW: f32 = 400.0;
+/// "Permissões…").
+const TOOLBAR_FULL_REMOTE_PT: f32 = 632.0;
+const TOOLBAR_FULL_LOCAL: f32 = 460.0;
+/// Below these pane widths the remote toolbar trims the labels of Permissions and Edit,
+/// the local one shows icons only (labels and keys in the tooltips). The labelled remote
+/// toolbar needs ~505 px (more in Portuguese, ~525 px) and the local one ~365 px,
+/// estimated, not measured: each threshold has a margin of 24 px.
+const TOOLBAR_NARROW_REMOTE: f32 = 530.0;
+const TOOLBAR_NARROW_REMOTE_PT: f32 = 550.0;
+const TOOLBAR_NARROW_LOCAL: f32 = 390.0;
+/// Below these pane widths even the trimmed remote toolbar (Permissions and Edit without
+/// labels, ~410 px; ~425 px in Portuguese) does not fit with its margin: icons only.
+const TOOLBAR_TRIMMED_REMOTE: f32 = 435.0;
+const TOOLBAR_TRIMMED_REMOTE_PT: f32 = 450.0;
 /// Below this center width the queue head uses short labels.
 const QUEUE_HEAD_FULL: f32 = 900.0;
+
+/// Advance of JetBrains Mono, in em: exact, every glyph has it.
+pub const MONO_ADVANCE: f32 = 0.6;
+/// Advance of Inter, in em: an average (the glyphs vary), so the container still clips.
+pub const INTER_ADVANCE: f32 = 0.56;
+
+/// `text` cut to fit `width` px at `size` px with a per-character `advance` (em), ending in
+/// `…` when it had to be cut; the text itself, borrowed, when it fits. Counts characters.
+pub fn ellipsize(text: &str, width: f32, size: f32, advance: f32) -> Cow<'_, str> {
+    // The epsilon absorbs f32 rounding (75 / 7.5 must be 10, not 9.999).
+    let budget = (width / (size * advance) + 1e-3).floor().max(0.0) as usize;
+    let total = text.chars().count();
+    if total <= budget {
+        return Cow::Borrowed(text);
+    }
+    let kept: String = text.chars().take(budget.saturating_sub(1)).collect();
+    Cow::Owned(format!("{kept}\u{2026}"))
+}
 
 /// The columns a file table shows besides Name and Size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +87,23 @@ pub fn columns(pane: f32, side: Side) -> Columns {
     }
 }
 
+/// What a name cell spends besides the name: the 2 px selection bar, both paddings, the
+/// kind icon and its gap.
+pub const NAME_CHROME: f32 = 2.0 + 2.0 * 16.0 + 16.0 + 8.0;
+
+/// The text width of the name column in a pane `pane` px wide with `cols`: the pane minus
+/// the fixed columns and [`NAME_CHROME`]; never below 0.
+pub fn name_width(pane: f32, cols: Columns) -> f32 {
+    let fixed = SIZE_WIDTH
+        + if cols.modified { MODIFIED_WIDTH } else { 0.0 }
+        + if cols.permissions {
+            PERMISSIONS_WIDTH
+        } else {
+            0.0
+        };
+    (pane - fixed - NAME_CHROME).max(0.0)
+}
+
 /// How a pane's toolbar reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Toolbar {
@@ -66,7 +111,9 @@ pub enum Toolbar {
     Full,
     /// Labels only.
     Compact,
-    /// Short labels only (the narrowest panes).
+    /// Labels without hints, except Permissions and Edit: icons with a tooltip (remote).
+    Trimmed,
+    /// Icons only, labels and keys in the tooltips (the narrowest panes).
     Narrow,
 }
 
@@ -76,25 +123,43 @@ impl Toolbar {
         self == Self::Full
     }
 
-    /// Whether the short labels replace the long ones.
-    pub fn short_labels(self) -> bool {
+    /// Whether the least-used actions (Permissions, Edit) are icons only.
+    pub fn trimmed(self) -> bool {
+        matches!(self, Self::Trimmed | Self::Narrow)
+    }
+
+    /// Whether the buttons are icons only.
+    pub fn icons_only(self) -> bool {
         self == Self::Narrow
     }
 }
 
 /// The toolbar form for a pane `pane` px wide.
 pub fn toolbar(pane: f32, side: Side) -> Toolbar {
-    let full = match side {
-        Side::Local => TOOLBAR_FULL_LOCAL,
-        Side::Remote if crate::i18n::language() == crate::i18n::Language::PtBr => {
-            TOOLBAR_FULL_REMOTE_PT
-        }
-        Side::Remote => TOOLBAR_FULL_REMOTE,
+    let pt = crate::i18n::language() == crate::i18n::Language::PtBr;
+    let trimmed = match side {
+        Side::Local => 0.0,
+        Side::Remote if pt => TOOLBAR_TRIMMED_REMOTE_PT,
+        Side::Remote => TOOLBAR_TRIMMED_REMOTE,
+    };
+    let (full, narrow) = match side {
+        Side::Local => (
+            TOOLBAR_FULL_LOCAL,
+            if pt {
+                TOOLBAR_NARROW_LOCAL + 15.0
+            } else {
+                TOOLBAR_NARROW_LOCAL
+            },
+        ),
+        Side::Remote if pt => (TOOLBAR_FULL_REMOTE_PT, TOOLBAR_NARROW_REMOTE_PT),
+        Side::Remote => (TOOLBAR_FULL_REMOTE, TOOLBAR_NARROW_REMOTE),
     };
     if pane >= full {
         Toolbar::Full
-    } else if pane >= TOOLBAR_NARROW {
+    } else if pane >= narrow {
         Toolbar::Compact
+    } else if pane >= trimmed && side == Side::Remote {
+        Toolbar::Trimmed
     } else {
         Toolbar::Narrow
     }
@@ -151,6 +216,64 @@ mod tests {
     };
 
     #[test]
+    fn ellipsize_keeps_text_that_fits() {
+        let out = ellipsize("short.txt", 200.0, 12.5, MONO_ADVANCE);
+        assert!(matches!(out, Cow::Borrowed("short.txt")));
+    }
+
+    #[test]
+    fn ellipsize_cuts_with_an_ellipsis() {
+        // 75 / (12.5 * 0.6) = 10 characters.
+        let out = ellipsize("public_html_backup_2026", 75.0, 12.5, MONO_ADVANCE);
+        assert_eq!(out.chars().count(), 10);
+        assert!(out.ends_with('\u{2026}'));
+        assert!(out.starts_with("public_ht"));
+    }
+
+    #[test]
+    fn ellipsize_counts_chars_not_bytes() {
+        // 4 characters, 6 bytes; a budget of 4 keeps all of them.
+        let width = 4.0 * 10.0 * MONO_ADVANCE;
+        assert!(matches!(
+            ellipsize("a\u{e7}\u{e3}o", width, 10.0, MONO_ADVANCE),
+            Cow::Borrowed(_)
+        ));
+        let out = ellipsize("a\u{e7}\u{e3}o!!", width, 10.0, MONO_ADVANCE);
+        assert_eq!(out, "a\u{e7}\u{e3}\u{2026}");
+    }
+
+    #[test]
+    fn ellipsize_zero_width_is_just_the_ellipsis() {
+        assert_eq!(ellipsize("anything", 0.0, 12.5, MONO_ADVANCE), "\u{2026}");
+        assert_eq!(ellipsize("anything", 5.0, 12.5, INTER_ADVANCE), "\u{2026}");
+    }
+
+    #[test]
+    fn name_width_shrinks_with_columns() {
+        let all = name_width(600.0, ALL);
+        let some = name_width(
+            600.0,
+            Columns {
+                modified: true,
+                permissions: false,
+            },
+        );
+        let few = name_width(
+            600.0,
+            Columns {
+                modified: false,
+                permissions: false,
+            },
+        );
+        assert!(all < some && some < few, "{all} {some} {few}");
+        assert_eq!(
+            all,
+            600.0 - SIZE_WIDTH - MODIFIED_WIDTH - PERMISSIONS_WIDTH - NAME_CHROME
+        );
+        assert_eq!(name_width(10.0, ALL), 0.0);
+    }
+
+    #[test]
     fn columns_drop_permissions_then_modified() {
         // 1280 px window: both panes ~512 px, everything fits.
         assert_eq!(columns(pane_width(1280.0), Side::Remote), ALL);
@@ -204,33 +327,79 @@ mod tests {
         }
     }
 
-    /// The Portuguese labels are wider: the remote toolbar keeps its hints at the default
-    /// window (512 px panes, as measured) but drops them from a ~1240 px window, where
-    /// "Permissões…" would be cut.
+    /// The Portuguese labels are wider: the remote toolbar needs more room for its hints
+    /// and for its labels (Compact), each with a margin.
     #[test]
     fn remote_toolbar_needs_more_room_in_portuguese() {
         crate::i18n::set_language(crate::i18n::Language::PtBr);
-        assert_eq!(toolbar(pane_width(1280.0), Side::Remote), Toolbar::Full);
-        assert_eq!(toolbar(pane_width(1240.0), Side::Remote), Toolbar::Compact);
-        assert_eq!(toolbar(pane_width(1280.0), Side::Local), Toolbar::Full);
+        assert_eq!(
+            toolbar(TOOLBAR_FULL_REMOTE_PT - 1.0, Side::Remote),
+            Toolbar::Compact
+        );
+        assert_eq!(toolbar(TOOLBAR_FULL_REMOTE_PT, Side::Remote), Toolbar::Full);
+        assert_eq!(
+            toolbar(TOOLBAR_NARROW_REMOTE_PT - 1.0, Side::Remote),
+            Toolbar::Trimmed
+        );
+        assert_eq!(
+            toolbar(TOOLBAR_TRIMMED_REMOTE_PT, Side::Remote),
+            Toolbar::Trimmed
+        );
+        assert_eq!(
+            toolbar(TOOLBAR_TRIMMED_REMOTE_PT - 1.0, Side::Remote),
+            Toolbar::Narrow
+        );
+        // The 512 px pane of the default window keeps the main labels in Portuguese too.
+        assert_eq!(toolbar(512.0, Side::Remote), Toolbar::Trimmed);
+        assert_eq!(toolbar(512.0, Side::Local), Toolbar::Full);
+        assert_eq!(
+            toolbar(TOOLBAR_NARROW_REMOTE_PT, Side::Remote),
+            Toolbar::Compact
+        );
+        // English has its own, smaller boundaries.
         crate::i18n::set_language(crate::i18n::Language::En);
+        assert_eq!(
+            toolbar(TOOLBAR_NARROW_REMOTE_PT - 1.0, Side::Remote),
+            Toolbar::Compact
+        );
+        assert_eq!(
+            toolbar(TOOLBAR_FULL_REMOTE_PT - 1.0, Side::Remote),
+            Toolbar::Full
+        );
     }
 
     #[test]
     fn toolbars_and_queue_head_go_compact_when_narrow() {
-        // The remote toolbar has Edit too (Plan 6 Task 8); both keep their key hints at
-        // the default 1280 px window (Plan 6 Task 11), the remote one down to ~1240 px.
-        assert_eq!(toolbar(pane_width(1280.0), Side::Remote), Toolbar::Full);
-        assert_eq!(toolbar(pane_width(1240.0), Side::Remote), Toolbar::Full);
-        assert_eq!(toolbar(pane_width(1200.0), Side::Remote), Toolbar::Compact);
+        // Every button has a 16 px icon, so the hints need wider panes than before.
+        assert_eq!(toolbar(pane_width(1480.0), Side::Remote), Toolbar::Full);
+        assert_eq!(toolbar(pane_width(1440.0), Side::Remote), Toolbar::Compact);
+        assert_eq!(
+            toolbar(TOOLBAR_NARROW_REMOTE, Side::Remote),
+            Toolbar::Compact
+        );
+        assert_eq!(
+            toolbar(TOOLBAR_NARROW_REMOTE - 1.0, Side::Remote),
+            Toolbar::Trimmed
+        );
+        assert_eq!(
+            toolbar(TOOLBAR_TRIMMED_REMOTE - 1.0, Side::Remote),
+            Toolbar::Narrow
+        );
+        assert_eq!(toolbar(pane_width(1180.0), Side::Local), Toolbar::Full);
+        assert_eq!(toolbar(TOOLBAR_NARROW_LOCAL, Side::Local), Toolbar::Compact);
+        assert_eq!(
+            toolbar(TOOLBAR_NARROW_LOCAL - 1.0, Side::Local),
+            Toolbar::Narrow
+        );
+        // The default 1280 px window (512 px panes): the remote side keeps the main labels
+        // (only Permissions and Edit are icons), with the margin the form needs.
+        assert_eq!(toolbar(pane_width(1280.0), Side::Remote), Toolbar::Trimmed);
         assert_eq!(toolbar(pane_width(1280.0), Side::Local), Toolbar::Full);
-        assert_eq!(toolbar(pane_width(1120.0), Side::Remote), Toolbar::Compact);
-        // At the 960 px minimum (352 px panes) both toolbars use the short labels, so
-        // all six remote actions fit unclipped ("Permissions…" was cut there).
+        // At the 960 px minimum (352 px panes) both toolbars are icons only.
         assert_eq!(toolbar(pane_width(960.0), Side::Remote), Toolbar::Narrow);
         assert_eq!(toolbar(pane_width(960.0), Side::Local), Toolbar::Narrow);
         assert!(!Toolbar::Narrow.hints() && !Toolbar::Compact.hints() && Toolbar::Full.hints());
-        assert!(Toolbar::Narrow.short_labels() && !Toolbar::Compact.short_labels());
+        assert!(Toolbar::Narrow.icons_only() && !Toolbar::Compact.icons_only());
         assert!(!compact_queue(1280.0));
         assert!(compact_queue(960.0));
         assert_eq!(center_width(100.0), 0.0);

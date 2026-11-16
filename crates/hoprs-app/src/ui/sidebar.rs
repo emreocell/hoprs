@@ -1,13 +1,18 @@
 //! The 256 px sidebar of mockup v2: filter, Workspaces (expandable, with "Open
 //! workspace"), All sites, the unreadable entries and the footer.
 
-use hoprs_core::{OpenAs, Protocol, Site, Workspace};
-use iced::widget::{button, column, container, row, rule, scrollable, space, text, text_input};
+use hoprs_core::{Error, OpenAs, Protocol, Site, SiteId, Workspace};
+use iced::widget::{
+    button, column, container, hover, row, rule, scrollable, space, text, text_input, tooltip,
+};
 use iced::{Alignment, Element, Length, Padding};
 
-use crate::app::{App, Load, Message};
+use crate::app::{App, ConnStatus, Load, Message, SidebarMsg, SidebarSection, TabState};
+use crate::ui::fit;
+use crate::ui::icons::{self, Icon};
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
+use crate::ui::widgets;
 
 pub const WIDTH: f32 = 256.0;
 pub const SEARCH_HEIGHT: f32 = 32.0;
@@ -48,16 +53,23 @@ pub fn view(app: &App) -> Element<'_, Message> {
     .padding(theme::SPACE_SM);
 
     let footer = row![
-        button(text(strings::import_filezilla()).size(theme::TEXT_XS))
-            .padding(0)
-            .style(theme::button_text)
-            .on_press(Message::OpenImport),
-        button(text(strings::settings()).size(theme::TEXT_XS))
-            .padding(0)
-            .style(theme::button_text)
-            .on_press(Message::OpenSettings),
+        widgets::tool_button(
+            Icon::DownloadSimple,
+            strings::import_filezilla(),
+            None,
+            true,
+            Some(Message::OpenImport),
+        ),
+        space::horizontal(),
+        // The `Ctrl ,` hint joins the tooltip with the shortcut (Plan 13 task 8).
+        widgets::icon_button(
+            Icon::GearSix,
+            strings::settings(),
+            None,
+            Some(Message::OpenSettings),
+        ),
     ]
-    .spacing(theme::SPACE_MD);
+    .align_y(Alignment::Center);
 
     let body: Element<'_, Message> = match &app.load {
         Load::Loading => skeleton(),
@@ -77,7 +89,16 @@ pub fn view(app: &App) -> Element<'_, Message> {
         ]
         .into(),
         Load::Loaded => {
-            let mut lists = column![workspaces(app), all_sites(app)];
+            let mut lists = column![];
+            if !app.settings.workspaces.hidden {
+                lists = lists.push(workspaces(app));
+            }
+            if !app.settings.sites.hidden {
+                lists = lists.push(all_sites(app));
+            }
+            if app.settings.workspaces.hidden && app.settings.sites.hidden {
+                lists = lists.push(column![group_rule(), note(strings::sidebar_all_hidden())]);
+            }
             if !app.unreadable.is_empty() || app.sidebar_error.is_some() {
                 lists = lists.push(unreadable(app));
             }
@@ -89,7 +110,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         search,
         container(body).height(Length::Fill),
         group_rule(),
-        container(footer).padding(Padding::from([theme::SPACE_SM, theme::SPACE_MD])),
+        container(footer).padding(Padding::from([theme::SPACE_2XS, theme::SPACE_SM])),
     ]
     .height(Length::Fill);
 
@@ -121,38 +142,196 @@ fn action(label: &str, on_press: Message) -> Element<'_, Message> {
         .into()
 }
 
-/// A sidebar group: rule, heading with "+ New", then its body.
-fn group<'a>(title: &'a str, on_new: Message, body: Element<'a, Message>) -> Element<'a, Message> {
+/// A sidebar group: rule, heading (fold caret, title, then "+" to create, or the count
+/// when folded), then its body unless folded.
+fn group<'a>(
+    section: SidebarSection,
+    collapsed: bool,
+    title: &'a str,
+    count: usize,
+    new_label: &'a str,
+    on_new: Message,
+    body: Element<'a, Message>,
+) -> Element<'a, Message> {
+    let caret = widgets::icon_button_small(
+        if collapsed {
+            Icon::CaretRight
+        } else {
+            Icon::CaretDown
+        },
+        if collapsed {
+            strings::sidebar_expand()
+        } else {
+            strings::sidebar_collapse()
+        },
+        None,
+        Some(Message::Sidebar(SidebarMsg::ToggleCollapsed(section))),
+    );
+    let end: Element<'a, Message> = if collapsed {
+        text(count.to_string())
+            .size(theme::TEXT_XS)
+            .color(palette().muted)
+            .into()
+    } else {
+        widgets::icon_button_small(Icon::Plus, new_label, None, Some(on_new))
+    };
     let head = row![
+        caret,
         text(title).size(theme::TEXT_XS).color(palette().muted),
         space::horizontal(),
-        button(text(strings::new()).size(theme::TEXT_XS))
-            .padding(Padding::from([0.0, theme::SPACE_2XS]))
-            .style(theme::button_text)
-            .on_press(on_new),
+        end,
     ]
+    .spacing(theme::SPACE_2XS)
     .align_y(Alignment::Center)
-    .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_MD]));
+    .padding(Padding::from([0.0, theme::SPACE_SM]));
 
+    let content: Element<'a, Message> = if collapsed {
+        head.into()
+    } else {
+        column![head, body].spacing(theme::SPACE_2XS).into()
+    };
     column![
         group_rule(),
-        container(column![head, body].spacing(theme::SPACE_2XS))
-            .padding(Padding::from([theme::SPACE_XS, 0.0])),
+        container(content).padding(Padding::from([theme::SPACE_XS, 0.0])),
     ]
     .into()
 }
+/// How a site's connection reads in the sidebar.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SiteState<'a> {
+    /// No connection record: the site has no tabs.
+    Idle,
+    Connecting,
+    Connected,
+    Failed(&'a Error),
+}
 
-/// A site row: name on the left, protocol tag in mono on the right; a click connects.
-/// With `edit`, a muted "Edit" after it opens the site form without connecting.
-fn site_row(site: &Site, edit: bool) -> Element<'_, Message> {
+/// The state of `site`'s connection. Reads the record itself, not [`App::conn`], which
+/// answers "connecting" for a site without tabs.
+pub fn site_state<'a>(app: &'a App, site: &SiteId) -> SiteState<'a> {
+    let Some(conn) = app.conns.get(site) else {
+        return SiteState::Idle;
+    };
+    match &conn.state {
+        TabState::Failed(failure) => SiteState::Failed(&failure.error),
+        _ => match conn.conn_status() {
+            ConnStatus::Connected => SiteState::Connected,
+            ConnStatus::Disconnected(error) => SiteState::Failed(error),
+            _ => SiteState::Connecting,
+        },
+    }
+}
+
+/// The icon of a site by what it opens: a terminal for SSH, a drive for FTP.
+pub fn site_icon(site: &Site) -> Icon {
+    match site.protocol {
+        Protocol::Ssh => Icon::TerminalWindow,
+        Protocol::Ftp | Protocol::FtpsExplicit | Protocol::FtpsImplicit => Icon::HardDrives,
+    }
+}
+
+/// The icon, its colour and the name's colour of a site row by `state`. Connecting reads
+/// as busy (arrows, name dimmed) so it differs from Idle.
+fn state_look(site: &Site, state: SiteState<'_>) -> (Icon, iced::Color, iced::Color) {
+    let p = palette();
+    match state {
+        SiteState::Idle => (site_icon(site), p.muted, p.ink_2),
+        SiteState::Connecting => (Icon::ArrowsClockwise, p.muted, p.ink_2),
+        SiteState::Connected => (Icon::PlugsConnected, p.success, p.ink),
+        SiteState::Failed(_) => (Icon::Warning, p.error, p.ink_2),
+    }
+}
+
+/// `full` on one clipped line cut to `width`; the whole name in a tooltip only when cut.
+fn named<'a>(
+    full: &'a str,
+    width: f32,
+    font: iced::Font,
+    color: iced::Color,
+) -> Element<'a, Message> {
+    let shown = fit::ellipsize(full, width, theme::TEXT_SM, fit::INTER_ADVANCE);
+    let cut = matches!(shown, std::borrow::Cow::Owned(_));
+    let line: Element<'a, Message> = container(
+        text(shown)
+            .font(font)
+            .size(theme::TEXT_SM)
+            .color(color)
+            .wrapping(text::Wrapping::None),
+    )
+    .width(Length::Fill)
+    .clip(true)
+    .into();
+    if cut {
+        widgets::tip(line, full, None)
+    } else {
+        line
+    }
+}
+
+/// Horizontal room around a site row in the All sites list: the list's and the button's
+/// padding.
+const ROW_CHROME: f32 = 4.0 * theme::SPACE_XS;
+/// The same inside an open workspace: the nested list's indent, rule and padding.
+const NESTED_CHROME: f32 =
+    theme::SPACE_LG + 3.0 * theme::SPACE_XS + theme::HAIRLINE + 2.0 * theme::SPACE_XS;
+
+/// Room kept right of a row for the scrollbar.
+const SCROLL_GUTTER: f32 = 10.0;
+
+/// The pencil that shows over a hovered row (right-aligned, on a patch that hides what is
+/// under it) and opens its form.
+fn hover_edit<'a>(row_view: Element<'a, Message>, on_edit: Message) -> Element<'a, Message> {
+    let pencil = container(widgets::icon_button(
+        Icon::PencilSimple,
+        strings::edit(),
+        None,
+        Some(on_edit),
+    ))
+    .padding(Padding::from([0.0, theme::SPACE_2XS]))
+    .style(theme::hover_patch);
+    hover(
+        row_view,
+        container(pencil)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_right(Length::Fill)
+            .center_y(Length::Fill),
+    )
+}
+
+/// A site row: state icon, name, protocol tag in mono on the right; a click connects.
+/// With `edit`, a pencil shows over the row while it is hovered and opens the site form.
+/// `chrome` is the horizontal room the row's surroundings take, for fitting the name.
+fn site_row<'a>(app: &'a App, site: &'a Site, edit: bool, chrome: f32) -> Element<'a, Message> {
+    let p = palette();
+    let state = site_state(app, &site.id);
+    let tag = protocol_tag(site);
+    let tag_width = tag.chars().count() as f32 * theme::TEXT_TAG * fit::MONO_ADVANCE;
+    let name_width = (WIDTH
+        - theme::HAIRLINE
+        - chrome
+        - icons::SMALL
+        - 2.0 * theme::SPACE_XS
+        - tag_width
+        - SCROLL_GUTTER)
+        .max(0.0);
+    let (glyph, glyph_color, name_color) = state_look(site, state);
+    let glyph = icons::icon(glyph, icons::SMALL).color(glyph_color);
+    let glyph: Element<'a, Message> = match state {
+        SiteState::Idle => glyph.into(),
+        SiteState::Connecting => state_tip(glyph, strings::connecting().to_owned()),
+        SiteState::Connected => state_tip(glyph, strings::connected().to_owned()),
+        SiteState::Failed(error) => state_tip(glyph, strings::error(error)),
+    };
+    let name = named(&site.name, name_width, theme::INTER, name_color);
     let open = button(
-        // The tag never wraps: a long name wraps instead.
         row![
-            text(&site.name).size(theme::TEXT_SM).width(Length::Fill),
-            text(protocol_tag(site))
+            glyph,
+            name,
+            text(tag)
                 .font(theme::MONO)
                 .size(theme::TEXT_TAG)
-                .color(palette().muted)
+                .color(p.muted)
                 .wrapping(text::Wrapping::None),
         ]
         .spacing(theme::SPACE_XS)
@@ -162,18 +341,22 @@ fn site_row(site: &Site, edit: bool) -> Element<'_, Message> {
     .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
     .style(theme::row)
     .on_press(Message::ConnectSite(site.id.clone()));
-    if !edit {
-        return open.into();
+    if edit {
+        hover_edit(open.into(), Message::EditSite(site.id.clone()))
+    } else {
+        open.into()
     }
-    row![
-        open,
-        button(text(strings::edit()).size(theme::TEXT_XS))
-            .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_2XS]))
-            .style(theme::button_text)
-            .on_press(Message::EditSite(site.id.clone())),
-    ]
-    .spacing(theme::SPACE_3XS)
-    .align_y(Alignment::Center)
+}
+
+/// `glyph` with `tip` as its tooltip.
+fn state_tip<'a>(glyph: iced::widget::Text<'a>, tip: String) -> Element<'a, Message> {
+    tooltip(
+        glyph,
+        container(text(tip).size(theme::TEXT_XS))
+            .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
+            .style(theme::dialog_box),
+        tooltip::Position::Bottom,
+    )
     .into()
 }
 
@@ -219,28 +402,49 @@ fn workspaces(app: &App) -> Element<'_, Message> {
             .spacing(theme::SPACE_3XS)
             .into()
     };
-    group(strings::workspaces(), Message::NewWorkspace, body)
+    group(
+        SidebarSection::Workspaces,
+        app.settings.workspaces.collapsed,
+        strings::workspaces(),
+        app.workspaces.len(),
+        strings::workspace_form_new(),
+        Message::NewWorkspace,
+        body,
+    )
 }
 
 fn workspace<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
     let open = app.expanded.contains(&ws.id);
     let p = palette();
+    let count = strings::workspace_site_count(
+        ws.sites
+            .iter()
+            .filter(|entry| app.site(&entry.site).is_some())
+            .count(),
+        ws.sites.len(),
+    );
+    let count_width = count.chars().count() as f32 * theme::TEXT_XS * fit::INTER_ADVANCE;
+    let name_width = (WIDTH
+        - theme::HAIRLINE
+        - 4.0 * theme::SPACE_XS
+        - icons::SMALL
+        - 2.0 * theme::SPACE_XS
+        - count_width
+        - SCROLL_GUTTER)
+        .max(0.0);
     let head = button(
         row![
-            text(&ws.name)
-                .font(theme::INTER_MEDIUM)
-                .color(if open { p.ink } else { p.ink_2 })
-                .width(Length::Fill),
-            text(strings::workspace_site_count(
-                ws.sites
-                    .iter()
-                    .filter(|entry| app.site(&entry.site).is_some())
-                    .count(),
-                ws.sites.len(),
-            ))
-            .size(theme::TEXT_XS)
-            .color(p.muted)
-            .wrapping(text::Wrapping::None),
+            icons::icon(Icon::Stack, icons::SMALL).color(p.muted),
+            named(
+                &ws.name,
+                name_width,
+                theme::INTER_MEDIUM,
+                if open { p.ink } else { p.ink_2 }
+            ),
+            text(count)
+                .size(theme::TEXT_XS)
+                .color(p.muted)
+                .wrapping(text::Wrapping::None),
         ]
         .spacing(theme::SPACE_XS)
         .align_y(Alignment::Center),
@@ -253,6 +457,7 @@ fn workspace<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
         theme::row
     })
     .on_press(Message::ToggleWorkspace(ws.id.clone()));
+    let head = hover_edit(head.into(), Message::EditWorkspace(ws.id.clone()));
     let head = container(head).padding(Padding::from([0.0, theme::SPACE_XS]));
     if !open {
         return head.into();
@@ -260,7 +465,7 @@ fn workspace<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
 
     let sites = column(ws.sites.iter().map(|entry| {
         match app.site(&entry.site) {
-            Some(site) => site_row(site, false),
+            Some(site) => site_row(app, site, false, NESTED_CHROME),
             None => container(
                 text(strings::site_missing())
                     .size(theme::TEXT_SM)
@@ -293,15 +498,9 @@ fn workspace<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
     .padding(0)
     .style(theme::button_primary)
     .on_press(Message::OpenWorkspace(ws.id.clone()));
-    let actions = row![
-        open_button,
-        button(text(strings::edit()).size(theme::TEXT_XS))
-            .padding(Padding::from([0.0, theme::SPACE_2XS]))
-            .style(theme::button_text)
-            .on_press(Message::EditWorkspace(ws.id.clone())),
-    ]
-    .spacing(theme::SPACE_XS)
-    .align_y(Alignment::Center);
+    let actions = row![open_button]
+        .spacing(theme::SPACE_XS)
+        .align_y(Alignment::Center);
     // The open workspace can be closed: its tabs are saved, then closed.
     let actions = if app.open_workspace.as_ref() == Some(&ws.id) {
         actions.push(
@@ -341,11 +540,23 @@ fn all_sites(app: &App) -> Element<'_, Message> {
     } else if visible.is_empty() {
         note(strings::no_matches())
     } else {
-        container(column(visible.into_iter().map(|site| site_row(site, true))))
-            .padding(Padding::from([0.0, theme::SPACE_XS]))
-            .into()
+        container(column(
+            visible
+                .into_iter()
+                .map(|site| site_row(app, site, true, ROW_CHROME)),
+        ))
+        .padding(Padding::from([0.0, theme::SPACE_XS]))
+        .into()
     };
-    group(strings::all_sites(), Message::NewSite, body)
+    group(
+        SidebarSection::Sites,
+        app.settings.sites.collapsed,
+        strings::all_sites(),
+        app.sites.len(),
+        strings::site_form_new(),
+        Message::NewSite,
+        body,
+    )
 }
 
 /// Entries kept on disk but unreadable here, and the way to look at the file.
@@ -379,4 +590,68 @@ fn unreadable(app: &App) -> Element<'_, Message> {
         container(list).padding(Padding::from([theme::SPACE_SM, theme::SPACE_MD])),
     ]
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use hoprs_core::ErrorKind;
+
+    use super::*;
+    use crate::app::SiteConn;
+    use crate::backend::{ConnectError, Connected, SessionId};
+
+    #[test]
+    fn site_state_per_connection() {
+        let mut app = App::new();
+        let id = SiteId::new();
+        assert_eq!(site_state(&app, &id), SiteState::Idle);
+
+        app.conns.insert(id.clone(), SiteConn::connecting());
+        assert_eq!(site_state(&app, &id), SiteState::Connecting);
+
+        app.conns.get_mut(&id).unwrap().state = TabState::Connected(Connected {
+            session: SessionId(1),
+            keyring_unavailable: false,
+        });
+        assert_eq!(site_state(&app, &id), SiteState::Connected);
+
+        let error = Error::new(ErrorKind::Protocol, "refused");
+        app.conns.get_mut(&id).unwrap().state = TabState::Failed(ConnectError {
+            session: None,
+            error: error.clone(),
+            keyring_unavailable: false,
+        });
+        assert_eq!(site_state(&app, &id), SiteState::Failed(&error));
+    }
+
+    #[test]
+    fn a_name_is_cut_only_when_it_does_not_fit() {
+        let cut = |name, width| {
+            matches!(
+                fit::ellipsize(name, width, theme::TEXT_SM, fit::INTER_ADVANCE),
+                std::borrow::Cow::Owned(_)
+            )
+        };
+        assert!(!cut("short", 200.0));
+        assert!(cut("a very long site name that cannot fit", 60.0));
+    }
+
+    #[test]
+    fn connecting_looks_busy_not_idle() {
+        let site = Site::new("s", "h", "u", Protocol::Ssh);
+        let idle = state_look(&site, SiteState::Idle);
+        let connecting = state_look(&site, SiteState::Connecting);
+        assert_eq!(idle.0, Icon::TerminalWindow);
+        assert_eq!(connecting.0, Icon::ArrowsClockwise);
+        assert_ne!(idle.0, connecting.0);
+    }
+
+    #[test]
+    fn site_icon_by_protocol() {
+        let icon = |protocol| site_icon(&Site::new("s", "h", "u", protocol));
+        assert_eq!(icon(Protocol::Ssh), Icon::TerminalWindow);
+        assert_eq!(icon(Protocol::Ftp), Icon::HardDrives);
+        assert_eq!(icon(Protocol::FtpsExplicit), Icon::HardDrives);
+        assert_eq!(icon(Protocol::FtpsImplicit), Icon::HardDrives);
+    }
 }

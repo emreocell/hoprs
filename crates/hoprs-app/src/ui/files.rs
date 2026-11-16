@@ -17,12 +17,16 @@ use crate::app::{
 };
 use crate::backend::Side;
 use crate::ui::fit::{self, Columns, MODIFIED_WIDTH, PERMISSIONS_WIDTH, SIZE_WIDTH};
+use crate::ui::icons::{self, Icon};
 use crate::ui::theme::{self, palette};
 use crate::ui::virtual_list::{self, ROW_HEIGHT};
+use crate::ui::widgets;
 use crate::ui::{file_actions, format, strings};
 
 /// The path bar (mockup `.path`: 38 px).
 const PATH_HEIGHT: f32 = 38.0;
+/// Width of a selected row's bar.
+const SELECTION_BAR: f32 = 2.0;
 /// Rows of the loading skeleton.
 const SKELETON_ROWS: usize = 8;
 
@@ -62,6 +66,30 @@ pub fn breadcrumb_segments(path: &RemotePath, home: Option<&RemotePath>) -> Vec<
         });
     }
     crumbs
+}
+
+/// Which breadcrumb segments fit `max_chars` characters: indices in order, one `None`
+/// for the elided middle. A segment costs its label plus one separator, the gap two; the
+/// first and last always stay, then segments are added from the end while they fit.
+pub fn fit_crumbs(crumbs: &[Crumb], max_chars: usize) -> Vec<Option<usize>> {
+    let cost = |i: usize| crumbs[i].label.chars().count() + 1;
+    let n = crumbs.len();
+    let total: usize = (0..n).map(cost).sum();
+    if n <= 2 || total <= max_chars {
+        return (0..n).map(Some).collect();
+    }
+    let mut used = cost(0) + cost(n - 1) + 2;
+    let mut from = n - 1;
+    while from > 1 && used + cost(from - 1) <= max_chars {
+        from -= 1;
+        used += cost(from);
+    }
+    let mut out = vec![Some(0)];
+    if from > 1 {
+        out.push(None);
+    }
+    out.extend((from..n).map(Some));
+    out
 }
 
 /// The id of a pane's scrollable, for [`crate::app::Effect::ScrollPane`].
@@ -278,10 +306,12 @@ pub(crate) fn lost_banner<'a>(app: &'a App, tab: &'a Tab) -> Option<Element<'a, 
     } else {
         strings::reconnect()
     };
-    let reconnect = button(text(label))
-        .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
-        .style(theme::button_outline)
-        .on_press_maybe((!conn.reconnecting).then_some(Message::ReconnectSession(tab.id)));
+    let reconnect = widgets::outlined(
+        button(text(label))
+            .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
+            .on_press_maybe((!conn.reconnecting).then_some(Message::ReconnectSession(tab.id))),
+        !conn.reconnecting,
+    );
     Some(
         container(
             row![reason, space::horizontal(), reconnect]
@@ -320,11 +350,11 @@ fn pane<'a>(
     let conn = app.conn(&tab.site);
     let body: Element<'a, Message> = match tab.pane_status(conn, side) {
         PaneStatus::Loading => skeleton(cols),
-        PaneStatus::Full => list(tab.id, side, pane, this_year, focused, cols),
+        PaneStatus::Full => list(tab.id, side, pane, this_year, focused, cols, width),
         PaneStatus::Empty => column![
             // `..` stays reachable from an empty folder.
             pane.has_up()
-                .then(|| file_row(tab.id, side, pane, 0, this_year, focused, cols)),
+                .then(|| file_row(tab.id, side, pane, 0, this_year, focused, cols, width)),
             centered(text(strings::empty_folder()).color(palette().muted).into()),
         ]
         .into(),
@@ -337,7 +367,7 @@ fn pane<'a>(
             .width(Length::Fill)
             .height(theme::HAIRLINE)
             .style(theme::pane_focus(focused)),
-        path_bar(place, pane, home, msg),
+        path_bar(place, side, pane, home, width, msg),
         hrule(),
         file_actions::toolbar(tab, conn, side, fit::toolbar(width, side)),
         hrule(),
@@ -383,41 +413,90 @@ fn centered(content: Element<'_, Message>) -> Element<'_, Message> {
         .into()
 }
 
-/// "Local" or the site's name, then the clickable breadcrumb in mono.
+/// Where the separators go between the kept crumbs of [`fit_crumbs`]: `(separator
+/// before, item)` for each. The root "/" is itself the separator after it, so none is
+/// drawn right after it (`/…/src`, `/home`).
+fn crumb_layout(kept: &[Option<usize>], root_first: bool) -> Vec<(bool, Option<usize>)> {
+    kept.iter()
+        .enumerate()
+        .map(|(n, entry)| {
+            let after_root = root_first && n == 1;
+            (n > 0 && !after_root, *entry)
+        })
+        .collect()
+}
+
+/// The icon of a pane's place: the desktop for Local, a drive for a remote (an SSH site's
+/// files pane too: it is files, not a terminal).
+fn place_icon(side: Side) -> Icon {
+    match side {
+        Side::Local => Icon::Desktop,
+        Side::Remote => Icon::HardDrives,
+    }
+}
+
+/// "Local" or the site's name (with its icon), then the clickable breadcrumb in mono,
+/// elided in the middle when the pane is too narrow for it.
 fn path_bar<'a>(
     place: &'a str,
+    side: Side,
     pane: &'a Pane,
     home: Option<&RemotePath>,
+    width: f32,
     msg: impl Fn(PaneMsg) -> Message,
 ) -> Element<'a, Message> {
     let p = palette();
+    let all = breadcrumb_segments(&pane.path, home);
+    // Room for the crumbs: the pane minus its padding, the icon and the place name.
+    let place_px = place.chars().count() as f32 * theme::TEXT_XS * fit::INTER_ADVANCE;
+    let room = width
+        - 2.0 * theme::SPACE_MD
+        - icons::ROW
+        - place_px
+        - 2.0 * theme::SPACE_SM
+        - theme::SPACE_2XS;
+    let max_chars = (room / (theme::TEXT_MONO * fit::MONO_ADVANCE)).max(0.0) as usize;
+    let kept = fit_crumbs(&all, max_chars);
+    let root_first = crumb_is_root(&pane.path, home);
     let mut crumbs = row![].align_y(Alignment::Center);
-    for (i, crumb) in breadcrumb_segments(&pane.path, home)
-        .into_iter()
-        .enumerate()
-    {
-        // The root "/" is itself the separator before the first folder.
-        if i > 0 && !(i == 1 && crumb_is_root(&pane.path, home)) {
-            crumbs = crumbs.push(
-                text(strings::path_separator())
+    let separator = || {
+        text(strings::path_separator())
+            .font(theme::MONO)
+            .size(theme::TEXT_MONO)
+            .color(p.rule_2)
+    };
+    for (sep, entry) in crumb_layout(&kept, root_first) {
+        if sep {
+            crumbs = crumbs.push(separator());
+        }
+        let Some(i) = entry else {
+            // The elided middle: "…" with the whole path on hover.
+            crumbs = crumbs.push(widgets::tip(
+                text(strings::ellipsis())
                     .font(theme::MONO)
                     .size(theme::TEXT_MONO)
-                    .color(p.rule_2),
-            );
-        }
+                    .color(p.muted),
+                pane.path.as_str(),
+                None,
+            ));
+            continue;
+        };
+        let crumb = &all[i];
         crumbs = crumbs.push(
             button(
-                text(crumb.label)
+                text(crumb.label.clone())
                     .font(theme::MONO)
                     .size(theme::TEXT_MONO)
                     .wrapping(text::Wrapping::None),
             )
             .padding(Padding::from([0.0, theme::SPACE_3XS]))
             .style(theme::crumb)
-            .on_press(msg(PaneMsg::Navigate(crumb.target))),
+            .on_press(msg(PaneMsg::Navigate(crumb.target.clone()))),
         );
     }
+    let place_icon = place_icon(side);
     row![
+        icons::icon(place_icon, icons::ROW).color(p.muted),
         text(place)
             .size(theme::TEXT_XS)
             .color(p.muted)
@@ -429,7 +508,7 @@ fn path_bar<'a>(
             .anchor_right()
             .width(Length::Fill),
     ]
-    .spacing(theme::SPACE_SM)
+    .spacing(theme::SPACE_2XS)
     .align_y(Alignment::Center)
     .height(PATH_HEIGHT)
     .padding(Padding::ZERO.left(theme::SPACE_MD).right(theme::SPACE_MD))
@@ -476,7 +555,15 @@ fn header<'a>(
         });
         button(label)
             .width(width)
-            .padding(Padding::from([theme::SPACE_XS, theme::SPACE_MD]))
+            .padding(Padding {
+                left: if key == SortKey::Name {
+                    // In line with the names: past the selection bar and the kind icon.
+                    theme::SPACE_MD + SELECTION_BAR + icons::ROW + theme::SPACE_XS
+                } else {
+                    theme::SPACE_MD
+                },
+                ..Padding::from([theme::SPACE_XS, theme::SPACE_MD])
+            })
             .style(theme::header_cell)
             .on_press(msg(PaneMsg::Sort(key)))
     };
@@ -519,6 +606,7 @@ fn list<'a>(
     this_year: i32,
     focused: bool,
     cols: Columns,
+    width: f32,
 ) -> Element<'a, Message> {
     virtual_list::view(
         scroll_id(tab, side),
@@ -532,12 +620,13 @@ fn list<'a>(
                 viewport_h: viewport.bounds().height,
             },
         },
-        move |i| file_row(tab, side, pane, i, this_year, focused, cols),
+        move |i| file_row(tab, side, pane, i, this_year, focused, cols, width),
     )
 }
 
 /// One 30 px row: click selects, double click enters, hover highlights. The entry being
 /// renamed shows the name editor in its name cell.
+#[allow(clippy::too_many_arguments)]
 fn file_row<'a>(
     tab: TabId,
     side: Side,
@@ -546,6 +635,7 @@ fn file_row<'a>(
     this_year: i32,
     focused: bool,
     cols: Columns,
+    width: f32,
 ) -> Element<'a, Message> {
     let p = palette();
     let msg = move |msg: PaneMsg| Message::Pane { tab, side, msg };
@@ -599,17 +689,41 @@ fn file_row<'a>(
         }
         _ => None,
     };
+    let selected = pane.selection.contains(index);
+    // The kind icon: muted, ink when the row is selected.
+    let kind_icon = match pane.row(index) {
+        Some(Row::Entry(entry)) => icons::for_entry(&entry.name, entry.kind),
+        _ => Icon::ArrowBendLeftUp,
+    };
+    // Cut to the column with "…" (the folder's "/" keeps its character), the whole name
+    // on hover only when cut.
+    let mut room = fit::name_width(width, cols);
+    if is_dir && !up {
+        room -= theme::TEXT_MONO * fit::MONO_ADVANCE;
+    }
+    let shown = fit::ellipsize(name, room, theme::TEXT_MONO, fit::MONO_ADVANCE);
+    let cut = matches!(shown, std::borrow::Cow::Owned(_));
     // Folders: medium weight in ink, with a muted "/" (mockup `.dir::after`).
+    let name_text: Element<'a, Message> = text(shown)
+        .font(if is_dir {
+            theme::MONO_MEDIUM
+        } else {
+            theme::MONO
+        })
+        .size(theme::TEXT_MONO)
+        .wrapping(text::Wrapping::None)
+        .into();
+    let name_text = if cut {
+        widgets::tip(name_text, name, None)
+    } else {
+        name_text
+    };
     let mut name_cell = row![
-        text(name)
-            .font(if is_dir {
-                theme::MONO_MEDIUM
-            } else {
-                theme::MONO
-            })
-            .size(theme::TEXT_MONO)
-            .wrapping(text::Wrapping::None)
-    ];
+        icons::icon(kind_icon, icons::ROW).color(if selected { p.ink } else { p.muted }),
+        name_text
+    ]
+    .spacing(theme::SPACE_XS)
+    .align_y(Alignment::Center);
     if is_dir && !up {
         name_cell = name_cell.push(
             text(strings::path_separator())
@@ -635,7 +749,19 @@ fn file_row<'a>(
             .into(),
         None => cell(name_cell.into(), Length::Fill, false).into(),
     };
+    // The selection bar, or the same room transparent so the text never shifts.
+    let bar = container(space())
+        .width(SELECTION_BAR)
+        .height(Length::Fill)
+        .style(move |t: &iced::Theme| {
+            if selected {
+                theme::selection_bar(focused)(t)
+            } else {
+                container::Style::default()
+            }
+        });
     let mut cells = row![
+        bar,
         name_cell,
         cell(size_text.into(), Length::Fixed(SIZE_WIDTH), true),
     ];
@@ -656,14 +782,13 @@ fn file_row<'a>(
             false,
         ));
     }
-    let selected = pane.selection.contains(index);
     let hovered = pane.hovered == Some(index);
     let cursor = focused && pane.selection.cursor == Some(index);
     mouse_area(
         container(cells)
             .width(Length::Fill)
             .height(ROW_HEIGHT)
-            .style(theme::file_row(selected, hovered, cursor)),
+            .style(theme::file_row(selected, hovered, cursor, false)),
     )
     .on_press(msg(PaneMsg::Click(index)))
     .on_double_click(msg(PaneMsg::Open(index)))
@@ -794,6 +919,12 @@ pub(crate) fn not_connected<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Messa
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn place_icon_is_a_drive_for_every_remote() {
+        assert_eq!(place_icon(Side::Local), Icon::Desktop);
+        assert_eq!(place_icon(Side::Remote), Icon::HardDrives);
+    }
+
     use super::*;
 
     fn path(s: &str) -> RemotePath {
@@ -806,6 +937,50 @@ mod tests {
             .into_iter()
             .map(|c| (c.label, c.target.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn fit_crumbs_keeps_ends() {
+        let labels = [
+            "/",
+            "home",
+            "me",
+            "projects",
+            "web-app",
+            "src",
+            "components",
+        ];
+        let crumbs: Vec<Crumb> = labels
+            .iter()
+            .map(|l| Crumb {
+                label: (*l).to_owned(),
+                target: RemotePath::root(),
+            })
+            .collect();
+        assert_eq!(fit_crumbs(&crumbs, 20), [Some(0), None, Some(5), Some(6)]);
+        let all = fit_crumbs(&crumbs, 60);
+        assert_eq!(all.len(), 7);
+        assert!(all.iter().all(Option::is_some));
+        assert_eq!(fit_crumbs(&crumbs[..2], 1), [Some(0), Some(1)]);
+    }
+
+    #[test]
+    fn crumb_layout_has_no_double_slash_after_root() {
+        // `/…/src`: the root, the gap, then a separator only before src.
+        assert_eq!(
+            crumb_layout(&[Some(0), None, Some(5)], true),
+            [(false, Some(0)), (false, None), (true, Some(5))]
+        );
+        // `/home/me`.
+        assert_eq!(
+            crumb_layout(&[Some(0), Some(1), Some(2)], true),
+            [(false, Some(0)), (false, Some(1)), (true, Some(2))]
+        );
+        // From `~`: separators everywhere but first.
+        assert_eq!(
+            crumb_layout(&[Some(0), Some(1)], false),
+            [(false, Some(0)), (true, Some(1))]
+        );
     }
 
     fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {

@@ -35,13 +35,15 @@ pub const MONO_MEDIUM: Font = Font {
     ..MONO
 };
 
-/// The embedded font files (SIL OFL 1.1, texts next to them).
-pub const FONTS: [&[u8]; 5] = [
+/// The embedded font files. Inter and JetBrains Mono are SIL OFL 1.1, Phosphor (icons) is
+/// MIT; the licence texts sit next to them.
+pub const FONTS: [&[u8]; 6] = [
     include_bytes!("../../assets/fonts/Inter-Regular.ttf"),
     include_bytes!("../../assets/fonts/Inter-Medium.ttf"),
     include_bytes!("../../assets/fonts/Inter-SemiBold.ttf"),
     include_bytes!("../../assets/fonts/JetBrainsMono-Regular.ttf"),
     include_bytes!("../../assets/fonts/JetBrainsMono-Medium.ttf"),
+    super::icons::ICON_BYTES,
 ];
 
 /// Type scale (mockup: 0.75rem, 0.8125rem, 0.9375rem, mono 0.78rem,
@@ -81,6 +83,10 @@ pub struct Palette {
     /// Selected rows.
     pub accent_wash: Color,
     pub error: Color,
+    /// Success state (a finished transfer, a matching file).
+    pub success: Color,
+    /// Text and icons of disabled controls: about 3:1 on `paper`.
+    pub disabled: Color,
 }
 
 impl Palette {
@@ -100,6 +106,8 @@ impl Palette {
             accent_ink: grey(0.14),
             accent_wash: grey(0.24),
             error: oklch_to_rgb(0.70, 0.14, 25.0),
+            success: oklch_to_rgb(0.72, 0.13, 150.0),
+            disabled: grey(0.48),
         }
     }
 }
@@ -150,7 +158,7 @@ pub fn theme() -> Theme {
             background: p.paper,
             text: p.ink,
             primary: p.accent,
-            success: p.ink,
+            success: p.success,
             warning: p.error,
             danger: p.error,
         },
@@ -181,7 +189,7 @@ pub fn button_primary(_: &Theme, status: button::Status) -> button::Style {
         button::Status::Active => flat_button(Some(p.accent), p.accent_ink),
         button::Status::Hovered => flat_button(Some(p.ink_2), p.accent_ink),
         button::Status::Pressed => flat_button(Some(p.muted), p.accent_ink),
-        button::Status::Disabled => flat_button(None, p.rule_2),
+        button::Status::Disabled => flat_button(None, p.disabled),
     }
 }
 
@@ -191,7 +199,7 @@ pub fn button_text(_: &Theme, status: button::Status) -> button::Style {
     match status {
         button::Status::Active => flat_button(None, p.muted),
         button::Status::Hovered | button::Status::Pressed => flat_button(None, p.ink),
-        button::Status::Disabled => flat_button(None, p.rule_2),
+        button::Status::Disabled => flat_button(None, p.disabled),
     }
 }
 
@@ -201,7 +209,7 @@ pub fn button_outline(_: &Theme, status: button::Status) -> button::Style {
     let (text_color, border) = match status {
         button::Status::Active => (p.muted, p.rule),
         button::Status::Hovered | button::Status::Pressed => (p.ink, p.rule_2),
-        button::Status::Disabled => (p.rule_2, p.rule),
+        button::Status::Disabled => (p.disabled, p.rule),
     };
     button::Style {
         border: Border {
@@ -211,6 +219,16 @@ pub fn button_outline(_: &Theme, status: button::Status) -> button::Style {
         },
         ..flat_button(None, text_color)
     }
+}
+
+/// [`button_outline`] for a button wrapped in `dashed`: disabled, its own border is
+/// transparent (same width, so nothing shifts) and the dashes are the outline.
+pub fn button_outline_dashed(theme: &Theme, status: button::Status) -> button::Style {
+    let mut style = button_outline(theme, status);
+    if status == button::Status::Disabled {
+        style.border.color = Color::TRANSPARENT;
+    }
+    style
 }
 
 /// A session tab in the top bar; the active one also gets the accent
@@ -296,6 +314,12 @@ fn surface(background: Color) -> container::Style {
         shadow: Shadow::default(),
         ..container::Style::default()
     }
+}
+
+/// The patch behind the pencil that shows on a hovered sidebar row: the row's hover
+/// ground, hiding what it covers.
+pub fn hover_patch(_: &Theme) -> container::Style {
+    surface(palette().paper_3)
 }
 
 /// The window ground.
@@ -425,20 +449,30 @@ pub fn header_cell(_: &Theme, status: button::Status) -> button::Style {
     }
 }
 
-/// A file row: hovered on `paper_2`, selected on the accent wash (mockup `tbody tr`).
-/// The keyboard cursor of the focused pane gets a 1 px `muted` outline, which shows on
-/// selected and plain rows alike.
+/// A file row: hovered on `paper_2`, selected on `paper_3` (with the [`selection_bar`]
+/// the caller draws beside it). The keyboard cursor of the focused pane gets a 1 px
+/// `muted` outline, which shows on selected and plain rows alike. `dimmed` (a row being
+/// dragged) halves the text.
 pub fn file_row(
     selected: bool,
     hovered: bool,
     cursor: bool,
+    dimmed: bool,
 ) -> impl Fn(&Theme) -> container::Style {
     move |_| {
         let p = palette();
         let (background, text_color) = match (selected, hovered) {
-            (true, _) => (Some(p.accent_wash), p.ink),
+            (true, _) => (Some(p.paper_3), p.ink),
             (false, true) => (Some(p.paper_2), p.ink),
             (false, false) => (None, p.ink_2),
+        };
+        let text_color = if dimmed {
+            Color {
+                a: text_color.a * 0.5,
+                ..text_color
+            }
+        } else {
+            text_color
         };
         container::Style {
             text_color: Some(text_color),
@@ -453,6 +487,40 @@ pub fn file_row(
                 Border::default()
             },
             ..container::Style::default()
+        }
+    }
+}
+
+/// The 2 px bar on the left of a selected row: `ink` while its pane (or list) has the
+/// keyboard, `rule_2` otherwise.
+pub fn selection_bar(focused: bool) -> impl Fn(&Theme) -> container::Style {
+    move |_| {
+        let p = palette();
+        surface(if focused { p.ink } else { p.rule_2 })
+    }
+}
+
+/// A small icon-only button: no fill, muted glyph, ink on `paper_3` when hovered.
+pub fn icon_button(_: &Theme, status: button::Status) -> button::Style {
+    let p = palette();
+    match status {
+        button::Status::Active => flat_button(None, p.muted),
+        button::Status::Hovered | button::Status::Pressed => flat_button(Some(p.paper_3), p.ink),
+        button::Status::Disabled => flat_button(None, p.disabled),
+    }
+}
+
+/// [`icon_button`] that shows ink while `active` (a panel it toggles is open).
+pub fn icon_button_active(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let style = icon_button(theme, status);
+        if active && status == button::Status::Active {
+            button::Style {
+                text_color: palette().ink,
+                ..style
+            }
+        } else {
+            style
         }
     }
 }
@@ -561,7 +629,7 @@ pub fn queue_action(_: &Theme, status: button::Status) -> button::Style {
     match status {
         button::Status::Active => flat_button(None, p.muted),
         button::Status::Hovered | button::Status::Pressed => flat_button(Some(p.paper_3), p.ink),
-        button::Status::Disabled => flat_button(None, p.rule_2),
+        button::Status::Disabled => flat_button(None, p.disabled),
     }
 }
 
@@ -699,7 +767,7 @@ mod tests {
     }
 
     #[test]
-    fn palette_tokens_are_achromatic_except_error() {
+    fn palette_tokens_are_achromatic_except_state_colours() {
         let p = Palette::v2();
         let greys = [
             ("paper", p.paper),
@@ -713,6 +781,7 @@ mod tests {
             ("accent", p.accent),
             ("accent_ink", p.accent_ink),
             ("accent_wash", p.accent_wash),
+            ("disabled", p.disabled),
         ];
         for (name, c) in greys {
             assert!(
@@ -724,9 +793,84 @@ mod tests {
         assert!(p.paper.r < p.paper_2.r && p.paper_2.r < p.paper_3.r);
         assert!(p.rule.r < p.rule_2.r && p.muted.r < p.ink_2.r);
         assert!(p.ink_2.r < p.ink.r && p.ink.r < p.accent.r);
-        // The one chromatic token: a warm red.
+        // The chromatic tokens: a warm red for errors.
         assert!(p.error.r > p.error.g + 0.3 && p.error.r > p.error.b + 0.3);
+        // And a green for success.
+        assert!(p.success.g > p.success.r + 0.15 && p.success.g > p.success.b);
         assert_eq!(p, *palette());
+    }
+
+    fn luminance(c: Color) -> f32 {
+        let lin = |x: f32| {
+            if x <= 0.039_28 {
+                x / 12.92
+            } else {
+                ((x + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+    }
+
+    fn contrast(a: Color, b: Color) -> f32 {
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn disabled_contrast_is_about_three() {
+        let p = palette();
+        let ratio = contrast(p.disabled, p.paper);
+        assert!((2.8..=3.6).contains(&ratio), "disabled on paper: {ratio}");
+        assert!(contrast(p.rule_2, p.paper) < 2.0);
+    }
+
+    #[test]
+    fn disabled_buttons_use_the_disabled_token() {
+        let p = palette();
+        let d = button::Status::Disabled;
+        assert_eq!(button_text(&Theme::Dark, d).text_color, p.disabled);
+        assert_eq!(button_outline(&Theme::Dark, d).text_color, p.disabled);
+        assert_eq!(button_primary(&Theme::Dark, d).text_color, p.disabled);
+        assert_eq!(queue_action(&Theme::Dark, d).text_color, p.disabled);
+        assert_eq!(icon_button(&Theme::Dark, d).text_color, p.disabled);
+    }
+
+    #[test]
+    fn dashed_outline_button_has_no_border_of_its_own_when_disabled() {
+        let off = button_outline_dashed(&Theme::Dark, button::Status::Disabled);
+        assert_eq!(off.border.color, Color::TRANSPARENT);
+        assert_eq!(off.border.width, HAIRLINE);
+        let on = button_outline_dashed(&Theme::Dark, button::Status::Active);
+        assert_eq!(on.border.color, palette().rule);
+    }
+
+    #[test]
+    fn icon_button_is_muted_then_ink_on_paper_3() {
+        let p = palette();
+        let active = icon_button(&Theme::Dark, button::Status::Active);
+        assert_eq!((active.background, active.text_color), (None, p.muted));
+        let hovered = icon_button(&Theme::Dark, button::Status::Hovered);
+        assert_eq!(hovered.background, Some(Background::Color(p.paper_3)));
+        assert_eq!(hovered.text_color, p.ink);
+    }
+
+    #[test]
+    fn selection_bar_follows_focus() {
+        let p = palette();
+        let bg = |focused| selection_bar(focused)(&Theme::Dark).background;
+        assert_eq!(bg(true), Some(Background::Color(p.ink)));
+        assert_eq!(bg(false), Some(Background::Color(p.rule_2)));
+    }
+
+    #[test]
+    fn file_row_selected_is_paper_3_and_dimmed_halves_the_text() {
+        let p = palette();
+        let selected = file_row(true, false, false, false)(&Theme::Dark);
+        assert_eq!(selected.background, Some(Background::Color(p.paper_3)));
+        let dimmed = file_row(false, false, false, true)(&Theme::Dark);
+        assert_eq!(dimmed.text_color.map(|c| c.a), Some(0.5));
+        let plain = file_row(false, false, false, false)(&Theme::Dark);
+        assert_eq!(plain.text_color.map(|c| c.a), Some(1.0));
     }
 
     #[test]

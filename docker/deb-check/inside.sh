@@ -94,7 +94,8 @@ for n in "${SIZES[@]}"; do
     installed_files+=("/usr/share/icons/hicolor/${n}x${n}/apps/$APP_ID.png")
 done
 doc_files=(/usr/share/doc/hoprs/LICENSE-MIT /usr/share/doc/hoprs/LICENSE-APACHE
-    /usr/share/doc/hoprs/copyright)
+    /usr/share/doc/hoprs/copyright /usr/share/doc/hoprs/fonts/OFL-Inter.txt
+    /usr/share/doc/hoprs/fonts/OFL-JetBrainsMono.txt /usr/share/doc/hoprs/fonts/LICENSE-Phosphor.txt)
 
 # The package's exact contents, files only, as "mode path": the binary 755, the rest 644.
 expected_contents() {
@@ -270,7 +271,7 @@ stage "create user data" make_user_data
 
 stage "apt-get remove" apt-get remove -y -q hoprs
 stage "installed files and docs gone after remove" none_exist "${installed_files[@]}" \
-    "${doc_files[@]}" /usr/share/doc/hoprs
+    "${doc_files[@]}" /usr/share/doc/hoprs/fonts /usr/share/doc/hoprs
 stage "user data intact after remove" user_data_intact
 # dpkg, not apt: after a remove that left no conffiles, apt no longer knows the package.
 stage "purge" dpkg --purge hoprs

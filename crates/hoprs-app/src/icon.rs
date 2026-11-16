@@ -7,6 +7,25 @@ pub const APP_ID: &str = "io.github.engviniciusbs.hoprs";
 /// The 256 px icon, embedded.
 const ICON_256: &[u8] = include_bytes!("../assets/icon/hoprs-256.png");
 
+/// The 48 px icon, shown in the top bar's brand cell.
+const LOGO_48: &[u8] = include_bytes!("../assets/icon/hoprs-48.png");
+
+/// The brand-cell logo, decoded once. A 1 x 1 transparent image if the PNG cannot be
+/// decoded (logged), so the cell still lays out.
+pub fn logo() -> iced::widget::image::Handle {
+    static LOGO: std::sync::LazyLock<iced::widget::image::Handle> =
+        std::sync::LazyLock::new(|| match decode_rgba8(LOGO_48) {
+            Ok((rgba, width, height)) => {
+                iced::widget::image::Handle::from_rgba(width, height, rgba)
+            }
+            Err(err) => {
+                tracing::warn!(%err, "cannot decode the embedded logo");
+                iced::widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 0])
+            }
+        });
+    LOGO.clone()
+}
+
 /// The window icon, or `None` if the embedded PNG cannot be decoded (the window then
 /// opens with the platform's default icon; the reason is logged).
 pub fn window_icon() -> Option<iced::window::Icon> {
@@ -28,7 +47,7 @@ pub fn window_icon() -> Option<iced::window::Icon> {
 
 /// Decodes any PNG to RGBA8: palette, grayscale, gray-alpha, RGB and 16-bit all end up
 /// as 4 bytes per pixel.
-fn decode_rgba8(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
+pub(crate) fn decode_rgba8(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     // EXPAND: palette -> RGB(A), low-bit gray -> 8-bit, tRNS -> alpha channel.
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
@@ -65,6 +84,26 @@ fn decode_rgba8(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn logo_decodes_to_48_rgba() {
+        let (rgba, w, h) = decode_rgba8(LOGO_48).unwrap();
+        assert_eq!((w, h), (48, 48));
+        assert_eq!(rgba.len(), 48 * 48 * 4);
+        assert!(rgba.chunks(4).any(|p| p[3] > 0));
+    }
+
+    #[test]
+    fn logo_handle_is_rgba() {
+        assert!(matches!(
+            logo(),
+            iced::widget::image::Handle::Rgba {
+                width: 48,
+                height: 48,
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn window_icon_decodes_256() {

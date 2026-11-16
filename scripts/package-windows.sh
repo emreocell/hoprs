@@ -20,7 +20,8 @@
 #    filled in. cargo-packager has no command-line switch for either, so the
 #    configuration is passed whole, as JSON, built from `cargo metadata`;
 #    target/packager/windows/hoprs_<version>_windows_x64.msi;
-# 4. the .zip holds hoprs.exe, LICENSE-MIT, LICENSE-APACHE and README.txt:
+# 4. the .zip holds hoprs.exe, LICENSE-MIT, LICENSE-APACHE, README.txt and licenses/ (the
+#    bundled fonts' licences):
 #    target/packager/windows/hoprs_<version>_windows_x64.zip.
 #
 # WiX 3 (candle, light) is downloaded by cargo-packager itself, checksum-verified. Nothing
@@ -155,6 +156,9 @@ mv "$built" "$msi"
 root=$out/zip-root
 mkdir -p "$root"
 cp "$bin_dir/hoprs.exe" LICENSE-MIT LICENSE-APACHE "$root/"
+mkdir -p "$root/licenses"
+cp crates/hoprs-app/assets/fonts/OFL-Inter.txt crates/hoprs-app/assets/fonts/OFL-JetBrainsMono.txt \
+    crates/hoprs-app/assets/fonts/LICENSE-Phosphor.txt "$root/licenses/"
 sed 's/$/\r/' >"$root/README.txt" <<EOF
 hoprs $version for Windows (64-bit), portable
 
@@ -177,7 +181,7 @@ Your data
   this folder or uninstalling never touches them.
 
 Homepage: $HOMEPAGE
-License: MIT OR Apache-2.0 (LICENSE-MIT, LICENSE-APACHE).
+License: MIT OR Apache-2.0 (LICENSE-MIT, LICENSE-APACHE). Font licences: licenses\\.
 EOF
 
 zip=$out/hoprs_${version}_windows_x64.zip

@@ -16,6 +16,8 @@ pub fn cannot_open_profiles() -> &'static str {
 pub fn brand() -> &'static str {
     tr("brand")
 }
+// Shown in Settings -> General (Task 9 of Plan 13); no other use until then.
+#[allow(dead_code)]
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub fn no_sessions() -> &'static str {
     tr("no-sessions")
@@ -25,6 +27,18 @@ pub fn go_to_anything() -> &'static str {
 }
 pub fn go_to_anything_key() -> &'static str {
     tr("go-to-anything-key")
+}
+/// The tooltip of the sidebar's ⋯ button.
+pub fn sidebar_options() -> &'static str {
+    tr("sidebar-options")
+}
+
+// Context menus.
+pub fn menu_show_workspaces() -> &'static str {
+    tr("menu-show-workspaces")
+}
+pub fn menu_show_sites() -> &'static str {
+    tr("menu-show-sites")
 }
 
 // The Ctrl+K palette.
@@ -108,8 +122,15 @@ pub fn workspaces() -> &'static str {
 pub fn all_sites() -> &'static str {
     tr("all-sites")
 }
-pub fn new() -> &'static str {
-    tr("new")
+/// The sidebar's note when both sections are hidden.
+pub fn sidebar_all_hidden() -> &'static str {
+    tr("sidebar-all-hidden")
+}
+pub fn sidebar_collapse() -> &'static str {
+    tr("sidebar-collapse")
+}
+pub fn sidebar_expand() -> &'static str {
+    tr("sidebar-expand")
 }
 pub fn no_workspaces() -> &'static str {
     tr("no-workspaces")
@@ -526,10 +547,6 @@ pub fn nothing_done() -> &'static str {
 pub fn clear_finished() -> &'static str {
     tr("clear-finished")
 }
-/// [`CLEAR_FINISHED`] in a narrow window.
-pub fn clear_finished_short() -> &'static str {
-    tr("clear-finished-short")
-}
 // Technical log panel.
 pub fn log() -> &'static str {
     tr("log")
@@ -574,12 +591,6 @@ pub fn log_lines(n: usize) -> String {
     tr_args("log-lines", &[("count", n.into())])
 }
 
-pub fn upload_arrow() -> &'static str {
-    tr("upload-arrow")
-}
-pub fn download_arrow() -> &'static str {
-    tr("download-arrow")
-}
 pub fn waiting_for_worker() -> &'static str {
     tr("waiting-for-worker")
 }
@@ -835,13 +846,6 @@ pub fn rename() -> &'static str {
 }
 pub fn permissions() -> &'static str {
     tr("permissions")
-}
-/// Short toolbar labels for the narrowest panes (`ui::fit::Toolbar::Narrow`).
-pub fn new_folder_short() -> &'static str {
-    tr("new-folder-short")
-}
-pub fn permissions_short() -> &'static str {
-    tr("permissions-short")
 }
 pub fn key_new_folder() -> &'static str {
     tr("key-new-folder")

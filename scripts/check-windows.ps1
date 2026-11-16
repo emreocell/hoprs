@@ -15,7 +15,7 @@ at it; Add/Remove Programs has one per-machine (HKLM) entry with the MSI version
 (numeric X.Y.Z); reinstalling the same .msi with REINSTALL=ALL REINSTALLMODE=vomus exits
 0 (the upgrade path); `msiexec /x` exits 0; the exe, the shortcuts and the entry are gone
 while the file in %APPDATA%\hoprs is still there; the .zip holds exactly hoprs.exe,
-LICENSE-MIT, LICENSE-APACHE and README.txt, and its hoprs.exe prints the same version and
+LICENSE-MIT, LICENSE-APACHE, README.txt and licenses\ (the font licences), and its hoprs.exe prints the same version and
 imports no VC++ runtime DLL; no builder paths in that exe (-BuilderPaths, default: this
 machine's %USERPROFILE% and the repository). Prints OK per check, throws with the first
 failing one (exit code 1).
@@ -199,8 +199,8 @@ try {
     $names = @(Get-ChildItem -Path $unzipped -Recurse -Force | ForEach-Object {
             $_.FullName.Substring($unzipped.Length + 1)
         } | Sort-Object)
-    $expected = @('hoprs.exe', 'LICENSE-APACHE', 'LICENSE-MIT', 'README.txt') | Sort-Object
-    Check '.zip holds hoprs.exe, LICENSE-MIT, LICENSE-APACHE, README.txt' (($names -join ',') -eq ($expected -join ',')) "holds $($names -join ', ')"
+    $expected = @('hoprs.exe', 'LICENSE-APACHE', 'LICENSE-MIT', 'README.txt', 'licenses', 'licenses\LICENSE-Phosphor.txt', 'licenses\OFL-Inter.txt', 'licenses\OFL-JetBrainsMono.txt') | Sort-Object
+    Check '.zip holds hoprs.exe, LICENSE-MIT, LICENSE-APACHE, README.txt, licenses/ (3 font licences)' (($names -join ',') -eq ($expected -join ',')) "holds $($names -join ', ')"
     $zipExe = Join-Path $unzipped 'hoprs.exe'
     $line = Get-VersionLine $zipExe
     Check ".zip's hoprs.exe --version prints 'hoprs $version'" ($line -eq "hoprs $version") "got '$line'"

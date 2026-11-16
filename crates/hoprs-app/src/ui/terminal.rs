@@ -40,6 +40,7 @@ use crate::terminal::selection::SelectionKind;
 use crate::terminal::{CellView, CursorShape, Rgb, TerminalModel};
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
+use crate::ui::widgets;
 
 /// Space between the widget's edge and the grid.
 pub const PADDING: f32 = 8.0;
@@ -272,10 +273,12 @@ fn end_banner(
                 .color(p.muted),
         );
     }
-    let action = button(text(banner.action))
-        .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
-        .style(theme::button_outline)
-        .on_press_maybe(can_restart.then(|| msg(tab, TerminalMsg::Restart)));
+    let action = widgets::outlined(
+        button(text(banner.action))
+            .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
+            .on_press_maybe(can_restart.then(|| msg(tab, TerminalMsg::Restart))),
+        can_restart,
+    );
     let hint = (!can_restart).then(|| {
         text(strings::terminal_waiting_for_connection())
             .size(theme::TEXT_XS)

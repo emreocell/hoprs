@@ -17,10 +17,12 @@ use iced::{Alignment, Element, Length, Padding};
 
 use crate::app::compare::{CompareState, Group, Phase, Row, RowState};
 use crate::app::{App, CompareMsg, Message, Tab, TabId};
+use crate::ui::fit;
+use crate::ui::icons::{self, Icon};
 use crate::ui::layout::QUEUE_HEAD_HEIGHT;
 use crate::ui::theme::{self, palette};
 use crate::ui::virtual_list::{self, ROW_HEIGHT};
-use crate::ui::{format, strings};
+use crate::ui::{format, strings, widgets};
 
 /// The fewest lines the rows' region shows (a group header counts as one).
 pub const MIN_BODY_LINES: usize = 4;
@@ -79,6 +81,16 @@ pub fn short_root(path: &str) -> String {
             format!("{}/{last}", strings::ellipsis())
         }
         _ => path.to_owned(),
+    }
+}
+
+/// The icon of a group's header.
+pub fn group_icon(group: Group) -> Icon {
+    match group {
+        Group::OnlyLocal => Icon::Desktop,
+        Group::OnlyRemote => Icon::HardDrives,
+        Group::Different => Icon::ArrowsLeftRight,
+        Group::Unreadable => Icon::WarningCircle,
     }
 }
 
@@ -294,11 +306,6 @@ pub fn view<'a>(app: &'a App, tab: &'a Tab, area: f32) -> Option<Element<'a, Mes
     ]
     .spacing(theme::SPACE_XS)
     .align_y(Alignment::Center);
-    let small = |label: &'static str| {
-        text(label)
-            .size(theme::TEXT_XS)
-            .wrapping(text::Wrapping::None)
-    };
     let top = row![
         text(head.title)
             .font(theme::INTER_SEMIBOLD)
@@ -316,23 +323,25 @@ pub fn view<'a>(app: &'a App, tab: &'a Tab, area: f32) -> Option<Element<'a, Mes
             .size(theme::TEXT_SM)
             .style(theme::checkbox)
             .on_toggle(move |on| msg(CompareMsg::ToggleAuto { tab: id, on })),
-        button(small(if state.collapsed {
-            strings::compare_expand()
-        } else {
-            strings::compare_collapse()
-        }))
-        .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
-        .style(theme::button_text)
-        .on_press(msg(CompareMsg::ToggleCollapsed { tab: id })),
-        tooltip(
-            button(small("✕"))
-                .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
-                .style(theme::button_text)
-                .on_press(msg(CompareMsg::Hide { tab: id })),
-            container(small(strings::compare_close()))
-                .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
-                .style(theme::dialog_box),
-            tooltip::Position::Left,
+        widgets::icon_button(
+            if state.collapsed {
+                Icon::CaretUp
+            } else {
+                Icon::CaretDown
+            },
+            if state.collapsed {
+                strings::compare_expand()
+            } else {
+                strings::compare_collapse()
+            },
+            None,
+            Some(msg(CompareMsg::ToggleCollapsed { tab: id })),
+        ),
+        widgets::icon_button(
+            Icon::X,
+            strings::compare_close(),
+            None,
+            Some(msg(CompareMsg::Hide { tab: id })),
         ),
     ]
     .spacing(theme::SPACE_MD)
@@ -349,7 +358,14 @@ pub fn view<'a>(app: &'a App, tab: &'a Tab, area: f32) -> Option<Element<'a, Mes
     if !state.collapsed {
         region = region
             .push(rule::horizontal(theme::HAIRLINE).style(theme::rule_1px))
-            .push(body(tab, state, &foot_content, lines, body_height(area)))
+            .push(body(
+                tab,
+                state,
+                &foot_content,
+                lines,
+                body_height(area),
+                app.window_width,
+            ))
             .push(rule::horizontal(theme::HAIRLINE).style(theme::rule_1px))
             .push(foot(id, foot_content, compact));
     }
@@ -362,6 +378,7 @@ fn body<'a>(
     footer: &Footer,
     lines: Vec<Line>,
     max_height: f32,
+    window: f32,
 ) -> Element<'a, Message> {
     let id = tab.id;
     if let Some(identical) = footer.all_identical.clone() {
@@ -388,7 +405,7 @@ fn body<'a>(
         },
         move |i| match lines.get(i) {
             Some(Line::Header(group)) => header_row(id, state, *group),
-            Some(Line::Row(index)) => diff_row(id, state, *index, this_year),
+            Some(Line::Row(index)) => diff_row(id, state, *index, this_year, window),
             None => space().height(ROW_HEIGHT).into(),
         },
     );
@@ -416,6 +433,12 @@ fn header_row<'a>(id: TabId, state: &'a CompareState, group: Group) -> Element<'
     } else {
         title.into()
     };
+    let content = row![
+        icons::icon(group_icon(group), icons::ROW).color(palette().muted),
+        content
+    ]
+    .spacing(theme::SPACE_XS)
+    .align_y(Alignment::Center);
     container(content)
         .width(Length::Fill)
         .height(ROW_HEIGHT)
@@ -425,11 +448,26 @@ fn header_row<'a>(id: TabId, state: &'a CompareState, group: Group) -> Element<'
         .into()
 }
 
+/// The text width of a row's path cell in a window `window` px wide: the panel's width
+/// minus the paddings, the checkbox, the icon, the status and sizes columns and the gaps.
+fn path_width(window: f32) -> f32 {
+    let fixed = 2.0
+        + 2.0 * theme::SPACE_MD
+        + theme::TEXT_SM
+        + icons::ROW
+        + theme::SPACE_XS
+        + STATUS_WIDTH
+        + SIZES_WIDTH
+        + 3.0 * theme::SPACE_SM;
+    (fit::center_width(window) - fixed).max(0.0)
+}
+
 fn diff_row<'a>(
     id: TabId,
     state: &'a CompareState,
     index: usize,
     this_year: i32,
+    window: f32,
 ) -> Element<'a, Message> {
     let p = palette();
     let Some(row_data) = state.rows.get(index) else {
@@ -461,10 +499,32 @@ fn diff_row<'a>(
             .align_y(Alignment::Center)
             .clip(true)
     };
-    let path = text(t.path)
+    let name = row_data
+        .diff
+        .path
+        .rsplit('/')
+        .next()
+        .unwrap_or(&row_data.diff.path);
+    let kind_icon = icons::for_entry(name, row_data.diff.kind);
+    let path_room = path_width(window);
+    let shown = fit::ellipsize(&t.path, path_room, theme::TEXT_MONO, fit::MONO_ADVANCE);
+    let cut = matches!(shown, std::borrow::Cow::Owned(_));
+    let path: Element<'a, Message> = text(shown.into_owned())
         .font(theme::MONO)
         .size(theme::TEXT_MONO)
-        .wrapping(text::Wrapping::None);
+        .wrapping(text::Wrapping::None)
+        .into();
+    let path = if cut {
+        widgets::tip(path, &row_data.diff.path, None)
+    } else {
+        path
+    };
+    let path = row![
+        icons::icon(kind_icon, icons::ROW).color(if row_data.selected { p.ink } else { p.muted }),
+        path
+    ]
+    .spacing(theme::SPACE_XS)
+    .align_y(Alignment::Center);
     let status = text(t.status)
         .size(theme::TEXT_SM)
         .color(status_color)
@@ -483,10 +543,21 @@ fn diff_row<'a>(
         cell(sizes.into(), Length::Fixed(SIZES_WIDTH), true),
     ]
     .spacing(theme::SPACE_SM)
+    .padding(Padding::ZERO.left(theme::SPACE_MD - 2.0))
     .height(ROW_HEIGHT);
-    let line = container(line)
-        .padding(Padding::ZERO.left(theme::SPACE_MD).right(theme::SPACE_MD))
-        .style(theme::file_row(row_data.selected, false, cursor));
+    let bar = container(space())
+        .width(2)
+        .height(Length::Fill)
+        .style(move |t: &iced::Theme| {
+            if row_data.selected {
+                theme::selection_bar(state.focused)(t)
+            } else {
+                container::Style::default()
+            }
+        });
+    let line = container(row![bar, line])
+        .padding(Padding::ZERO.right(theme::SPACE_MD))
+        .style(theme::file_row(row_data.selected, false, cursor, false));
     let line: Element<'a, Message> = match t.tip {
         Some(tip) => tooltip(
             line,
@@ -510,14 +581,17 @@ fn diff_row<'a>(
 fn foot(id: TabId, f: Footer, compact: bool) -> Element<'static, Message> {
     let p = palette();
     let button_of = |label: &'static str, on: Option<CompareMsg>| {
-        button(
-            text(label)
-                .size(theme::TEXT_XS)
-                .wrapping(text::Wrapping::None),
+        let enabled = on.is_some();
+        widgets::outlined(
+            button(
+                text(label)
+                    .size(theme::TEXT_XS)
+                    .wrapping(text::Wrapping::None),
+            )
+            .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
+            .on_press_maybe(on.map(Message::Compare)),
+            enabled,
         )
-        .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
-        .style(theme::button_outline)
-        .on_press_maybe(on.map(Message::Compare))
     };
     let mut bar = row![
         container(
@@ -579,6 +653,15 @@ mod tests {
     use super::*;
     use crate::app::compare::{CompareState, Group, Phase, Row, RowState};
     use crate::i18n::{Language, set_language};
+    use crate::ui::icons::Icon;
+
+    #[test]
+    fn group_icons() {
+        assert_eq!(group_icon(Group::OnlyLocal), Icon::Desktop);
+        assert_eq!(group_icon(Group::OnlyRemote), Icon::HardDrives);
+        assert_eq!(group_icon(Group::Different), Icon::ArrowsLeftRight);
+        assert_eq!(group_icon(Group::Unreadable), Icon::WarningCircle);
+    }
 
     struct RestoreEnglish;
     impl Drop for RestoreEnglish {

@@ -1,16 +1,20 @@
 //! Everything iced draws: theme, strings and the views.
 
 pub mod compare;
+pub mod dashed;
 pub mod dialogs;
 pub mod edits;
 pub mod file_actions;
 pub mod files;
 pub mod fit;
 pub mod format;
+pub mod icons;
 pub mod import;
 pub mod layout;
 pub mod log;
+pub mod menu;
 pub mod palette;
+pub mod pointer;
 pub mod queue;
 pub mod settings;
 pub mod sidebar;

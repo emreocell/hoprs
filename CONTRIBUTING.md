@@ -121,6 +121,13 @@ Style: write the way your language's developers talk, not word for word. Keep pr
 that developers keep in English (SSH, SFTP, FTP, terminal, host, upload, download …), use
 sentence case, and keep labels about as short as the English ones (buttons are narrow).
 
+## Adding an icon
+
+Add a line to `crates/hoprs-app/assets/fonts/phosphor-glyphs.txt` (`name U+XXXX`, from the
+Phosphor Regular `style.css`), run `scripts/icons-subset.sh` (needs `pip install fonttools`),
+and add the variant to `Icon` in `crates/hoprs-app/src/ui/icons.rs`. The tests check that
+the font, the list and the enum agree.
+
 ## Decisions already made
 
 These shape what gets merged. Proposals to change them are welcome in a discussion, but a

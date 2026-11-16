@@ -1392,13 +1392,19 @@ fn tab_strip_offset_spreads_tabs_from_start_to_end() {
     assert_eq!(super::tab_strip_offset(9, 5), 1.0);
 }
 
-/// The window's width, from its resize events, drives what fits (`ui::fit`).
+/// The window's size, from its resize events, drives what fits (`ui::fit`) and where a
+/// menu may go (`ui::menu::origin`).
 #[test]
 fn window_resize_is_remembered() {
     let mut app = App::new();
     assert_eq!(app.window_width, super::INITIAL_WINDOW_WIDTH);
-    assert!(app.update(Message::WindowResized(960.0)).is_empty());
+    assert_eq!(app.window_height, super::INITIAL_WINDOW_HEIGHT);
+    assert!(
+        app.update(Message::WindowResized(iced::Size::new(960.0, 700.0)))
+            .is_empty()
+    );
     assert_eq!(app.window_width, 960.0);
+    assert_eq!(app.window_height, 700.0);
 }
 
 mod compare;
@@ -1407,6 +1413,7 @@ mod edit;
 mod file_actions;
 mod import_settings;
 mod log;
+mod menu;
 mod palette;
 mod status;
 mod tabs;

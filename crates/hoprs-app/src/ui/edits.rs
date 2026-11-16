@@ -14,6 +14,7 @@ use crate::app::{App, Message, Tab};
 use crate::backend::EditChoice;
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
+use crate::ui::widgets;
 
 /// `14:02`, local time.
 pub fn clock(at: SystemTime) -> String {
@@ -87,15 +88,15 @@ fn small_button<'a>(
     on_press: Option<Message>,
     primary: bool,
 ) -> Element<'a, Message> {
-    button(text(label).size(theme::TEXT_XS))
+    let enabled = on_press.is_some();
+    let button = button(text(label).size(theme::TEXT_XS))
         .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
-        .style(if primary {
-            theme::button_primary
-        } else {
-            theme::button_outline
-        })
-        .on_press_maybe(on_press)
-        .into()
+        .on_press_maybe(on_press);
+    if primary {
+        button.style(theme::button_primary).into()
+    } else {
+        widgets::outlined(button, enabled)
+    }
 }
 
 fn edit_msg(msg: EditMsg) -> Message {

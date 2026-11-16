@@ -38,6 +38,9 @@ brand = hoprs
 no-sessions = No open sessions
 go-to-anything = Go to anything
 go-to-anything-key = Ctrl K
+sidebar-options = Sidebar options
+menu-show-workspaces = Show workspaces
+menu-show-sites = Show all sites
 
 ## The Ctrl+K palette
 
@@ -70,7 +73,9 @@ palette-key-find = Ctrl Shift F
 filter-sites = Filter sites
 workspaces = Workspaces
 all-sites = All sites
-new = + New
+sidebar-all-hidden = Both lists are hidden. Show them from the ⋯ menu.
+sidebar-collapse = Collapse
+sidebar-expand = Expand
 no-workspaces = No workspaces yet
 no-sites = No sites yet
 import-filezilla = Import from FileZilla
@@ -155,7 +160,7 @@ edit-site = Edit site
 
 ## Tabs
 
-close-tab = ×
+close-tab = Close tab
 # The tab strip's actions on a connected SSH tab: another tab on its session.
 new-terminal-tab = New terminal tab
 new-files-tab = New files tab
@@ -236,8 +241,6 @@ nothing-failed = No failures
 nothing-done = Nothing finished yet
 # Removes done, skipped, cancelled and failed rows (the engine's `clear_finished`).
 clear-finished = Clear finished and failed
-# [`CLEAR_FINISHED`] in a narrow window.
-clear-finished-short = Clear finished
 
 ## Technical log panel
 log = Log
@@ -259,8 +262,6 @@ log-lines =
         [one] { $count } line
        *[other] { $count } lines
     }
-upload-arrow = ↑
-download-arrow = ↓
 waiting-for-worker = Waiting for a worker
 starting = Starting…
 # A folder whose files are being copied.
@@ -339,9 +340,6 @@ workspace-status = { $connected } of { $sites } in { $name }
 new-folder = New folder
 rename = Rename
 permissions = Permissions…
-# Short toolbar labels for the narrowest panes (`ui::fit::Toolbar::Narrow`).
-new-folder-short = Folder
-permissions-short = Perms…
 key-new-folder = F7
 key-rename = F2
 key-delete = Del

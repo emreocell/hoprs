@@ -26,6 +26,9 @@ brand = hoprs
 no-sessions = Nenhuma sessão aberta
 go-to-anything = Ir para qualquer coisa
 go-to-anything-key = Ctrl K
+sidebar-options = Opções da barra lateral
+menu-show-workspaces = Mostrar workspaces
+menu-show-sites = Mostrar todos os sites
 
 ## The Ctrl+K palette
 
@@ -58,7 +61,9 @@ palette-key-find = Ctrl Shift F
 filter-sites = Filtrar sites
 workspaces = Workspaces
 all-sites = Todos os sites
-new = + Novo
+sidebar-all-hidden = As duas listas estão ocultas. Mostre-as no menu ⋯.
+sidebar-collapse = Recolher
+sidebar-expand = Expandir
 no-workspaces = Nenhum workspace ainda
 no-sites = Nenhum site ainda
 import-filezilla = Importar do FileZilla
@@ -139,7 +144,7 @@ edit-site = Editar site
 
 ## Tabs
 
-close-tab = ×
+close-tab = Fechar aba
 new-terminal-tab = Nova aba de terminal
 new-files-tab = Nova aba de arquivos
 terminal-overflowed = A saída chegou rápido demais e o shell foi encerrado
@@ -209,7 +214,6 @@ nothing-queued = Nada aguardando
 nothing-failed = Nenhuma falha
 nothing-done = Nada concluído ainda
 clear-finished = Limpar concluídas e com falha
-clear-finished-short = Limpar concluídas
 
 ## Technical log panel
 log = Log
@@ -230,8 +234,6 @@ log-lines =
         [one] { $count } linha
        *[other] { $count } linhas
     }
-upload-arrow = ↑
-download-arrow = ↓
 waiting-for-worker = Aguardando um worker
 starting = Iniciando…
 transferring = Transferindo…
@@ -296,8 +298,6 @@ workspace-status = { $connected } de { $sites } em { $name }
 new-folder = Nova pasta
 rename = Renomear
 permissions = Permissões…
-new-folder-short = Pasta
-permissions-short = Perm…
 key-new-folder = F7
 key-rename = F2
 key-delete = Del

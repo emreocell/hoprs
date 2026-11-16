@@ -122,6 +122,13 @@ impl LanguageChoice {
     }
 }
 
+/// One sidebar section's state: folded to its heading, or hidden altogether.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct SectionState {
+    pub collapsed: bool,
+    pub hidden: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
     /// Transfer workers per site (`1..=16`), for the connections made from now on.
@@ -148,6 +155,10 @@ pub struct Settings {
     /// Names a folder compare skips: `*` matches any run of characters, matched on the
     /// entry name.
     pub compare_ignore: Vec<String>,
+    /// The sidebar's Workspaces section.
+    pub workspaces: SectionState,
+    /// The sidebar's All sites section.
+    pub sites: SectionState,
 }
 
 /// The names a folder compare skips until the user changes the list.
@@ -184,6 +195,8 @@ impl Default for Settings {
             editor_command: EDITOR_DEFAULT.to_owned(),
             compare_auto: true,
             compare_ignore: compare_ignore_default(),
+            workspaces: SectionState::default(),
+            sites: SectionState::default(),
         }
     }
 }
@@ -252,6 +265,19 @@ struct File {
     compare_auto: Option<toml::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     compare_ignore: Option<toml::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspaces_collapsed: Option<toml::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspaces_hidden: Option<toml::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sites_collapsed: Option<toml::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sites_hidden: Option<toml::Value>,
+}
+
+/// A bool key; anything else (or missing) is `false`.
+fn flag(value: Option<toml::Value>) -> bool {
+    value.and_then(|value| value.as_bool()).unwrap_or(false)
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -357,6 +383,14 @@ pub fn parse(content: &str) -> Result<Settings> {
                     .filter(|name| !name.is_empty())
                     .collect()
             }),
+        workspaces: SectionState {
+            collapsed: flag(file.workspaces_collapsed),
+            hidden: flag(file.workspaces_hidden),
+        },
+        sites: SectionState {
+            collapsed: flag(file.sites_collapsed),
+            hidden: flag(file.sites_hidden),
+        },
     })
 }
 
@@ -384,6 +418,10 @@ fn file_of(settings: &Settings) -> File {
                 .map(toml::Value::String)
                 .collect(),
         )),
+        workspaces_collapsed: Some(toml::Value::Boolean(settings.workspaces.collapsed)),
+        workspaces_hidden: Some(toml::Value::Boolean(settings.workspaces.hidden)),
+        sites_collapsed: Some(toml::Value::Boolean(settings.sites.collapsed)),
+        sites_hidden: Some(toml::Value::Boolean(settings.sites.hidden)),
     }
 }
 
@@ -517,6 +555,41 @@ mod tests {
         assert_eq!(bad.workers_per_site, 2);
         let bad = parse("compare_ignore = [\"a\", 1]").unwrap();
         assert_eq!(bad.compare_ignore, defaults.compare_ignore);
+    }
+
+    #[test]
+    fn sidebar_sections_roundtrip_and_invalid() {
+        let all = Settings {
+            workspaces: SectionState {
+                collapsed: true,
+                hidden: true,
+            },
+            sites: SectionState {
+                collapsed: true,
+                hidden: true,
+            },
+            ..Settings::default()
+        };
+        assert_eq!(parse(&render(&all)).unwrap(), all);
+        let missing = parse("").unwrap();
+        assert_eq!(missing.workspaces, SectionState::default());
+        assert_eq!(missing.sites, SectionState::default());
+
+        let bad =
+            parse("workspaces_hidden = 3\nsites_collapsed = true\nworkers_per_site = 2").unwrap();
+        assert!(!bad.workspaces.hidden);
+        assert!(bad.sites.collapsed);
+        assert_eq!(bad.workers_per_site, 2);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        std::fs::write(&path, "future_key = 1\nsites_hidden = true\n").unwrap();
+        let loaded = load(&path).settings;
+        assert!(loaded.sites.hidden);
+        save(&path, &loaded).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("future_key = 1"), "{text}");
+        assert!(text.contains("sites_hidden = true"), "{text}");
     }
 
     #[test]

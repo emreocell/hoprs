@@ -2,20 +2,23 @@
 //! 256 px sidebar on the left and, on the right, the center, the
 //! collapsible transfer queue and the status bar.
 
-use iced::widget::{button, column, container, row, rule, text};
+use iced::widget::{button, column, container, image, row, rule, space, text};
 use iced::{Alignment, Element, Length, Padding};
 
-use crate::app::{App, Form, Message, PaletteMsg};
+use crate::app::{App, Form, MenuMsg, MenuTarget, Message, PaletteMsg};
+use crate::ui::icons::Icon;
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
 use crate::ui::{
-    dialogs, edits, files, import, log, palette as command_palette, queue, settings, sidebar,
-    site_form, status, tabs, terminal, workspace_form,
+    dialogs, edits, files, import, log, menu, palette as command_palette, pointer, queue, settings,
+    sidebar, site_form, status, tabs, terminal, widgets, workspace_form,
 };
 
 pub const SIDEBAR_WIDTH: f32 = sidebar::WIDTH;
 /// 4 px above the 36 px tabs.
 pub const TOP_BAR_HEIGHT: f32 = 40.0;
+/// Side of the logo in the brand cell.
+pub const BRAND_LOGO: f32 = 22.0;
 pub const QUEUE_HEAD_HEIGHT: f32 = 36.0;
 pub const QUEUE_MAX_HEIGHT: f32 = 210.0;
 pub const STATUS_HEIGHT: f32 = 26.0;
@@ -42,8 +45,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .height(Length::Fill)
         .style(theme::paper)
         .into();
-    // Never both: a security dialog closes the palette, which does not open under one.
-    dialogs::overlay(app, command_palette::overlay(app, base))
+    // Never more than one: a security dialog closes the palette and a menu, the palette
+    // closes a menu, and neither opens under a dialog.
+    let shown = dialogs::overlay(app, command_palette::overlay(app, menu::overlay(app, base)));
+    // Every left or right press is published with its position first (menus open there).
+    pointer::tracker(shown)
 }
 
 fn hrule<'a>() -> Element<'a, Message> {
@@ -65,10 +71,19 @@ fn muted<'a>(label: &'a str, size: f32) -> Element<'a, Message> {
 fn top_bar(app: &App) -> Element<'_, Message> {
     let brand = container(
         row![
+            image(crate::icon::logo())
+                .width(BRAND_LOGO)
+                .height(BRAND_LOGO),
             text(strings::brand())
                 .size(theme::TEXT_MD)
                 .font(theme::INTER_SEMIBOLD),
-            muted(strings::VERSION, theme::TEXT_XS),
+            space::horizontal(),
+            widgets::icon_button(
+                Icon::DotsThree,
+                strings::sidebar_options(),
+                None,
+                Some(Message::Menu(MenuMsg::Open(MenuTarget::SidebarOptions))),
+            ),
         ]
         .spacing(theme::SPACE_XS)
         .align_y(Alignment::Center),

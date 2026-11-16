@@ -16,10 +16,12 @@ use crate::app::queue::{QueueRow, RowStatus};
 use crate::app::{App, Message, QueueMsg, QueueTab, RowAction};
 use crate::ui::file_actions::error_bar;
 use crate::ui::fit;
+use crate::ui::icons::{self, Icon};
 use crate::ui::layout::{QUEUE_HEAD_HEIGHT, QUEUE_MAX_HEIGHT, UNDERLINE};
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
 use crate::ui::virtual_list::{self, ROW_HEIGHT};
+use crate::ui::widgets;
 
 /// Column widths (mockup: `.bar { width: 180px }`).
 const SITE_WIDTH: f32 = 128.0;
@@ -27,11 +29,34 @@ const BAR_WIDTH: f32 = 180.0;
 const PERCENT_WIDTH: f32 = 48.0;
 const SPEED_WIDTH: f32 = 96.0;
 const STATUS_WIDTH: f32 = BAR_WIDTH + PERCENT_WIDTH + SPEED_WIDTH + 2.0 * theme::SPACE_MD;
+/// The row actions: the icon ones need only about 3 x 22 px, but a conflict row keeps text
+/// answers (Skip, Overwrite, Resume) beside its Cancel, so the column keeps room for those
+/// and every row lines up.
 const ACTIONS_WIDTH: f32 = 236.0;
 /// The rows' part of the 210 px region: the rest is the head and its two rules.
 const BODY_MAX_HEIGHT: f32 = QUEUE_MAX_HEIGHT - QUEUE_HEAD_HEIGHT - 2.0 * theme::HAIRLINE;
 /// The 4 px progress bar.
 const BAR_GIRTH: f32 = 4.0;
+
+/// The arrow that starts a row: up for an upload, down for a download.
+pub fn direction_icon(direction: Direction) -> Icon {
+    match direction {
+        Direction::Upload => Icon::ArrowUp,
+        Direction::Download => Icon::ArrowDown,
+    }
+}
+
+/// The icon of a row action; the conflict answers keep their text buttons.
+pub fn action_icon(action: RowAction) -> Option<Icon> {
+    match action {
+        RowAction::Pause => Some(Icon::Pause),
+        RowAction::Resume => Some(Icon::Play),
+        RowAction::Cancel => Some(Icon::X),
+        RowAction::Retry => Some(Icon::ArrowsClockwise),
+        RowAction::Dismiss => Some(Icon::Check),
+        RowAction::Resolve(_) => None,
+    }
+}
 
 /// The id of the queue's list, for its scroll offset.
 fn scroll_id() -> Id {
@@ -129,30 +154,24 @@ pub fn view(app: &App) -> Element<'_, Message> {
         )
         .push(
             row![
-                button(
-                    text(if compact {
-                        strings::clear_finished_short()
-                    } else {
-                        strings::clear_finished()
-                    })
-                    .size(theme::TEXT_XS)
-                    .wrapping(text::Wrapping::None)
-                )
-                .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
-                .style(theme::button_text)
-                .on_press_maybe(
+                widgets::icon_button(
+                    Icon::Broom,
+                    strings::clear_finished(),
+                    None,
                     queue
                         .has_finished()
                         .then_some(Message::Queue(QueueMsg::ClearFinished)),
                 ),
-                button(
-                    text(toggle)
-                        .size(theme::TEXT_XS)
-                        .wrapping(text::Wrapping::None)
-                )
-                .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
-                .on_press(Message::ToggleQueue)
-                .style(theme::button_text),
+                widgets::icon_button(
+                    if app.queue_open {
+                        Icon::CaretDown
+                    } else {
+                        Icon::CaretUp
+                    },
+                    toggle,
+                    None,
+                    Some(Message::ToggleQueue),
+                ),
             ]
             .spacing(theme::SPACE_2XS)
             .align_y(Alignment::Center),
@@ -234,9 +253,9 @@ fn queue_row<'a>(app: &'a App, row: &'a QueueRow) -> Element<'a, Message> {
     let p = palette();
     let item = &row.item;
     let id = item.id;
-    let (arrow, path) = match item.spec.direction {
-        Direction::Upload => (strings::upload_arrow(), &item.spec.local),
-        Direction::Download => (strings::download_arrow(), &item.spec.remote),
+    let path = match item.spec.direction {
+        Direction::Upload => &item.spec.local,
+        Direction::Download => &item.spec.remote,
     };
     // The name first (a long folder must not hide it), then the source folder, muted.
     let mono = |label: &'a str| {
@@ -245,9 +264,25 @@ fn queue_row<'a>(app: &'a App, row: &'a QueueRow) -> Element<'a, Message> {
             .size(theme::TEXT_MONO)
             .wrapping(text::Wrapping::None)
     };
+    let file_name = path.file_name().unwrap_or(path.as_str());
+    // What the name column has left of the center area, beside the arrow.
+    let room = (fit::center_width(app.window_width)
+        - SITE_WIDTH
+        - STATUS_WIDTH
+        - ACTIONS_WIDTH
+        - 2.0 * theme::SPACE_MD
+        - icons::ROW
+        - theme::SPACE_XS)
+        .max(0.0);
+    let natural = file_name.chars().count() as f32 * theme::TEXT_MONO * fit::MONO_ADVANCE;
     let mut name = row![
-        text(arrow).size(theme::TEXT_SM).color(p.muted),
-        mono(path.file_name().unwrap_or(path.as_str())),
+        icons::icon(direction_icon(item.spec.direction), icons::ROW).color(p.muted),
+        widgets::fitted(
+            file_name,
+            (natural + 1.0).min(room),
+            theme::TEXT_MONO,
+            theme::MONO
+        ),
     ]
     .align_y(Alignment::Center);
     if item.is_dir == Some(true) {
@@ -349,12 +384,15 @@ fn queue_row<'a>(app: &'a App, row: &'a QueueRow) -> Element<'a, Message> {
             RowAction::Resolve(ResolveAction::Skip) => strings::skip(),
             RowAction::Resolve(ResolveAction::Overwrite) => strings::overwrite(),
         };
-        actions = actions.push(
-            button(text(label).size(theme::TEXT_XS))
+        let press = Message::Queue(QueueMsg::Action(id, action));
+        actions = actions.push(match action_icon(action) {
+            Some(icon) => widgets::icon_button(icon, label, None, Some(press)),
+            None => button(text(label).size(theme::TEXT_XS))
                 .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
                 .style(theme::queue_action)
-                .on_press(Message::Queue(QueueMsg::Action(id, action))),
-        );
+                .on_press(press)
+                .into(),
+        });
     }
     row![
         cell(name.into(), Length::Fill, false),
@@ -390,4 +428,28 @@ fn with_underline(label: Element<'_, Message>, active: bool) -> Element<'_, Mess
     ]
     .width(Length::Shrink)
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_icons_per_direction_and_action() {
+        assert_eq!(direction_icon(Direction::Upload), Icon::ArrowUp);
+        assert_eq!(direction_icon(Direction::Download), Icon::ArrowDown);
+        assert_eq!(action_icon(RowAction::Pause), Some(Icon::Pause));
+        assert_eq!(action_icon(RowAction::Resume), Some(Icon::Play));
+        assert_eq!(action_icon(RowAction::Cancel), Some(Icon::X));
+        assert_eq!(action_icon(RowAction::Retry), Some(Icon::ArrowsClockwise));
+        assert_eq!(action_icon(RowAction::Dismiss), Some(Icon::Check));
+        // The conflict answers keep their text buttons.
+        for answer in [
+            ResolveAction::Skip,
+            ResolveAction::Overwrite,
+            ResolveAction::Resume,
+        ] {
+            assert_eq!(action_icon(RowAction::Resolve(answer)), None);
+        }
+    }
 }

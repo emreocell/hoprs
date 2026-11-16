@@ -989,6 +989,40 @@ async fn action_on_dropped_session_reconnects_and_retries() {
     assert!(reconnects(&effects).is_empty());
 }
 
+/// An action chosen in a context menu is the user acting, like the same action sent by its
+/// button or key: on a site whose session was lost it reconnects first and is held, never
+/// run on the dead session. (A test-only menu item stands in for the pane menus of Plan 13
+/// Part 3, the first real items that act on a tab.)
+#[tokio::test]
+async fn menu_action_on_dropped_session_reconnects_like_its_button() {
+    use crate::app::menu::{MenuMsg, MenuTarget};
+
+    let a = site("a", "a.example", "u", Protocol::Ftp);
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
+    let mut app = loaded(&fake).await;
+    let sites = connect_effect(app.update(Message::ConnectSite(a.id.clone())));
+    drive(&mut app, &fake, sites).await;
+    let session = session_of(&app, &a.id);
+    let tab = app.tabs[0].id;
+    let lost = Error::new(ErrorKind::Network, "Connection lost");
+    state(&mut app, session, ConnectionState::Disconnected(lost));
+
+    app.update(Message::Menu(MenuMsg::Open(MenuTarget::TestNavigate {
+        tab,
+        to: path("/srv"),
+    })));
+    assert!(app.menu.is_some());
+    let effects = app.update(Message::Menu(MenuMsg::Choose(0)));
+    assert!(app.menu.is_none());
+    // The same as `navigate(&mut app, tab, "/srv")`: a reconnection, the listing held.
+    assert_eq!(reconnects(&effects), vec![session], "{effects:?}");
+    assert!(remote_lists(&effects, tab).is_empty(), "{effects:?}");
+    assert!(app.tab_conn(0).reconnecting);
+    // Back: the held action runs, once.
+    let effects = state(&mut app, session, ConnectionState::Connected);
+    assert_eq!(remote_lists(&effects, tab), vec![path("/srv")]);
+}
+
 /// A session refused for good (host key, authentication, certificate) never reconnects by
 /// itself: an action fails as before and the banner keeps the reason and its fix.
 #[tokio::test]
