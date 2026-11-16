@@ -17,6 +17,8 @@ run in `cargo test --workspace`; NEEDS HUMAN rows need a person and a real displ
 
 ## NEEDS HUMAN
 
+**Run 2026-11-16 (author, Linux, release build of `main` with the UI in pt-BR):** the main flows passed — switching the language live in Settings, folder compare over SFTP and FTP with upload/download from the panel, identical files not shown as newer on FTP, enabled and disabled panel buttons distinguishable. Rows below not covered by that run stay open (macOS and Windows, large-tree limit, keyboard-only use).
+
 1. **A real project over SFTP.** Open a local project and its deployed copy on an SSH
    site. Expect: the panel lists plausible differences, `node_modules`/`.git` are absent, the
    summary is correct, Upload selected makes the row "Queued" then "done", and the next run
