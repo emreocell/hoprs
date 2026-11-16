@@ -1407,6 +1407,34 @@ fn window_resize_is_remembered() {
     assert_eq!(app.window_height, 700.0);
 }
 
+/// A small window shows the saved heights clamped, and neither rewrites them nor forgets
+/// them: a taller window gets them back.
+#[test]
+fn small_window_clamps_without_rewriting() {
+    use crate::ui::{compare, files, fit, queue};
+    let mut app = App::new();
+    app.settings.compare_height = Some(400.0);
+    app.settings.queue_height = 400.0;
+    let resize = |app: &mut App, height: f32| {
+        app.update(Message::WindowResized(iced::Size::new(1280.0, height)));
+    };
+    resize(&mut app, 600.0);
+    let area = 600.0 - 40.0 - 1.0 - 26.0;
+    let compare_h = fit::compare_height(area, app.settings.compare_height);
+    assert!((compare::MIN_HEIGHT..400.0).contains(&compare_h));
+    assert!(compare_h <= area - files::PANES_MIN_HEIGHT);
+    let queue_h = queue::max_height(&app);
+    assert!((queue::MIN_HEIGHT..400.0).contains(&queue_h));
+    assert_eq!(app.settings.compare_height, Some(400.0));
+    assert_eq!(app.settings.queue_height, 400.0);
+    resize(&mut app, 1200.0);
+    assert_eq!(queue::max_height(&app), 400.0);
+    assert_eq!(
+        fit::compare_height(1100.0, app.settings.compare_height),
+        400.0
+    );
+}
+
 mod compare;
 mod dialogs;
 mod edit;
@@ -1415,6 +1443,7 @@ mod import_settings;
 mod log;
 mod menu;
 mod palette;
+mod panels;
 mod status;
 mod tabs;
 mod terminal;

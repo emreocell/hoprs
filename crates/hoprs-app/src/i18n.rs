@@ -491,6 +491,8 @@ mod tests {
         "brand",
         "compare-ellipsis",
         "go-to-anything-key",
+        "key-settings",
+        "key-settings-macos",
         "palette-key-copy",
         "palette-key-paste",
         "palette-key-find",

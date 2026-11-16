@@ -12,6 +12,8 @@ real display.
 | File icons by extension (`for_entry`) | Pass |
 | Context menu model: opens at the last press, closes on Escape, outside click, resize and choice, blocked behind a dialog (`crates/hoprs-app/src/app/tests/menu.rs`); kept inside the window (`ui::menu` tests); press position published before the widget under it (`ui::pointer` tests) | Pass |
 | Sidebar state saved: collapse and hide round-trip through `settings.toml`, invalid values read as shown, the ⋯ menu hides and shows a section (`settings` tests, `app/tests/import_settings.rs`); site state and icon by protocol (`ui::sidebar` tests) | Pass |
+| Panel dividers: a drag resizes the compare panel and the queue from the press position, never below their minimum, saved on release or when the pointer leaves the window; a double-click resets and saves; heights round-trip through `settings.toml`; past the window's cap or the minimum a drag turns back at once; dragging up a short queue never lowers its maximum, dragging down shrinks it from the drawn height; a click or unchanged drag saves nothing; the queue's saved height is its maximum (two rows stay two rows); pointer moves are listened to only while resizing (`app/tests/panels.rs`, `ui::pointer` tests) | Pass |
+| Settings tab: one at most, selecting another tab keeps it, its × returns to the tab it came from (or the last), not saved with a workspace, blocked behind a dialog (`app/tests/tabs.rs`); settings saved and typed passwords forgotten when it is not shown (`app/tests/import_settings.rs`); no connection in the status bar (`app/tests/status.rs`); Ctrl+, opens it even from a focused terminal and sends nothing to the shell (`ui::files`, `ui::terminal`, `terminal::input` tests); palette rows (`app/tests/palette.rs`) | Pass |
 
 ## NEEDS HUMAN
 
@@ -58,3 +60,34 @@ real display.
    with its label. The status bar shows a green plug when connected, a red warning when the
    connection is lost, and a lock before the login method on SSH and FTPS but not on plain
    FTP. The Log button stays highlighted while the panel is open.
+
+8. **Settings tab.** NEEDS HUMAN. Ctrl+, (Cmd+, on macOS) opens Settings from a file tab,
+   from a focused terminal (nothing typed in the shell) and with no tabs. Expect: a
+   "Settings" tab with a gear after the session tabs, selected; no queue under it and no
+   connection in the status bar (the Log button stays). Press Ctrl+, again, or use the
+   sidebar gear or Ctrl+K › Settings: the same tab is focused, never a second one. Click a
+   session tab and back; then close Settings with its ×: the tab you came from is selected
+   again.
+
+9. **Settings sections.** NEEDS HUMAN. In the Settings tab click each of the six sections
+   in the left list (General, Transfers, Folder compare, Remote editing, Terminal, Backup),
+   in English and in Portuguese. Expect: the selected row has the white bar, each section
+   shows its title, a one-line description and its fields, and each one fits at 960 x 600.
+
+10. **Resizable panels.** NEEDS HUMAN. Open a files tab with the compare panel and a few
+    transfers in the queue. Expect: the cursor turns into the vertical resize cursor over
+    the top edge of the compare panel and of the queue, and a small grip shows there on
+    hover; dragging either edge resizes it smoothly; a double-click on the edge resets it
+    (compare about 30% of the tab, queue 210 px at most); the heights are the same after a
+    restart. Make the window shorter: the panels shrink before the file panes lose their
+    last five rows, and grow back when the window does. A terminal tab shows only the
+    queue's edge; the settings tab has no queue. While dragging, the panel follows the
+    pointer at once in both directions, also after going past its smallest or largest
+    size; dragging up a queue with only a few rows does not shrink its maximum. Expected,
+    not a bug: once a panel stops at a bound, the cursor may turn back into an arrow until
+    the pointer is over the edge again (iced applies the resize cursor only over the 7 px
+    band).
+    Collapse the compare panel with its caret: one line is left with the differences icon, the
+    three counts (only here, only on the server, different) or the progress while a run has
+    no rows yet, the auto checkbox, expand and close; no resize edge; expanding brings back
+    the height it had.

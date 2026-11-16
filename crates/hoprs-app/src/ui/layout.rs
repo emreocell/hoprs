@@ -32,9 +32,15 @@ pub fn view(app: &App) -> Element<'_, Message> {
     if let Some(notice) = edits::kept_notice(app) {
         right = right.push(notice).push(hrule());
     }
+    let right = right.push(edits::with_toast(app, center(app)));
+    // The settings tab has no transfers to show: no queue under it (the log and the
+    // status bar stay).
+    let right = if app.settings_shown() {
+        right
+    } else {
+        right.push(queue::view(app))
+    };
     let right = right
-        .push(edits::with_toast(app, center(app)))
-        .push(queue::view(app))
         .push(log::view(app))
         .push(status::view(app))
         .width(Length::Fill);
@@ -124,7 +130,8 @@ fn top_bar(app: &App) -> Element<'_, Message> {
         .into()
 }
 
-/// The center: the open form, else the active tab, else the empty state.
+/// The center: the open form, else the settings tab or the active tab, else the empty
+/// state.
 fn center(app: &App) -> Element<'_, Message> {
     match &app.form {
         Some(Form::Site(form)) => {
@@ -132,9 +139,13 @@ fn center(app: &App) -> Element<'_, Message> {
         }
         Some(Form::Workspace(form)) => return workspace_form::view(form, &app.sites),
         Some(Form::Import) => return import::view(app),
-        Some(Form::Settings) => return settings::view(app),
         Some(Form::QuitEdits) => return edits::quit_view(app),
         None => {}
+    }
+    if app.settings_shown()
+        && let Some(tab) = &app.settings_tab
+    {
+        return settings::view(app, tab);
     }
     if let Some(tab) = app.active_tab.and_then(|i| app.tabs.get(i)) {
         return match tab.terminal() {

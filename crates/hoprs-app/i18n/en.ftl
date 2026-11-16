@@ -56,6 +56,7 @@ palette-kind-files = files
 palette-toggle-queue = Toggle queue
 palette-toggle-log = Toggle log
 palette-close-tab = Close tab
+palette-close-settings = Close settings
 palette-open-workspace = Open workspace…
 palette-edit = Edit in editor
 palette-compare-folders = Compare folders
@@ -80,6 +81,8 @@ no-workspaces = No workspaces yet
 no-sites = No sites yet
 import-filezilla = Import from FileZilla
 settings = Settings
+key-settings = Ctrl ,
+key-settings-macos = ⌘ ,
 new-site = New site
 no-matches = No matching sites
 open-workspace = Open workspace
@@ -482,7 +485,13 @@ pick-sitemanager = Choose FileZilla's sitemanager.xml
 pick-filter-xml = XML files
 
 ## Settings
-settings-title = Settings
+settings-general = General
+settings-general-description = Language and version.
+settings-transfers-description = How many files move at once, what happens to existing files, and how connections stay open.
+settings-compare-description = When folders are compared, and the names left out.
+settings-editing-description = The editor that opens remote files.
+settings-terminal-description = How terminal tabs look and how much they remember.
+settings-backup-description = Save your sites, workspaces and passwords to a file, or restore them.
 settings-transfers = Transfers
 settings-workers = Workers per site
 settings-workers-hint = Parallel transfers per site, 1 to 16. Applies to the next connections.
@@ -805,6 +814,13 @@ compare-group-only-local = Only on this computer ({ $count })
 compare-group-only-remote = Only on the server ({ $count })
 compare-group-different = Different ({ $count })
 compare-group-unreadable = Could not read ({ $count })
+compare-summary-only-here = { $count } only here
+compare-summary-only-server = { $count } only on the server
+compare-summary-different =
+    { $count ->
+    [1] 1 different
+   *[other] { $count } different
+    }
 compare-local-newer = Local is newer
 compare-remote-newer = Server is newer
 compare-size-differs = Size differs

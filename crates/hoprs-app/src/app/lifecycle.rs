@@ -441,9 +441,13 @@ impl App {
             | Message::OpenImport
             | Message::Import(_)
             | Message::OpenSettings
+            | Message::SelectSettings
+            | Message::CloseSettings
             | Message::Settings(_)
             | Message::Palette(_)
             | Message::PointerPressed(_)
+            | Message::PointerMoved(_)
+            | Message::Divider(_)
             | Message::Menu(_)
             | Message::Sidebar(_)
             | Message::Terminal { .. } => Some(Vec::new()),

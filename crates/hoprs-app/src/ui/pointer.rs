@@ -5,15 +5,28 @@
 //! and may capture a press, which then is not published. On the base tree, the
 //! message a button or row sends for the same press finds [`crate::app::App::last_press`]
 //! already set (a menu opens there; drags and resizes start there). It never captures:
-//! the press goes on to the content as if the tracker were not there.
+//! the press goes on to the content as if the tracker were not there. Moves come from
+//! [`moved_message`], subscribed to only while something follows the pointer.
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer;
 use iced::advanced::widget::{Operation, Tree, tree};
 use iced::advanced::{Clipboard, Shell, Widget, overlay};
-use iced::{Element, Event, Length, Rectangle, Size, Vector, mouse};
+use iced::event::Status;
+use iced::{Element, Event, Length, Rectangle, Size, Vector, mouse, window};
 
 use crate::app::Message;
+
+/// The pointer's moves, as [`Message::PointerMoved`]: listened to only while
+/// [`crate::app::App::tracks_pointer`] (a divider is dragged), so they cost nothing else.
+pub fn moved_message(event: Event, _: Status, _: window::Id) -> Option<Message> {
+    match event {
+        Event::Mouse(mouse::Event::CursorMoved { position }) => {
+            Some(Message::PointerMoved(position))
+        }
+        _ => None,
+    }
+}
 
 /// `content`, with its left and right presses published as [`Message::PointerPressed`].
 pub fn tracker<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
@@ -195,5 +208,26 @@ mod tests {
                 Message::PointerPressed(Point::new(150.0, 150.0))
             )]
         );
+    }
+
+    #[test]
+    fn moves_become_pointer_moved() {
+        let at = Point::new(12.0, 34.0);
+        let id = iced::window::Id::unique();
+        let moved = moved_message(
+            Event::Mouse(mouse::Event::CursorMoved { position: at }),
+            Status::Ignored,
+            id,
+        );
+        assert_eq!(
+            format!("{moved:?}"),
+            format!("{:?}", Some(Message::PointerMoved(at)))
+        );
+        let pressed = moved_message(
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            Status::Ignored,
+            id,
+        );
+        assert!(pressed.is_none());
     }
 }

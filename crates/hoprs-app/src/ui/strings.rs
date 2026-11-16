@@ -16,8 +16,6 @@ pub fn cannot_open_profiles() -> &'static str {
 pub fn brand() -> &'static str {
     tr("brand")
 }
-// Shown in Settings -> General (Task 9 of Plan 13); no other use until then.
-#[allow(dead_code)]
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub fn no_sessions() -> &'static str {
     tr("no-sessions")
@@ -143,6 +141,18 @@ pub fn import_filezilla() -> &'static str {
 }
 pub fn settings() -> &'static str {
     tr("settings")
+}
+/// The key that opens Settings, as the palette shows it (Cmd on macOS).
+pub fn key_settings() -> &'static str {
+    if cfg!(target_os = "macos") {
+        tr("key-settings-macos")
+    } else {
+        tr("key-settings")
+    }
+}
+/// The palette's row that closes the settings tab.
+pub fn palette_close_settings() -> &'static str {
+    tr("palette-close-settings")
 }
 pub fn new_site() -> &'static str {
     tr("new-site")
@@ -1222,8 +1232,26 @@ pub fn pick_filter_xml() -> &'static str {
     tr("pick-filter-xml")
 }
 // Settings.
-pub fn settings_title() -> &'static str {
-    tr("settings-title")
+pub fn settings_general() -> &'static str {
+    tr("settings-general")
+}
+pub fn settings_general_description() -> &'static str {
+    tr("settings-general-description")
+}
+pub fn settings_transfers_description() -> &'static str {
+    tr("settings-transfers-description")
+}
+pub fn settings_compare_description() -> &'static str {
+    tr("settings-compare-description")
+}
+pub fn settings_editing_description() -> &'static str {
+    tr("settings-editing-description")
+}
+pub fn settings_terminal_description() -> &'static str {
+    tr("settings-terminal-description")
+}
+pub fn settings_backup_description() -> &'static str {
+    tr("settings-backup-description")
 }
 pub fn settings_transfers() -> &'static str {
     tr("settings-transfers")
@@ -1653,6 +1681,15 @@ pub fn compare_partial() -> &'static str {
 }
 pub fn compare_again() -> &'static str {
     tr("compare-again")
+}
+pub fn compare_summary_only_here(count: usize) -> String {
+    tr_args("compare-summary-only-here", &[("count", count.into())])
+}
+pub fn compare_summary_only_server(count: usize) -> String {
+    tr_args("compare-summary-only-server", &[("count", count.into())])
+}
+pub fn compare_summary_different(count: usize) -> String {
+    tr_args("compare-summary-different", &[("count", count.into())])
 }
 pub fn compare_group_only_local(count: usize) -> String {
     tr_args("compare-group-only-local", &[("count", count.into())])

@@ -16,7 +16,8 @@ use iced::widget::{
 use iced::{Alignment, Element, Length, Padding};
 
 use crate::app::compare::{CompareState, Group, Phase, Row, RowState};
-use crate::app::{App, CompareMsg, Message, Tab, TabId};
+use crate::app::{App, CompareMsg, Message, Panel, Tab, TabId};
+use crate::ui::divider;
 use crate::ui::fit;
 use crate::ui::icons::{self, Icon};
 use crate::ui::layout::QUEUE_HEAD_HEIGHT;
@@ -24,23 +25,14 @@ use crate::ui::theme::{self, palette};
 use crate::ui::virtual_list::{self, ROW_HEIGHT};
 use crate::ui::{format, strings, widgets};
 
-/// The fewest lines the rows' region shows (a group header counts as one).
-pub const MIN_BODY_LINES: usize = 4;
-/// The most lines it shows, however tall the window.
-pub const MAX_BODY_LINES: usize = 10;
-/// The region's smallest height.
-pub const MIN_BODY_HEIGHT: f32 = MIN_BODY_LINES as f32 * ROW_HEIGHT;
-/// The head and the foot with their rules.
-const CHROME_HEIGHT: f32 = 2.0 * QUEUE_HEAD_HEIGHT + 3.0 * theme::HAIRLINE;
-
-/// The rows' region height for a tab area `area` px tall: the panel (head, rows, foot)
-/// takes at most 35% of it, so the panes keep their room; between
-/// [`MIN_BODY_LINES`] and [`MAX_BODY_LINES`] whole lines.
-pub fn body_height(area: f32) -> f32 {
-    let room = (area * 0.35 - CHROME_HEIGHT) / ROW_HEIGHT;
-    let lines = (room.floor().max(0.0) as usize).clamp(MIN_BODY_LINES, MAX_BODY_LINES);
-    lines as f32 * ROW_HEIGHT
-}
+/// The panel's share of the tab area until the user drags it.
+pub const DEFAULT_SHARE: f32 = 0.30;
+/// The divider, the head and the foot with their rules.
+const CHROME_HEIGHT: f32 = divider::HIT + 2.0 * QUEUE_HEAD_HEIGHT + 2.0 * theme::HAIRLINE;
+/// The panel's least height: its divider, head and foot, their rules and two rows.
+pub const MIN_HEIGHT: f32 = CHROME_HEIGHT + MIN_BODY_HEIGHT;
+/// The rows' region's least height.
+pub const MIN_BODY_HEIGHT: f32 = 2.0 * ROW_HEIGHT;
 const STATUS_WIDTH: f32 = 148.0;
 const SIZES_WIDTH: f32 = 128.0;
 
@@ -273,14 +265,133 @@ pub fn footer(state: &CompareState) -> Footer {
     }
 }
 
+/// What the collapsed panel's single line says.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Summary {
+    pub only_local: usize,
+    pub only_remote: usize,
+    pub different: usize,
+    /// The footer's text while a run is going, paused or failed (or nothing differs); the
+    /// counts are shown otherwise.
+    pub progress: Option<String>,
+}
+
+/// The counts of the three groups (not the unreadable ones), or the run's progress.
+pub fn summary(state: &CompareState) -> Summary {
+    // A run in flight, paused or failed always says so; an identical result or the
+    // wait before a run shows the footer's text only when there are no rows to count.
+    let progress = match state.phase {
+        Phase::Running { .. }
+        | Phase::Paused { .. }
+        | Phase::Stopped(_)
+        | Phase::Done { partial: true } => true,
+        Phase::Debouncing | Phase::Done { partial: false } => state.rows.is_empty(),
+        Phase::Idle => false,
+    };
+    Summary {
+        only_local: group_count(state, Group::OnlyLocal),
+        only_remote: group_count(state, Group::OnlyRemote),
+        different: group_count(state, Group::Different),
+        progress: progress.then(|| footer(state).text),
+    }
+}
+
+/// The collapsed panel: one line with the title, the counts, the toggle and the buttons.
+fn summary_line<'a>(
+    id: TabId,
+    state: &'a CompareState,
+    auto: bool,
+    msg: impl Fn(CompareMsg) -> Message + Copy + 'a,
+) -> Element<'a, Message> {
+    let p = palette();
+    let sum = summary(state);
+    let count = |group: Group, label: String| {
+        row![
+            icons::icon(group_icon(group), icons::SMALL).color(p.muted),
+            text(label)
+                .size(theme::TEXT_SM)
+                .color(p.muted)
+                .wrapping(text::Wrapping::None),
+        ]
+        .spacing(theme::SPACE_3XS)
+        .align_y(Alignment::Center)
+    };
+    let middle: Element<'a, Message> = match sum.progress {
+        Some(progress) => text(progress)
+            .size(theme::TEXT_SM)
+            .color(p.muted)
+            .wrapping(text::Wrapping::None)
+            .into(),
+        None => row![
+            count(
+                Group::OnlyLocal,
+                strings::compare_summary_only_here(sum.only_local)
+            ),
+            count(
+                Group::OnlyRemote,
+                strings::compare_summary_only_server(sum.only_remote)
+            ),
+            count(
+                Group::Different,
+                strings::compare_summary_different(sum.different)
+            ),
+        ]
+        .spacing(theme::SPACE_MD)
+        .align_y(Alignment::Center)
+        .into(),
+    };
+    row![
+        icons::icon(Icon::GitDiff, icons::SMALL).color(p.muted),
+        text(strings::compare_title())
+            .font(theme::INTER_SEMIBOLD)
+            .wrapping(text::Wrapping::None),
+        container(middle).width(Length::Fill).clip(true),
+        checkbox(auto)
+            .label(strings::compare_auto())
+            .text_size(theme::TEXT_XS)
+            .size(theme::TEXT_SM)
+            .style(theme::checkbox)
+            .on_toggle(move |on| msg(CompareMsg::ToggleAuto { tab: id, on })),
+        widgets::icon_button(
+            Icon::CaretUp,
+            strings::compare_expand(),
+            None,
+            Some(msg(CompareMsg::ToggleCollapsed { tab: id })),
+        ),
+        widgets::icon_button(
+            Icon::X,
+            strings::compare_close(),
+            None,
+            Some(msg(CompareMsg::Hide { tab: id })),
+        ),
+    ]
+    .spacing(theme::SPACE_MD)
+    .align_y(Alignment::Center)
+    .height(QUEUE_HEAD_HEIGHT)
+    .padding(Padding::ZERO.left(theme::SPACE_MD).right(theme::SPACE_SM))
+    .into()
+}
+
 /// The panel, when the tab shows one.
 pub fn view<'a>(app: &'a App, tab: &'a Tab, area: f32) -> Option<Element<'a, Message>> {
     let state = tab.compare().filter(|s| s.visible())?;
     let id = tab.id;
     let p = palette();
     let msg = move |m: CompareMsg| Message::Compare(m);
+    if state.collapsed {
+        // No divider: there is no height to drag, and expanding restores the saved one.
+        return Some(
+            container(column![
+                rule::horizontal(theme::HAIRLINE).style(theme::rule_1px),
+                summary_line(id, state, app.settings.compare_auto, msg),
+            ])
+            .width(Length::Fill)
+            .into(),
+        );
+    }
     let head = head(state, app.settings.compare_auto);
     let compact = app.window_width < 1180.0;
+    let height = fit::compare_height(area, app.settings.compare_height);
 
     let (local, remote) = if compact {
         (short_root(&head.local), short_root(&head.remote))
@@ -324,16 +435,8 @@ pub fn view<'a>(app: &'a App, tab: &'a Tab, area: f32) -> Option<Element<'a, Mes
             .style(theme::checkbox)
             .on_toggle(move |on| msg(CompareMsg::ToggleAuto { tab: id, on })),
         widgets::icon_button(
-            if state.collapsed {
-                Icon::CaretUp
-            } else {
-                Icon::CaretDown
-            },
-            if state.collapsed {
-                strings::compare_expand()
-            } else {
-                strings::compare_collapse()
-            },
+            Icon::CaretDown,
+            strings::compare_collapse(),
             None,
             Some(msg(CompareMsg::ToggleCollapsed { tab: id })),
         ),
@@ -351,24 +454,26 @@ pub fn view<'a>(app: &'a App, tab: &'a Tab, area: f32) -> Option<Element<'a, Mes
 
     let foot_content = footer(state);
     let lines = lines(state);
-    let mut region = column![
-        rule::horizontal(theme::HAIRLINE).style(theme::rule_strong),
-        top,
-    ];
-    if !state.collapsed {
-        region = region
-            .push(rule::horizontal(theme::HAIRLINE).style(theme::rule_1px))
-            .push(body(
+    let dragged = app.resize.is_some_and(|r| r.panel == Panel::Compare);
+    let cap = fit::compare_height(area, Some(f32::INFINITY));
+    let divider = divider::view(Panel::Compare, height, cap, dragged);
+    let region = column![divider, top]
+        .push(rule::horizontal(theme::HAIRLINE).style(theme::rule_1px))
+        .push(
+            container(body(
                 tab,
                 state,
                 &foot_content,
                 lines,
-                body_height(area),
+                height - CHROME_HEIGHT,
                 app.window_width,
             ))
-            .push(rule::horizontal(theme::HAIRLINE).style(theme::rule_1px))
-            .push(foot(id, foot_content, compact));
-    }
+            .width(Length::Fill)
+            .height(height - CHROME_HEIGHT)
+            .clip(true),
+        )
+        .push(rule::horizontal(theme::HAIRLINE).style(theme::rule_1px))
+        .push(foot(id, foot_content, compact));
     Some(container(region).width(Length::Fill).into())
 }
 
@@ -935,17 +1040,6 @@ mod tests {
     }
 
     #[test]
-    fn body_height_grows_with_the_window() {
-        // 1280x800: the tab area is ~690 px; the panes keep their room.
-        assert_eq!(body_height(690.0), 5.0 * ROW_HEIGHT);
-        assert_eq!(body_height(300.0), MIN_BODY_HEIGHT);
-        // 1280x1000.
-        assert_eq!(body_height(890.0), 7.0 * ROW_HEIGHT);
-        assert_eq!(body_height(5000.0), MAX_BODY_LINES as f32 * ROW_HEIGHT);
-        assert!(body_height(0.0) >= MIN_BODY_HEIGHT);
-    }
-
-    #[test]
     fn upload_and_download_follow_the_selection() {
         let mut s = mixed();
         let f = footer(&s);
@@ -1037,6 +1131,95 @@ mod tests {
         assert_eq!(
             footer(&state(Vec::new())).all_identical.as_deref(),
             Some("As duas pastas são idênticas (1.204 itens)")
+        );
+    }
+
+    #[test]
+    fn summary_counts_groups() {
+        let mut s = mixed();
+        s.rows.push(row(diff(
+            "x",
+            Status::Unreadable {
+                side: CompareSide::Local,
+                error: Error::coded(ErrorKind::Network, "session-closed", "x"),
+            },
+            None,
+            None,
+        )));
+        let sm = summary(&s);
+        assert_eq!((sm.only_local, sm.only_remote, sm.different), (2, 1, 2));
+        assert_eq!(sm.progress, None);
+    }
+
+    #[test]
+    fn summary_shows_progress_while_running() {
+        let _r = RestoreEnglish;
+        let mut s = state(Vec::new());
+        s.phase = Phase::Running { seen: (1000, 2120) };
+        assert_eq!(
+            summary(&s).progress.as_deref(),
+            Some("Comparing… 3,120 items")
+        );
+        s.phase = Phase::Paused { seen: (1, 1) };
+        assert!(summary(&s).progress.is_some());
+        s.phase = Phase::Debouncing;
+        assert_eq!(summary(&s).progress.as_deref(), Some("1,204 identical"));
+        // A run in flight says so even with rows already found.
+        let mut m = mixed();
+        m.phase = Phase::Running { seen: (1, 1) };
+        assert_eq!(summary(&m).progress.as_deref(), Some("Comparing… 2 items"));
+        m.phase = Phase::Paused { seen: (1, 1) };
+        assert_eq!(
+            summary(&m).progress.as_deref(),
+            Some("2 items seen so far; the list is partial.")
+        );
+        m.phase = Phase::Done { partial: true };
+        assert_eq!(
+            summary(&m).progress.as_deref(),
+            Some("Stopped; the list is partial.")
+        );
+        m.phase = Phase::Stopped(Error::coded(ErrorKind::Network, "session-closed", "x"));
+        assert!(
+            summary(&m)
+                .progress
+                .is_some_and(|t| t.starts_with("Comparison stopped: "))
+        );
+        // Finished: the counts when something differs, the identical text otherwise.
+        m.phase = Phase::Done { partial: false };
+        assert_eq!(summary(&m).progress, None);
+        let mut clean = state(Vec::new());
+        clean.phase = Phase::Done { partial: false };
+        assert_eq!(summary(&clean).progress.as_deref(), Some("1,204 identical"));
+    }
+
+    #[test]
+    fn summary_in_portuguese() {
+        let _r = RestoreEnglish;
+        set_language(Language::PtBr);
+        let one = crate::ui::strings::compare_summary_only_here(1);
+        let two = crate::ui::strings::compare_summary_only_here(2);
+        assert_eq!(one, "1 só aqui");
+        assert_eq!(two, "2 só aqui");
+        assert_eq!(
+            crate::ui::strings::compare_summary_only_server(1),
+            "1 só no servidor"
+        );
+        assert_eq!(
+            crate::ui::strings::compare_summary_different(1),
+            "1 diferente"
+        );
+        assert_eq!(
+            crate::ui::strings::compare_summary_different(2),
+            "2 diferentes"
+        );
+        set_language(Language::En);
+        assert_eq!(
+            crate::ui::strings::compare_summary_different(1),
+            "1 different"
+        );
+        assert_eq!(
+            crate::ui::strings::compare_summary_only_here(2),
+            "2 only here"
         );
     }
 }

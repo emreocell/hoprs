@@ -1,5 +1,11 @@
-//! The settings page (center, no modal): workers per site, the default conflict policy,
-//! the keepalive, the terminal, and the encrypted backup (export and restore).
+//! The settings page, shown as a tab in the strip (no modal): workers per site, the
+//! default conflict policy, the keepalive, the terminal, and the encrypted backup (export
+//! and restore).
+//!
+//! The settings tab is a slot of its own ([`App::settings_tab`]), not a session [`Tab`](super::Tab)
+//! (it has no site): at most one, never saved with a workspace. While it is selected no
+//! session tab is (`active_tab` is `None`), so every "active tab" path shows no
+//! connection; closing it returns to the tab it came from.
 //!
 //! A change applies at once (the policy to the engine, the workers and the keepalive to
 //! the next connections) and is saved to `settings.toml`, unless that file was unreadable at start:
@@ -15,10 +21,10 @@ use hoprs_transfer::ConflictPolicy;
 use hoprs_vault::{BackupImportReport, ExportReport, ImportMode};
 use secrecy::SecretString;
 
-use super::{App, Effect, Form, PickTarget};
+use super::{App, DividerMsg, Effect, Panel, PickTarget, Resize, TabId};
 use crate::settings::{
     LanguageChoice, SettingsLoad, TerminalTheme, clamp_font_size, clamp_keepalive,
-    clamp_scrollback, clamp_workers, valid_editor,
+    clamp_scrollback, clamp_workers, round_panel_height, valid_editor,
 };
 use crate::ui::site_form::Password;
 use crate::ui::strings;
@@ -43,7 +49,43 @@ pub enum SettingsMsg {
     /// The compare's ignore list as typed (comma-separated): saved as parsed.
     CompareIgnore(String),
     Backup(BackupMsg),
-    Close,
+    /// A section of the left navigation.
+    Section(SettingsSection),
+}
+
+/// A section of the settings tab (its left navigation).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum SettingsSection {
+    #[default]
+    General,
+    Transfers,
+    Compare,
+    Editing,
+    Terminal,
+    Backup,
+}
+
+impl SettingsSection {
+    /// The navigation's order.
+    pub const ALL: [SettingsSection; 6] = [
+        SettingsSection::General,
+        SettingsSection::Transfers,
+        SettingsSection::Compare,
+        SettingsSection::Editing,
+        SettingsSection::Terminal,
+        SettingsSection::Backup,
+    ];
+}
+
+/// The settings tab in the strip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingsTab {
+    pub section: SettingsSection,
+    /// Selected: the center shows it, and no session tab is active.
+    pub active: bool,
+    /// The session tab that was selected when it was opened (or last selected), where
+    /// closing it returns.
+    pub return_to: Option<TabId>,
 }
 
 #[derive(Debug, Clone)]
@@ -212,9 +254,65 @@ impl App {
         }
     }
 
+    /// Whether the center shows the settings tab (selected, no form over it).
+    pub fn settings_shown(&self) -> bool {
+        self.form.is_none() && self.settings_tab.as_ref().is_some_and(|tab| tab.active)
+    }
+
+    /// Opens the settings tab, or selects it if it is open (there is at most one), and
+    /// scrolls the strip to it. Like selecting a tab, it drops the form shown.
     pub(super) fn open_settings(&mut self) -> Vec<Effect> {
-        self.form = Some(Form::Settings);
+        self.form = None;
+        let from = self.shown_session_tab();
+        let tab = self.settings_tab.get_or_insert(SettingsTab {
+            section: SettingsSection::default(),
+            active: false,
+            return_to: None,
+        });
+        if from.is_some() {
+            tab.return_to = from;
+        }
+        tab.active = true;
+        self.active_tab = None;
+        // It is the strip's last tab: bring it into view.
+        vec![Effect::ScrollTabs { x: 1.0 }]
+    }
+
+    /// The settings tab's ×: it goes; if it was selected, the tab it came from is
+    /// selected again if still open, else the last tab.
+    pub(super) fn close_settings(&mut self) -> Vec<Effect> {
+        let Some(tab) = self.settings_tab.take() else {
+            return Vec::new();
+        };
+        if tab.active {
+            let back = tab
+                .return_to
+                .and_then(|id| self.tab_index(id))
+                .or_else(|| self.tabs.len().checked_sub(1));
+            match back {
+                Some(index) => self.select_session_tab(index),
+                None => self.active_tab = None,
+            }
+        }
         Vec::new()
+    }
+
+    /// Shows a session tab. A terminal shown again takes the keyboard (its search bar
+    /// keeps it).
+    pub(super) fn select_session_tab(&mut self, index: usize) {
+        self.active_tab = Some(index);
+        if let Some(terminal) = self.tabs[index].terminal_mut()
+            && terminal.search.is_none()
+        {
+            terminal.focused = true;
+        }
+    }
+
+    /// The selected session tab's id, if any.
+    fn shown_session_tab(&self) -> Option<TabId> {
+        self.active_tab
+            .and_then(|i| self.tabs.get(i))
+            .map(|tab| tab.id)
     }
 
     pub(super) fn settings_loaded(&mut self, loaded: SettingsLoad) {
@@ -273,6 +371,12 @@ impl App {
                     }
                 }
                 self.save_settings_effect().into_iter().collect()
+            }
+            SettingsMsg::Section(section) => {
+                if let Some(tab) = &mut self.settings_tab {
+                    tab.section = section;
+                }
+                Vec::new()
             }
             SettingsMsg::Language(choice) => {
                 if choice == self.settings.language {
@@ -335,23 +439,13 @@ impl App {
                 self.save_settings_effect().into_iter().collect()
             }
             SettingsMsg::Backup(msg) => self.backup_msg(msg),
-            SettingsMsg::Close => {
-                if matches!(self.form, Some(Form::Settings)) {
-                    self.form = None;
-                }
-                // Typed passwords don't outlive the page, nor does a blank editor field.
-                self.backup.forget_passwords();
-                self.editor_input = None;
-                self.compare_ignore_input = None;
-                Vec::new()
-            }
         }
     }
 
     /// Saves the settings, unless the file was unreadable: it is never overwritten. One
     /// save at a time: a change made while one runs is saved when it ends, so the file
     /// always ends up with the latest settings (two writes never race).
-    fn save_settings_effect(&mut self) -> Option<Effect> {
+    pub(super) fn save_settings_effect(&mut self) -> Option<Effect> {
         if self.settings_load_error.is_some() {
             return None;
         }
@@ -589,5 +683,106 @@ impl App {
     /// An import or a backup runs: the progress indicator moves.
     pub fn busy(&self) -> bool {
         self.import.running() || self.backup.running()
+    }
+
+    /// Whether the pointer's moves are wanted: only while a divider is dragged (the
+    /// subscription that sends them runs only then).
+    pub fn tracks_pointer(&self) -> bool {
+        self.resize.is_some()
+    }
+
+    /// A press or double-click on a panel's divider. A press starts a resize at the
+    /// press's position ([`App::last_press`], published before the divider's message);
+    /// a double-click puts the panel back to its default height and saves it (if that
+    /// changed anything).
+    pub(super) fn divider_msg(&mut self, msg: DividerMsg) -> Vec<Effect> {
+        match msg {
+            DividerMsg::Press { panel, height, cap } => {
+                self.resize = Some(Resize {
+                    panel,
+                    start_y: self.last_press.y,
+                    start_height: height,
+                    drawn: height,
+                    cap,
+                    saved_at_press: self.panel_setting(panel),
+                });
+                Vec::new()
+            }
+            DividerMsg::Reset(panel) => {
+                // The double-click's second press started a resize: it ends here.
+                self.resize = None;
+                let before = self.panel_setting(panel);
+                match panel {
+                    Panel::Compare => self.settings.compare_height = None,
+                    Panel::Queue => {
+                        self.settings.queue_height = crate::ui::layout::QUEUE_MAX_HEIGHT;
+                    }
+                }
+                self.save_panel_if_changed(panel, before)
+            }
+        }
+    }
+
+    /// The saved height of `panel` (`None`: the compare panel's default share).
+    fn panel_setting(&self, panel: Panel) -> Option<f32> {
+        match panel {
+            Panel::Compare => self.settings.compare_height,
+            Panel::Queue => Some(self.settings.queue_height),
+        }
+    }
+
+    /// Saves the settings when `panel`'s height is no longer `before` (a plain click on a
+    /// divider writes nothing).
+    fn save_panel_if_changed(&mut self, panel: Panel, before: Option<f32>) -> Vec<Effect> {
+        if self.panel_setting(panel) == before {
+            return Vec::new();
+        }
+        self.save_settings_effect().into_iter().collect()
+    }
+
+    /// The pointer moved: while a divider is dragged, its panel follows the pointer, as
+    /// much taller as it went up, between the panel's minimum and the window's cap now
+    /// (past either, the anchor moves with the pointer so turning back acts at once).
+    /// Below the height drawn at the press the setting is that height; above it the
+    /// setting only grows: the queue's setting is its maximum, so a queue drawn shorter
+    /// than its maximum keeps that maximum until the drag passes it. Saved when the button
+    /// is up.
+    pub(super) fn pointer_moved(&mut self, at: iced::Point) {
+        let Some(resize) = self.resize.as_mut() else {
+            return;
+        };
+        let min = match resize.panel {
+            Panel::Compare => crate::ui::compare::MIN_HEIGHT,
+            Panel::Queue => crate::ui::queue::MIN_HEIGHT,
+        };
+        let wanted = resize.start_height + (resize.start_y - at.y);
+        let height = wanted.min(resize.cap).max(min);
+        if height != wanted {
+            resize.start_y = at.y;
+            resize.start_height = height;
+        }
+        let saved = resize.saved_at_press.unwrap_or(resize.drawn);
+        let value = if height < resize.drawn {
+            Some(round_panel_height(height))
+        } else if height <= saved {
+            resize.saved_at_press
+        } else {
+            Some(round_panel_height(height))
+        };
+        match resize.panel {
+            Panel::Compare => self.settings.compare_height = value,
+            Panel::Queue => {
+                self.settings.queue_height = value.unwrap_or(crate::ui::layout::QUEUE_MAX_HEIGHT);
+            }
+        }
+    }
+
+    /// The button went up or the pointer left the window: a resize ends with the height
+    /// it reached, saved if it changed.
+    pub(super) fn end_resize(&mut self) -> Vec<Effect> {
+        let Some(resize) = self.resize.take() else {
+            return Vec::new();
+        };
+        self.save_panel_if_changed(resize.panel, resize.saved_at_press)
     }
 }

@@ -303,6 +303,11 @@ pub fn rule_strong(_: &Theme) -> rule::Style {
     hairline(palette().rule_2)
 }
 
+/// The grip a hovered divider shows: a `muted` bar.
+pub fn grip(_: &Theme) -> container::Style {
+    surface(palette().muted)
+}
+
 /// The 2 px accent line under the active tab.
 pub fn underline(_: &Theme) -> container::Style {
     surface(palette().accent)

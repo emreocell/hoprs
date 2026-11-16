@@ -40,8 +40,6 @@ pub enum Form {
     /// "Import from FileZilla" ([`App::import`] holds its state, which outlives the view
     /// while an import runs).
     Import,
-    /// The settings page ([`App::settings`], [`App::backup`]).
-    Settings,
     /// The question about unsent remote edits before the window or a workspace closes
     /// ([`App::center_ask`]).
     QuitEdits,
@@ -85,7 +83,7 @@ pub use log::{LogLevel, LogMsg};
 pub use menu::{ContextMenu, MenuMsg, MenuTarget};
 pub use palette::PaletteMsg;
 pub use queue::{Queue, QueueMsg, QueueTab, RowAction};
-pub use settings::{SidebarMsg, SidebarSection};
+pub use settings::{SettingsTab, SidebarMsg, SidebarSection};
 pub use tabs::{SiteConn, Tab, TabId, TabState};
 pub use terminal::TerminalMsg;
 
@@ -96,6 +94,39 @@ pub enum WorkspaceRow<'a> {
     /// The site is no longer in the vault (or this version can't read it): shown as
     /// "Site missing" and skipped by "Open workspace".
     Missing(SiteId),
+}
+
+/// A panel whose height the user drags ([`crate::ui::divider`]).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Panel {
+    Compare,
+    Queue,
+}
+
+/// A divider drag. The anchor (`start_y`, `start_height`) is where the press was and how
+/// tall the panel was drawn then; it moves to the pointer whenever the height hits a
+/// bound, so the panel follows the pointer at once when it turns back.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Resize {
+    pub panel: Panel,
+    pub start_y: f32,
+    pub start_height: f32,
+    /// The height the panel was drawn at when pressed (fixed for the whole drag).
+    pub drawn: f32,
+    /// The most the panel can be drawn at in the window now.
+    pub cap: f32,
+    /// The panel's setting when pressed (`None`: the compare panel's default).
+    pub saved_at_press: Option<f32>,
+}
+
+/// Something on a panel's divider.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum DividerMsg {
+    /// A press: a resize starts from `height`, the height the panel was drawn at, up to
+    /// `cap`, the most the window lets it have now.
+    Press { panel: Panel, height: f32, cap: f32 },
+    /// A double-click: the panel's default height.
+    Reset(Panel),
 }
 
 /// The whole UI state.
@@ -124,6 +155,9 @@ pub struct App {
     /// The connection of each site with tabs, shared by those tabs ([`tabs`]).
     pub conns: HashMap<SiteId, SiteConn>,
     pub active_tab: Option<usize>,
+    /// The settings tab, drawn after the session tabs while it is open ([`settings`]).
+    /// Selected (`active`) only while `active_tab` is `None`.
+    pub settings_tab: Option<SettingsTab>,
     /// A sidebar action failed (opening the profile folder).
     pub sidebar_error: Option<Error>,
     /// Where a local pane starts when its site names no folder.
@@ -171,6 +205,8 @@ pub struct App {
     /// root [`crate::ui::pointer`] widget publishes it before the press reaches anything
     /// else): where a menu opens.
     pub last_press: iced::Point,
+    /// A divider being dragged: the panel it resizes, until the button is up.
+    pub resize: Option<Resize>,
     /// The context menu, while one is open ([`menu`]).
     pub menu: Option<ContextMenu>,
     /// The remote files being edited, in the order they started ([`edit`]).
@@ -371,8 +407,13 @@ pub enum Message {
     /// The import finished: its report, or why the file could not be read.
     Imported(Result<ImportReport, Error>),
     SitemanagerDeleted(Result<(), Error>),
-    /// The sidebar's "Settings".
+    /// The sidebar's gear, the palette or Ctrl+, (Cmd+, on macOS): opens the settings
+    /// tab, or selects it.
     OpenSettings,
+    /// A click on the settings tab in the strip.
+    SelectSettings,
+    /// The settings tab's ×.
+    CloseSettings,
     Settings(settings::SettingsMsg),
     /// Folding or hiding a sidebar section.
     Sidebar(SidebarMsg),
@@ -399,6 +440,11 @@ pub enum Message {
     /// A left or right press in the window, at this position (logical pixels), before
     /// the widget under it sees it.
     PointerPressed(iced::Point),
+    /// The pointer moved, at this position (logical pixels): sent only while
+    /// [`App::tracks_pointer`].
+    PointerMoved(iced::Point),
+    /// A press or double-click on the divider at the top of a panel.
+    Divider(DividerMsg),
     /// Something in the context menu ([`menu`]).
     Menu(MenuMsg),
     /// Something in a terminal tab: its widget, keyboard, search bar or timers.
@@ -748,6 +794,7 @@ impl App {
             tabs: Vec::new(),
             conns: HashMap::new(),
             active_tab: None,
+            settings_tab: None,
             sidebar_error: None,
             home: dirs::home_dir().as_deref().and_then(files::local_path),
             mods: Mods::default(),
@@ -770,6 +817,7 @@ impl App {
             window_width: INITIAL_WINDOW_WIDTH,
             window_height: INITIAL_WINDOW_HEIGHT,
             last_press: iced::Point::ORIGIN,
+            resize: None,
             menu: None,
             edits: Vec::new(),
             edit_opening: Vec::new(),
@@ -880,8 +928,10 @@ impl App {
         if self.active_tab != active
             && let Some(index) = self.active_tab
         {
+            // The settings tab, last in the strip, counts too.
+            let count = self.tabs.len() + usize::from(self.settings_tab.is_some());
             effects.push(Effect::ScrollTabs {
-                x: tab_strip_offset(index, self.tabs.len()),
+                x: tab_strip_offset(index, count),
             });
         }
         // A security dialog wins over the palette, and a closing window has none.
@@ -893,8 +943,22 @@ impl App {
         {
             self.menu = None;
         }
+        // A session tab became active (selected, opened, a close question shown): the
+        // settings tab is no longer selected.
+        if self.active_tab.is_some()
+            && let Some(settings) = &mut self.settings_tab
+        {
+            settings.active = false;
+        }
+        // No session tab selected (the last one closed, or the workspace with it): the
+        // settings tab, if open, is the remaining tab and becomes selected.
+        if self.active_tab.is_none()
+            && let Some(settings) = &mut self.settings_tab
+        {
+            settings.active = true;
+        }
         // Typed backup passwords never outlive the settings page, however it was left.
-        if !matches!(self.form, Some(Form::Settings)) {
+        if !self.settings_shown() {
             self.backup.forget_passwords();
             // The same for the typed fields: the next visit starts from what is saved.
             self.compare_ignore_input = None;
@@ -938,6 +1002,8 @@ impl App {
                 self.menu = None;
             }
             Message::PointerPressed(at) => self.last_press = at,
+            Message::PointerMoved(at) => self.pointer_moved(at),
+            Message::Divider(msg) => return self.divider_msg(msg),
             Message::Menu(msg) => return self.menu_msg(msg),
             Message::Sidebar(msg) => return self.sidebar_msg(msg),
             Message::FilterSites(filter) => self.site_filter = filter,
@@ -961,14 +1027,8 @@ impl App {
             Message::SiteConnected { site, result } => return self.site_connected(site, result),
             Message::SelectTab(index) => {
                 if index < self.tabs.len() {
-                    self.active_tab = Some(index);
+                    self.select_session_tab(index);
                     self.form = None;
-                    // A terminal shown again takes the keyboard (its search bar keeps it).
-                    if let Some(terminal) = self.tabs[index].terminal_mut()
-                        && terminal.search.is_none()
-                    {
-                        terminal.focused = true;
-                    }
                 }
             }
             Message::NewSite => self.form = Some(Form::Site(SiteForm::new_site())),
@@ -1043,7 +1103,7 @@ impl App {
             Message::FileDropped(path) => return self.file_dropped(&path),
             Message::FilesHovered(hovered) => self.os_drag = hovered,
             Message::DragEnd => return self.drag_end(),
-            Message::DragCancel => self.drag_cancel(),
+            Message::DragCancel => return self.drag_cancel(),
             Message::Prompt(event) => return self.prompt_event(event),
             Message::Dialog(msg) => return self.dialog_msg(msg),
             Message::KnownHosts { tab, msg } => return self.known_hosts_msg(tab, msg),
@@ -1070,6 +1130,12 @@ impl App {
             Message::Imported(result) => return self.imported(result),
             Message::SitemanagerDeleted(result) => self.sitemanager_deleted(result),
             Message::OpenSettings => return self.open_settings(),
+            Message::SelectSettings => {
+                if self.settings_tab.is_some() {
+                    return self.open_settings();
+                }
+            }
+            Message::CloseSettings => return self.close_settings(),
             Message::Settings(msg) => return self.settings_msg(msg),
             Message::SettingsLoaded(loaded) => self.settings_loaded(loaded),
             Message::QueueStatus(Some(error)) => self.queue_unavailable(error),
@@ -1165,7 +1231,7 @@ impl App {
             match form {
                 Form::Site(form) => form.finished(Some(error.clone())),
                 Form::Workspace(form) => form.finished(Some(error.clone())),
-                Form::Import | Form::Settings | Form::QuitEdits => {}
+                Form::Import | Form::QuitEdits => {}
             }
         }
         let error = result.err();

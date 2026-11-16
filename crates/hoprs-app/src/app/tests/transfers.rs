@@ -23,7 +23,7 @@ fn spec(site: &SiteId, direction: Direction, local: &str, remote: &str) -> Trans
     }
 }
 
-fn item(id: i64, site: &SiteId, state: TransferState) -> TransferItem {
+pub(super) fn item(id: i64, site: &SiteId, state: TransferState) -> TransferItem {
     TransferItem {
         id: TransferId(id),
         parent: None,
@@ -84,7 +84,7 @@ fn snapshot_request(effects: &[Effect]) -> RequestId {
 }
 
 /// Starts the queue the way the subscription does (a resync), on `items` at `seq`.
-fn synced(app: &mut App, seq: u64, items: Vec<TransferItem>) {
+pub(super) fn synced(app: &mut App, seq: u64, items: Vec<TransferItem>) {
     let request = snapshot_request(&app.update(Message::QueueResync));
     assert!(
         app.update(Message::QueueSnapshot {

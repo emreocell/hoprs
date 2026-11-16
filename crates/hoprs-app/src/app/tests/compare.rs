@@ -702,6 +702,17 @@ async fn a_failed_suppressed_listing_ends_the_suppression() {
 }
 
 #[tokio::test]
+async fn collapse_keeps_the_height() {
+    let (mut app, _fake, _a, tab, _run) = running().await;
+    app.settings.compare_height = Some(333.0);
+    app.update(msg(CompareMsg::ToggleCollapsed { tab }));
+    assert!(state(&app).collapsed);
+    app.update(msg(CompareMsg::ToggleCollapsed { tab }));
+    assert!(!state(&app).collapsed);
+    assert_eq!(app.settings.compare_height, Some(333.0));
+}
+
+#[tokio::test]
 async fn collapse_focus_and_scroll_are_the_panels_own_state() {
     let (mut app, _fake, _a, tab, run) = running().await;
     app.update(found(tab, run, "a"));
@@ -808,7 +819,7 @@ async fn keyboard_moves_in_group_order_and_space_toggles() {
 #[tokio::test]
 async fn leaving_settings_without_closing_clears_the_typed_fields() {
     let mut app = App::new();
-    app.form = Some(Form::Settings);
+    app.update(Message::OpenSettings);
     app.compare_ignore_input = Some("a, b".into());
     app.editor_input = Some("code".into());
     app.update(Message::Modifiers(Mods::default()));
@@ -817,8 +828,7 @@ async fn leaving_settings_without_closing_clears_the_typed_fields() {
         Some("a, b"),
         "still open"
     );
-    app.form = None;
-    app.update(Message::Modifiers(Mods::default()));
+    app.update(Message::NewSite);
     assert_eq!(app.compare_ignore_input, None);
     assert_eq!(app.editor_input, None);
 }

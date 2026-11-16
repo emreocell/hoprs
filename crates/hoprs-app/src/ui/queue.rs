@@ -13,11 +13,12 @@ use iced::{Alignment, Element, Event, Length, Padding, window};
 use hoprs_transfer::{Direction, ResolveAction};
 
 use crate::app::queue::{QueueRow, RowStatus};
-use crate::app::{App, Message, QueueMsg, QueueTab, RowAction};
+use crate::app::{App, Message, Panel, QueueMsg, QueueTab, RowAction};
+use crate::ui::divider;
 use crate::ui::file_actions::error_bar;
 use crate::ui::fit;
 use crate::ui::icons::{self, Icon};
-use crate::ui::layout::{QUEUE_HEAD_HEIGHT, QUEUE_MAX_HEIGHT, UNDERLINE};
+use crate::ui::layout::{QUEUE_HEAD_HEIGHT, UNDERLINE};
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
 use crate::ui::virtual_list::{self, ROW_HEIGHT};
@@ -33,8 +34,76 @@ const STATUS_WIDTH: f32 = BAR_WIDTH + PERCENT_WIDTH + SPEED_WIDTH + 2.0 * theme:
 /// answers (Skip, Overwrite, Resume) beside its Cancel, so the column keeps room for those
 /// and every row lines up.
 const ACTIONS_WIDTH: f32 = 236.0;
-/// The rows' part of the 210 px region: the rest is the head and its two rules.
-const BODY_MAX_HEIGHT: f32 = QUEUE_MAX_HEIGHT - QUEUE_HEAD_HEIGHT - 2.0 * theme::HAIRLINE;
+/// The queue's least height: its divider, its head, the rule under it and one row.
+pub const MIN_HEIGHT: f32 = CHROME_HEIGHT + ROW_HEIGHT;
+/// A one-line note in place of the rows ("Nothing queued"): fixed, so the queue's drawn
+/// height is known.
+const NOTE_HEIGHT: f32 = ROW_HEIGHT + theme::SPACE_SM;
+/// The two-line note of an empty queue (title and hint).
+const NOTE_2_HEIGHT: f32 = 2.0 * ROW_HEIGHT;
+/// The queue's error bar, about: one line of 12 px text beside "Dismiss", with its padding.
+const ERROR_BAR_ESTIMATE: f32 = 36.0;
+/// The divider, the head and the rule above the rows.
+const CHROME_HEIGHT: f32 = divider::HIT + QUEUE_HEAD_HEIGHT + theme::HAIRLINE;
+
+/// The most the queue takes at the window's height now.
+pub fn max_height(app: &App) -> f32 {
+    fit::queue_max(
+        app.window_height,
+        app.settings.queue_height,
+        app.log.open,
+        compare_shown(app),
+    )
+}
+
+/// The most the queue can be drawn at in the window now, whatever its saved maximum.
+pub fn cap(app: &App) -> f32 {
+    fit::queue_max(
+        app.window_height,
+        f32::INFINITY,
+        app.log.open,
+        compare_shown(app),
+    )
+}
+
+/// The height the queue is drawn at now (where a drag of its divider starts): its rows,
+/// or the note standing for them, up to [`max_height`]; the head alone while hidden. An
+/// error bar counts as [`ERROR_BAR_ESTIMATE`] (its text may wrap).
+pub fn drawn_height(app: &App) -> f32 {
+    if !app.queue_open {
+        return divider::HIT + QUEUE_HEAD_HEIGHT;
+    }
+    let queue = &app.queue;
+    let body = if queue.len() == 0 {
+        if queue.resyncing() {
+            NOTE_HEIGHT
+        } else {
+            NOTE_2_HEIGHT
+        }
+    } else {
+        match queue.rows_in(queue.tab).len() {
+            0 => NOTE_HEIGHT,
+            count => count as f32 * ROW_HEIGHT,
+        }
+    };
+    let error = if queue.error.is_some() {
+        ERROR_BAR_ESTIMATE
+    } else {
+        0.0
+    };
+    (CHROME_HEIGHT + error + body).min(max_height(app))
+}
+
+/// Whether the center shows a compare panel (a files tab with one open).
+fn compare_shown(app: &App) -> bool {
+    app.form.is_none()
+        && !app.settings_shown()
+        && app
+            .active_tab
+            .and_then(|i| app.tabs.get(i))
+            .and_then(|tab| tab.compare())
+            .is_some_and(|state| state.visible())
+}
 /// The 4 px progress bar.
 const BAR_GIRTH: f32 = 4.0;
 
@@ -179,8 +248,14 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .height(QUEUE_HEAD_HEIGHT)
         .padding(Padding::ZERO.left(theme::SPACE_MD).right(theme::SPACE_SM));
 
-    let strong = rule::horizontal(theme::HAIRLINE).style(theme::rule_strong);
-    let mut region = column![strong, head];
+    // A hidden queue has nothing to resize: the same band, inert.
+    let top = if app.queue_open {
+        let dragged = app.resize.is_some_and(|r| r.panel == Panel::Queue);
+        divider::view(Panel::Queue, drawn_height(app), cap(app), dragged)
+    } else {
+        divider::inert()
+    };
+    let mut region = column![top, head];
     if app.queue_open {
         region = region.push(rule::horizontal(theme::HAIRLINE).style(theme::rule_1px));
         if let Some(error) = &queue.error {
@@ -190,7 +265,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     }
     container(region)
         .width(Length::Fill)
-        .max_height(QUEUE_MAX_HEIGHT)
+        .max_height(max_height(app))
         .into()
 }
 
@@ -198,14 +273,19 @@ pub fn view(app: &App) -> Element<'_, Message> {
 fn body(app: &App) -> Element<'_, Message> {
     let queue = &app.queue;
     let p = palette();
-    let note = |line: Element<'static, Message>| -> Element<'static, Message> {
+    let note = |line: Element<'static, Message>, height: f32| -> Element<'static, Message> {
         container(line)
             .padding(Padding::from([theme::SPACE_SM, theme::SPACE_MD]))
+            .height(height)
+            .clip(true)
             .into()
     };
     if queue.len() == 0 {
         if queue.resyncing() {
-            return note(text(strings::queue_loading()).color(p.muted).into());
+            return note(
+                text(strings::queue_loading()).color(p.muted).into(),
+                NOTE_HEIGHT,
+            );
         }
         return note(
             column![
@@ -216,6 +296,7 @@ fn body(app: &App) -> Element<'_, Message> {
             ]
             .spacing(theme::SPACE_3XS)
             .into(),
+            NOTE_2_HEIGHT,
         );
     }
     let rows = queue.rows_in(queue.tab);
@@ -226,11 +307,11 @@ fn body(app: &App) -> Element<'_, Message> {
             QueueTab::Failed => strings::nothing_failed(),
             QueueTab::Done => strings::nothing_done(),
         };
-        return note(text(empty).color(p.muted).into());
+        return note(text(empty).color(p.muted).into(), NOTE_HEIGHT);
     }
     let count = rows.len();
     // As tall as the rows, up to the queue's cap (a `Fill` list would grow the region).
-    let height = (count as f32 * ROW_HEIGHT).min(BODY_MAX_HEIGHT);
+    let height = (count as f32 * ROW_HEIGHT).min(max_height(app) - CHROME_HEIGHT);
     let list = virtual_list::view(
         scroll_id(),
         count,

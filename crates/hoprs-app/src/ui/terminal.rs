@@ -459,11 +459,17 @@ where
             Event::Keyboard(keyboard::Event::KeyPressed {
                 key,
                 modified_key,
+                physical_key,
                 modifiers,
                 text,
                 ..
             }) if self.focused => {
-                if let Some((key, mods)) = map_key(key, modified_key, text.as_deref(), *modifiers) {
+                // Ctrl+, (Cmd+, on macOS) opens Settings (the window's key subscription
+                // sees it even captured): the shell gets nothing, not even the comma.
+                if !crate::ui::files::is_settings_key(key, *physical_key, *modifiers)
+                    && let Some((key, mods)) =
+                        map_key(key, modified_key, text.as_deref(), *modifiers)
+                {
                     shell.publish(msg(tab, TerminalMsg::Key { key, mods }));
                 }
                 // Every key belongs to the terminal while it has the focus: the file panes'

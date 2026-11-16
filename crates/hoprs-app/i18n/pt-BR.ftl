@@ -44,6 +44,7 @@ palette-kind-files = arquivos
 palette-toggle-queue = Mostrar ou ocultar a fila
 palette-toggle-log = Mostrar ou ocultar o log
 palette-close-tab = Fechar aba
+palette-close-settings = Fechar configurações
 palette-open-workspace = Abrir workspace…
 palette-edit = Abrir no editor
 palette-compare-folders = Comparar pastas
@@ -68,6 +69,8 @@ no-workspaces = Nenhum workspace ainda
 no-sites = Nenhum site ainda
 import-filezilla = Importar do FileZilla
 settings = Configurações
+key-settings = Ctrl ,
+key-settings-macos = ⌘ ,
 new-site = Novo site
 no-matches = Nenhum site encontrado
 open-workspace = Abrir workspace
@@ -435,7 +438,13 @@ pick-sitemanager = Escolha o sitemanager.xml do FileZilla
 pick-filter-xml = Arquivos XML
 
 ## Settings
-settings-title = Configurações
+settings-general = Geral
+settings-general-description = Idioma e versão.
+settings-transfers-description = Quantos arquivos andam ao mesmo tempo, o que fazer com arquivos que já existem e como manter as conexões abertas.
+settings-compare-description = Quando as pastas são comparadas e quais nomes ficam de fora.
+settings-editing-description = O editor que abre os arquivos remotos.
+settings-terminal-description = A aparência das abas de terminal e quanto elas lembram.
+settings-backup-description = Salve seus sites, workspaces e senhas em um arquivo, ou restaure-os.
 settings-transfers = Transferências
 settings-workers = Workers por site
 settings-workers-hint = Transferências paralelas por site, de 1 a 16. Vale para as próximas conexões.
@@ -763,6 +772,13 @@ compare-group-only-local = Só neste computador ({ $count })
 compare-group-only-remote = Só no servidor ({ $count })
 compare-group-different = Diferentes ({ $count })
 compare-group-unreadable = Não foi possível ler ({ $count })
+compare-summary-only-here = { $count } só aqui
+compare-summary-only-server = { $count } só no servidor
+compare-summary-different =
+    { $count ->
+    [1] 1 diferente
+   *[other] { $count } diferentes
+    }
 compare-local-newer = Local mais novo
 compare-remote-newer = Servidor mais novo
 compare-size-differs = Tamanho diferente
