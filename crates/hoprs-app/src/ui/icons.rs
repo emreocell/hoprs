@@ -7,7 +7,7 @@ use iced::Font;
 use iced::widget::{Text, text};
 
 /// The family name inside the subset font.
-pub const ICON_FONT: Font = Font::with_name("Phosphor");
+pub const ICON_FONT: Font = Font::with_name("Phosphor hoprs");
 /// The subset font file.
 pub const ICON_BYTES: &[u8] = include_bytes!("../../assets/fonts/Phosphor-hoprs.ttf");
 /// Icon size beside a file or list row label.
@@ -300,14 +300,14 @@ mod tests {
     }
 
     #[test]
-    fn font_family_is_phosphor() {
+    fn font_family_is_phosphor_hoprs() {
         let face = ttf_parser::Face::parse(ICON_BYTES, 0).expect("font parses");
         let family = face
             .names()
             .into_iter()
             .filter(|n| n.name_id == ttf_parser::name_id::FAMILY)
             .find_map(|n| n.to_string());
-        assert_eq!(family.as_deref(), Some("Phosphor"));
+        assert_eq!(family.as_deref(), Some("Phosphor hoprs"));
     }
 
     #[test]
