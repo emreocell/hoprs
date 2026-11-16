@@ -129,7 +129,6 @@ pub fn action_icon(action: RowAction) -> Option<Icon> {
     }
 }
 
-/// The id of the queue's list, for its scroll offset.
 /// A row button's label (its tooltip, or its text for a conflict's answers), also the
 /// row menu's item.
 pub fn action_label(action: RowAction) -> &'static str {
@@ -144,6 +143,7 @@ pub fn action_label(action: RowAction) -> &'static str {
     }
 }
 
+/// The id of the queue's list, for its scroll offset.
 fn scroll_id() -> Id {
     Id::new("queue")
 }
