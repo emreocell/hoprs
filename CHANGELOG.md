@@ -5,6 +5,7 @@
 A UI polish release.
 
 - Icons (Phosphor, MIT) on actions, files, tabs and the sidebar.
+- Disabled actions are readable and look disabled.
 
 ## 1.2.0 — 2026-11-16
 

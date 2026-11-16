@@ -15,3 +15,7 @@ real display.
 
 1. **Icon rendering.** Run hoprs at 100%, 150% and 200% scale on Linux, macOS and Windows.
    Expect: icons are crisp and sit on the same baseline as the label next to them.
+
+2. **Disabled actions.** With nothing selected, look at the pane toolbars and the dialogs'
+   outline buttons. Expect: enabled and disabled actions are told apart at a glance, and
+   disabled outline buttons have a dashed outline.

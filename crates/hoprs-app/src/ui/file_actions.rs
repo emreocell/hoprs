@@ -290,7 +290,7 @@ pub fn new_folder_row<'a>(tab: TabId, side: Side, pane: &'a Pane) -> Option<Elem
             .height(ROW_HEIGHT)
             .padding(Padding::ZERO.left(theme::SPACE_MD).right(theme::SPACE_MD))
             .align_y(Alignment::Center)
-            .style(theme::file_row(true, false, false))
+            .style(theme::file_row(true, false, false, false))
             .into(),
     )
 }

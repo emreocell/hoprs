@@ -486,7 +486,7 @@ fn diff_row<'a>(
     .height(ROW_HEIGHT);
     let line = container(line)
         .padding(Padding::ZERO.left(theme::SPACE_MD).right(theme::SPACE_MD))
-        .style(theme::file_row(row_data.selected, false, cursor));
+        .style(theme::file_row(row_data.selected, false, cursor, false));
     let line: Element<'a, Message> = match t.tip {
         Some(tip) => tooltip(
             line,

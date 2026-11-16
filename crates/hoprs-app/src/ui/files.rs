@@ -663,7 +663,7 @@ fn file_row<'a>(
         container(cells)
             .width(Length::Fill)
             .height(ROW_HEIGHT)
-            .style(theme::file_row(selected, hovered, cursor)),
+            .style(theme::file_row(selected, hovered, cursor, false)),
     )
     .on_press(msg(PaneMsg::Click(index)))
     .on_double_click(msg(PaneMsg::Open(index)))

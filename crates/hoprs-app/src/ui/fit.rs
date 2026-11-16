@@ -2,6 +2,8 @@
 //! columns show, which form the pane toolbars use, and whether the queue head is compact.
 //! Pure functions of the window width the app last saw ([`crate::app::App::window_width`]).
 
+use std::borrow::Cow;
+
 use crate::backend::Side;
 use crate::ui::sidebar;
 
@@ -28,6 +30,24 @@ const TOOLBAR_FULL_LOCAL: f32 = 360.0;
 const TOOLBAR_NARROW: f32 = 400.0;
 /// Below this center width the queue head uses short labels.
 const QUEUE_HEAD_FULL: f32 = 900.0;
+
+/// Advance of JetBrains Mono, in em: exact, every glyph has it.
+pub const MONO_ADVANCE: f32 = 0.6;
+/// Advance of Inter, in em: an average (the glyphs vary), so the container still clips.
+pub const INTER_ADVANCE: f32 = 0.56;
+
+/// `text` cut to fit `width` px at `size` px with a per-character `advance` (em), ending in
+/// `…` when it had to be cut; the text itself, borrowed, when it fits. Counts characters.
+pub fn ellipsize(text: &str, width: f32, size: f32, advance: f32) -> Cow<'_, str> {
+    // The epsilon absorbs f32 rounding (75 / 7.5 must be 10, not 9.999).
+    let budget = (width / (size * advance) + 1e-3).floor().max(0.0) as usize;
+    let total = text.chars().count();
+    if total <= budget {
+        return Cow::Borrowed(text);
+    }
+    let kept: String = text.chars().take(budget.saturating_sub(1)).collect();
+    Cow::Owned(format!("{kept}\u{2026}"))
+}
 
 /// The columns a file table shows besides Name and Size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +169,39 @@ mod tests {
         modified: true,
         permissions: true,
     };
+
+    #[test]
+    fn ellipsize_keeps_text_that_fits() {
+        let out = ellipsize("short.txt", 200.0, 12.5, MONO_ADVANCE);
+        assert!(matches!(out, Cow::Borrowed("short.txt")));
+    }
+
+    #[test]
+    fn ellipsize_cuts_with_an_ellipsis() {
+        // 75 / (12.5 * 0.6) = 10 characters.
+        let out = ellipsize("public_html_backup_2026", 75.0, 12.5, MONO_ADVANCE);
+        assert_eq!(out.chars().count(), 10);
+        assert!(out.ends_with('\u{2026}'));
+        assert!(out.starts_with("public_ht"));
+    }
+
+    #[test]
+    fn ellipsize_counts_chars_not_bytes() {
+        // 4 characters, 6 bytes; a budget of 4 keeps all of them.
+        let width = 4.0 * 10.0 * MONO_ADVANCE;
+        assert!(matches!(
+            ellipsize("a\u{e7}\u{e3}o", width, 10.0, MONO_ADVANCE),
+            Cow::Borrowed(_)
+        ));
+        let out = ellipsize("a\u{e7}\u{e3}o!!", width, 10.0, MONO_ADVANCE);
+        assert_eq!(out, "a\u{e7}\u{e3}\u{2026}");
+    }
+
+    #[test]
+    fn ellipsize_zero_width_is_just_the_ellipsis() {
+        assert_eq!(ellipsize("anything", 0.0, 12.5, MONO_ADVANCE), "\u{2026}");
+        assert_eq!(ellipsize("anything", 5.0, 12.5, INTER_ADVANCE), "\u{2026}");
+    }
 
     #[test]
     fn columns_drop_permissions_then_modified() {
