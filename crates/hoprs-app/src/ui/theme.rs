@@ -35,13 +35,15 @@ pub const MONO_MEDIUM: Font = Font {
     ..MONO
 };
 
-/// The embedded font files (SIL OFL 1.1, texts next to them).
-pub const FONTS: [&[u8]; 5] = [
+/// The embedded font files. Inter and JetBrains Mono are SIL OFL 1.1, Phosphor (icons) is
+/// MIT; the licence texts sit next to them.
+pub const FONTS: [&[u8]; 6] = [
     include_bytes!("../../assets/fonts/Inter-Regular.ttf"),
     include_bytes!("../../assets/fonts/Inter-Medium.ttf"),
     include_bytes!("../../assets/fonts/Inter-SemiBold.ttf"),
     include_bytes!("../../assets/fonts/JetBrainsMono-Regular.ttf"),
     include_bytes!("../../assets/fonts/JetBrainsMono-Medium.ttf"),
+    super::icons::ICON_BYTES,
 ];
 
 /// Type scale (mockup: 0.75rem, 0.8125rem, 0.9375rem, mono 0.78rem,

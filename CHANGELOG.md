@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.0 — unreleased
+
+A UI polish release.
+
+- Icons (Phosphor, MIT) on actions, files, tabs and the sidebar.
+
 ## 1.2.0 — 2026-11-16
 
 hoprs speaks Brazilian Portuguese and compares folders.

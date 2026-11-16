@@ -2219,6 +2219,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "ttf-parser",
  "unic-langid",
  "windows-sys 0.61.2",
  "winresource",

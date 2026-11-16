@@ -7,6 +7,7 @@ pub mod file_actions;
 pub mod files;
 pub mod fit;
 pub mod format;
+pub mod icons;
 pub mod import;
 pub mod layout;
 pub mod log;
