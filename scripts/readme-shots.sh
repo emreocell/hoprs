@@ -4,7 +4,7 @@
 # same Dockerfile, sites.toml and planted trees; the landing page shots are unaffected).
 #   scripts/readme-shots.sh            # capture, convert, tear everything down
 #   KEEP=1 scripts/readme-shots.sh     # leave the servers and the capture box running
-#   LOCAL_DEB=target/deb-ubuntu-24.04/debian/hoprs_1.3.0-1_amd64.deb scripts/readme-shots.sh
+#   LOCAL_DEB=target/deb-ubuntu-24.04/debian/hoprs_1.3.1-1_amd64.deb scripts/readme-shots.sh
 #                                      # shoot a .deb built by scripts/package-deb.sh
 # Without LOCAL_DEB the box downloads DEB_URL (default: the release in the Dockerfile).
 # Click coordinates are physical pixels (logical x 2), found by capturing and looking.
