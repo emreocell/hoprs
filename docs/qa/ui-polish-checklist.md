@@ -19,3 +19,6 @@ real display.
 2. **Disabled actions.** With nothing selected, look at the pane toolbars and the dialogs'
    outline buttons. Expect: enabled and disabled actions are told apart at a glance, and
    disabled outline buttons have a dashed outline.
+
+3. **Logo.** Look at the top of the sidebar at 100% and 200% scale. Expect: the logo is
+   sharp, aligned with "hoprs", and there is no version beside it.

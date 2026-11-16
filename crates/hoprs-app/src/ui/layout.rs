@@ -2,7 +2,7 @@
 //! 256 px sidebar on the left and, on the right, the center, the
 //! collapsible transfer queue and the status bar.
 
-use iced::widget::{button, column, container, row, rule, text};
+use iced::widget::{button, column, container, image, row, rule, space, text};
 use iced::{Alignment, Element, Length, Padding};
 
 use crate::app::{App, Form, Message, PaletteMsg};
@@ -16,6 +16,8 @@ use crate::ui::{
 pub const SIDEBAR_WIDTH: f32 = sidebar::WIDTH;
 /// 4 px above the 36 px tabs.
 pub const TOP_BAR_HEIGHT: f32 = 40.0;
+/// Side of the logo in the brand cell.
+pub const BRAND_LOGO: f32 = 22.0;
 pub const QUEUE_HEAD_HEIGHT: f32 = 36.0;
 pub const QUEUE_MAX_HEIGHT: f32 = 210.0;
 pub const STATUS_HEIGHT: f32 = 26.0;
@@ -65,10 +67,14 @@ fn muted<'a>(label: &'a str, size: f32) -> Element<'a, Message> {
 fn top_bar(app: &App) -> Element<'_, Message> {
     let brand = container(
         row![
+            image(crate::icon::logo())
+                .width(BRAND_LOGO)
+                .height(BRAND_LOGO),
             text(strings::brand())
                 .size(theme::TEXT_MD)
                 .font(theme::INTER_SEMIBOLD),
-            muted(strings::VERSION, theme::TEXT_XS),
+            // Task 4 puts the dots-three menu button here.
+            space::horizontal(),
         ]
         .spacing(theme::SPACE_XS)
         .align_y(Alignment::Center),

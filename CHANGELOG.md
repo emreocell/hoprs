@@ -6,6 +6,7 @@ A UI polish release.
 
 - Icons (Phosphor, MIT) on actions, files, tabs and the sidebar.
 - Disabled actions are readable and look disabled.
+- The hoprs logo at the top of the sidebar; the version moved to Settings.
 
 ## 1.2.0 — 2026-11-16
 

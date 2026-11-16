@@ -16,6 +16,8 @@ pub fn cannot_open_profiles() -> &'static str {
 pub fn brand() -> &'static str {
     tr("brand")
 }
+// Shown in Settings -> General (Task 9 of Plan 13); no other use until then.
+#[allow(dead_code)]
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub fn no_sessions() -> &'static str {
     tr("no-sessions")

@@ -12,7 +12,7 @@ hoprs-ssh = { path = "../hoprs-ssh" }
 hoprs-remote = { path = "../hoprs-remote" }
 hoprs-transfer = { path = "../hoprs-transfer" }
 hoprs-import = { path = "../hoprs-import" }
-iced = { workspace = true }
+iced = { workspace = true, features = ["image-without-codecs"] }
 # iced's own crates (already in its tree, same versions), for `bench`: a user interface
 # laid out and drawn without a window.
 iced_runtime = "0.14"
