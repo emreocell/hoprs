@@ -1446,3 +1446,52 @@ async fn compare_settings_messages_save() {
     app.update(Message::CloseSettings);
     assert_eq!(app.compare_ignore_input, None);
 }
+
+/// Plan 13: "Close other tabs" with a tab whose session has edits: that tab asks (its
+/// question shown, the tab selected) and stays; the others close as usual.
+#[tokio::test]
+async fn close_other_tabs_leaves_the_asking_tab_with_its_question() {
+    let a = srv_site(Protocol::Ssh);
+    let b = site("b", "b.example", "u", Protocol::Ftp);
+    let c = site("c", "c.example", "u", Protocol::Ftp);
+    let fake = Arc::new(
+        FakeBackend::new()
+            .with_site(a.clone())
+            .with_site(b.clone())
+            .with_site(c.clone()),
+    );
+    let (mut app, _session, _id) = editing(&fake, &a).await;
+    let mut sites = connect_effect(app.update(Message::ConnectSite(b.id.clone())));
+    sites.extend(connect_effect(
+        app.update(Message::ConnectSite(c.id.clone())),
+    ));
+    drive(&mut app, &fake, sites).await;
+    assert_eq!(app.tabs.len(), 3);
+    let (asking, keep, other) = (app.tabs[0].id, app.tabs[1].id, app.tabs[2].id);
+    let sc = app.tab_session(2).expect("c connected");
+
+    let effects = app.update(Message::CloseOtherTabs(crate::app::menu::TabRef::Session(
+        keep,
+    )));
+    // `c` closed with its session; `a` asks instead of closing.
+    assert!(app.tab_index(other).is_none());
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::CloseSession(s) if *s == sc)),
+        "{effects:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::CheckEdits { purpose: EditsFor::Tab(t), .. } if *t == asking
+        )),
+        "{effects:?}"
+    );
+    let ids: Vec<TabId> = app.tabs.iter().map(|t| t.id).collect();
+    assert_eq!(ids, [asking, keep]);
+    assert!(app.close_asks.contains_key(&asking));
+    assert!(!app.close_asks.contains_key(&keep));
+    // The asking tab is the one shown, its question on screen.
+    assert_eq!(app.active_tab, app.tab_index(asking));
+}

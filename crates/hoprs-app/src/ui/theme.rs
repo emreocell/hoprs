@@ -471,14 +471,7 @@ pub fn file_row(
             (false, true) => (Some(p.paper_2), p.ink),
             (false, false) => (None, p.ink_2),
         };
-        let text_color = if dimmed {
-            Color {
-                a: text_color.a * 0.5,
-                ..text_color
-            }
-        } else {
-            text_color
-        };
+        let text_color = if dimmed { dim(text_color) } else { text_color };
         container::Style {
             text_color: Some(text_color),
             background: background.map(Background::Color),
@@ -652,19 +645,57 @@ pub fn progress(_: &Theme) -> progress_bar::Style {
     }
 }
 
-/// The pane a drag (or files from the system) would drop on: a 1 px accent outline.
-pub fn drop_target(active: bool) -> impl Fn(&Theme) -> container::Style {
-    move |_| container::Style {
-        border: if active {
-            Border {
-                color: palette().accent,
-                width: HAIRLINE,
-                radius: radius(),
-            }
-        } else {
-            Border::default()
+/// The faint `ink` wash over a pane a drop would land in (4% alpha).
+pub fn drop_wash(_: &Theme) -> container::Style {
+    let ink = palette().ink;
+    surface(Color { a: 0.04, ..ink })
+}
+
+/// The drag ghost that follows the pointer: `paper_3`, a 1 px `ink_2` border, 4 px radius
+/// (the mockup's `.ghost`).
+pub fn drag_ghost(_: &Theme) -> container::Style {
+    container::Style {
+        border: Border {
+            color: palette().ink_2,
+            ..drag_label(&Theme::Dark).border
         },
-        ..container::Style::default()
+        ..drag_label(&Theme::Dark)
+    }
+}
+
+/// The drop label over the target pane: `paper_3`, a 1 px `rule_2` border, 4 px radius.
+pub fn drag_label(_: &Theme) -> container::Style {
+    let p = palette();
+    container::Style {
+        text_color: Some(p.ink),
+        border: Border {
+            color: p.rule_2,
+            width: HAIRLINE,
+            radius: radius(),
+        },
+        ..surface(p.paper_3)
+    }
+}
+
+/// The count badge in the drag chip: `paper` on `ink`, fully rounded (8 px).
+pub fn drag_badge(_: &Theme) -> container::Style {
+    let p = palette();
+    container::Style {
+        text_color: Some(p.paper),
+        border: Border {
+            radius: Radius::from(8.0),
+            ..Border::default()
+        },
+        ..surface(p.ink)
+    }
+}
+
+/// `color` at half its alpha: a dragged row's icon and data while the drag is under way
+/// (its text through [`file_row`]'s `dimmed`).
+pub fn dim(color: Color) -> Color {
+    Color {
+        a: color.a * 0.5,
+        ..color
     }
 }
 
@@ -857,6 +888,20 @@ mod tests {
         let hovered = icon_button(&Theme::Dark, button::Status::Hovered);
         assert_eq!(hovered.background, Some(Background::Color(p.paper_3)));
         assert_eq!(hovered.text_color, p.ink);
+    }
+
+    #[test]
+    fn drag_ghost_has_an_ink_2_border_and_the_drop_label_rule_2() {
+        let p = palette();
+        let ghost = drag_ghost(&Theme::Dark);
+        let label = drag_label(&Theme::Dark);
+        assert_eq!(ghost.border.color, p.ink_2);
+        assert_eq!(label.border.color, p.rule_2);
+        for style in [ghost, label] {
+            assert_eq!(style.background, Some(Background::Color(p.paper_3)));
+            assert_eq!(style.border.width, HAIRLINE);
+            assert_eq!(style.text_color, Some(p.ink));
+        }
     }
 
     #[test]

@@ -1,5 +1,5 @@
 //! Press positions: `mouse_area` tells a press happened, not where. [`tracker`] wraps the
-//! whole window and publishes [`Message::PointerPressed`] with the cursor's position for
+//! whole window (its own tree node, the content its only child) and publishes [`Message::PointerPressed`] with the cursor's position for
 //! every left or right press on the base widget tree, **before** the press reaches the
 //! widgets inside. iced's own overlays (tooltips, pick_list dropdowns) are updated first
 //! and may capture a press, which then is not published. On the base tree, the
@@ -13,7 +13,7 @@ use iced::advanced::renderer;
 use iced::advanced::widget::{Operation, Tree, tree};
 use iced::advanced::{Clipboard, Shell, Widget, overlay};
 use iced::event::Status;
-use iced::{Element, Event, Length, Rectangle, Size, Vector, mouse, window};
+use iced::{Element, Event, Length, Rectangle, Size, Vector, keyboard, mouse, window};
 
 use crate::app::Message;
 
@@ -29,31 +29,55 @@ pub fn moved_message(event: Event, _: Status, _: window::Id) -> Option<Message> 
 }
 
 /// `content`, with its left and right presses published as [`Message::PointerPressed`].
+/// On macOS a Control+click is a right click (winit reports a left press with Control
+/// held), so the content sees it as one.
 pub fn tracker<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
-    Element::new(PressTracker { content })
+    Element::new(PressTracker::new(content, cfg!(target_os = "macos")))
 }
 
-/// The widget behind [`tracker`]: transparent (same tree, layout and drawing as its
-/// content) except for the message it publishes.
+/// The widget behind [`tracker`]: transparent (same layout and drawing as its content)
+/// except for the message it publishes and, with `control_click_is_right`, the
+/// Control+left presses it turns into right ones.
 pub struct PressTracker<'a> {
     content: Element<'a, Message>,
+    control_click_is_right: bool,
+}
+
+impl<'a> PressTracker<'a> {
+    /// `control_click_is_right`: a left press with Control held (and its release) reach
+    /// the content as a right one (the macOS convention; set by [`tracker`] there only).
+    pub fn new(content: Element<'a, Message>, control_click_is_right: bool) -> Self {
+        Self {
+            content,
+            control_click_is_right,
+        }
+    }
+}
+
+/// What [`PressTracker`] remembers between events.
+#[derive(Debug, Default)]
+struct State {
+    /// Control is held (from `ModifiersChanged`).
+    control: bool,
+    /// The left button went down with Control: its release is a right release too.
+    translating: bool,
 }
 
 impl Widget<Message, iced::Theme, iced::Renderer> for PressTracker<'_> {
     fn tag(&self) -> tree::Tag {
-        self.content.as_widget().tag()
+        tree::Tag::of::<State>()
     }
 
     fn state(&self) -> tree::State {
-        self.content.as_widget().state()
+        tree::State::new(State::default())
     }
 
     fn children(&self) -> Vec<Tree> {
-        self.content.as_widget().children()
+        vec![Tree::new(&self.content)]
     }
 
     fn diff(&self, tree: &mut Tree) {
-        self.content.as_widget().diff(tree);
+        tree.diff_children(std::slice::from_ref(&self.content));
     }
 
     fn size(&self) -> Size<Length> {
@@ -66,7 +90,9 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PressTracker<'_> {
         renderer: &iced::Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
-        self.content.as_widget_mut().layout(tree, renderer, limits)
+        self.content
+            .as_widget_mut()
+            .layout(&mut tree.children[0], renderer, limits)
     }
 
     fn operate(
@@ -78,7 +104,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PressTracker<'_> {
     ) {
         self.content
             .as_widget_mut()
-            .operate(tree, layout, renderer, operation);
+            .operate(&mut tree.children[0], layout, renderer, operation);
     }
 
     fn update(
@@ -98,8 +124,40 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PressTracker<'_> {
         {
             shell.publish(Message::PointerPressed(position));
         }
+        let state = tree.state.downcast_mut::<State>();
+        let translated;
+        let event = if self.control_click_is_right {
+            match event {
+                Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
+                    state.control = modifiers.control();
+                    event
+                }
+                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) if state.control => {
+                    state.translating = true;
+                    translated = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right));
+                    &translated
+                }
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
+                    if state.translating =>
+                {
+                    state.translating = false;
+                    translated = Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Right));
+                    &translated
+                }
+                _ => event,
+            }
+        } else {
+            event
+        };
         self.content.as_widget_mut().update(
-            tree, event, layout, cursor, renderer, clipboard, shell, viewport,
+            &mut tree.children[0],
+            event,
+            layout,
+            cursor,
+            renderer,
+            clipboard,
+            shell,
+            viewport,
         );
     }
 
@@ -111,9 +169,13 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PressTracker<'_> {
         viewport: &Rectangle,
         renderer: &iced::Renderer,
     ) -> mouse::Interaction {
-        self.content
-            .as_widget()
-            .mouse_interaction(tree, layout, cursor, viewport, renderer)
+        self.content.as_widget().mouse_interaction(
+            &tree.children[0],
+            layout,
+            cursor,
+            viewport,
+            renderer,
+        )
     }
 
     fn draw(
@@ -126,9 +188,15 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PressTracker<'_> {
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
-        self.content
-            .as_widget()
-            .draw(tree, renderer, theme, style, layout, cursor, viewport);
+        self.content.as_widget().draw(
+            &tree.children[0],
+            renderer,
+            theme,
+            style,
+            layout,
+            cursor,
+            viewport,
+        );
     }
 
     fn overlay<'b>(
@@ -139,9 +207,13 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PressTracker<'_> {
         viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, iced::Theme, iced::Renderer>> {
-        self.content
-            .as_widget_mut()
-            .overlay(tree, layout, renderer, viewport, translation)
+        self.content.as_widget_mut().overlay(
+            &mut tree.children[0],
+            layout,
+            renderer,
+            viewport,
+            translation,
+        )
     }
 }
 
@@ -149,7 +221,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PressTracker<'_> {
 mod tests {
     use iced::advanced::clipboard;
     use iced::widget::{mouse_area, space};
-    use iced::{Event, Point, Size, mouse};
+    use iced::{Event, Point, Size, keyboard, mouse};
     use iced_runtime::user_interface::{Cache, UserInterface};
 
     use super::*;
@@ -207,6 +279,98 @@ mod tests {
                 "{:?}",
                 Message::PointerPressed(Point::new(150.0, 150.0))
             )]
+        );
+    }
+
+    /// The messages `events` make on a tracker (Control+click translation on or off)
+    /// over a mouse area that tells left (NewSite / NewWorkspace on press / release)
+    /// from right (ToggleQueue / ReloadProfiles).
+    fn control_click(control_click_is_right: bool, events: &[Event]) -> Vec<String> {
+        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
+            ui::theme::INTER,
+            ui::theme::TEXT_SM.into(),
+        ));
+        let content = mouse_area(space().width(100).height(100))
+            .on_press(Message::NewSite)
+            .on_release(Message::NewWorkspace)
+            .on_right_press(Message::ToggleQueue)
+            .on_right_release(Message::ReloadProfiles);
+        let mut ui = UserInterface::build(
+            Element::new(PressTracker::new(content.into(), control_click_is_right)),
+            Size::new(200.0, 200.0),
+            Cache::new(),
+            &mut renderer,
+        );
+        let at = Point::new(20.0, 30.0);
+        let mut messages = Vec::new();
+        let mut all = vec![Event::Mouse(mouse::Event::CursorMoved { position: at })];
+        all.extend_from_slice(events);
+        for event in all {
+            ui.update(
+                &[event],
+                mouse::Cursor::Available(at),
+                &mut renderer,
+                &mut clipboard::Null,
+                &mut messages,
+            );
+        }
+        messages.iter().map(|m| format!("{m:?}")).collect()
+    }
+
+    fn modifiers(modifiers: keyboard::Modifiers) -> Event {
+        Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers))
+    }
+
+    fn left(pressed: bool) -> Event {
+        Event::Mouse(if pressed {
+            mouse::Event::ButtonPressed(mouse::Button::Left)
+        } else {
+            mouse::Event::ButtonReleased(mouse::Button::Left)
+        })
+    }
+
+    #[test]
+    fn control_click_is_a_right_click_when_asked() {
+        let pressed = format!("{:?}", Message::PointerPressed(Point::new(20.0, 30.0)));
+        let dbg = |m: Message| format!("{m:?}");
+        // Translation on (macOS): Control+left press and its release reach the content
+        // as right ones, and the press is still published.
+        let got = control_click(
+            true,
+            &[
+                modifiers(keyboard::Modifiers::CTRL),
+                left(true),
+                // Control let go before the button: the release still matches the press.
+                modifiers(keyboard::Modifiers::empty()),
+                left(false),
+                // A plain click afterwards is left again.
+                left(true),
+                left(false),
+            ],
+        );
+        assert_eq!(
+            got,
+            [
+                pressed.clone(),
+                dbg(Message::ToggleQueue),
+                dbg(Message::ReloadProfiles),
+                pressed.clone(),
+                dbg(Message::NewSite),
+                dbg(Message::NewWorkspace),
+            ]
+        );
+        // Translation off (Linux, Windows): Control+click stays a left click.
+        let got = control_click(
+            false,
+            &[
+                modifiers(keyboard::Modifiers::CTRL),
+                left(true),
+                left(false),
+            ],
+        );
+        assert_eq!(
+            got,
+            [pressed, dbg(Message::NewSite), dbg(Message::NewWorkspace)]
         );
     }
 

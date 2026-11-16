@@ -41,6 +41,13 @@ go-to-anything-key = Ctrl K
 sidebar-options = Sidebar options
 menu-show-workspaces = Show workspaces
 menu-show-sites = Show all sites
+menu-open = Open
+menu-copy-path = Copy path
+menu-refresh = Refresh
+menu-show-in-panes = Show in panes
+menu-open-files = Open files
+menu-close-other-tabs = Close other tabs
+key-refresh = F5
 
 ## The Ctrl+K palette
 
@@ -204,6 +211,30 @@ home-dir = ~
 # The size column of a folder.
 no-size = -
 empty-folder = This folder is empty
+# A drag between panes, at the bottom of the pane it would drop on: "Upload 2 items to
+# /srv", "Download 1 item to ~/Downloads" (the folder in mono, cut with "…").
+drop-upload =
+    { $count ->
+        [one] Upload { $count } item to { $folder }
+       *[other] Upload { $count } items to { $folder }
+    }
+drop-download =
+    { $count ->
+        [one] Download { $count } item to { $folder }
+       *[other] Download { $count } items to { $folder }
+    }
+# Files from the system file manager over the remote pane; "-unknown" while the system
+# has not said how many.
+drop-upload-files =
+    { $count ->
+        [one] Upload { $count } file to { $folder }
+       *[other] Upload { $count } files to { $folder }
+    }
+drop-upload-files-unknown = Upload files to { $folder }
+# The chip that follows the pointer in a drag of several items: "+1" after the first
+# name, then the badge with how many go ("2").
+drag-more = +{ $more }
+drag-count = { $count }
 reconnect = Reconnect
 # Units of [`crate::ui::format::size`], base 1024.
 size-unit-b = B
@@ -785,6 +816,7 @@ error-app-background-task-failed = Background task failed
 error-app-no-config-dir = No configuration directory
 error-app-drop-needs-site = Open a connected site to drop files into it
 error-app-drop-pane-busy = The remote folder is busy or not listed yet; drop again in a moment
+error-app-drop-not-connected = The site is not connected; reconnect it to drop files into it
 error-app-drop-unsupported = Can't upload this path
 error-app-site-endpoint-changed = The site's host or port changed: this session was closed. Reconnect to use the new settings.
 error-session-closed = Session closed

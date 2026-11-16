@@ -35,6 +35,27 @@ pub fn sidebar_options() -> &'static str {
 pub fn menu_show_workspaces() -> &'static str {
     tr("menu-show-workspaces")
 }
+pub fn menu_open() -> &'static str {
+    tr("menu-open")
+}
+pub fn menu_copy_path() -> &'static str {
+    tr("menu-copy-path")
+}
+pub fn menu_refresh() -> &'static str {
+    tr("menu-refresh")
+}
+pub fn menu_show_in_panes() -> &'static str {
+    tr("menu-show-in-panes")
+}
+pub fn menu_open_files() -> &'static str {
+    tr("menu-open-files")
+}
+pub fn menu_close_other_tabs() -> &'static str {
+    tr("menu-close-other-tabs")
+}
+pub fn key_refresh() -> &'static str {
+    tr("key-refresh")
+}
 pub fn menu_show_sites() -> &'static str {
     tr("menu-show-sites")
 }
@@ -465,6 +486,39 @@ pub fn path_separator() -> &'static str {
 /// The breadcrumb's first segment for the home folder.
 pub fn home_dir() -> &'static str {
     tr("home-dir")
+}
+/// A drag from the local pane over the remote one: "Upload 2 items to /srv".
+pub fn drop_upload(count: usize, folder: &str) -> String {
+    tr_args(
+        "drop-upload",
+        &[("count", count.into()), ("folder", folder.into())],
+    )
+}
+/// A drag from the remote pane over the local one: "Download 1 item to ~/Downloads".
+pub fn drop_download(count: usize, folder: &str) -> String {
+    tr_args(
+        "drop-download",
+        &[("count", count.into()), ("folder", folder.into())],
+    )
+}
+/// Files from the system over the remote pane: "Upload 3 files to /srv".
+pub fn drop_upload_files(count: usize, folder: &str) -> String {
+    tr_args(
+        "drop-upload-files",
+        &[("count", count.into()), ("folder", folder.into())],
+    )
+}
+/// Files from the system over the remote pane, their count not known yet.
+pub fn drop_upload_files_unknown(folder: &str) -> String {
+    tr_args("drop-upload-files-unknown", &[("folder", folder.into())])
+}
+/// The drag chip, after the first name: "+1" for one more item.
+pub fn drag_more(more: usize) -> String {
+    tr_args("drag-more", &[("more", more.into())])
+}
+/// The drag chip's badge: how many items go ("2").
+pub fn drag_count(count: usize) -> String {
+    tr_args("drag-count", &[("count", count.into())])
 }
 /// The size column of a folder.
 pub fn no_size() -> &'static str {

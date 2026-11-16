@@ -514,7 +514,12 @@ fn body<'a>(
             None => space().height(ROW_HEIGHT).into(),
         },
     );
-    container(list).height(height).into()
+    // Where the list is, for a menu opened from the keyboard (Shift+F10).
+    crate::ui::bounds::report(
+        container(list).height(height),
+        state.bounds,
+        move |bounds| Message::Compare(CompareMsg::Placed { tab: id, bounds }),
+    )
 }
 
 fn header_row<'a>(id: TabId, state: &'a CompareState, group: Group) -> Element<'a, Message> {
@@ -680,6 +685,7 @@ fn diff_row<'a>(
             cursor: Some(index),
         }))
         .on_double_click(Message::Compare(CompareMsg::Open { tab: id, index }))
+        .on_right_press(Message::Compare(CompareMsg::ContextMenu { tab: id, index }))
         .into()
 }
 

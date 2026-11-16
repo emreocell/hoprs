@@ -595,6 +595,10 @@ impl App {
     pub(super) fn close_tab(&mut self, index: usize) -> Vec<Effect> {
         let tab = self.tabs.remove(index);
         self.close_asks.remove(&tab.id);
+        // A drag from it has nowhere to go.
+        if self.drag.is_some_and(|d| d.tab == tab.id) {
+            self.drag = None;
+        }
         self.active_tab = match self.active_tab {
             _ if self.tabs.is_empty() => None,
             Some(active) if active > index => Some(active - 1),
@@ -628,6 +632,59 @@ impl App {
             self.forget_session(session);
         }
         effects.extend(session.map(Effect::CloseSession));
+        effects
+    }
+
+    /// "Close other tabs": every session tab but `keep` closes through
+    /// [`close_tab`](Self::close_tab), as its × would (the last tab of a session with
+    /// remote edits asks first and stays until answered), and the settings tab closes
+    /// unless it is the one kept. The kept tab is selected, unless a tab asked: that one
+    /// is shown, as after its × (the question is in it).
+    pub(super) fn close_other_tabs(&mut self, keep: super::TabRef) -> Vec<Effect> {
+        use super::TabRef;
+        let kept = match keep {
+            TabRef::Session(id) => self.tab_index(id).is_some(),
+            TabRef::Settings => self.settings_tab.is_some(),
+        };
+        if !kept {
+            return Vec::new();
+        }
+        let others: Vec<TabId> = self
+            .tabs
+            .iter()
+            .map(|tab| tab.id)
+            .filter(|&id| keep != TabRef::Session(id))
+            .collect();
+        let mut effects = Vec::new();
+        let mut asked = None;
+        for id in others {
+            let Some(index) = self.tab_index(id) else {
+                continue;
+            };
+            if let Some(ask) = self.ask_before_closing_tab(index) {
+                effects.extend(ask);
+                asked.get_or_insert(id);
+                continue;
+            }
+            effects.extend(self.close_tab(index));
+        }
+        if let TabRef::Session(_) = keep {
+            self.settings_tab = None;
+        }
+        match (asked.and_then(|id| self.tab_index(id)), keep) {
+            (Some(index), _) => self.active_tab = Some(index),
+            (None, TabRef::Session(id)) => {
+                if let Some(index) = self.tab_index(id) {
+                    self.select_session_tab(index);
+                }
+            }
+            (None, TabRef::Settings) => {
+                self.active_tab = None;
+                if let Some(settings) = &mut self.settings_tab {
+                    settings.active = true;
+                }
+            }
+        }
         effects
     }
 

@@ -5,13 +5,21 @@
 //! destructive item is in the error colour after a rule; a disabled item is drawn in the
 //! `disabled` token and cannot be clicked. No shadow, 1 px outline, 4 px corners.
 
+use iced::advanced::layout::{self, Layout};
+use iced::advanced::renderer;
+use iced::advanced::widget::{Operation, Tree, tree};
+use iced::advanced::{Clipboard, Shell, Widget, overlay};
 use iced::widget::{
     button, column, container, mouse_area, opaque, pin, row, rule, space, stack, text,
 };
-use iced::{Alignment, Color, Element, Length, Padding, Point, Size};
+use iced::{
+    Alignment, Color, Element, Event, Length, Padding, Point, Rectangle, Size, Vector, keyboard,
+    mouse,
+};
 
 use crate::app::menu::{MenuAction, MenuItem};
-use crate::app::{App, MenuMsg, Message};
+use crate::app::{App, FileKey, MenuMsg, Message};
+use crate::backend::Side;
 use crate::ui::icons::{self, Icon};
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
@@ -36,8 +44,26 @@ pub fn label(action: MenuAction) -> &'static str {
     match action {
         MenuAction::ShowWorkspaces => strings::menu_show_workspaces(),
         MenuAction::ShowSites => strings::menu_show_sites(),
-        #[cfg(test)]
-        MenuAction::TestNavigate => "Test",
+        MenuAction::Transfer(Side::Local) => strings::upload(),
+        MenuAction::Transfer(Side::Remote) => strings::download(),
+        MenuAction::Edit => strings::edit_file(),
+        MenuAction::Open => strings::menu_open(),
+        MenuAction::Rename => strings::rename(),
+        MenuAction::Permissions => strings::permissions(),
+        MenuAction::CopyPath => strings::menu_copy_path(),
+        MenuAction::Refresh => strings::menu_refresh(),
+        MenuAction::NewFolder => strings::new_folder(),
+        MenuAction::Delete => strings::delete(),
+        MenuAction::Compare => strings::compare_button(),
+        MenuAction::CompareUpload => strings::upload(),
+        MenuAction::CompareDownload => strings::download(),
+        MenuAction::ShowInPanes => strings::menu_show_in_panes(),
+        MenuAction::Queue(action) => crate::ui::queue::action_label(action),
+        MenuAction::OpenSite => strings::menu_open_files(),
+        MenuAction::EditSite | MenuAction::EditWorkspace => strings::edit(),
+        MenuAction::OpenWorkspace => strings::open_workspace(),
+        MenuAction::CloseTab => strings::close_tab(),
+        MenuAction::CloseOtherTabs => strings::menu_close_other_tabs(),
     }
 }
 
@@ -46,17 +72,54 @@ pub fn icon(action: MenuAction) -> Icon {
     match action {
         MenuAction::ShowWorkspaces => Icon::Stack,
         MenuAction::ShowSites => Icon::HardDrives,
-        #[cfg(test)]
-        MenuAction::TestNavigate => Icon::Folder,
+        MenuAction::Transfer(Side::Local) => Icon::UploadSimple,
+        MenuAction::Transfer(Side::Remote) => Icon::DownloadSimple,
+        MenuAction::Edit => Icon::PencilSimpleLine,
+        MenuAction::Open => Icon::Folder,
+        MenuAction::Rename => Icon::Textbox,
+        MenuAction::Permissions => Icon::LockKey,
+        MenuAction::CopyPath => Icon::Copy,
+        MenuAction::Refresh => Icon::ArrowsClockwise,
+        MenuAction::NewFolder => Icon::FolderSimplePlus,
+        MenuAction::Delete => Icon::Trash,
+        MenuAction::Compare => Icon::GitDiff,
+        MenuAction::CompareUpload => Icon::UploadSimple,
+        MenuAction::CompareDownload => Icon::DownloadSimple,
+        MenuAction::ShowInPanes => Icon::Folder,
+        // A conflict's answers have no icon, and are never in a menu.
+        MenuAction::Queue(action) => crate::ui::queue::action_icon(action).unwrap_or(Icon::Check),
+        MenuAction::OpenSite => Icon::HardDrives,
+        MenuAction::EditSite | MenuAction::EditWorkspace => Icon::PencilSimple,
+        MenuAction::OpenWorkspace => Icon::Stack,
+        MenuAction::CloseTab | MenuAction::CloseOtherTabs => Icon::X,
     }
 }
 
 /// The item's key, as the rest of the app shows it, if it has one.
 pub fn shortcut(action: MenuAction) -> Option<&'static str> {
     match action {
-        MenuAction::ShowWorkspaces | MenuAction::ShowSites => None,
-        #[cfg(test)]
-        MenuAction::TestNavigate => None,
+        MenuAction::Transfer(_) => Some(strings::key_transfer()),
+        MenuAction::Edit => Some(strings::key_edit()),
+        MenuAction::Rename => Some(strings::key_rename()),
+        MenuAction::Refresh => Some(strings::key_refresh()),
+        MenuAction::NewFolder => Some(strings::key_new_folder()),
+        MenuAction::Delete => Some(strings::key_delete()),
+        MenuAction::ShowWorkspaces
+        | MenuAction::ShowSites
+        | MenuAction::Open
+        | MenuAction::Permissions
+        | MenuAction::CopyPath
+        | MenuAction::Compare
+        | MenuAction::CompareUpload
+        | MenuAction::CompareDownload
+        | MenuAction::ShowInPanes
+        | MenuAction::Queue(_)
+        | MenuAction::OpenSite
+        | MenuAction::EditSite
+        | MenuAction::OpenWorkspace
+        | MenuAction::EditWorkspace
+        | MenuAction::CloseTab
+        | MenuAction::CloseOtherTabs => None,
     }
 }
 
@@ -126,10 +189,148 @@ pub fn overlay<'a>(app: &'a App, base: Element<'a, Message>) -> Element<'a, Mess
             .on_scroll(|_| msg(MenuMsg::Close)),
     );
     let layer = pin(opaque(boxed)).position(at);
-    stack![base, backdrop, layer].into()
+    stack![base, backdrop, keys(layer.into())].into()
 }
 
-/// One item: icon, label, shortcut, check; chosen with a click when enabled.
+/// `layer` taking ↑, ↓ and Enter (without Ctrl or Alt) away from the window while a menu
+/// is open: they are published as [`Message::KeyPressed`] and captured, so a text field
+/// behind the menu (a rename in progress) neither moves its caret nor submits, and the
+/// keyboard subscription, which drops captured keys, does not send them twice. Escape and
+/// every other key go on as usual (the subscription closes the menu with them).
+fn keys(layer: Element<'_, Message>) -> Element<'_, Message> {
+    Element::new(MenuKeys { content: layer })
+}
+
+struct MenuKeys<'a> {
+    content: Element<'a, Message>,
+}
+
+impl Widget<Message, iced::Theme, iced::Renderer> for MenuKeys<'_> {
+    fn tag(&self) -> tree::Tag {
+        self.content.as_widget().tag()
+    }
+
+    fn state(&self) -> tree::State {
+        self.content.as_widget().state()
+    }
+
+    fn children(&self) -> Vec<Tree> {
+        self.content.as_widget().children()
+    }
+
+    fn diff(&self, tree: &mut Tree) {
+        self.content.as_widget().diff(tree);
+    }
+
+    fn size(&self) -> Size<Length> {
+        self.content.as_widget().size()
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut Tree,
+        renderer: &iced::Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        self.content.as_widget_mut().layout(tree, renderer, limits)
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &iced::Renderer,
+        operation: &mut dyn Operation,
+    ) {
+        self.content
+            .as_widget_mut()
+            .operate(tree, layout, renderer, operation);
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &iced::Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        viewport: &Rectangle,
+    ) {
+        if let Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(named),
+            modifiers,
+            ..
+        }) = event
+            && !modifiers.command()
+            && !modifiers.alt()
+        {
+            let key = match named {
+                keyboard::key::Named::ArrowUp => Some(FileKey::Up),
+                keyboard::key::Named::ArrowDown => Some(FileKey::Down),
+                keyboard::key::Named::Enter => Some(FileKey::Enter),
+                _ => None,
+            };
+            if let Some(key) = key {
+                shell.publish(Message::KeyPressed {
+                    key,
+                    shift: modifiers.shift(),
+                });
+                shell.capture_event();
+                return;
+            }
+        }
+        self.content.as_widget_mut().update(
+            tree, event, layout, cursor, renderer, clipboard, shell, viewport,
+        );
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &iced::Renderer,
+    ) -> mouse::Interaction {
+        self.content
+            .as_widget()
+            .mouse_interaction(tree, layout, cursor, viewport, renderer)
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut iced::Renderer,
+        theme: &iced::Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        self.content
+            .as_widget()
+            .draw(tree, renderer, theme, style, layout, cursor, viewport);
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut Tree,
+        layout: Layout<'b>,
+        renderer: &iced::Renderer,
+        viewport: &Rectangle,
+        translation: Vector,
+    ) -> Option<overlay::Element<'b, Message, iced::Theme, iced::Renderer>> {
+        self.content
+            .as_widget_mut()
+            .overlay(tree, layout, renderer, viewport, translation)
+    }
+}
+
+/// One item: icon, label, shortcut, check; chosen with a click when enabled. The pointer
+/// over an enabled item highlights it ([`MenuMsg::Hover`]), as the arrows do: the row
+/// lights up and its icon goes from `muted` to `ink`.
 fn item_row<'a>(index: usize, item: &MenuItem, highlighted: bool) -> Element<'a, Message> {
     let p = palette();
     // `None` lets the label follow the row's hover colour.
@@ -137,6 +338,8 @@ fn item_row<'a>(index: usize, item: &MenuItem, highlighted: bool) -> Element<'a,
         (Some(p.disabled), p.disabled)
     } else if item.destructive {
         (Some(p.error), p.error)
+    } else if highlighted {
+        (None, p.ink)
     } else {
         (None, p.muted)
     };
@@ -166,7 +369,7 @@ fn item_row<'a>(index: usize, item: &MenuItem, highlighted: bool) -> Element<'a,
     ]
     .spacing(theme::SPACE_XS)
     .align_y(Alignment::Center);
-    button(
+    let button = button(
         container(line)
             .height(Length::Fill)
             .align_y(Alignment::Center),
@@ -179,8 +382,14 @@ fn item_row<'a>(index: usize, item: &MenuItem, highlighted: bool) -> Element<'a,
     } else {
         theme::row
     })
-    .on_press_maybe(item.enabled.then(|| msg(MenuMsg::Choose(index))))
-    .into()
+    .on_press_maybe(item.enabled.then(|| msg(MenuMsg::Choose(index))));
+    if item.enabled {
+        mouse_area(button)
+            .on_enter(msg(MenuMsg::Hover(index)))
+            .into()
+    } else {
+        button.into()
+    }
 }
 
 #[cfg(test)]
@@ -203,6 +412,108 @@ mod tests {
             && origin.y >= EDGE
             && origin.x + menu.width <= window.width - EDGE
             && origin.y + menu.height <= window.height - EDGE
+    }
+
+    /// ↑, ↓ and Enter go to the menu, even with a text field focused behind it: a rename
+    /// editor neither gets nor submits them. Escape, Ctrl+Enter and letters pass.
+    #[test]
+    fn menu_takes_arrows_and_enter_from_a_text_field() {
+        use iced::advanced::clipboard;
+        use iced::widget::{stack, text_input};
+        use iced_runtime::user_interface::{Cache, UserInterface};
+
+        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
+            theme::INTER,
+            theme::TEXT_SM.into(),
+        ));
+        let id = iced::widget::Id::unique();
+        let field = text_input("", "name")
+            .id(id.clone())
+            .on_input(|_| Message::NewSite)
+            .on_submit(Message::NewWorkspace);
+        let content = stack![field, keys(space().width(10).height(10).into())];
+        let mut ui = UserInterface::build(
+            content,
+            Size::new(200.0, 100.0),
+            Cache::new(),
+            &mut renderer,
+        );
+        // Focus the field.
+        let mut focus = iced::advanced::widget::operation::focusable::focus(id);
+        ui.operate(&renderer, &mut focus);
+        let press = |named, modifiers| {
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(named),
+                modified_key: keyboard::Key::Named(named),
+                physical_key: keyboard::key::Physical::Unidentified(
+                    keyboard::key::NativeCode::Unidentified,
+                ),
+                location: keyboard::Location::Standard,
+                modifiers,
+                text: None,
+                repeat: false,
+            })
+        };
+        let none = keyboard::Modifiers::default();
+        let mut messages = Vec::new();
+        let (_, statuses) = ui.update(
+            &[
+                press(keyboard::key::Named::ArrowDown, none),
+                press(keyboard::key::Named::ArrowUp, keyboard::Modifiers::SHIFT),
+                press(keyboard::key::Named::Enter, none),
+            ],
+            mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut messages,
+        );
+        let got: Vec<String> = messages.iter().map(|m| format!("{m:?}")).collect();
+        let key = |key, shift| format!("{:?}", Message::KeyPressed { key, shift });
+        assert_eq!(
+            got,
+            [
+                key(FileKey::Down, false),
+                key(FileKey::Up, true),
+                key(FileKey::Enter, false)
+            ],
+            "the field never submitted"
+        );
+        assert!(statuses.iter().all(|s| *s == iced::event::Status::Captured));
+        // Ctrl+Enter, letters and Escape are not the menu's (the letter reaches the
+        // focused field: it was focused all along).
+        let letter = Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Character("a".into()),
+            modified_key: keyboard::Key::Character("a".into()),
+            physical_key: keyboard::key::Physical::Unidentified(
+                keyboard::key::NativeCode::Unidentified,
+            ),
+            location: keyboard::Location::Standard,
+            modifiers: none,
+            text: Some("a".into()),
+            repeat: false,
+        });
+        let mut messages = Vec::new();
+        ui.update(
+            &[
+                letter,
+                press(keyboard::key::Named::Enter, keyboard::Modifiers::COMMAND),
+                press(keyboard::key::Named::Escape, none),
+            ],
+            mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut messages,
+        );
+        assert!(
+            !messages
+                .iter()
+                .any(|m| matches!(m, Message::KeyPressed { .. })),
+            "{messages:?}"
+        );
+        assert!(
+            messages.iter().any(|m| matches!(m, Message::NewSite)),
+            "{messages:?}"
+        );
     }
 
     #[test]
@@ -250,5 +561,27 @@ mod tests {
             let _ = icon(action);
             assert_eq!(shortcut(action), None);
         }
+        // The pane items, with the keys the toolbar shows.
+        for (action, key) in [
+            (MenuAction::Transfer(Side::Local), Some("Ctrl ↵")),
+            (MenuAction::Transfer(Side::Remote), Some("Ctrl ↵")),
+            (MenuAction::Edit, Some("F4")),
+            (MenuAction::Open, None),
+            (MenuAction::Rename, Some("F2")),
+            (MenuAction::Permissions, None),
+            (MenuAction::CopyPath, None),
+            (MenuAction::Refresh, Some("F5")),
+            (MenuAction::NewFolder, Some("F7")),
+            (MenuAction::Delete, Some("Del")),
+            (MenuAction::Compare, None),
+        ] {
+            assert!(!label(action).is_empty(), "{action:?}");
+            let _ = icon(action);
+            assert_eq!(shortcut(action), key, "{action:?}");
+        }
+        assert_ne!(
+            label(MenuAction::Transfer(Side::Local)),
+            label(MenuAction::Transfer(Side::Remote))
+        );
     }
 }

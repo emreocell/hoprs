@@ -11,7 +11,11 @@ use hoprs_transfer::{
     ResolveAction, TransferId, TransferItem, TransferSpec, TransferState,
 };
 
+use hoprs_core::ConnectionState;
+use iced::Point;
+
 use crate::app::queue::{QueueRow, RowStatus};
+use crate::app::transfers::other;
 use crate::backend::{ControlOp, TransferSnapshot};
 
 fn spec(site: &SiteId, direction: Direction, local: &str, remote: &str) -> TransferSpec {
@@ -62,11 +66,11 @@ fn snapshot(seq: u64, items: Vec<TransferItem>) -> TransferSnapshot {
     }
 }
 
-fn failed(message: &str) -> TransferState {
+pub(super) fn failed(message: &str) -> TransferState {
     TransferState::Failed(Error::new(ErrorKind::Permission, message))
 }
 
-fn conflict() -> TransferState {
+pub(super) fn conflict() -> TransferState {
     TransferState::AwaitingDecision(ConflictInfo {
         src_size: 10,
         dst_size: 4,
@@ -150,42 +154,6 @@ async fn run_queue(fake: &Arc<FakeBackend>, effects: Vec<Effect>) -> Vec<Message
         });
     }
     messages
-}
-
-/// A connected tab: local `/home/me` holds `a.txt`, `b.txt` and `dir/`; remote `/srv`
-/// holds `r.txt` and `sub/`.
-async fn transfer_tab() -> (Arc<FakeBackend>, App, Site, TabId) {
-    let a = srv_site();
-    let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
-    let fake = &fake;
-    fake.remote_fs(&a.id)
-        .add_file("/srv/r.txt", b"r", SystemTime::UNIX_EPOCH);
-    fake.remote_fs(&a.id).add_dir("/srv/sub");
-    let local = fake.local_fs();
-    local.add_file("/home/me/a.txt", b"a", SystemTime::UNIX_EPOCH);
-    local.add_file("/home/me/b.txt", b"b", SystemTime::UNIX_EPOCH);
-    local.add_dir("/home/me/dir");
-    let app = connected_tab(fake, &a).await;
-    assert!(app.can_act(0, Side::Remote) && app.can_act(0, Side::Local));
-    let tab = app.tabs[0].id;
-    (fake.clone(), app, a, tab)
-}
-
-fn srv_site() -> Site {
-    let mut a = site("a", "h", "u", Protocol::Ftp);
-    a.remote_dir = Some("/srv".into());
-    a
-}
-
-/// The row of the entry called `name` in the first tab's pane.
-fn row_of(app: &App, side: Side, name: &str) -> usize {
-    let pane = app.tabs[0].pane(side).unwrap();
-    usize::from(pane.has_up())
-        + pane
-            .entries
-            .iter()
-            .position(|e| e.name == name)
-            .unwrap_or_else(|| panic!("no {name}"))
 }
 
 /// Upload / Download send the selection to the other pane's folder, folders as they are;
@@ -338,8 +306,27 @@ async fn drop_from_os_targets_remote_dir() {
     assert!(app.queue.error.is_some());
 }
 
-/// A press on a row then the button up over the other pane enqueues the selection there;
-/// released over its own pane (a plain click) or outside the panes, nothing.
+/// Where the local pane and the remote pane are, for the pointer.
+const IN_LOCAL: Point = Point::new(100.0, 200.0);
+const IN_REMOTE: Point = Point::new(600.0, 200.0);
+
+/// A press on `row` of `side` at `at`: the root tracker publishes the position, then the
+/// row takes the click.
+fn press(app: &mut App, tab: TabId, side: Side, row: usize, at: Point) {
+    app.update(Message::PointerPressed(at));
+    app.update(pane_msg(tab, side, PaneMsg::Click(row)));
+}
+
+/// The pointer moves to `at` and is over `side`'s pane.
+fn move_over(app: &mut App, tab: TabId, side: Side, at: Point) {
+    app.update(Message::PointerMoved(at));
+    app.update(pane_msg(tab, side, PaneMsg::PointerIn));
+    app.update(pane_msg(tab, other(side), PaneMsg::PointerOut));
+}
+
+/// A press on a row, a move of more than 4 px, then the button up over the other pane
+/// enqueues the selection there; released over its own pane (a plain click) or outside
+/// the panes, nothing.
 #[tokio::test]
 async fn drag_between_panes_enqueues() {
     let (_fake, mut app, a, tab) = transfer_tab().await;
@@ -347,16 +334,27 @@ async fn drag_between_panes_enqueues() {
 
     // A plain click: press and release in the same pane.
     app.update(pane_msg(tab, Side::Local, PaneMsg::PointerIn));
-    app.update(pane_msg(tab, Side::Local, PaneMsg::Click(b_row)));
-    assert_eq!(app.drag, Some((tab, Side::Local)));
+    press(&mut app, tab, Side::Local, b_row, IN_LOCAL);
+    assert_eq!(
+        app.drag,
+        Some(Drag {
+            tab,
+            from: Side::Local,
+            origin: IN_LOCAL,
+            at: IN_LOCAL,
+            active: false
+        })
+    );
+    assert!(app.tracks_pointer(), "a possible drag follows the pointer");
     assert_eq!(app.drop_target(), None);
     assert!(no_enqueue(&app.update(Message::DragEnd)));
     assert_eq!(app.drag, None);
+    assert!(!app.tracks_pointer());
 
     // Press on b.txt, move to the remote pane (the enter may come before the exit), up.
-    app.update(pane_msg(tab, Side::Local, PaneMsg::Click(b_row)));
-    app.update(pane_msg(tab, Side::Remote, PaneMsg::PointerIn));
-    app.update(pane_msg(tab, Side::Local, PaneMsg::PointerOut));
+    press(&mut app, tab, Side::Local, b_row, IN_LOCAL);
+    move_over(&mut app, tab, Side::Remote, IN_REMOTE);
+    assert!(app.drag.is_some_and(|d| d.active && d.at == IN_REMOTE));
     assert_eq!(
         app.drop_target(),
         Some((tab, Side::Remote)),
@@ -378,9 +376,8 @@ async fn drag_between_panes_enqueues() {
 
     // From the remote pane to the local one: a download.
     let r_row = row_of(&app, Side::Remote, "r.txt");
-    app.update(pane_msg(tab, Side::Remote, PaneMsg::Click(r_row)));
-    app.update(pane_msg(tab, Side::Remote, PaneMsg::PointerOut));
-    app.update(pane_msg(tab, Side::Local, PaneMsg::PointerIn));
+    press(&mut app, tab, Side::Remote, r_row, IN_REMOTE);
+    move_over(&mut app, tab, Side::Local, IN_LOCAL);
     assert_eq!(
         enqueued(&app.update(Message::DragEnd)),
         vec![spec(
@@ -393,8 +390,8 @@ async fn drag_between_panes_enqueues() {
 
     // The pointer leaves the window mid-drag (its release may never come back): the drag
     // ends, and a later release elsewhere drops nothing.
-    app.update(pane_msg(tab, Side::Local, PaneMsg::Click(b_row)));
-    app.update(pane_msg(tab, Side::Remote, PaneMsg::PointerIn));
+    press(&mut app, tab, Side::Local, b_row, IN_LOCAL);
+    move_over(&mut app, tab, Side::Remote, IN_REMOTE);
     assert!(app.update(Message::DragCancel).is_empty());
     assert_eq!((app.drag, app.pointer), (None, None));
     app.update(pane_msg(tab, Side::Remote, PaneMsg::PointerIn));
@@ -424,10 +421,221 @@ async fn drag_between_panes_enqueues() {
     ));
 
     // Released outside both panes (over the queue): nothing.
-    app.update(pane_msg(tab, Side::Local, PaneMsg::Click(b_row)));
+    press(&mut app, tab, Side::Local, b_row, IN_LOCAL);
+    app.update(Message::PointerMoved(Point::new(300.0, 700.0)));
     app.update(pane_msg(tab, Side::Local, PaneMsg::PointerOut));
     assert_eq!(app.pointer, None);
     assert!(no_enqueue(&app.update(Message::DragEnd)));
+}
+
+/// A press followed by a move of 4 px or less stays a click: released over the other
+/// pane, it drops nothing.
+#[tokio::test]
+async fn press_without_4px_move_is_a_click() {
+    let (_fake, mut app, _a, tab) = transfer_tab().await;
+    let b_row = row_of(&app, Side::Local, "b.txt");
+    press(&mut app, tab, Side::Local, b_row, IN_LOCAL);
+    app.update(Message::PointerMoved(Point::new(
+        IN_LOCAL.x + 3.0,
+        IN_LOCAL.y,
+    )));
+    app.update(pane_msg(tab, Side::Remote, PaneMsg::PointerIn));
+    assert!(app.drag.is_some_and(|d| !d.active));
+    assert_eq!(app.drop_target(), None);
+    assert_eq!(
+        (app.drop_label(), app.drag_invalid_over(tab, Side::Remote)),
+        (None, false)
+    );
+    assert!(no_enqueue(&app.update(Message::DragEnd)));
+    // Exactly 4 px is not more than the threshold either; 4.5 px is.
+    press(&mut app, tab, Side::Local, b_row, IN_LOCAL);
+    app.update(Message::PointerMoved(Point::new(
+        IN_LOCAL.x,
+        IN_LOCAL.y + DRAG_THRESHOLD,
+    )));
+    assert!(app.drag.is_some_and(|d| !d.active));
+    app.update(Message::PointerMoved(Point::new(
+        IN_LOCAL.x + 3.0,
+        IN_LOCAL.y + 3.4,
+    )));
+    assert!(app.drag.is_some_and(|d| d.active));
+    // Once active it stays active, even back at the press.
+    app.update(Message::PointerMoved(IN_LOCAL));
+    assert!(app.drag.is_some_and(|d| d.active));
+    app.update(Message::DragCancel);
+}
+
+/// Over the other pane an active drag has a target and says what a drop does.
+#[tokio::test]
+async fn drag_over_other_pane_sets_target_and_label() {
+    let (_fake, mut app, _a, tab) = transfer_tab().await;
+    let b_row = row_of(&app, Side::Local, "b.txt");
+    press(&mut app, tab, Side::Local, b_row, IN_LOCAL);
+    assert_eq!(app.drag_count(), 1);
+    move_over(&mut app, tab, Side::Remote, IN_REMOTE);
+    assert_eq!(app.drop_target(), Some((tab, Side::Remote)));
+    assert_eq!(app.drop_label().as_deref(), Some("Upload 1 item to /srv"));
+    assert!(!app.drag_invalid_over(tab, Side::Remote));
+    app.update(Message::DragCancel);
+
+    // Two selected (Ctrl+click adds a.txt).
+    let a_row = row_of(&app, Side::Local, "a.txt");
+    press(&mut app, tab, Side::Local, b_row, IN_LOCAL);
+    app.update(Message::DragCancel);
+    app.mods.ctrl = true;
+    press(&mut app, tab, Side::Local, a_row, IN_LOCAL);
+    app.mods.ctrl = false;
+    assert_eq!(app.drag_count(), 2);
+    move_over(&mut app, tab, Side::Remote, IN_REMOTE);
+    assert_eq!(app.drop_label().as_deref(), Some("Upload 2 items to /srv"));
+    app.update(Message::DragCancel);
+
+    // A download names the local folder as the breadcrumb does (under home, with `~`).
+    let r_row = row_of(&app, Side::Remote, "r.txt");
+    press(&mut app, tab, Side::Remote, r_row, IN_REMOTE);
+    move_over(&mut app, tab, Side::Local, IN_LOCAL);
+    assert_eq!(app.drop_label().as_deref(), Some("Download 1 item to ~"));
+    app.update(Message::DragCancel);
+    assert_eq!(app.drop_label(), None);
+}
+
+/// Over its own pane a drag has no target: no label, the not-allowed cursor.
+#[tokio::test]
+async fn drag_over_source_pane_has_no_target() {
+    let (_fake, mut app, _a, tab) = transfer_tab().await;
+    let b_row = row_of(&app, Side::Local, "b.txt");
+    app.update(pane_msg(tab, Side::Local, PaneMsg::PointerIn));
+    press(&mut app, tab, Side::Local, b_row, IN_LOCAL);
+    app.update(Message::PointerMoved(Point::new(
+        IN_LOCAL.x,
+        IN_LOCAL.y + 40.0,
+    )));
+    assert!(app.drag.is_some_and(|d| d.active));
+    assert_eq!((app.drop_target(), app.drop_label()), (None, None));
+    assert!(app.drag_invalid_over(tab, Side::Local));
+    assert!(
+        !app.drag_invalid_over(tab, Side::Remote),
+        "the pointer is not there"
+    );
+    assert!(no_enqueue(&app.update(Message::DragEnd)));
+    assert!(
+        !app.drag_invalid_over(tab, Side::Local),
+        "no drag, no cursor"
+    );
+}
+
+/// The remote pane of a site that lost its connection is no target: nothing drops.
+#[tokio::test]
+async fn disconnected_target_is_invalid() {
+    let (_fake, mut app, a, tab) = transfer_tab().await;
+    let b_row = row_of(&app, Side::Local, "b.txt");
+    press(&mut app, tab, Side::Local, b_row, IN_LOCAL);
+    // The site is closed under the drag: its pane can't act.
+    let session = app.conn(&a.id).session().unwrap();
+    app.update(Message::SessionState {
+        session,
+        state: ConnectionState::Disconnected(Error::new(ErrorKind::Network, "Connection reset")),
+        auth: None,
+    });
+    // The drop of the session ended that drag; a new one over the dead pane is invalid.
+    assert_eq!(app.drag, None);
+    press(&mut app, tab, Side::Local, b_row, IN_LOCAL);
+    move_over(&mut app, tab, Side::Remote, IN_REMOTE);
+    assert!(app.drag.is_some_and(|d| d.active));
+    assert!(app.conn(&a.id).lost_connection().is_some());
+    assert_eq!((app.drop_target(), app.drop_label()), (None, None));
+    assert!(app.drag_invalid_over(tab, Side::Remote));
+    assert!(no_enqueue(&app.update(Message::DragEnd)));
+}
+
+/// Escape cancels an active drag (a later release drops nothing); before the move it is
+/// the pane's Escape as always.
+#[tokio::test]
+async fn escape_cancels_drag() {
+    let (_fake, mut app, _a, tab) = transfer_tab().await;
+    let b_row = row_of(&app, Side::Local, "b.txt");
+    press(&mut app, tab, Side::Local, b_row, IN_LOCAL);
+    move_over(&mut app, tab, Side::Remote, IN_REMOTE);
+    let escape = Message::KeyPressed {
+        key: FileKey::Escape,
+        shift: false,
+    };
+    assert!(app.update(escape.clone()).is_empty());
+    assert_eq!(app.drag, None);
+    assert_eq!(
+        app.tabs[0]
+            .pane(Side::Local)
+            .unwrap()
+            .selected_entries()
+            .len(),
+        1,
+        "the pane did not see that Escape"
+    );
+    assert!(no_enqueue(&app.update(Message::DragEnd)));
+
+    // Not active yet: the drag stays (the release ends it), the pane takes Escape.
+    press(&mut app, tab, Side::Local, b_row, IN_LOCAL);
+    app.update(escape);
+    assert!(app.drag.is_some());
+    assert!(no_enqueue(&app.update(Message::DragEnd)));
+}
+
+/// The source pane listing again (its rows are gone) or the source tab closing ends a
+/// drag.
+#[tokio::test]
+async fn drag_ends_when_source_relists_or_tab_closes() {
+    let (fake, mut app, _a, tab) = transfer_tab().await;
+    let b_row = row_of(&app, Side::Local, "b.txt");
+    press(&mut app, tab, Side::Local, b_row, IN_LOCAL);
+    move_over(&mut app, tab, Side::Remote, IN_REMOTE);
+    // The other pane listing again leaves the drag alone.
+    let effects = app.update(pane_msg(tab, Side::Remote, PaneMsg::Retry));
+    settle(&mut app, &fake, run_listings(&fake, &effects).await).await;
+    assert!(app.drag.is_some());
+    let effects = app.update(pane_msg(tab, Side::Local, PaneMsg::Retry));
+    settle(&mut app, &fake, run_listings(&fake, &effects).await).await;
+    assert_eq!(app.drag, None);
+
+    press(&mut app, tab, Side::Local, b_row, IN_LOCAL);
+    move_over(&mut app, tab, Side::Remote, IN_REMOTE);
+    app.update(Message::CloseTab(tab));
+    assert!(app.tabs.is_empty());
+    assert_eq!(app.drag, None);
+}
+
+/// Files from the system over the window: the label counts them when the system said
+/// how many, and needs a connected tab whose remote pane can act.
+#[tokio::test]
+async fn os_drop_label_counts_files() {
+    let fake = Arc::new(FakeBackend::new());
+    let mut app = loaded(&fake).await;
+    app.update(Message::FilesHovered(true));
+    assert_eq!(app.os_drop_label(), None, "no connected tab");
+    app.update(Message::FilesHovered(false));
+
+    let (_fake, mut app, _a, _tab) = transfer_tab().await;
+    assert_eq!(app.os_drop_label(), None, "nothing hovers");
+    for _ in 0..3 {
+        app.update(Message::FilesHovered(true));
+    }
+    assert_eq!(app.os_drag_count, 3);
+    assert_eq!(
+        app.os_drop_label().as_deref(),
+        Some("Upload 3 files to /srv")
+    );
+    app.update(Message::FilesHovered(false));
+    assert_eq!((app.os_drag, app.os_drag_count), (false, 0));
+    assert_eq!(app.os_drop_label(), None);
+    // Hovering, count not known yet.
+    app.os_drag = true;
+    assert_eq!(app.os_drop_label().as_deref(), Some("Upload files to /srv"));
+    app.update(Message::FilesHovered(true));
+    assert_eq!(
+        app.os_drop_label().as_deref(),
+        Some("Upload 1 file to /srv")
+    );
+    app.update(Message::FileDropped(PathBuf::from("/home/me/a.txt")));
+    assert_eq!((app.os_drag, app.os_drag_count), (false, 0));
 }
 
 /// Active (running, paused, awaiting a decision), Queued, Failed, Done (done, skipped,
@@ -1404,4 +1612,98 @@ async fn held_file_op_of_a_closed_tab_is_dropped() {
         !effects.iter().any(|e| matches!(e, Effect::FileOp { .. })),
         "{effects:?}"
     );
+}
+
+/// Files dropped from the system on a site whose connection is down: nothing uploads (the
+/// pane showed it takes no drop) and the queue says why.
+#[tokio::test]
+async fn os_drop_on_lost_session_does_nothing() {
+    let (_fake, mut app, a, _tab) = transfer_tab().await;
+    let session = app.conn(&a.id).session().unwrap();
+    app.update(Message::SessionState {
+        session,
+        state: ConnectionState::Disconnected(Error::new(ErrorKind::Network, "Connection reset")),
+        auth: None,
+    });
+    app.update(Message::FilesHovered(true));
+    assert_eq!(app.os_drop_label(), None);
+    let effects = app.update(Message::FileDropped(PathBuf::from("/home/me/a.txt")));
+    assert!(no_enqueue(&effects));
+    assert_eq!(
+        app.queue.error.as_ref().map(|e| e.message.as_str()),
+        Some("The site is not connected; reconnect it to drop files into it")
+    );
+}
+
+/// A drag that carries nothing (the only selected row deselected by Ctrl+click) has no
+/// target and drops nothing.
+#[tokio::test]
+async fn drag_with_nothing_selected_has_no_target() {
+    let (_fake, mut app, _a, tab) = transfer_tab().await;
+    let b_row = row_of(&app, Side::Local, "b.txt");
+    press(&mut app, tab, Side::Local, b_row, IN_LOCAL);
+    app.update(Message::DragCancel);
+    app.mods.ctrl = true;
+    press(&mut app, tab, Side::Local, b_row, IN_LOCAL);
+    app.mods.ctrl = false;
+    assert_eq!(app.drag_count(), 0);
+    move_over(&mut app, tab, Side::Remote, IN_REMOTE);
+    assert!(app.drag.is_some_and(|d| d.active));
+    assert_eq!((app.drop_target(), app.drop_label()), (None, None));
+    assert!(app.drag_invalid_over(tab, Side::Remote));
+    assert!(no_enqueue(&app.update(Message::DragEnd)));
+}
+
+/// A right press during a drag opens a menu: the first Escape closes the menu, the next
+/// cancels the drag.
+#[tokio::test]
+async fn escape_closes_menu_before_drag() {
+    let (_fake, mut app, _a, tab) = transfer_tab().await;
+    let b_row = row_of(&app, Side::Local, "b.txt");
+    press(&mut app, tab, Side::Local, b_row, IN_LOCAL);
+    move_over(&mut app, tab, Side::Remote, IN_REMOTE);
+    app.update(Message::PointerPressed(IN_REMOTE));
+    app.update(pane_msg(tab, Side::Remote, PaneMsg::ContextMenu(None)));
+    assert!(app.menu.is_some());
+    let escape = Message::KeyPressed {
+        key: FileKey::Escape,
+        shift: false,
+    };
+    app.update(escape.clone());
+    assert!(app.menu.is_none());
+    assert!(app.drag.is_some_and(|d| d.active));
+    app.update(escape);
+    assert_eq!(app.drag, None);
+}
+
+/// A dialog or the palette opened during a drag: Escape closes it first, the next one
+/// cancels the drag.
+#[tokio::test]
+async fn escape_closes_dialog_or_palette_before_drag() {
+    let (_fake, mut app, _a, tab) = transfer_tab().await;
+    let b_row = row_of(&app, Side::Local, "b.txt");
+    let escape = Message::KeyPressed {
+        key: FileKey::Escape,
+        shift: false,
+    };
+    // The palette.
+    press(&mut app, tab, Side::Local, b_row, IN_LOCAL);
+    move_over(&mut app, tab, Side::Remote, IN_REMOTE);
+    app.update(Message::Palette(crate::app::palette::PaletteMsg::Open));
+    assert!(app.palette.is_some());
+    app.update(escape.clone());
+    assert!(app.palette.is_none());
+    assert!(app.drag.is_some_and(|d| d.active));
+    app.update(escape.clone());
+    assert_eq!(app.drag, None);
+    // A security dialog.
+    press(&mut app, tab, Side::Local, b_row, IN_LOCAL);
+    move_over(&mut app, tab, Side::Remote, IN_REMOTE);
+    app.update(super::menu::host_key_prompt(1));
+    assert!(app.dialogs.is_open());
+    app.update(escape.clone());
+    assert!(!app.dialogs.is_open());
+    assert!(app.drag.is_some_and(|d| d.active));
+    app.update(escape);
+    assert_eq!(app.drag, None);
 }

@@ -230,6 +230,26 @@ impl Pane {
             .collect()
     }
 
+    /// How many entries are selected (`..` and rows past the listing aside): the length
+    /// of [`selected_entries`](Self::selected_entries), without walking the selection
+    /// (a drag asks every frame).
+    pub fn selected_count(&self) -> usize {
+        let rows = &self.selection.rows;
+        let up = usize::from(self.has_up() && rows.contains(&0));
+        rows.len() - up - rows.range(self.row_count()..).count()
+    }
+
+    /// The first selected entry in row order (`..` aside), without collecting the rest.
+    pub fn first_selected_entry(&self) -> Option<&RemoteEntry> {
+        self.selection
+            .rows
+            .iter()
+            .find_map(|&row| match self.row(row) {
+                Some(Row::Entry(entry)) => Some(entry),
+                Some(Row::Up) | None => None,
+            })
+    }
+
     /// What Permissions… acts on: the selected entries but links. A chmod through a link
     /// (SFTP setstat, `set_permissions`, FTP `SITE CHMOD`) changes its target, and the
     /// link's own `lrwxrwxrwx` would start the dialog at 777.

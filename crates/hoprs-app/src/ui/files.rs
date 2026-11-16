@@ -7,7 +7,9 @@ use iced::advanced::widget::Operation;
 use iced::advanced::widget::operation::{Focusable, Outcome};
 use iced::event::Status;
 use iced::keyboard::{self, Key, key::Named};
-use iced::widget::{Id, button, column, container, mouse_area, row, rule, scrollable, space, text};
+use iced::widget::{
+    Id, button, column, container, mouse_area, row, rule, scrollable, space, stack, text,
+};
 use iced::{Alignment, Element, Event, Length, Padding, Rectangle, window};
 
 use crate::app::actions::{EditKind, PaneAction};
@@ -21,7 +23,7 @@ use crate::ui::icons::{self, Icon};
 use crate::ui::theme::{self, palette};
 use crate::ui::virtual_list::{self, ROW_HEIGHT};
 use crate::ui::widgets;
-use crate::ui::{file_actions, format, strings};
+use crate::ui::{drag, file_actions, format, strings};
 
 /// The path bar (mockup `.path`: 38 px).
 const PATH_HEIGHT: f32 = 38.0;
@@ -79,6 +81,21 @@ pub fn breadcrumb_segments(path: &RemotePath, home: Option<&RemotePath>) -> Vec<
         });
     }
     crumbs
+}
+
+/// `path` as one line, the way the breadcrumb shows it: under `home` (local side) it
+/// starts with `~`.
+pub fn display_path(path: &RemotePath, home: Option<&RemotePath>) -> String {
+    let root_first = crumb_is_root(path, home);
+    let mut out = String::new();
+    for (i, crumb) in breadcrumb_segments(path, home).iter().enumerate() {
+        // The root's label is the separator itself.
+        if i > 1 || (i == 1 && !root_first) {
+            out.push_str(strings::path_separator());
+        }
+        out.push_str(&crumb.label);
+    }
+    out
 }
 
 /// Which breadcrumb segments fit `max_chars` characters: indices in order, one `None`
@@ -165,10 +182,13 @@ pub fn key_message(event: Event, status: Status, _: window::Id) -> Option<Messag
             modifiers,
             ..
         } => {
-            // Ctrl+Enter sends the selection to the other pane.
-            let key = match file_key(named)? {
-                FileKey::Enter if modifiers.command() => FileKey::Transfer,
-                key => key,
+            // Ctrl+Enter sends the selection to the other pane; Shift+F10 is the Menu key.
+            let key = match named {
+                Named::F10 if modifiers.shift() => FileKey::Menu,
+                _ => match file_key(named)? {
+                    FileKey::Enter if modifiers.command() => FileKey::Transfer,
+                    key => key,
+                },
             };
             if status == Status::Captured && key != FileKey::Escape {
                 return None;
@@ -218,6 +238,8 @@ fn file_key(named: Named) -> Option<FileKey> {
         Named::F4 => FileKey::Edit,
         Named::Escape => FileKey::Escape,
         Named::Space => FileKey::Space,
+        Named::F5 => FileKey::Refresh,
+        Named::ContextMenu => FileKey::Menu,
         _ => return None,
     })
 }
@@ -389,19 +411,28 @@ fn pane<'a>(
     let width = fit::pane_width(app.window_width);
     let cols = fit::columns(width, side);
     let conn = app.conn(&tab.site);
+    // The pane a drag under way started in: its selected rows are drawn dimmed.
+    let source = app
+        .drag
+        .is_some_and(|d| d.active && d.tab == tab.id && d.from == side);
     let body: Element<'a, Message> = match tab.pane_status(conn, side) {
         PaneStatus::Loading => skeleton(cols),
-        PaneStatus::Full => list(tab.id, side, pane, this_year, focused, cols, width),
+        PaneStatus::Full => list(tab.id, side, pane, this_year, focused, source, cols, width),
         PaneStatus::Empty => column![
             // `..` stays reachable from an empty folder.
-            pane.has_up()
-                .then(|| file_row(tab.id, side, pane, 0, this_year, focused, cols, width)),
+            pane.has_up().then(|| file_row(
+                tab.id, side, pane, 0, this_year, focused, source, cols, width
+            )),
             centered(text(strings::empty_folder()).color(palette().muted).into()),
         ]
         .into(),
         PaneStatus::Failed(error) => failed(error, msg(PaneMsg::Retry)),
         PaneStatus::NotConnected => not_connected(app, tab),
     };
+    // Where the rows are, scrolling or not: a menu opened from the keyboard goes there.
+    let body = crate::ui::bounds::report(body, pane.bounds, move |bounds| {
+        msg(PaneMsg::Placed(bounds))
+    });
     let mut content = column![
         // The focused pane (the one the keyboard drives) has the accent line on top.
         container(space())
@@ -420,22 +451,45 @@ fn pane<'a>(
     if let Some(row) = file_actions::new_folder_row(tab.id, side, pane) {
         content = content.push(row);
     }
+    // A drag from the other pane (or files from the system, on the remote side) would
+    // drop here: a dashed outline, a wash and, near the bottom, what the drop does, all
+    // over the pane (the list keeps its height). Always a stack, so the pane keeps its
+    // state when a drag passes over it.
+    let label = if app.drop_target() == Some((tab.id, side)) {
+        app.drop_label()
+    } else if side == Side::Remote {
+        app.os_drop_label()
+    } else {
+        None
+    };
     let content = content
         .push(body)
         .width(Length::FillPortion(1))
         .height(Length::Fill);
-    // A drag from the other pane (or files from the system, on the remote side) would
-    // drop here: a 1 px accent outline.
-    let target = app.drop_target() == Some((tab.id, side))
-        || (app.os_drag && side == Side::Remote && tab.can_act(conn, Side::Remote));
-    let content = container(content)
+    let mut layers = stack![content]
         .width(Length::FillPortion(1))
-        .height(Length::Fill)
-        .style(theme::drop_target(target));
+        .height(Length::Fill);
+    if let Some(label) = label {
+        let folder = display_path(&pane.path, home);
+        layers = layers.push(drag::drop_layer(
+            &label,
+            &folder,
+            side == Side::Remote,
+            width,
+        ));
+    }
     // A press anywhere focuses the pane for the keyboard, without taking the click; the
-    // pointer going in and out tells a drag where it would drop.
-    mouse_area(content)
-        .on_release(msg(PaneMsg::Focus))
+    // pointer going in and out tells a drag where it would drop (a pane that would not
+    // take it shows the not-allowed cursor). A right press outside the rows (a row's
+    // takes its own) opens the pane's menu.
+    let area = mouse_area(layers);
+    let area = if app.drag_invalid_over(tab.id, side) {
+        area.interaction(iced::mouse::Interaction::NotAllowed)
+    } else {
+        area
+    };
+    area.on_release(msg(PaneMsg::Focus))
+        .on_right_press(msg(PaneMsg::ContextMenu(None)))
         .on_enter(msg(PaneMsg::PointerIn))
         .on_exit(msg(PaneMsg::PointerOut))
         .into()
@@ -640,12 +694,14 @@ fn header<'a>(
     cells.height(HEADER_HEIGHT).into()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn list<'a>(
     tab: TabId,
     side: Side,
     pane: &'a Pane,
     this_year: i32,
     focused: bool,
+    source: bool,
     cols: Columns,
     width: f32,
 ) -> Element<'a, Message> {
@@ -661,12 +717,13 @@ fn list<'a>(
                 viewport_h: viewport.bounds().height,
             },
         },
-        move |i| file_row(tab, side, pane, i, this_year, focused, cols, width),
+        move |i| file_row(tab, side, pane, i, this_year, focused, source, cols, width),
     )
 }
 
 /// One 30 px row: click selects, double click enters, hover highlights. The entry being
-/// renamed shows the name editor in its name cell.
+/// renamed shows the name editor in its name cell. In the `source` pane of a drag under
+/// way, a selected row (one being dragged) is drawn at half opacity.
 #[allow(clippy::too_many_arguments)]
 fn file_row<'a>(
     tab: TabId,
@@ -675,6 +732,7 @@ fn file_row<'a>(
     index: usize,
     this_year: i32,
     focused: bool,
+    source: bool,
     cols: Columns,
     width: f32,
 ) -> Element<'a, Message> {
@@ -693,10 +751,12 @@ fn file_row<'a>(
             .align_y(Alignment::Center)
             .clip(true)
     };
+    let dimmed = source && pane.selection.contains(index);
+    let fade = move |color: iced::Color| if dimmed { theme::dim(color) } else { color };
     let data = |value: String| {
         text(value)
             .size(theme::TEXT_SM)
-            .color(p.muted)
+            .color(fade(p.muted))
             .wrapping(text::Wrapping::None)
     };
     let (name, is_dir, size, modified, permissions) = match pane.row(index) {
@@ -760,7 +820,7 @@ fn file_row<'a>(
         name_text
     };
     let mut name_cell = row![
-        icons::icon(kind_icon, icons::ROW).color(if selected { p.ink } else { p.muted }),
+        icons::icon(kind_icon, icons::ROW).color(fade(if selected { p.ink } else { p.muted })),
         name_text
     ]
     .spacing(theme::SPACE_XS)
@@ -770,7 +830,7 @@ fn file_row<'a>(
             text(strings::path_separator())
                 .font(theme::MONO)
                 .size(theme::TEXT_MONO)
-                .color(p.muted),
+                .color(fade(p.muted)),
         );
     }
     let size_text = if is_dir {
@@ -829,9 +889,10 @@ fn file_row<'a>(
         container(cells)
             .width(Length::Fill)
             .height(ROW_HEIGHT)
-            .style(theme::file_row(selected, hovered, cursor, false)),
+            .style(theme::file_row(selected, hovered, cursor, dimmed)),
     )
     .on_press(msg(PaneMsg::Click(index)))
+    .on_right_press(msg(PaneMsg::ContextMenu(Some(index))))
     .on_double_click(msg(PaneMsg::Open(index)))
     .on_enter(msg(PaneMsg::Hover(index)))
     .on_exit(msg(PaneMsg::Unhover(index)))
@@ -1006,6 +1067,19 @@ mod tests {
     }
 
     #[test]
+    fn display_path_reads_like_the_breadcrumb() {
+        let home = path("/home/me");
+        assert_eq!(super::display_path(&path("/"), None), "/");
+        assert_eq!(super::display_path(&path("/srv/www"), None), "/srv/www");
+        assert_eq!(super::display_path(&path("/home/me"), Some(&home)), "~");
+        assert_eq!(
+            super::display_path(&path("/home/me/Downloads/x"), Some(&home)),
+            "~/Downloads/x"
+        );
+        assert_eq!(super::display_path(&path("/etc"), Some(&home)), "/etc");
+    }
+
+    #[test]
     fn crumb_layout_has_no_double_slash_after_root() {
         // `/…/src`: the root, the gap, then a separator only before src.
         assert_eq!(
@@ -1072,7 +1146,48 @@ mod tests {
             pressed(Named::Escape, Status::Captured),
             Some(FileKey::Escape)
         );
-        assert_eq!(pressed(Named::F5, Status::Ignored), None);
+        // F5: Refresh.
+        assert_eq!(pressed(Named::F5, Status::Ignored), Some(FileKey::Refresh));
+    }
+
+    /// Shift+F10 and the Menu key open the focused pane's menu; F10 alone does nothing.
+    #[test]
+    fn shift_f10_and_menu_key_open_the_menu() {
+        let id = window::Id::unique();
+        let with = |named, modifiers| {
+            let Event::Keyboard(keyboard::Event::KeyPressed {
+                key,
+                modified_key,
+                physical_key,
+                location,
+                text,
+                repeat,
+                ..
+            }) = press(named)
+            else {
+                unreachable!()
+            };
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key,
+                modified_key,
+                physical_key,
+                location,
+                modifiers,
+                text,
+                repeat,
+            })
+        };
+        let pressed = |event| match key_message(event, Status::Ignored, id) {
+            Some(Message::KeyPressed { key, .. }) => Some(key),
+            None => None,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            pressed(with(Named::F10, keyboard::Modifiers::SHIFT)),
+            Some(FileKey::Menu)
+        );
+        assert_eq!(pressed(press(Named::ContextMenu)), Some(FileKey::Menu));
+        assert_eq!(pressed(press(Named::F10)), None);
     }
 
     /// Ctrl+K opens the palette unless a widget took it: a focused terminal captures every

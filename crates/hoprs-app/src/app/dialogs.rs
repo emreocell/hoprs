@@ -558,7 +558,7 @@ fn behind_overlay(msg: &Message) -> bool {
         Message::Edit(msg) => msg.is_user(),
         // Scroll offsets the lists report (also after a programmatic scroll).
         Message::Pane {
-            msg: super::PaneMsg::Scrolled { .. },
+            msg: super::PaneMsg::Scrolled { .. } | super::PaneMsg::Placed(_),
             ..
         }
         | Message::Queue(super::QueueMsg::Scrolled { .. }) => false,
@@ -576,6 +576,8 @@ fn behind_overlay(msg: &Message) -> bool {
         | Message::WorkspaceForm(_)
         | Message::OpenProfileFolder
         | Message::CloseTab(_)
+        | Message::CloseOtherTabs(_)
+        | Message::Compare(super::CompareMsg::ContextMenu { .. })
         | Message::NewTab { .. }
         | Message::Pane { .. }
         | Message::Key { .. }

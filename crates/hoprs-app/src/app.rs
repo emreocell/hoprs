@@ -80,7 +80,7 @@ pub use edit::EditMsg;
 pub use files::{FileKey, Mods, PaneMsg, RequestId};
 pub use lifecycle::ConnStatus;
 pub use log::{LogLevel, LogMsg};
-pub use menu::{ContextMenu, MenuMsg, MenuTarget};
+pub use menu::{ContextMenu, MenuMsg, MenuTarget, TabRef};
 pub use palette::PaletteMsg;
 pub use queue::{Queue, QueueMsg, QueueTab, RowAction};
 pub use settings::{SettingsTab, SidebarMsg, SidebarSection};
@@ -101,6 +101,22 @@ pub enum WorkspaceRow<'a> {
 pub enum Panel {
     Compare,
     Queue,
+}
+
+/// How far (logical px) the pointer must move from a press on a row before a drag
+/// between panes starts; up to it the press stays a click.
+pub const DRAG_THRESHOLD: f32 = 4.0;
+
+/// A press on a row of pane `from` that may become a drag to the other pane: `origin` is
+/// where the press was, `at` where the pointer is now; `active` once it moved more than
+/// [`DRAG_THRESHOLD`] (and from then on, until the button is up).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Drag {
+    pub tab: TabId,
+    pub from: Side,
+    pub origin: iced::Point,
+    pub at: iced::Point,
+    pub active: bool,
 }
 
 /// A divider drag. The anchor (`start_y`, `start_height`) is where the press was and how
@@ -166,12 +182,15 @@ pub struct App {
     pub mods: Mods,
     /// The transfer queue panel.
     pub queue: Queue,
-    /// A press on a row started a possible drag from this pane (until the button is up).
-    pub drag: Option<(TabId, Side)>,
+    /// A press on a row started a possible drag from its pane (until the button is up).
+    pub drag: Option<Drag>,
     /// The pane under the pointer.
     pub pointer: Option<(TabId, Side)>,
     /// Files from the system file manager hover the window.
     pub os_drag: bool,
+    /// How many files the system said hover the window (one `FileHovered` each; 0 while
+    /// it has not said yet).
+    pub os_drag_count: usize,
     /// The security and credential dialogs: the one shown and those waiting.
     pub dialogs: Dialogs,
     /// The workspace "Open workspace" opened last, until it is closed: its tabs and
@@ -285,6 +304,9 @@ pub enum Message {
     ProfileFolderOpened(Result<(), Error>),
     /// The × of a tab: closes it, and its session if no other tab uses it.
     CloseTab(TabId),
+    /// A tab's menu, "Close other tabs": every other tab closes as its × would, and the
+    /// kept one is selected.
+    CloseOtherTabs(TabRef),
     /// "New terminal tab" / "New files tab" on a connected SSH tab: another tab of
     /// `kind` on the same session.
     NewTab {
@@ -352,7 +374,8 @@ pub enum Message {
     Cleared(Result<usize, Error>),
     /// A file or folder dropped on the window from the system file manager.
     FileDropped(PathBuf),
-    /// Files from the system file manager entered (`true`) or left the window.
+    /// Files from the system file manager entered (`true`, once per file) or left the
+    /// window.
     FilesHovered(bool),
     /// A mouse button went up, anywhere: ends a drag between panes (dropping it only over
     /// the other pane).
@@ -802,6 +825,7 @@ impl App {
             drag: None,
             pointer: None,
             os_drag: false,
+            os_drag_count: 0,
             dialogs: Dialogs::default(),
             open_workspace: None,
             closing: false,
@@ -913,7 +937,16 @@ impl App {
     pub fn update(&mut self, msg: Message) -> Vec<Effect> {
         // A palette row to run becomes the action's own message.
         let msg = self.palette_command(msg);
-        // So does a menu item chosen.
+        // Escape cancels a drag under way first, unless a menu (a right press during the
+        // drag opened it), a dialog or the palette is open: then that takes the Escape.
+        let Some(msg) = self.drag_key(msg) else {
+            return Vec::new();
+        };
+        // An open menu has the keyboard first (Enter chooses its highlighted item).
+        let Some(msg) = self.menu_key(msg) else {
+            return Vec::new();
+        };
+        // A menu item chosen becomes the action's own message too.
         let msg = self.menu_command(msg);
         let shown = self.shown_tab();
         let active = self.active_tab;
@@ -963,6 +996,18 @@ impl App {
             // The same for the typed fields: the next visit starts from what is saved.
             self.compare_ignore_input = None;
             self.editor_input = None;
+        }
+        // The center shows another tab (or Settings, or a form): a menu about what it
+        // showed goes.
+        if self.shown_tab() != shown {
+            self.menu = None;
+        }
+        // Everything the menu offered went (its queue row finished, its site, workspace
+        // or tab is gone): no empty box stays behind.
+        if let Some(menu) = &self.menu
+            && self.menu_items(&menu.target).is_empty()
+        {
+            self.menu = None;
         }
         // The center now shows another tab (or a tab instead of a form): its lists'
         // scrollables must match the offsets the panes remember.
@@ -1059,6 +1104,7 @@ impl App {
                     return self.close_tab(index);
                 }
             }
+            Message::CloseOtherTabs(keep) => return self.close_other_tabs(keep),
             Message::NewTab { tab, kind } => return self.new_session_tab(tab, kind),
             Message::Pane { tab, side, msg } => return self.pane_msg(tab, side, msg),
             Message::Listed {
@@ -1067,11 +1113,6 @@ impl App {
                 request_id,
                 result,
             } => return self.listed(tab, side, request_id, result),
-            // Escape closes an open menu, and nothing else sees it.
-            Message::KeyPressed {
-                key: FileKey::Escape,
-                ..
-            } if self.menu.is_some() => self.menu = None,
             Message::KeyPressed { key, shift } => return self.key_pressed(key, shift),
             Message::Key { key, shift } => return self.file_key(key, shift),
             Message::Modifiers(mods) => self.mods = mods,
@@ -1101,7 +1142,7 @@ impl App {
             Message::ControlDone { id, result } => self.control_done(id, result),
             Message::Cleared(result) => return self.cleared(result),
             Message::FileDropped(path) => return self.file_dropped(&path),
-            Message::FilesHovered(hovered) => self.os_drag = hovered,
+            Message::FilesHovered(hovered) => self.files_hovered(hovered),
             Message::DragEnd => return self.drag_end(),
             Message::DragCancel => return self.drag_cancel(),
             Message::Prompt(event) => return self.prompt_event(event),
@@ -1344,4 +1385,4 @@ impl Default for App {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

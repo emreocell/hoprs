@@ -3,11 +3,14 @@
 
 use hoprs_core::{Error, OpenAs, Protocol, Site, SiteId, Workspace};
 use iced::widget::{
-    button, column, container, hover, row, rule, scrollable, space, text, text_input, tooltip,
+    button, column, container, hover, mouse_area, row, rule, scrollable, space, text, text_input,
+    tooltip,
 };
 use iced::{Alignment, Element, Length, Padding};
 
-use crate::app::{App, ConnStatus, Load, Message, SidebarMsg, SidebarSection, TabState};
+use crate::app::{
+    App, ConnStatus, Load, MenuMsg, MenuTarget, Message, SidebarMsg, SidebarSection, TabState,
+};
 use crate::ui::fit;
 use crate::ui::icons::{self, Icon};
 use crate::ui::strings;
@@ -341,11 +344,17 @@ fn site_row<'a>(app: &'a App, site: &'a Site, edit: bool, chrome: f32) -> Elemen
     .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
     .style(theme::row)
     .on_press(Message::ConnectSite(site.id.clone()));
-    if edit {
+    let open = if edit {
         hover_edit(open.into(), Message::EditSite(site.id.clone()))
     } else {
         open.into()
-    }
+    };
+    // A right press: Open files, Edit (mouse only; both have their click and the palette).
+    mouse_area(open)
+        .on_right_press(Message::Menu(MenuMsg::Open(MenuTarget::Site(
+            site.id.clone(),
+        ))))
+        .into()
 }
 
 /// `glyph` with `tip` as its tooltip.
@@ -458,6 +467,10 @@ fn workspace<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
     })
     .on_press(Message::ToggleWorkspace(ws.id.clone()));
     let head = hover_edit(head.into(), Message::EditWorkspace(ws.id.clone()));
+    // A right press: Open workspace, Edit (mouse only, like the site's).
+    let head = mouse_area(head).on_right_press(Message::Menu(MenuMsg::Open(
+        MenuTarget::Workspace(ws.id.clone()),
+    )));
     let head = container(head).padding(Padding::from([0.0, theme::SPACE_XS]));
     if !open {
         return head.into();

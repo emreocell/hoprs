@@ -13,6 +13,7 @@ real display.
 | Context menu model: opens at the last press, closes on Escape, outside click, resize and choice, blocked behind a dialog (`crates/hoprs-app/src/app/tests/menu.rs`); kept inside the window (`ui::menu` tests); press position published before the widget under it (`ui::pointer` tests) | Pass |
 | Sidebar state saved: collapse and hide round-trip through `settings.toml`, invalid values read as shown, the ⋯ menu hides and shows a section (`settings` tests, `app/tests/import_settings.rs`); site state and icon by protocol (`ui::sidebar` tests) | Pass |
 | Panel dividers: a drag resizes the compare panel and the queue from the press position, never below their minimum, saved on release or when the pointer leaves the window; a double-click resets and saves; heights round-trip through `settings.toml`; past the window's cap or the minimum a drag turns back at once; dragging up a short queue never lowers its maximum, dragging down shrinks it from the drawn height; a click or unchanged drag saves nothing; the queue's saved height is its maximum (two rows stay two rows); pointer moves are listened to only while resizing (`app/tests/panels.rs`, `ui::pointer` tests) | Pass |
+| Drag feedback: a drag starts past 4 px, has a target only over the other pane of a connected site and says what a drop does (`app/tests/transfers.rs`); the chip shows the first dragged item and "+N" only once the drag started, and stays inside the window; the drop label splits out the folder (`ui::drag` tests) | Pass |
 | Settings tab: one at most, selecting another tab keeps it, its × returns to the tab it came from (or the last), not saved with a workspace, blocked behind a dialog (`app/tests/tabs.rs`); settings saved and typed passwords forgotten when it is not shown (`app/tests/import_settings.rs`); no connection in the status bar (`app/tests/status.rs`); Ctrl+, opens it even from a focused terminal and sends nothing to the shell (`ui::files`, `ui::terminal`, `terminal::input` tests); palette rows (`app/tests/palette.rs`) | Pass |
 
 ## NEEDS HUMAN
@@ -91,3 +92,64 @@ real display.
     three counts (only here, only on the server, different) or the progress while a run has
     no rows yet, the auto checkbox, expand and close; no resize edge; expanding brings back
     the height it had.
+
+11. **File pane menus.** NEEDS HUMAN. Right-click a file and a folder in each pane on
+    Linux, macOS (also a two-finger click and Ctrl+click) and Windows. Expect: the menu opens
+    at the pointer (kept inside the window near the edges) with icons, labels and keys:
+    local rows Upload, Open (folders), Rename, Copy path, Refresh, New folder, a rule, then
+    Delete in red; remote rows Download, Edit (files), Open (folders), Rename,
+    Permissions…, Copy path, Refresh, New folder, rule, Delete. Unavailable items are dimmed,
+    not hidden. A right-click on an unselected row selects it alone; on one of several
+    selected rows the selection stays and Delete asks about all of them. A right-click
+    below the rows gives New folder, Refresh, Compare. Copy path pastes the full path (one
+    per line for several). Hovering an item lights it up with a white icon. F5 refreshes the
+    focused pane. Select a row, then press Shift+F10 and the Menu key, in a short folder
+    (no scrollbar), a long scrolled one, after Tab to the other pane and after resizing the
+    window: the menu opens at the row each time; ↑/↓ move (skipping dimmed items, wrapping), Enter runs the item, Escape closes;
+    another key (F7) closes the menu and acts. Opening Settings (Ctrl+,) or switching tabs
+    closes an open menu.
+
+12. **Copy path on Windows.** NEEDS HUMAN. On Windows, right-click a file in the local pane
+    (for example under `Users\<you>\Documents`), choose Copy path and paste it into Explorer's
+    address bar or Notepad. Expect: a native path with the drive and backslashes
+    (`C:\Users\<you>\Documents\file.txt`) that Explorer opens; with several files selected,
+    one such path per line. Also with a rename editor open in a pane, right-click a row:
+    ↑/↓ move in the menu (not the editor's caret) and Enter runs the item (it does not
+    commit the rename).
+
+13. **Menus on compare rows, queue rows, the sidebar and tabs.** NEEDS HUMAN. Expect every
+    menu in the spec's list where expected; keyboard reaches each action through shortcuts
+    or the palette. Steps:
+    - Compare: run a compare with rows in several groups. Right-click an unselected row: it
+      is selected alone and the menu shows Upload, Download (each dimmed unless the panel's
+      button of the same name is on) and Show in panes. Right-click one of several ticked
+      rows: the ticks stay and Upload/Download act on all of them. Show in panes goes to the
+      item, like a double-click. Click a row, move with ↑/↓, press Shift+F10 (and the Menu
+      key) with the list short (no scrollbar) and scrolled: the menu opens at the row.
+    - Queue: right-click an active row (Pause, Cancel), a paused one (Resume, Cancel), a
+      failed one (Retry, Dismiss); a conflict row and a finished row open no menu (the
+      conflict's answers stay in the row). An item on a row that finished meanwhile does
+      nothing.
+    - Sidebar: right-click a site (Open files, Edit; also a site inside an open workspace) and
+      a workspace head (Open workspace, Edit). No Disconnect, no Delete. Shift+F10 does
+      nothing there (mouse only).
+    - Tabs: right-click a session tab and the settings tab: Close tab, Close other tabs
+      (dimmed when it is the only tab). Close other tabs keeps the clicked tab, selected,
+      closes the rest (the settings tab too, unless it is the one kept); a site whose last tab
+      has unsent remote edits asks first, in its tab.
+    - Keyboard: Close tab, Open workspace, the sites, Upload/Download (compare panel
+      buttons), the queue's actions (Tab to their buttons) stay reachable as before.
+
+14. **Drag feedback.** NEEDS HUMAN. On Linux, macOS and Windows, open a connected site,
+    select two files in the local pane and drag one of them. Expect: nothing moves until
+    the pointer has gone a few pixels; then a chip follows the pointer with the first
+    file's icon and name ("…" when long), "+1" and a badge "2", and stays inside the window
+    near the edges; the two dragged rows are dimmed. Over the remote pane: a dashed grey
+    outline, a faint wash and, near the bottom, "Upload 2 items to /the/folder" (the folder
+    in mono, cut with "…" in a narrow window); the list does not move or shrink. Over the
+    local pane itself, and over a pane whose site is disconnected: no outline, the
+    not-allowed cursor, and releasing there does nothing. Drag remote files to the local
+    pane: "Download N items to ~/…". Drag files from the OS file manager over the remote
+    pane: "Upload N files to …" ("Upload files to …" until the system says how many).
+    Press Escape during a drag, and drag out of the window: both cancel (no chip, no dimmed
+    rows, nothing queued).

@@ -256,7 +256,7 @@ fn app_subscription(state: &Hoprs) -> iced::Subscription<Message> {
             effects::shell_feed(feed.2.as_ref(), feed.0, feed.1)
         })
     });
-    // The pointer's moves, only while a divider is dragged.
+    // The pointer's moves, only while a divider or a row is dragged.
     let pointer = state
         .app
         .tracks_pointer()

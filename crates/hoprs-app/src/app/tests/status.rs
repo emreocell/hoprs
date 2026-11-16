@@ -1003,11 +1003,10 @@ async fn action_on_dropped_session_reconnects_and_retries() {
 
 /// An action chosen in a context menu is the user acting, like the same action sent by its
 /// button or key: on a site whose session was lost it reconnects first and is held, never
-/// run on the dead session. (A test-only menu item stands in for the pane menus of Plan 13
-/// Part 3, the first real items that act on a tab.)
+/// run on the dead session (here the remote pane's Refresh).
 #[tokio::test]
 async fn menu_action_on_dropped_session_reconnects_like_its_button() {
-    use crate::app::menu::{MenuMsg, MenuTarget};
+    use crate::app::menu::{MenuAction, MenuMsg, MenuTarget};
 
     let a = site("a", "a.example", "u", Protocol::Ftp);
     let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
@@ -1019,20 +1018,28 @@ async fn menu_action_on_dropped_session_reconnects_like_its_button() {
     let lost = Error::new(ErrorKind::Network, "Connection lost");
     state(&mut app, session, ConnectionState::Disconnected(lost));
 
-    app.update(Message::Menu(MenuMsg::Open(MenuTarget::TestNavigate {
+    let target = MenuTarget::Pane {
         tab,
-        to: path("/srv"),
-    })));
+        side: Side::Remote,
+        row: None,
+    };
+    app.update(Message::Menu(MenuMsg::Open(target.clone())));
     assert!(app.menu.is_some());
-    let effects = app.update(Message::Menu(MenuMsg::Choose(0)));
+    let refresh = app
+        .menu_items(&target)
+        .iter()
+        .position(|item| item.action == MenuAction::Refresh && item.enabled)
+        .expect("Refresh is offered");
+    let here = app.tabs[0].remote().path.clone();
+    let effects = app.update(Message::Menu(MenuMsg::Choose(refresh)));
     assert!(app.menu.is_none());
-    // The same as `navigate(&mut app, tab, "/srv")`: a reconnection, the listing held.
+    // The same as the key: a reconnection, the listing held.
     assert_eq!(reconnects(&effects), vec![session], "{effects:?}");
     assert!(remote_lists(&effects, tab).is_empty(), "{effects:?}");
     assert!(app.tab_conn(0).reconnecting);
     // Back: the held action runs, once.
     let effects = state(&mut app, session, ConnectionState::Connected);
-    assert_eq!(remote_lists(&effects, tab), vec![path("/srv")]);
+    assert_eq!(remote_lists(&effects, tab), vec![here]);
 }
 
 /// A session refused for good (host key, authentication, certificate) never reconnects by

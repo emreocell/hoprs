@@ -9,11 +9,16 @@
 use std::collections::{BTreeSet, HashSet};
 
 use hoprs_core::{EntryKind, Error, ErrorKind, RemoteEntry, RemotePath};
+use iced::{Point, Rectangle};
 
 use super::actions::{Busy, PaneAction};
-use super::{App, Effect, TabId};
+use super::menu::{ContextMenu, MenuTarget};
+use super::{App, Drag, Effect, TabId};
 use crate::backend::Side;
 use crate::ui::virtual_list::ROW_HEIGHT;
+
+/// How far into a row a menu opened from the keyboard starts (past the kind icon).
+pub(super) const MENU_INSET: f32 = 24.0;
 
 /// One listing request; only a pane's latest one is applied.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -127,6 +132,9 @@ pub struct Pane {
     /// The list's scroll offset and visible height, as `on_scroll` last reported them.
     pub offset_y: f32,
     pub viewport_h: f32,
+    /// Where the list is in the window, as [`crate::ui::bounds`] last reported it (where
+    /// a menu opened from the keyboard goes).
+    pub bounds: Rectangle,
     /// The request whose result this pane waits for.
     pub request: Option<RequestId>,
     /// The inline editor, delete confirmation or permissions dialog open, if any.
@@ -164,6 +172,7 @@ impl Pane {
             hovered: None,
             offset_y: 0.0,
             viewport_h: 0.0,
+            bounds: Rectangle::default(),
             request: None,
             action: None,
             busy: None,
@@ -235,6 +244,15 @@ impl Pane {
             .cursor
             .or(self.selection.cursor.filter(|&r| r < up));
         self.selection = selection;
+    }
+
+    /// Where a menu opened from the keyboard on `row` goes: a little into the row, at its
+    /// bottom edge, in window coordinates.
+    pub fn menu_anchor(&self, row: usize) -> Point {
+        Point::new(
+            self.bounds.x + MENU_INSET,
+            self.bounds.y + (row + 1) as f32 * ROW_HEIGHT - self.offset_y,
+        )
     }
 
     /// The offset that brings `row` into view, if it is not.
@@ -309,6 +327,8 @@ pub enum PaneMsg {
         offset_y: f32,
         viewport_h: f32,
     },
+    /// Where the list is in the window (reported when it changes, scrolling or not).
+    Placed(Rectangle),
     Hover(usize),
     Unhover(usize),
     Retry,
@@ -337,6 +357,12 @@ pub enum PaneMsg {
     /// The pointer entered or left the pane (a drag drops on the pane under it).
     PointerIn,
     PointerOut,
+    /// A right press on a row, or on the pane's empty area (`None`): its menu.
+    ContextMenu(Option<usize>),
+    /// F5 / "Refresh": lists the folder again.
+    Refresh,
+    /// "Copy path": the selected entries' full paths to the clipboard.
+    CopyPath,
 }
 
 /// The keys the focused pane handles.
@@ -366,6 +392,10 @@ pub enum FileKey {
     Escape,
     /// Ctrl+Enter: the selection to the other pane's folder.
     Transfer,
+    /// F5: list the folder again.
+    Refresh,
+    /// Shift+F10 or the Menu key: the focused pane's menu, at the cursor's row.
+    Menu,
 }
 
 /// `path` as a [`RemotePath`], if it is absolute and POSIX-shaped (the local side lists
@@ -378,6 +408,17 @@ pub fn local_path(path: &std::path::Path) -> Option<RemotePath> {
 /// workspace saves as `local_dir`).
 pub fn local_fs_path(path: &RemotePath) -> std::path::PathBuf {
     std::path::PathBuf::from(path.as_str())
+}
+
+/// The file the local side opens for `path`, as the system writes it: its components
+/// pushed onto the root, as `LocalFs::new("/")` does, made absolute without touching the
+/// disk (on Windows that adds the current drive: `/Users/me` is `C:\Users\me`).
+pub fn local_os_path(path: &RemotePath) -> std::path::PathBuf {
+    let mut out = std::path::PathBuf::from("/");
+    for comp in path.as_str().split('/').filter(|s| !s.is_empty()) {
+        out.push(comp);
+    }
+    std::path::absolute(&out).unwrap_or(out)
 }
 
 impl App {
@@ -483,7 +524,10 @@ impl App {
         // A press or action in a pane gives it the keyboard back from the differences panel.
         if !matches!(
             msg,
-            PaneMsg::Scrolled { .. } | PaneMsg::PointerIn | PaneMsg::PointerOut
+            PaneMsg::Scrolled { .. }
+                | PaneMsg::Placed(_)
+                | PaneMsg::PointerIn
+                | PaneMsg::PointerOut
         ) && let Some(state) = self.tabs[index].compare_mut()
         {
             state.focused = false;
@@ -496,8 +540,16 @@ impl App {
             PaneMsg::Click(row) => {
                 if row < pane.row_count() {
                     pane.selection.click(row, mods);
-                    // A press on a row may start a drag to the other pane.
-                    self.drag = Some((tab, side));
+                    // A press on a row may start a drag to the other pane (once the
+                    // pointer moves far enough from the press).
+                    let at = self.last_press;
+                    self.drag = Some(Drag {
+                        tab,
+                        from: side,
+                        origin: at,
+                        at,
+                        active: false,
+                    });
                 }
             }
             PaneMsg::Open(row) => {
@@ -518,6 +570,11 @@ impl App {
             } => {
                 pane.offset_y = offset_y;
                 pane.viewport_h = viewport_h;
+                return Vec::new();
+            }
+            PaneMsg::Placed(bounds) => {
+                pane.bounds = bounds;
+                pane.viewport_h = bounds.height;
                 return Vec::new();
             }
             PaneMsg::Hover(row) => {
@@ -586,9 +643,95 @@ impl App {
                 self.pointer(tab, side, matches!(msg, PaneMsg::PointerIn));
                 return Vec::new();
             }
+            // A row's `mouse_area` captures its right press, so the pane's own (`None`)
+            // comes only from outside the rows.
+            PaneMsg::ContextMenu(row) => {
+                let at = self.last_press;
+                self.open_pane_menu(index, side, row, at);
+                return Vec::new();
+            }
+            PaneMsg::Refresh => {
+                self.tabs[index].set_focus(side);
+                return self.refresh(index, side);
+            }
+            PaneMsg::CopyPath => {
+                self.tabs[index].set_focus(side);
+                return self
+                    .copy_paths(index, side)
+                    .map(|text| vec![Effect::WriteClipboard(text.into())])
+                    .unwrap_or_default();
+            }
         }
         self.tabs[index].set_focus(side);
         Vec::new()
+    }
+
+    /// Whether F5 / "Refresh" would list pane `side` again: no operation runs in it (it
+    /// lists the folder itself when done) and, remote, the site has a session (one lost
+    /// to the network counts: the listing reconnects it).
+    pub(super) fn can_refresh(&self, index: usize, side: Side) -> bool {
+        self.tabs[index]
+            .pane(side)
+            .is_some_and(|p| p.busy.is_none())
+            && (side == Side::Local || self.tab_conn(index).session().is_some())
+    }
+
+    /// F5 / "Refresh": the folder again, when [`can_refresh`](Self::can_refresh).
+    fn refresh(&mut self, index: usize, side: Side) -> Vec<Effect> {
+        if !self.can_refresh(index, side) {
+            return Vec::new();
+        }
+        self.request_listing(index, side)
+    }
+
+    /// The menu of pane `side` (of the tab at `index`) on `row` (`None`: its empty area),
+    /// at `at`. A row that is not selected is selected alone first; a selected one keeps
+    /// the selection, so the menu acts on all of it. The pane gets the keyboard.
+    fn open_pane_menu(&mut self, index: usize, side: Side, row: Option<usize>, at: Point) {
+        let tab = &mut self.tabs[index];
+        let tab_id = tab.id;
+        let Some(pane) = tab.pane_mut(side) else {
+            return;
+        };
+        let row = row.filter(|&r| r < pane.row_count());
+        if let Some(row) = row {
+            if pane.selection.contains(row) {
+                // Keep the selection; the clicked row becomes the cursor, so an action
+                // on one entry (Rename) acts on the row under the pointer.
+                pane.selection.cursor = Some(row);
+            } else {
+                pane.selection.click(row, Mods::default());
+            }
+        }
+        tab.set_focus(side);
+        self.menu = Some(ContextMenu {
+            at,
+            target: MenuTarget::Pane {
+                tab: tab_id,
+                side,
+                row,
+            },
+            cursor: None,
+        });
+    }
+
+    /// What "Copy path" copies from pane `side` of the tab at `index`: the selected
+    /// entries' full paths, one per line, in row order (local: the system's path, see
+    /// [`local_os_path`]; remote: the remote one). `None` with nothing selected.
+    pub fn copy_paths(&self, index: usize, side: Side) -> Option<String> {
+        let pane = self.tabs.get(index)?.pane(side)?;
+        let paths: Vec<String> = pane
+            .selected_entries()
+            .iter()
+            .map(|entry| {
+                let path = pane.path.join(&entry.name);
+                match side {
+                    Side::Local => local_os_path(&path).display().to_string(),
+                    Side::Remote => path.as_str().to_owned(),
+                }
+            })
+            .collect();
+        (!paths.is_empty()).then(|| paths.join("\n"))
     }
 
     /// A listing finished. Applied only if it is the pane's latest request.
@@ -618,6 +761,21 @@ impl App {
         pane.request = None;
         pane.selection = Selection::default();
         pane.hovered = None;
+        // The rows a drag from this pane carried are gone.
+        if self.drag.is_some_and(|d| d.tab == tab && d.from == side) {
+            self.drag = None;
+        }
+        // The rows a menu on this pane was about are gone.
+        if matches!(
+            &self.menu,
+            Some(ContextMenu { target: MenuTarget::Pane { tab: t, side: s, .. }, .. })
+                if *t == tab && *s == side
+        ) {
+            self.menu = None;
+        }
+        let Some(pane) = self.tabs[index].pane_mut(side) else {
+            return Vec::new();
+        };
         if let Err(error) = &result
             && error.kind == ErrorKind::NotFound
             && let Some(restore) = pane.restore.take()
@@ -773,6 +931,14 @@ impl App {
             (None, FileKey::Delete) => return self.start_delete(index, side),
             (None, FileKey::Edit) => return self.start_edit(index, side),
             (None, FileKey::Transfer) => return self.transfer_selection(index, side),
+            (None, FileKey::Refresh) => return self.refresh(index, side),
+            (None, FileKey::Menu) => {
+                // At the cursor's row (the first one without a cursor).
+                let row = pane.selection.cursor;
+                let at = pane.menu_anchor(row.unwrap_or(0));
+                self.open_pane_menu(index, side, row, at);
+                return Vec::new();
+            }
             (None, _) => {}
         }
         if key == FileKey::SwitchPane {
@@ -823,6 +989,8 @@ impl App {
             | FileKey::Delete
             | FileKey::Edit
             | FileKey::Transfer
+            | FileKey::Refresh
+            | FileKey::Menu
             | FileKey::Escape => unreachable!("handled above"),
         };
         pane.selection.move_to(target, shift);
@@ -942,6 +1110,27 @@ mod tests {
         assert_eq!(pane.row(7), Some(Row::Entry(&pane.entries[6])));
         assert_eq!(pane.row(0), Some(Row::Up));
         assert_eq!(pane.row(8), None);
+    }
+
+    #[test]
+    fn local_os_path_is_the_native_path() {
+        let path = RemotePath::new("/home/me/a b.txt").unwrap();
+        let os = local_os_path(&path);
+        assert!(os.is_absolute(), "{os:?}");
+        assert!(os.ends_with(std::path::Path::new("home").join("me").join("a b.txt")));
+        #[cfg(unix)]
+        assert_eq!(os, std::path::PathBuf::from("/home/me/a b.txt"));
+        // On Windows: a drive, backslashes (`C:\home\me\a b.txt`).
+        #[cfg(windows)]
+        {
+            let text = os.display().to_string();
+            assert!(text.ends_with(r"\home\me\a b.txt"), "{text}");
+            assert_eq!(text.chars().nth(1), Some(':'), "{text}");
+        }
+        assert_eq!(
+            local_os_path(&RemotePath::root()),
+            std::path::absolute("/").unwrap()
+        );
     }
 
     #[test]

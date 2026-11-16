@@ -7,11 +7,16 @@ use std::path::Path;
 use hoprs_core::{Error, ErrorKind, RemotePath, SiteId};
 use hoprs_transfer::{Direction, Event, TransferId, TransferSpec};
 
-use super::files::{RequestId, local_path};
+use hoprs_core::ConnectionState;
+use iced::Point;
+
+use super::files::{FileKey, RequestId, local_path};
 use super::queue::QueueMsg;
-use super::{App, Effect};
+use super::{App, DRAG_THRESHOLD, Effect, Message};
 use crate::app::TabId;
 use crate::backend::{ControlOp, Side, TransferSnapshot};
+use crate::ui::files::display_path;
+use crate::ui::strings;
 
 /// The other pane.
 pub fn other(side: Side) -> Side {
@@ -74,12 +79,118 @@ impl App {
         }
     }
 
-    /// The pane a drag would drop on now: the pane under the pointer, if a drag started in
-    /// the other pane of the same tab.
+    /// The pointer moved to `at`: a press on a row becomes a drag once the pointer is more
+    /// than [`DRAG_THRESHOLD`] from the press (and stays one until the button is up).
+    pub(super) fn drag_moved(&mut self, at: Point) {
+        if let Some(drag) = &mut self.drag {
+            drag.at = at;
+            drag.active |= drag.origin.distance(at) > DRAG_THRESHOLD;
+        }
+    }
+
+    /// Escape while a drag is under way cancels it (`None`: taken). Anything else, a press
+    /// that has not moved yet, or Escape while a menu is open (a right press during the
+    /// drag opened it: that Escape closes the menu, the next one cancels the drag), passes
+    /// unchanged.
+    pub(super) fn drag_key(&mut self, msg: Message) -> Option<Message> {
+        if self.menu.is_none()
+            && !self.dialogs.is_open()
+            && self.palette.is_none()
+            && matches!(
+                msg,
+                Message::KeyPressed {
+                    key: FileKey::Escape,
+                    ..
+                }
+            )
+            && self.drag.is_some_and(|d| d.active)
+        {
+            self.drag = None;
+            return None;
+        }
+        Some(msg)
+    }
+
+    /// Whether pane `side` of tab `index` takes a drop: it can act, and the site's
+    /// connection is up (a remote pane on a lost or reconnecting session is no target).
+    fn takes_drop(&self, index: usize, side: Side) -> bool {
+        self.can_act(index, side)
+            && (side == Side::Local
+                || self
+                    .tab_conn(index)
+                    .conn
+                    .as_ref()
+                    .is_none_or(|state| *state == ConnectionState::Connected))
+    }
+
+    /// The pane a drag would drop on now: the pane under the pointer, if a drag that moved
+    /// past the threshold and carries something started in the other pane of the same tab
+    /// and that pane takes a drop ([`takes_drop`](Self::takes_drop)).
     pub fn drop_target(&self) -> Option<(TabId, Side)> {
-        let (tab, from) = self.drag?;
-        self.pointer
-            .filter(|&(over_tab, over)| over_tab == tab && over == other(from))
+        let drag = self.drag.filter(|d| d.active)?;
+        if self.drag_count() == 0 {
+            return None;
+        }
+        let (tab, over) = self
+            .pointer
+            .filter(|&(over_tab, over)| over_tab == drag.tab && over == other(drag.from))?;
+        let index = self.tab_index(tab)?;
+        self.takes_drop(index, over).then_some((tab, over))
+    }
+
+    /// Whether pane `side` of `tab` is under an active drag it would not take (its own
+    /// pane, or one that can't act): the not-allowed cursor.
+    pub fn drag_invalid_over(&self, tab: TabId, side: Side) -> bool {
+        self.drag.is_some_and(|d| d.active && d.tab == tab)
+            && self.pointer == Some((tab, side))
+            && self.drop_target() != Some((tab, side))
+    }
+
+    /// How many entries a drag carries: the selection of its pane.
+    pub fn drag_count(&self) -> usize {
+        self.drag
+            .and_then(|d| self.tab_index(d.tab).zip(Some(d.from)))
+            .and_then(|(index, side)| self.tabs[index].pane(side))
+            .map_or(0, |pane| pane.selected_count())
+    }
+
+    /// What a drop would do, for the target pane: "Upload 2 items to /srv",
+    /// "Download 1 item to ~/Downloads" (local folders as the breadcrumb shows them).
+    pub fn drop_label(&self) -> Option<String> {
+        let (tab, side) = self.drop_target()?;
+        let index = self.tab_index(tab)?;
+        let pane = self.tabs[index].pane(side)?;
+        let count = self.drag_count();
+        Some(match side {
+            Side::Remote => strings::drop_upload(count, &display_path(&pane.path, None)),
+            Side::Local => {
+                strings::drop_download(count, &display_path(&pane.path, self.home.as_ref()))
+            }
+        })
+    }
+
+    /// What dropping the system's files would do, while they hover the window and the
+    /// remote pane of the tab in view takes a drop: "Upload 3 files to /srv" ("Upload
+    /// files to /srv" until the system says how many).
+    pub fn os_drop_label(&self) -> Option<String> {
+        if !self.os_drag {
+            return None;
+        }
+        let index = self.shown_tab().and_then(|id| self.tab_index(id))?;
+        if !self.tabs[index].is_files() || !self.takes_drop(index, Side::Remote) {
+            return None;
+        }
+        let folder = display_path(&self.tabs[index].pane(Side::Remote)?.path, None);
+        Some(match self.os_drag_count {
+            0 => strings::drop_upload_files_unknown(&folder),
+            n => strings::drop_upload_files(n, &folder),
+        })
+    }
+
+    /// Files from the system entered the window (once per file) or left it.
+    pub(super) fn files_hovered(&mut self, hovered: bool) {
+        self.os_drag = hovered;
+        self.os_drag_count = if hovered { self.os_drag_count + 1 } else { 0 };
     }
 
     /// The pointer left the window: a drag started in it ends without dropping (its
@@ -91,16 +202,17 @@ impl App {
         self.end_resize()
     }
 
-    /// A mouse button went up anywhere: a drag that ends over the other pane sends its
-    /// selection there; any other ends with nothing. A divider's resize ends and is saved.
+    /// A mouse button went up anywhere: a drag that ends over a pane taking it
+    /// ([`drop_target`](Self::drop_target)) sends its selection there; any other ends with
+    /// nothing. A divider's resize ends and is saved.
     pub(super) fn drag_end(&mut self) -> Vec<Effect> {
         let mut effects = self.end_resize();
         let target = self.drop_target();
-        let Some((tab, from)) = self.drag.take() else {
+        let Some(drag) = self.drag.take() else {
             return effects;
         };
-        if let (Some(_), Some(index)) = (target, self.tab_index(tab)) {
-            effects.extend(self.transfer_selection(index, from));
+        if let (Some(_), Some(index)) = (target, self.tab_index(drag.tab)) {
+            effects.extend(self.transfer_selection(index, drag.from));
         }
         effects
     }
@@ -109,6 +221,7 @@ impl App {
     /// folder of the tab in view. Without a connected tab in view, the queue says why.
     pub(super) fn file_dropped(&mut self, path: &Path) -> Vec<Effect> {
         self.os_drag = false;
+        self.os_drag_count = 0;
         // No connected tab in view, or one whose remote folder is still loading (or
         // failed to list, or runs a file operation): each says so.
         let connected = self
@@ -128,6 +241,15 @@ impl App {
                 ErrorKind::Conflict,
                 "app-drop-pane-busy",
                 "The remote folder is busy or not listed yet; drop again in a moment",
+            ));
+            return Vec::new();
+        }
+        // The session is lost or reconnecting: the pane showed it takes no drop.
+        if !self.takes_drop(index, Side::Remote) {
+            self.queue_error(Error::coded(
+                ErrorKind::Network,
+                "app-drop-not-connected",
+                "The site is not connected; reconnect it to drop files into it",
             ));
             return Vec::new();
         }

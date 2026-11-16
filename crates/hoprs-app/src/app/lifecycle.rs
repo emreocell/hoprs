@@ -172,6 +172,14 @@ impl App {
         }
         if down {
             self.site_connection_down(&site);
+            // A drag in one of the site's tabs ends: its target (or source) went away.
+            if let Some(drag) = self.drag
+                && self
+                    .tab_index(drag.tab)
+                    .is_some_and(|i| self.tabs[i].site == site)
+            {
+                self.drag = None;
+            }
         }
         // Refused for good: the actions waiting for a reconnection fail now. Given up for a
         // network reason while they waited for the transport's own round: the app
@@ -408,6 +416,13 @@ impl App {
                 answer: PromptAnswer::Cancel,
             }]),
             Message::Edit(msg) if msg.is_user() => Some(Vec::new()),
+            // Where the lists are and how far they scrolled (not input): stored as usual,
+            // else a list's bounds reporter would publish them again every event.
+            Message::Pane {
+                msg: super::PaneMsg::Scrolled { .. } | super::PaneMsg::Placed(_),
+                ..
+            }
+            | Message::Queue(super::QueueMsg::Scrolled { .. }) => None,
             Message::ToggleQueue
             | Message::FilterSites(_)
             | Message::ReloadProfiles
@@ -423,6 +438,8 @@ impl App {
             | Message::WorkspaceForm(_)
             | Message::OpenProfileFolder
             | Message::CloseTab(_)
+            | Message::CloseOtherTabs(_)
+            | Message::Compare(super::CompareMsg::ContextMenu { .. })
             | Message::NewTab { .. }
             | Message::Pane { .. }
             | Message::KeyPressed { .. }

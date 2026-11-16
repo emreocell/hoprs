@@ -19,6 +19,7 @@ use hoprs_remote::{CompareOptions, Difference, Progress, RelPath, Status, Summar
 use hoprs_transfer::{Direction, Event, EventKind, TransferId, TransferSpec, TransferState};
 
 use super::files::Listing;
+use super::menu::{ContextMenu, MenuTarget};
 use super::settings::SettingsMsg;
 use super::{App, Effect, FileKey, Message, TabId};
 use crate::backend::Side;
@@ -232,6 +233,9 @@ pub struct CompareState {
     pub cursor: Option<usize>,
     /// The rows' scroll offset, as the list last reported it.
     pub offset_y: f32,
+    /// Where the rows' list is in the window, as [`crate::ui::bounds`] last reported it
+    /// (where a menu opened from the keyboard goes).
+    pub bounds: iced::Rectangle,
 }
 
 impl CompareState {
@@ -363,6 +367,10 @@ pub enum CompareMsg {
     Focus { tab: TabId, cursor: Option<usize> },
     /// The rows' list scrolled.
     Scrolled { tab: TabId, offset_y: f32 },
+    /// Where the rows' list is now ([`crate::ui::bounds`]).
+    Placed { tab: TabId, bounds: iced::Rectangle },
+    /// A right press on row `index`: its menu, at the press.
+    ContextMenu { tab: TabId, index: usize },
 }
 
 impl App {
@@ -434,6 +442,7 @@ impl App {
                     state.focused = false;
                     state.cursor = None;
                 }
+                self.close_compare_menu(index);
                 effects
             }
             CompareMsg::ToggleAuto { tab, on } => {
@@ -523,6 +532,62 @@ impl App {
                 }
                 Vec::new()
             }
+            CompareMsg::Placed { tab, bounds } => {
+                if let Some(state) = self
+                    .files_tab_index(tab)
+                    .and_then(|i| self.tabs[i].compare_mut())
+                {
+                    state.bounds = bounds;
+                }
+                Vec::new()
+            }
+            CompareMsg::ContextMenu { tab, index } => {
+                if let Some(i) = self.files_tab_index(tab) {
+                    let at = self.last_press;
+                    self.open_compare_menu(i, index, at);
+                }
+                Vec::new()
+            }
+        }
+    }
+
+    /// The menu of compare row `row` (of the tab at `index`), at `at`. A row that is not
+    /// selected is selected alone first (as far as its checkbox works); a selected one
+    /// keeps the selection, so the menu acts on all of it. The list gets the keyboard, on
+    /// that row. Nothing for a row that is not there.
+    fn open_compare_menu(&mut self, index: usize, row: usize, at: iced::Point) {
+        let tab = self.tabs[index].id;
+        let Some(state) = self.tabs[index]
+            .compare_mut()
+            .filter(|state| row < state.rows.len())
+        else {
+            return;
+        };
+        if !state.rows[row].selected {
+            for r in &mut state.rows {
+                r.selected = false;
+            }
+            let r = &mut state.rows[row];
+            r.selected = r.selectable() && r.transferable();
+        }
+        state.focused = true;
+        state.cursor = Some(row);
+        self.menu = Some(ContextMenu {
+            at,
+            target: MenuTarget::CompareRow { tab, index: row },
+            cursor: None,
+        });
+    }
+
+    /// The panel's rows of the tab at `index` went (a new run, a folder change, its
+    /// cross): a menu on one of them goes too.
+    fn close_compare_menu(&mut self, index: usize) {
+        let tab = self.tabs[index].id;
+        if matches!(
+            &self.menu,
+            Some(ContextMenu { target: MenuTarget::CompareRow { tab: t, .. }, .. }) if *t == tab
+        ) {
+            self.menu = None;
         }
     }
 
@@ -573,6 +638,24 @@ impl App {
             }),
             FileKey::Escape | FileKey::SwitchPane => {
                 state.focused = false;
+                Some(Vec::new())
+            }
+            FileKey::Menu => {
+                // At the cursor's row (the first one shown without a cursor), at its
+                // bottom edge, a little into it.
+                if let Some(row) = state
+                    .cursor
+                    .filter(|&c| c < state.rows.len())
+                    .or(order.first().copied())
+                {
+                    let line = crate::ui::compare::line_of(state, row);
+                    let at = iced::Point::new(
+                        state.bounds.x + super::files::MENU_INSET,
+                        state.bounds.y + (line + 1) as f32 * crate::ui::virtual_list::ROW_HEIGHT
+                            - state.offset_y,
+                    );
+                    self.open_compare_menu(index, row, at);
+                }
                 Some(Vec::new())
             }
             _ => Some(Vec::new()),
@@ -692,6 +775,7 @@ impl App {
             remote_root: remote,
             options,
         });
+        self.close_compare_menu(index);
         effects
     }
 
@@ -732,6 +816,9 @@ impl App {
         } else if state.phase == Phase::Debouncing {
             state.phase = Phase::Idle;
         }
+        if state.rows.is_empty() {
+            self.close_compare_menu(index);
+        }
         effect.into_iter().collect()
     }
 
@@ -755,6 +842,7 @@ impl App {
             state.rows.clear();
             state.identical = 0;
             state.phase = Phase::Idle;
+            self.close_compare_menu(index);
         }
         effects
     }

@@ -8,10 +8,12 @@
 
 use hoprs_core::{Protocol, Site, TabKind};
 use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::widget::{Id, button, column, container, row, scrollable, space, text, tooltip};
+use iced::widget::{
+    Id, button, column, container, mouse_area, row, scrollable, space, text, tooltip,
+};
 use iced::{Alignment, Element, Length, Padding};
 
-use crate::app::{App, Message, Tab};
+use crate::app::{App, MenuMsg, MenuTarget, Message, Tab, TabRef};
 use crate::ui::icons::{self, Icon};
 use crate::ui::layout::UNDERLINE;
 use crate::ui::theme::{self, palette};
@@ -143,8 +145,17 @@ fn settings_tab<'a>(active: bool) -> Element<'a, Message> {
     .padding(Padding::ZERO.left(theme::SPACE_MD).right(theme::SPACE_XS))
     .style(theme::tab(active))
     .on_press(Message::SelectSettings);
-    column![button, underline(active)]
-        .width(Length::Shrink)
+    with_menu(
+        column![button, underline(active)].width(Length::Shrink),
+        TabRef::Settings,
+    )
+}
+
+/// A tab with its menu on a right press: Close, Close other tabs (mouse only; the
+/// palette has Close tab, and the × is there).
+fn with_menu<'a>(tab: impl Into<Element<'a, Message>>, which: TabRef) -> Element<'a, Message> {
+    mouse_area(tab)
+        .on_right_press(Message::Menu(MenuMsg::Open(MenuTarget::Tab(which))))
         .into()
 }
 
@@ -222,9 +233,10 @@ fn session_tab<'a>(app: &'a App, index: usize, tab: &'a Tab) -> Element<'a, Mess
         .into(),
         None => button.into(),
     };
-    column![button, underline(active)]
-        .width(Length::Shrink)
-        .into()
+    with_menu(
+        column![button, underline(active)].width(Length::Shrink),
+        TabRef::Session(tab.id),
+    )
 }
 
 #[cfg(test)]

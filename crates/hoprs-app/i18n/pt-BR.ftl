@@ -29,6 +29,13 @@ go-to-anything-key = Ctrl K
 sidebar-options = Opções da barra lateral
 menu-show-workspaces = Mostrar workspaces
 menu-show-sites = Mostrar todos os sites
+menu-open = Abrir
+menu-copy-path = Copiar caminho
+menu-refresh = Atualizar
+menu-show-in-panes = Mostrar nos painéis
+menu-open-files = Abrir arquivos
+menu-close-other-tabs = Fechar outras abas
+key-refresh = F5
 
 ## The Ctrl+K palette
 
@@ -180,6 +187,33 @@ path-separator = /
 home-dir = ~
 no-size = -
 empty-folder = Esta pasta está vazia
+# A drag between panes, at the bottom of the pane it would drop on: "Upload 2 items to
+# /srv", "Download 1 item to ~/Downloads" (the folder in mono, cut with "…").
+drop-upload =
+    { $count ->
+        [0] Fazer upload de { $count } itens para { $folder }
+        [one] Fazer upload de { $count } item para { $folder }
+       *[other] Fazer upload de { $count } itens para { $folder }
+    }
+drop-download =
+    { $count ->
+        [0] Fazer download de { $count } itens para { $folder }
+        [one] Fazer download de { $count } item para { $folder }
+       *[other] Fazer download de { $count } itens para { $folder }
+    }
+# Files from the system file manager over the remote pane; "-unknown" while the system
+# has not said how many.
+drop-upload-files =
+    { $count ->
+        [0] Fazer upload de { $count } arquivos para { $folder }
+        [one] Fazer upload de { $count } arquivo para { $folder }
+       *[other] Fazer upload de { $count } arquivos para { $folder }
+    }
+drop-upload-files-unknown = Fazer upload de arquivos para { $folder }
+# The chip that follows the pointer in a drag of several items: "+1" after the first
+# name, then the badge with how many go ("2").
+drag-more = +{ $more }
+drag-count = { $count }
 reconnect = Reconectar
 size-unit-b = B
 size-unit-kb = KB
@@ -743,6 +777,7 @@ error-app-background-task-failed = A tarefa em segundo plano falhou
 error-app-no-config-dir = Sem pasta de configuração
 error-app-drop-needs-site = Abra um site conectado para soltar arquivos nele
 error-app-drop-pane-busy = A pasta remota está ocupada ou ainda não foi listada; solte de novo em instantes
+error-app-drop-not-connected = O site não está conectado; reconecte-o para soltar arquivos nele
 error-app-drop-unsupported = Não é possível fazer upload deste caminho
 error-app-site-endpoint-changed = O host ou a porta do site mudou: esta sessão foi fechada. Reconecte para usar as novas configurações.
 error-session-closed = Sessão encerrada

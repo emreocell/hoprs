@@ -231,7 +231,6 @@ impl Queue {
         counts
     }
 
-    #[cfg(test)]
     pub fn row(&self, id: TransferId) -> Option<&QueueRow> {
         self.rows.get(&id)
     }
