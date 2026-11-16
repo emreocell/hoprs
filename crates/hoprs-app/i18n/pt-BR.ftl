@@ -43,6 +43,7 @@ palette-toggle-log = Mostrar ou ocultar o log
 palette-close-tab = Fechar aba
 palette-open-workspace = Abrir workspace…
 palette-edit = Abrir no editor
+palette-compare-folders = Comparar pastas
 palette-upload = Fazer upload da seleção
 palette-download = Fazer download da seleção
 palette-copy = Copiar
@@ -558,6 +559,10 @@ editor-command-hint = system abre os arquivos remotos no editor padrão do siste
 editor-system-default = Padrão do sistema
 editor-command-empty = Digite um comando
 settings-editing = Edição remota
+settings-compare = Comparação de pastas
+settings-compare-auto = Comparar pastas automaticamente
+settings-compare-ignore = Ignorar ao comparar
+settings-compare-ignore-hint = Nomes separados por vírgula. * corresponde a qualquer sequência de caracteres, por exemplo *.log. Um campo vazio não ignora nada.
 # "Upload failed: Permission denied".
 upload-failed = Falha no upload: { $reason }
 # "Your version was saved to <path>".
@@ -746,3 +751,51 @@ error-edit-unmatched-quote = O comando do editor tem aspas sem fechar
 error-edit-no-editor = Nenhum comando de editor definido
 error-edit-cannot-start-editor = Não foi possível iniciar o editor
 error-edit-path-refused = Este caminho remoto não pode ser editado localmente
+
+# The folder compare panel (between the panes and the queue).
+compare-button = Comparar
+compare-title = Diferenças
+compare-auto = Comparar automaticamente
+compare-close = Fechar o painel de diferenças
+compare-collapse = Recolher
+compare-expand = Expandir
+compare-group-only-local = Só neste computador ({ $count })
+compare-group-only-remote = Só no servidor ({ $count })
+compare-group-different = Diferentes ({ $count })
+compare-group-unreadable = Não foi possível ler ({ $count })
+compare-local-newer = Local mais novo
+compare-remote-newer = Servidor mais novo
+compare-size-differs = Tamanho diferente
+compare-kind-differs = Arquivo × pasta
+compare-unreadable = Não foi possível ler: { $error }
+compare-queued = Na fila
+compare-tip-local = Este computador: { $when }
+compare-tip-remote = Servidor: { $when }
+compare-upload-selected = Fazer upload dos selecionados
+compare-download-selected = Fazer download dos selecionados
+compare-identical =
+    { $count ->
+    [0] { $count } idênticos
+    [one] { $count } idêntico
+   *[other] { $count } idênticos
+    }
+compare-all-identical =
+    { $count ->
+    [0] As duas pastas são idênticas (0 itens)
+    [one] As duas pastas são idênticas (1 item)
+   *[other] As duas pastas são idênticas ({ $count } itens)
+    }
+compare-running =
+    { $count ->
+    [0] Comparando… 0 itens
+    [one] Comparando… 1 item
+   *[other] Comparando… { $count } itens
+    }
+compare-paused = { $count } itens vistos até agora; a lista é parcial.
+compare-continue = Comparar tudo
+compare-stop = Parar
+compare-stopped = Comparação interrompida: { $error }
+compare-partial = Interrompida; a lista é parcial.
+compare-again = Comparar de novo
+compare-roots = { $local } ↔ { $remote }
+compare-ellipsis = …

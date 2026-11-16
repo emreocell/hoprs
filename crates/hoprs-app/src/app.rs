@@ -59,6 +59,7 @@ pub enum PickTarget {
 }
 
 pub mod actions;
+pub mod compare;
 pub mod dialogs;
 pub mod edit;
 pub mod files;
@@ -74,6 +75,7 @@ pub mod terminal;
 pub mod transfers;
 
 pub use actions::FileAction;
+pub use compare::{CompareItem, CompareMsg, CompareRunId};
 pub use dialogs::{Dialog, DialogMsg, Dialogs, FailureAction, KnownHostsFix, KnownHostsMsg, Typed};
 pub use edit::EditMsg;
 pub use files::{FileKey, Mods, PaneMsg, RequestId};
@@ -178,6 +180,8 @@ pub struct App {
     pub kept_notice: Option<edit::KeptNotice>,
     /// The editor command as typed on the settings page, while it is not valid.
     pub editor_input: Option<String>,
+    /// The compare ignore field as typed, while the settings page is open.
+    pub compare_ignore_input: Option<String>,
     /// Actions waiting for their site's lost session to reconnect ([`reconnect`]).
     held: HashMap<SiteId, Vec<Effect>>,
     /// Listings sent again after a reconnection, which the reconnect's result does not
@@ -196,6 +200,8 @@ pub enum Message {
     ToggleQueue,
     /// Something in the technical log panel, or its poll.
     Log(LogMsg),
+    /// A folder comparison's progress or end ([`compare`]).
+    Compare(CompareMsg),
     /// The Ctrl+K palette: open, typed into, run or closed ([`palette`]).
     Palette(PaletteMsg),
     /// The sidebar filter changed.
@@ -437,6 +443,35 @@ pub enum Effect {
     DeleteSite(SiteId),
     SaveWorkspace(Workspace),
     DeleteWorkspace(WorkspaceId),
+    /// Starts a comparison of the local folder `local_root` with the remote folder
+    /// `remote_root` of `session`; reports as [`Message::Compare`] (progress, then one
+    /// `Finished`). `options.concurrency_*` are set by the backend; a run id is
+    /// used once per tab.
+    Compare {
+        tab: TabId,
+        run: CompareRunId,
+        session: SessionId,
+        local_root: RemotePath,
+        remote_root: RemotePath,
+        options: hoprs_remote::CompareOptions,
+    },
+    /// Lets a run that stopped at the limit continue without one.
+    CompareResume {
+        tab: TabId,
+        run: CompareRunId,
+    },
+    /// Cooperative cancel (folder change, Stop, auto-off): no new listing starts, the one
+    /// in flight finishes, and the run ends with `Finished(Ok(stopped))`.
+    CompareCancel {
+        tab: TabId,
+        run: CompareRunId,
+    },
+    /// Abrupt cancel for a closed tab or a gone session: drops the run's future (an FTP
+    /// session may reconnect) and its registry entry; no `Finished` follows.
+    CompareAbort {
+        tab: TabId,
+        run: CompareRunId,
+    },
     /// Connects the sites in parallel with one secret batch; one
     /// [`Message::SiteConnected`] per site, as each finishes.
     ConnectSites(Vec<SiteId>),
@@ -464,6 +499,11 @@ pub enum Effect {
         side: Side,
         offset_y: f32,
     },
+    /// Scrolls the differences panel's list to `offset_y` (the keyboard cursor).
+    ScrollCompare {
+        tab: TabId,
+        offset_y: f32,
+    },
     /// A new folder, rename, delete or chmod in one pane; progress comes back as
     /// [`Message::FileOpProgress`], the end as [`Message::FileOpDone`]. The remote side
     /// needs `session`.
@@ -489,6 +529,15 @@ pub enum Effect {
     },
     /// Adds transfers to the engine's queue; one [`Message::Enqueued`] for all.
     Enqueue(Vec<TransferSpec>),
+    /// Queues the compare panel's transfers (files with their own `Overwrite` policy); one
+    /// [`CompareMsg::Enqueued`] with each item's id.
+    EnqueueCompare {
+        tab: TabId,
+        /// The run and roots the rows belong to.
+        run: CompareRunId,
+        roots: (RemotePath, RemotePath),
+        items: Vec<compare::CompareItem>,
+    },
     /// Pause, resume, cancel, retry or resolve one item.
     Control {
         id: TransferId,
@@ -708,6 +757,7 @@ impl App {
             queued_quit: None,
             kept_notice: None,
             editor_input: None,
+            compare_ignore_input: None,
             held: HashMap::new(),
             replayed: HashSet::new(),
             next_id: 0,
@@ -816,6 +866,9 @@ impl App {
         // Typed backup passwords never outlive the settings page, however it was left.
         if !matches!(self.form, Some(Form::Settings)) {
             self.backup.forget_passwords();
+            // The same for the typed fields: the next visit starts from what is saved.
+            self.compare_ignore_input = None;
+            self.editor_input = None;
         }
         // The center now shows another tab (or a tab instead of a form): its lists'
         // scrollables must match the offsets the panes remember.
@@ -847,6 +900,7 @@ impl App {
         match msg {
             Message::ToggleQueue => self.queue_open = !self.queue_open,
             Message::Log(msg) => return self.log_msg(msg),
+            Message::Compare(msg) => return self.compare_msg(msg),
             Message::Palette(msg) => return self.palette_msg(msg),
             Message::WindowResized(width) => self.window_width = width,
             Message::FilterSites(filter) => self.site_filter = filter,

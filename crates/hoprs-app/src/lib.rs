@@ -118,6 +118,8 @@ fn platform_specific() -> iced::window::settings::PlatformSpecific {
 struct Hoprs {
     app: App,
     backend: Arc<dyn BackendApi>,
+    /// The running folder comparisons' handles.
+    compare_runs: effects::CompareRuns,
     /// Only with `HOPRS_PROBE_STARTUP=1`.
     probe: Option<probe::Probe>,
 }
@@ -148,11 +150,13 @@ fn boot(log: logbuf::LogBuffer, probe: Option<probe::Probe>) -> (Hoprs, Task<Roo
     let backend: Arc<dyn BackendApi> = Arc::new(backend);
     let (mut app, effects) = App::boot();
     app.attach_log(log);
-    let task = run_effects(&backend, effects);
+    let compare_runs = effects::CompareRuns::default();
+    let task = run_effects(&backend, &compare_runs, effects);
     (
         Hoprs {
             app,
             backend,
+            compare_runs,
             probe,
         },
         task,
@@ -176,7 +180,7 @@ fn update(state: &mut Hoprs, message: Root) -> Task<Root> {
     match message {
         Root::App(message) => {
             let effects = state.app.update(message);
-            run_effects(&state.backend, effects)
+            run_effects(&state.backend, &state.compare_runs, effects)
         }
         Root::Probe(step) => match &mut state.probe {
             Some(probe) => probe.step(step).map(Root::Probe),
@@ -185,11 +189,15 @@ fn update(state: &mut Hoprs, message: Root) -> Task<Root> {
     }
 }
 
-fn run_effects(backend: &Arc<dyn BackendApi>, effects: Vec<app::Effect>) -> Task<Root> {
+fn run_effects(
+    backend: &Arc<dyn BackendApi>,
+    runs: &effects::CompareRuns,
+    effects: Vec<app::Effect>,
+) -> Task<Root> {
     Task::batch(
         effects
             .into_iter()
-            .map(|effect| effects::run(Arc::clone(backend), effect)),
+            .map(|effect| effects::run(Arc::clone(backend), runs, effect)),
     )
     .map(Root::App)
 }

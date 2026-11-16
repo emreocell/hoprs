@@ -161,6 +161,28 @@ fn fuzzy_matches_in_order_and_ranks_word_starts() {
     assert_eq!(order, ["New site", "Options", "Settings"]);
 }
 
+/// "Compare folders" is a file tab's action only, and sends the same message as the
+/// Compare button.
+#[tokio::test]
+async fn compare_folders_is_listed_for_files_tabs_only() {
+    let web = ssh_site("web");
+    let fake = fake_with(&[&web], Vec::new());
+    let mut app = ssh_both(&fake, &web).await;
+    app.update(Message::SelectTab(0));
+    assert!(entry(&all(&app), strings::palette_compare_folders()).is_none());
+    app.update(Message::SelectTab(1));
+    let entries = all(&app);
+    let found = entry(&entries, strings::palette_compare_folders()).expect("a files tab");
+    assert_eq!(found.group, Group::Action);
+    let tab = app.tabs[1].id;
+    app.update(palette(PaletteMsg::Open));
+    app.update(palette(PaletteMsg::Query("compare folders".into())));
+    assert!(matches!(
+        app.palette_command(palette(PaletteMsg::Run)),
+        Message::Compare(crate::app::CompareMsg::Start { tab: t }) if t == tab
+    ));
+}
+
 #[tokio::test]
 async fn palette_lists_context_actions() {
     // Nothing open: the global actions only.

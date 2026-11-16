@@ -21,6 +21,7 @@ use hoprs_core::{
     WorkspaceId,
 };
 
+use super::compare::CompareState;
 use super::files::{Listing, Pane, PaneStatus, Restore, local_path};
 use super::terminal::TerminalTab;
 use super::{App, Effect, KnownHostsFix, RequestId, WorkspaceRow};
@@ -93,6 +94,8 @@ pub struct FilePanes {
     pub remote: Pane,
     /// The pane the keyboard drives.
     pub focus: Side,
+    /// The folder comparison of the two panes.
+    pub compare: CompareState,
 }
 
 /// What a tab holds besides its site: the panes of a files tab, or a terminal.
@@ -153,6 +156,15 @@ impl Tab {
             TabBody::Terminal(terminal) => Some(terminal),
             TabBody::Files(_) => None,
         }
+    }
+
+    /// The folder comparison of a files tab.
+    pub fn compare(&self) -> Option<&CompareState> {
+        self.files().map(|files| &files.compare)
+    }
+
+    pub fn compare_mut(&mut self) -> Option<&mut CompareState> {
+        self.files_mut().map(|files| &mut files.compare)
     }
 
     /// Pane `side` of a files tab.
@@ -397,6 +409,7 @@ impl App {
                 local: local_pane,
                 remote: Pane::new(remote),
                 focus: Side::Local,
+                compare: CompareState::default(),
             }),
         };
         let effect = Effect::List {
@@ -591,6 +604,8 @@ impl App {
         // A terminal's shell goes with its tab (a shell still opening is closed when its
         // result finds no tab).
         let mut effects = Self::terminal_close_effects(&tab);
+        // A comparison still walking stops at once (the tab's results have nowhere to go).
+        effects.extend(Self::compare_close_effects(&tab));
         if self.tab_of(&tab.site).is_some() {
             return effects;
         }

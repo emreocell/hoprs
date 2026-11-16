@@ -9,8 +9,8 @@ mod stream;
 mod tls;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::SystemTime;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use hoprs_core::{ConnectionState, EntryKind, Error, ErrorKind, RemoteEntry, RemotePath, Result};
@@ -100,6 +100,8 @@ pub struct FtpFs {
     session: FtpSession,
     /// Directory listings sent so far (tests check that opens send none).
     listings: Arc<AtomicU64>,
+    /// A listing came from `LIST` (no `MLSD`): times have minute precision at best.
+    listed_with_list: Arc<AtomicBool>,
 }
 
 impl FtpFs {
@@ -123,6 +125,7 @@ impl FtpFs {
         FtpFs {
             session,
             listings: Arc::new(AtomicU64::new(0)),
+            listed_with_list: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -141,7 +144,8 @@ impl FtpFs {
         let arg = arg(dir)?.to_owned();
         self.listings.fetch_add(1, Ordering::Relaxed);
         let context = dir.to_string();
-        self.session
+        let result = self
+            .session
             .with_control(move |c| {
                 Box::pin(async move {
                     let mlsd = c.has_mlsd;
@@ -156,7 +160,11 @@ impl FtpFs {
                         .map_err(|e| map_ftp_error(e, &context))
                 })
             })
-            .await
+            .await;
+        if let Ok((_, false)) = result {
+            self.listed_with_list.store(true, Ordering::Relaxed);
+        }
+        result
     }
 
     /// The parsed entries of `dir`, special files included. A `LIST` reply in a format the
@@ -1012,6 +1020,16 @@ impl RemoteFs for FtpFs {
     /// engine's size check after a copy does not mind.
     async fn size(&self, path: &RemotePath) -> Result<u64> {
         self.file_size(path).await
+    }
+
+    /// 60 s once a listing came from `LIST` (dates carry minutes at best); 1 s with `MLSD`.
+    /// Unknown, so 1 s, until the first listing.
+    fn mtime_precision(&self) -> Duration {
+        if self.listed_with_list.load(Ordering::Relaxed) {
+            Duration::from_secs(60)
+        } else {
+            Duration::from_secs(1)
+        }
     }
 
     async fn set_modified(&self, path: &RemotePath, mtime: SystemTime) -> Result<()> {

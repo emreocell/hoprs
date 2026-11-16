@@ -143,6 +143,32 @@ pub struct Settings {
     /// with shell quoting rules (Windows command-line rules on Windows; no shell runs), the
     /// file's path added last. Never empty ([`valid_editor`]).
     pub editor_command: String,
+    /// Whether a folder compare re-runs by itself when the two folders change.
+    pub compare_auto: bool,
+    /// Names a folder compare skips: `*` matches any run of characters, matched on the
+    /// entry name.
+    pub compare_ignore: Vec<String>,
+}
+
+/// The names a folder compare skips until the user changes the list.
+pub const COMPARE_IGNORE_DEFAULT: [&str; 3] = [".git", "node_modules", ".DS_Store"];
+
+/// The default ignore list, owned.
+pub fn compare_ignore_default() -> Vec<String> {
+    COMPARE_IGNORE_DEFAULT
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect()
+}
+
+/// The ignore list typed as comma-separated names: trimmed, empty items dropped.
+pub fn parse_compare_ignore(typed: &str) -> Vec<String> {
+    typed
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 impl Default for Settings {
@@ -156,6 +182,8 @@ impl Default for Settings {
             language: LanguageChoice::System,
             keepalive_secs: KEEPALIVE_DEFAULT,
             editor_command: EDITOR_DEFAULT.to_owned(),
+            compare_auto: true,
+            compare_ignore: compare_ignore_default(),
         }
     }
 }
@@ -219,6 +247,11 @@ struct File {
     keepalive_secs: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     editor_command: Option<String>,
+    // Any TOML value: a wrong type reads as the default instead of failing the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compare_auto: Option<toml::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compare_ignore: Option<toml::Value>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -301,6 +334,29 @@ pub fn parse(content: &str) -> Result<Settings> {
             .editor_command
             .filter(|command| valid_editor(command))
             .unwrap_or(defaults.editor_command),
+        compare_auto: file
+            .compare_auto
+            .and_then(|value| value.as_bool())
+            .unwrap_or(defaults.compare_auto),
+        compare_ignore: file
+            .compare_ignore
+            .and_then(|value| match value {
+                toml::Value::Array(items) => items
+                    .into_iter()
+                    .map(|item| match item {
+                        toml::Value::String(name) => Some(name),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>(),
+                _ => None,
+            })
+            .map_or(defaults.compare_ignore, |names| {
+                names
+                    .into_iter()
+                    .map(|name| name.trim().to_owned())
+                    .filter(|name| !name.is_empty())
+                    .collect()
+            }),
     })
 }
 
@@ -319,6 +375,15 @@ fn file_of(settings: &Settings) -> File {
         } else {
             EDITOR_DEFAULT.to_owned()
         }),
+        compare_auto: Some(toml::Value::Boolean(settings.compare_auto)),
+        compare_ignore: Some(toml::Value::Array(
+            settings
+                .compare_ignore
+                .iter()
+                .cloned()
+                .map(toml::Value::String)
+                .collect(),
+        )),
     }
 }
 
@@ -421,6 +486,64 @@ pub fn save(path: &Path, settings: &Settings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compare_settings_default_roundtrip_and_invalid() {
+        let defaults = parse("").unwrap();
+        assert!(defaults.compare_auto);
+        assert_eq!(
+            defaults.compare_ignore,
+            vec![".git", "node_modules", ".DS_Store"]
+        );
+
+        let custom = Settings {
+            compare_auto: false,
+            compare_ignore: vec!["a".into(), "*.log".into()],
+            ..Settings::default()
+        };
+        assert_eq!(parse(&render(&custom)).unwrap(), custom);
+        // An empty list is a valid choice: nothing ignored.
+        let none = Settings {
+            compare_ignore: Vec::new(),
+            ..Settings::default()
+        };
+        assert_eq!(parse(&render(&none)).unwrap(), none);
+
+        // Wrong types read as the defaults, the rest of the file still applies.
+        let bad =
+            parse("compare_auto = \"yes\"\ncompare_ignore = 3\nworkers_per_site = 2").unwrap();
+        assert!(bad.compare_auto);
+        assert_eq!(bad.compare_ignore, defaults.compare_ignore);
+        assert_eq!(bad.workers_per_site, 2);
+        let bad = parse("compare_ignore = [\"a\", 1]").unwrap();
+        assert_eq!(bad.compare_ignore, defaults.compare_ignore);
+    }
+
+    #[test]
+    fn compare_settings_keep_unknown_keys_on_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        std::fs::write(&path, "future_key = 1\ncompare_auto = \"yes\"\n").unwrap();
+        let loaded = load(&path).settings;
+        save(
+            &path,
+            &Settings {
+                compare_auto: false,
+                ..loaded
+            },
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("future_key = 1"), "{text}");
+        assert!(text.contains("compare_auto = false"), "{text}");
+        assert!(text.contains("compare_ignore"), "{text}");
+    }
+
+    #[test]
+    fn compare_ignore_typed_is_trimmed_and_cleaned() {
+        assert_eq!(parse_compare_ignore(" a, ,*.log "), vec!["a", "*.log"]);
+        assert!(parse_compare_ignore("  ").is_empty());
+    }
 
     /// A fresh install opens remote edits with the OS's default editor.
     #[test]

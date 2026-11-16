@@ -70,6 +70,9 @@ pub fn palette_open_workspace() -> &'static str {
 pub fn palette_edit() -> &'static str {
     tr("palette-edit")
 }
+pub fn palette_compare_folders() -> &'static str {
+    tr("palette-compare-folders")
+}
 pub fn palette_upload() -> &'static str {
     tr("palette-upload")
 }
@@ -1557,6 +1560,18 @@ pub fn editor_command_empty() -> &'static str {
 pub fn settings_editing() -> &'static str {
     tr("settings-editing")
 }
+pub fn settings_compare() -> &'static str {
+    tr("settings-compare")
+}
+pub fn settings_compare_auto() -> &'static str {
+    tr("settings-compare-auto")
+}
+pub fn settings_compare_ignore() -> &'static str {
+    tr("settings-compare-ignore")
+}
+pub fn settings_compare_ignore_hint() -> &'static str {
+    tr("settings-compare-ignore-hint")
+}
 /// "Upload failed: Permission denied".
 pub fn upload_failed(reason: &str) -> String {
     tr_args("upload-failed", &[("reason", reason.into())])
@@ -1581,6 +1596,106 @@ pub fn kept_notice(n: usize) -> String {
 /// The delete confirmation of a site with files open for editing.
 pub fn delete_site_edits(n: usize) -> String {
     tr_args("delete-site-edits", &[("count", n.into())])
+}
+
+// The folder compare panel.
+pub fn compare_button() -> &'static str {
+    tr("compare-button")
+}
+pub fn compare_title() -> &'static str {
+    tr("compare-title")
+}
+pub fn compare_auto() -> &'static str {
+    tr("compare-auto")
+}
+pub fn compare_close() -> &'static str {
+    tr("compare-close")
+}
+pub fn compare_collapse() -> &'static str {
+    tr("compare-collapse")
+}
+pub fn compare_expand() -> &'static str {
+    tr("compare-expand")
+}
+pub fn compare_local_newer() -> &'static str {
+    tr("compare-local-newer")
+}
+pub fn compare_remote_newer() -> &'static str {
+    tr("compare-remote-newer")
+}
+pub fn compare_size_differs() -> &'static str {
+    tr("compare-size-differs")
+}
+pub fn compare_kind_differs() -> &'static str {
+    tr("compare-kind-differs")
+}
+pub fn compare_queued() -> &'static str {
+    tr("compare-queued")
+}
+pub fn compare_upload_selected() -> &'static str {
+    tr("compare-upload-selected")
+}
+pub fn compare_download_selected() -> &'static str {
+    tr("compare-download-selected")
+}
+pub fn compare_continue() -> &'static str {
+    tr("compare-continue")
+}
+pub fn compare_stop() -> &'static str {
+    tr("compare-stop")
+}
+pub fn compare_partial() -> &'static str {
+    tr("compare-partial")
+}
+pub fn compare_again() -> &'static str {
+    tr("compare-again")
+}
+pub fn compare_group_only_local(count: usize) -> String {
+    tr_args("compare-group-only-local", &[("count", count.into())])
+}
+pub fn compare_group_only_remote(count: usize) -> String {
+    tr_args("compare-group-only-remote", &[("count", count.into())])
+}
+pub fn compare_group_different(count: usize) -> String {
+    tr_args("compare-group-different", &[("count", count.into())])
+}
+pub fn compare_group_unreadable(count: usize) -> String {
+    tr_args("compare-group-unreadable", &[("count", count.into())])
+}
+pub fn compare_identical(count: usize) -> String {
+    tr_args("compare-identical", &[("count", count.into())])
+}
+pub fn compare_all_identical(count: usize) -> String {
+    tr_args("compare-all-identical", &[("count", count.into())])
+}
+pub fn compare_running(count: usize) -> String {
+    tr_args("compare-running", &[("count", count.into())])
+}
+pub fn compare_paused(count: usize) -> String {
+    tr_args("compare-paused", &[("count", count.into())])
+}
+pub fn compare_unreadable(error: &str) -> String {
+    tr_args("compare-unreadable", &[("error", error.into())])
+}
+pub fn compare_stopped(error: &str) -> String {
+    tr_args("compare-stopped", &[("error", error.into())])
+}
+pub fn compare_tip_local(when: &str) -> String {
+    tr_args("compare-tip-local", &[("when", when.into())])
+}
+pub fn compare_tip_remote(when: &str) -> String {
+    tr_args("compare-tip-remote", &[("when", when.into())])
+}
+
+pub fn compare_roots(local: &str, remote: &str) -> String {
+    tr_args(
+        "compare-roots",
+        &[("local", local.into()), ("remote", remote.into())],
+    )
+}
+
+pub fn ellipsis() -> &'static str {
+    tr("compare-ellipsis")
 }
 
 #[cfg(test)]

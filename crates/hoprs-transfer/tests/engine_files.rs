@@ -643,3 +643,132 @@ async fn progress_rate_at_most_10hz() {
     );
     engine.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn enqueue_with_overwrite_replaces_existing_without_asking() {
+    let (engine, local, remote, mut rx) = engine_with_memfs(1).await;
+    let new = data(3_000);
+    local.add_file("/w/a.bin", &new, mtime());
+    local.add_file("/w/b.bin", &data(10), mtime());
+    remote.add_file("/srv/a.bin", b"old", mtime());
+    remote.add_file("/srv/b.bin", b"old", mtime());
+    // Global policy stays `Ask`.
+
+    let a = engine
+        .enqueue_with_policy(
+            spec(Direction::Upload, "/w/a.bin", "/srv/a.bin"),
+            ConflictPolicy::Overwrite,
+        )
+        .await
+        .unwrap();
+    let mut seen = Vec::new();
+    let end = wait_for(&mut rx, |e| {
+        seen.push(e.clone());
+        matches!(e, EventKind::StateChanged { id, state } if *id == a && state.is_terminal())
+    })
+    .await;
+    assert!(matches!(
+        end,
+        EventKind::StateChanged {
+            state: TransferState::Done,
+            ..
+        }
+    ));
+    assert!(!seen.iter().any(|e| matches!(
+        e,
+        EventKind::StateChanged {
+            state: TransferState::AwaitingDecision(_),
+            ..
+        }
+    )));
+    assert_eq!(remote.read_file("/srv/a.bin").unwrap(), new);
+
+    // A plain `enqueue` still uses the global policy (`Ask`).
+    let b = engine
+        .enqueue(spec(Direction::Upload, "/w/b.bin", "/srv/b.bin"))
+        .await
+        .unwrap();
+    wait_for(&mut rx, |e| {
+        matches!(e, EventKind::StateChanged { id, state: TransferState::AwaitingDecision(_) } if *id == b)
+    })
+    .await;
+    assert_eq!(remote.read_file("/srv/b.bin").unwrap(), b"old");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn per_item_policy_survives_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("queue.db");
+    let local = MemFs::new();
+    let remote = MemFs::new();
+    let new = data(3_000);
+    local.add_file("/w/a.bin", &new, mtime());
+    remote.add_file("/srv/a.bin", b"old", mtime());
+
+    // No site registered: the item stays queued and never runs.
+    let engine =
+        TransferEngine::start(QueueStore::open(&db).unwrap(), EngineConfig::default()).unwrap();
+    let id = engine
+        .enqueue_with_policy(
+            spec(Direction::Upload, "/w/a.bin", "/srv/a.bin"),
+            ConflictPolicy::Overwrite,
+        )
+        .await
+        .unwrap();
+    engine.shutdown().await;
+
+    let engine =
+        TransferEngine::start(QueueStore::open(&db).unwrap(), EngineConfig::default()).unwrap();
+    let mut rx = engine.subscribe();
+    engine
+        .register_site(
+            site(),
+            SiteEndpoints {
+                local: Arc::new(local),
+                remote: Arc::new(remote.clone()),
+                workers: 1,
+            },
+        )
+        .await;
+    engine.resume(id).await.unwrap();
+    assert_eq!(wait_terminal(&mut rx, id).await, TransferState::Done);
+    assert_eq!(remote.read_file("/srv/a.bin").unwrap(), new);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn enqueue_with_overwrite_after_earlier_transfer_to_same_destination() {
+    let (engine, local, remote, mut rx) = engine_with_memfs(1).await;
+    local.add_file("/w/a.bin", &data(100), mtime());
+    remote.add_dir("/srv");
+
+    let first = engine
+        .enqueue(spec(Direction::Upload, "/w/a.bin", "/srv/a.bin"))
+        .await
+        .unwrap();
+    assert_eq!(wait_terminal(&mut rx, first).await, TransferState::Done);
+
+    // The file is edited and compared again; the user chooses overwrite.
+    let new = data(3_000);
+    local.add_file("/w/a.bin", &new, mtime());
+    let mut seen = Vec::new();
+    let second = engine
+        .enqueue_with_policy(
+            spec(Direction::Upload, "/w/a.bin", "/srv/a.bin"),
+            ConflictPolicy::Overwrite,
+        )
+        .await
+        .unwrap();
+    wait_for(&mut rx, |e| {
+        seen.push(e.clone());
+        matches!(e, EventKind::StateChanged { id, state } if *id == second && state.is_terminal())
+    })
+    .await;
+    assert!(!seen.iter().any(|e| matches!(
+        e,
+        EventKind::StateChanged {
+            state: TransferState::AwaitingDecision(_),
+            ..
+        }
+    )));
+    assert_eq!(remote.read_file("/srv/a.bin").unwrap(), new);
+}

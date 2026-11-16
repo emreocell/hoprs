@@ -199,10 +199,11 @@ impl App {
     }
 
     pub(super) fn transfer_event(&mut self, event: Event) -> Vec<Effect> {
+        let mut effects = self.compare_transfer_event(&event);
         if self.queue.on_event(event) {
-            return self.resync_queue();
+            effects.extend(self.resync_queue());
         }
-        Vec::new()
+        effects
     }
 
     pub(super) fn queue_snapshot(
@@ -210,10 +211,11 @@ impl App {
         request: RequestId,
         snapshot: TransferSnapshot,
     ) -> Vec<Effect> {
+        let mut effects = self.compare_snapshot(&snapshot.items);
         if self.queue.on_snapshot(request, snapshot) {
-            return self.resync_queue();
+            effects.extend(self.resync_queue());
         }
-        Vec::new()
+        effects
     }
 
     pub(super) fn control_done(&mut self, id: TransferId, result: Result<(), Error>) {

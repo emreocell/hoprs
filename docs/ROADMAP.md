@@ -9,8 +9,10 @@ Released work is in the [CHANGELOG](../CHANGELOG.md).
 
 - **1.2.0: the app in Brazilian Portuguese.** Done on `main`, not released yet: the whole UI
   and hoprs's own error messages, with the language following the OS or set in Settings.
-- **Folder compare and sync.** Compare a local and a remote folder side by side, see what is
-  new, changed or missing on each side, and transfer only the difference.
+- **Folder compare.** Done on `main`, not released yet (1.2.0): a panel lists what is new,
+  changed or missing on each side and transfers only the difference.
+- **Sync on top of compare:** delete one-sided files, mirror a folder, compare by content
+  or checksum (see the Plan 12 follow-ups).
 
 ## Later
 

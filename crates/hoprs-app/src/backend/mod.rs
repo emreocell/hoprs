@@ -23,7 +23,7 @@ use hoprs_core::{
     WorkspaceId,
 };
 use hoprs_import::{ImportOptions, ImportReport};
-use hoprs_remote::RemoteFs;
+use hoprs_remote::{CompareOptions, CompareSignals, Progress, RemoteFs, Summary};
 pub use hoprs_ssh::known_hosts::KnownHostEntry;
 pub use hoprs_ssh::{AuthMethod, ShellOutput};
 use hoprs_transfer::{
@@ -222,7 +222,30 @@ pub trait BackendApi: Send + Sync {
         mode: u32,
     ) -> Result<()>;
 
+    /// Compares the local folder `local_root` with the remote folder `remote_root` of
+    /// `session` (see [`hoprs_remote::compare`]), over the session's existing connection:
+    /// listing concurrency 4 on SFTP, 1 on FTP/FTPS, 4 on the local side (the
+    /// options' concurrency fields are overwritten). Differences stream on `progress`.
+    /// A closed session fails with the coded "session closed" error. See
+    /// [`CompareSignals`] for pausing and cancelling.
+    async fn compare(
+        &self,
+        session: SessionId,
+        local_root: RemotePath,
+        remote_root: RemotePath,
+        options: CompareOptions,
+        progress: mpsc::UnboundedSender<Progress>,
+        signals: CompareSignals,
+    ) -> Result<Summary>;
+
     async fn enqueue(&self, spec: TransferSpec) -> Result<TransferId>;
+    /// Like [`enqueue`](Self::enqueue), with a conflict policy for this item
+    /// alone (persisted, so it survives a restart).
+    async fn enqueue_with_policy(
+        &self,
+        spec: TransferSpec,
+        policy: ConflictPolicy,
+    ) -> Result<TransferId>;
     async fn control(&self, id: TransferId, op: ControlOp) -> Result<()>;
     /// A new receiver of the engine's events. Subscribe first, then take
     /// [`transfer_snapshot`](Self::transfer_snapshot): events at or below its `seq` are
@@ -286,7 +309,16 @@ pub trait BackendApi: Send + Sync {
     fn set_keepalive(&self, secs: u64);
 }
 
-/// A remote listing asked without a session.
+/// The concurrent listings per side for a session's protocol: `(local, remote)`.
+pub fn compare_concurrency(protocol: hoprs_core::Protocol) -> (usize, usize) {
+    match protocol {
+        hoprs_core::Protocol::Ssh => (4, 4),
+        hoprs_core::Protocol::Ftp
+        | hoprs_core::Protocol::FtpsExplicit
+        | hoprs_core::Protocol::FtpsImplicit => (4, 1),
+    }
+}
+
 fn not_connected() -> Error {
     Error::coded(
         hoprs_core::ErrorKind::NotFound,
@@ -659,6 +691,33 @@ impl BackendApi for Backend {
         ops::delete_all(fs.as_ref(), targets, &progress).await
     }
 
+    async fn compare(
+        &self,
+        session: SessionId,
+        local_root: RemotePath,
+        remote_root: RemotePath,
+        mut options: CompareOptions,
+        progress: mpsc::UnboundedSender<Progress>,
+        signals: CompareSignals,
+    ) -> Result<Summary> {
+        let remote = self.sessions.remote(session)?;
+        let protocol = self
+            .sessions
+            .protocol(session)
+            .unwrap_or(hoprs_core::Protocol::Ssh);
+        (options.concurrency_a, options.concurrency_b) = compare_concurrency(protocol);
+        hoprs_remote::compare(
+            self.sessions.local(),
+            local_root,
+            remote,
+            remote_root,
+            options,
+            progress,
+            signals,
+        )
+        .await
+    }
+
     async fn chmod(
         &self,
         session: Option<SessionId>,
@@ -671,6 +730,14 @@ impl BackendApi for Backend {
 
     async fn enqueue(&self, spec: TransferSpec) -> Result<TransferId> {
         self.engine.enqueue(spec).await
+    }
+
+    async fn enqueue_with_policy(
+        &self,
+        spec: TransferSpec,
+        policy: ConflictPolicy,
+    ) -> Result<TransferId> {
+        self.engine.enqueue_with_policy(spec, policy).await
     }
 
     async fn control(&self, id: TransferId, op: ControlOp) -> Result<()> {
@@ -949,6 +1016,42 @@ mod tests {
         backend
             .answer_prompt(PromptId(1), PromptAnswer::Cancel)
             .await;
+    }
+
+    #[tokio::test]
+    async fn compare_on_a_closed_session_is_the_session_closed_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = open(dir.path());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let signals = CompareSignals {
+            resume: watch::channel(false).1,
+            stop: watch::channel(false).1,
+        };
+        let error = backend
+            .compare(
+                SessionId(99),
+                RemotePath::new("/l").unwrap(),
+                RemotePath::new("/r").unwrap(),
+                CompareOptions::default(),
+                tx,
+                signals,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, Some("session-closed"));
+    }
+
+    #[test]
+    fn compare_concurrency_is_4_on_sftp_and_1_on_ftp() {
+        use hoprs_core::Protocol;
+        assert_eq!(compare_concurrency(Protocol::Ssh), (4, 4));
+        for ftp in [
+            Protocol::Ftp,
+            Protocol::FtpsExplicit,
+            Protocol::FtpsImplicit,
+        ] {
+            assert_eq!(compare_concurrency(ftp), (4, 1));
+        }
     }
 
     #[cfg(unix)]

@@ -360,6 +360,8 @@ pub enum FileKey {
     Delete,
     /// F4: edit the remote file in the editor.
     Edit,
+    /// Space: toggles the differences panel's row (the panes ignore it).
+    Space,
     /// Closes the inline editor, confirmation or dialog (or the error bar).
     Escape,
     /// Ctrl+Enter: the selection to the other pane's folder.
@@ -392,6 +394,14 @@ impl App {
         if !self.tabs[index].is_files() {
             return Vec::new();
         }
+        // The folders are about to be read again: a comparison of the old ones stops.
+        let mut effects = self.compare_folders_changing(index);
+        effects.extend(self.list_pane(index, side));
+        effects
+    }
+
+    /// The listing effects of [`request_listing`](Self::request_listing).
+    pub(super) fn list_pane(&mut self, index: usize, side: Side) -> Vec<Effect> {
         let request_id = RequestId(self.next_id());
         let session = self.tab_session(index);
         let tab = &mut self.tabs[index];
@@ -430,7 +440,7 @@ impl App {
 
     /// Goes to `path`: the old entries go, with any editor or dialog about them, and the
     /// list scrolls to the top.
-    fn navigate(&mut self, index: usize, side: Side, path: RemotePath) -> Vec<Effect> {
+    pub(super) fn navigate(&mut self, index: usize, side: Side, path: RemotePath) -> Vec<Effect> {
         let Some(pane) = self.tabs[index].pane_mut(side) else {
             return Vec::new();
         };
@@ -470,6 +480,14 @@ impl App {
             return Vec::new();
         };
         let mods = self.mods;
+        // A press or action in a pane gives it the keyboard back from the differences panel.
+        if !matches!(
+            msg,
+            PaneMsg::Scrolled { .. } | PaneMsg::PointerIn | PaneMsg::PointerOut
+        ) && let Some(state) = self.tabs[index].compare_mut()
+        {
+            state.focused = false;
+        }
         let Some(pane) = self.tabs[index].pane_mut(side) else {
             return Vec::new();
         };
@@ -584,6 +602,12 @@ impl App {
         let Some(index) = self.tab_index(tab) else {
             return Vec::new();
         };
+        let quiet = self.tabs[index]
+            .compare()
+            .is_some_and(|s| s.quiet_request == Some(request_id));
+        if quiet && let Some(state) = self.tabs[index].compare_mut() {
+            state.quiet_request = None;
+        }
         let Some(pane) = self.tabs[index].pane_mut(side) else {
             return Vec::new();
         };
@@ -619,8 +643,22 @@ impl App {
             }
         }
         if listed {
-            self.select_new_entry(index, side)
+            let mut effects = self.select_new_entry(index, side);
+            if !quiet {
+                effects.extend(self.compare_after_listing(index));
+            }
+            effects
         } else {
+            // A failed listing never reaches `compare_after_listing`: once nothing is
+            // pending any more, an Open's suppression ends here.
+            let idle = [Side::Local, Side::Remote].iter().all(|s| {
+                self.tabs[index]
+                    .pane(*s)
+                    .is_none_or(|p| p.request.is_none())
+            });
+            if idle && let Some(state) = self.tabs[index].compare_mut() {
+                state.suppress_auto = false;
+            }
             Vec::new()
         }
     }
@@ -705,6 +743,9 @@ impl App {
         else {
             return Vec::new();
         };
+        if let Some(effects) = self.compare_key(index, key) {
+            return effects;
+        }
         let tab = &mut self.tabs[index];
         let Some(files) = tab.files_mut() else {
             return Vec::new();
@@ -774,6 +815,8 @@ impl App {
                     None => Vec::new(),
                 };
             }
+            // The differences panel's key; the panes have none for it.
+            FileKey::Space => return Vec::new(),
             FileKey::SwitchPane
             | FileKey::NewFolder
             | FileKey::Rename

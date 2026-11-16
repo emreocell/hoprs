@@ -554,7 +554,8 @@ impl App {
             pane.select_after = None;
             return Vec::new();
         }
-        self.request_listing(index, side)
+        // The folder is the same: a running comparison goes on, no new one starts.
+        self.request_listing_quiet(index, side)
     }
 
     /// Escape, Cancel or Keep: closes the editor, confirmation or dialog.

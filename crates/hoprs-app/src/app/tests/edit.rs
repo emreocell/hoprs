@@ -748,6 +748,7 @@ async fn editor_setting_roundtrip() {
     use crate::settings::{self as file, EDITOR_DEFAULT};
 
     let mut app = App::new();
+    app.form = Some(Form::Settings);
     assert_eq!(app.settings.editor_command, "system");
     assert_eq!(EDITOR_DEFAULT, "system");
 
@@ -1409,4 +1410,39 @@ async fn silent_close_kept_notice_says_saves_stop() {
         strings::kept_saves_stopped(),
         "The session closed: further saves in the editor won't be uploaded. Your changes are in the recovered copy; open the file again to go on editing."
     );
+}
+
+/// The folder compare settings: the messages update state and each emits the save
+/// effect; the typed ignore text is cleaned for the setting and kept as typed in the field.
+#[tokio::test]
+async fn compare_settings_messages_save() {
+    let mut app = App::new();
+    assert!(app.settings.compare_auto);
+
+    let effects = app.update(Message::Settings(settings::SettingsMsg::CompareAuto(false)));
+    let [Effect::SaveSettings(saved)] = &effects[..] else {
+        panic!("{effects:?}");
+    };
+    assert!(!saved.compare_auto);
+    assert!(!app.settings.compare_auto);
+    app.update(Message::SettingsSaved(Ok(())));
+    // Unchanged: nothing to save.
+    assert!(
+        app.update(Message::Settings(settings::SettingsMsg::CompareAuto(false)))
+            .is_empty()
+    );
+
+    app.form = Some(Form::Settings);
+    let effects = app.update(Message::Settings(settings::SettingsMsg::CompareIgnore(
+        " a, ,*.log ".into(),
+    )));
+    let [Effect::SaveSettings(saved)] = &effects[..] else {
+        panic!("{effects:?}");
+    };
+    assert_eq!(saved.compare_ignore, vec!["a", "*.log"]);
+    assert_eq!(app.compare_ignore_input.as_deref(), Some(" a, ,*.log "));
+    app.update(Message::SettingsSaved(Ok(())));
+
+    app.update(Message::Settings(settings::SettingsMsg::Close));
+    assert_eq!(app.compare_ignore_input, None);
 }

@@ -118,6 +118,21 @@ pub fn toolbar<'a>(
         }
     }
     bar = bar.push(space().width(Length::Fill));
+    // Folder compare: one button for the tab, at the right of the local toolbar.
+    if side == Side::Local && !(compact && pane.busy.is_some()) {
+        bar = bar.push(
+            button(
+                text(strings::compare_button())
+                    .size(theme::TEXT_XS)
+                    .wrapping(text::Wrapping::None),
+            )
+            .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_2XS]))
+            .style(theme::button_text)
+            .on_press_maybe(tab.can_act(conn, Side::Remote).then_some(Message::Compare(
+                crate::app::CompareMsg::Start { tab: tab.id },
+            ))),
+        );
+    }
     if let Some(busy) = &pane.busy {
         let label = match busy.kind {
             BusyKind::NewFolder => strings::creating_folder().to_owned(),

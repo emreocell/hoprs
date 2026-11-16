@@ -148,6 +148,7 @@ fn file_key(named: Named) -> Option<FileKey> {
         Named::Delete => FileKey::Delete,
         Named::F4 => FileKey::Edit,
         Named::Escape => FileKey::Escape,
+        Named::Space => FileKey::Space,
         _ => return None,
     })
 }
@@ -175,6 +176,11 @@ pub fn text_focused() -> impl Operation<bool> {
 
 /// The tab's two panes.
 pub fn view<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> {
+    // The differences panel sizes its rows to the room the tab has.
+    iced::widget::responsive(move |size| content(app, tab, size.height)).into()
+}
+
+fn content<'a>(app: &'a App, tab: &'a Tab, area: f32) -> Element<'a, Message> {
     let site_name = app
         .site(&tab.site)
         .map_or(strings::site_missing(), |s| s.name.as_str());
@@ -195,7 +201,11 @@ pub fn view<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> {
     if let Some(strip) = crate::ui::edits::strip(app, tab) {
         col = col.push(strip).push(hrule());
     }
-    col.push(panes).into()
+    let col = col.push(panes);
+    match crate::ui::compare::view(app, tab, area) {
+        Some(panel) => col.push(panel).into(),
+        None => col.into(),
+    }
 }
 
 /// What the bar across a connected tab says, if anything.
