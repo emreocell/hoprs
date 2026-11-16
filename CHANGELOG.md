@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.3.1 — unreleased
+
+- Workspaces are plain groups in the sidebar: the big "Open workspace" button and the "Close tabs" link are gone. Right-click a workspace for "Open all", "Close all" (the open workspace) and "Edit".
+
 ## 1.3.0 — 2026-11-16
 
 hoprs gets a polished interface: icons, right-click menus, a drag that says what it will do, Settings as a tab, and a compare panel and queue you can resize.

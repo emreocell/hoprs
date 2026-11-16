@@ -19,8 +19,6 @@ use crate::ui::widgets;
 
 pub const WIDTH: f32 = 256.0;
 pub const SEARCH_HEIGHT: f32 = 32.0;
-/// The "Open workspace" button.
-const OPEN_HEIGHT: f32 = 32.0;
 
 /// Whether `site` matches the filter: name, host or user contains it, ignoring case.
 pub fn site_matches(site: &Site, filter: &str) -> bool {
@@ -467,7 +465,7 @@ fn workspace<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
     })
     .on_press(Message::ToggleWorkspace(ws.id.clone()));
     let head = hover_edit(head.into(), Message::EditWorkspace(ws.id.clone()));
-    // A right press: Open workspace, Edit (mouse only, like the site's).
+    // A right press: Open all, Close all, Edit (mouse only, like the site's).
     let head = mouse_area(head).on_right_press(Message::Menu(MenuMsg::Open(
         MenuTarget::Workspace(ws.id.clone()),
     )));
@@ -501,39 +499,7 @@ fn workspace<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
             .right(theme::SPACE_XS),
     );
 
-    let open_button = button(
-        container(text(strings::open_workspace()).font(theme::INTER_SEMIBOLD))
-            .center_x(Length::Fill)
-            .center_y(Length::Fill),
-    )
-    .width(Length::Fill)
-    .height(OPEN_HEIGHT)
-    .padding(0)
-    .style(theme::button_primary)
-    .on_press(Message::OpenWorkspace(ws.id.clone()));
-    let actions = row![open_button]
-        .spacing(theme::SPACE_XS)
-        .align_y(Alignment::Center);
-    // The open workspace can be closed: its tabs are saved, then closed.
-    let actions = if app.open_workspace.as_ref() == Some(&ws.id) {
-        actions.push(
-            button(text(strings::close_workspace()).size(theme::TEXT_XS))
-                .padding(Padding::from([0.0, theme::SPACE_2XS]))
-                .style(theme::button_text)
-                .on_press(Message::CloseWorkspace(ws.id.clone())),
-        )
-    } else {
-        actions
-    };
-    let actions = container(actions).padding(
-        Padding::ZERO
-            .top(theme::SPACE_SM)
-            .bottom(theme::SPACE_XS)
-            .left(theme::SPACE_MD)
-            .right(theme::SPACE_MD),
-    );
-
-    column![head, nested, actions].into()
+    column![head, nested].into()
 }
 
 fn all_sites(app: &App) -> Element<'_, Message> {

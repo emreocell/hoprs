@@ -92,7 +92,8 @@ key-settings = Ctrl ,
 key-settings-macos = ⌘ ,
 new-site = New site
 no-matches = No matching sites
-open-workspace = Open workspace
+menu-open-all = Open all
+menu-close-all = Close all
 edit = Edit
 site-missing = Site missing
 cannot-load-sites = Can't load the saved sites
@@ -349,7 +350,6 @@ connecting = Connecting…
 connected = Connected
 waiting-for-you = Waiting for you
 closing = Saving tabs and closing…
-close-workspace = Close tabs
 reconnecting-now = Reconnecting…
 # A workspace's saved folder is gone; the pane shows a folder above it instead.
 saved-folder-gone = The saved folder { $saved } is gone; showing the nearest folder instead.

@@ -115,8 +115,10 @@ pub enum MenuAction {
     OpenSite,
     /// The site's form (its pencil).
     EditSite,
-    /// The workspace's "Open workspace".
-    OpenWorkspace,
+    /// The workspace's "Open all": its sites connect, its tabs come back.
+    OpenAll,
+    /// The open workspace's "Close all": its tabs are saved, then closed.
+    CloseAll,
     /// The workspace's form (its pencil).
     EditWorkspace,
     /// The tab's ×.
@@ -203,10 +205,14 @@ impl App {
                 None => Vec::new(),
             },
             MenuTarget::Workspace(id) => match self.workspaces.iter().any(|w| &w.id == id) {
-                true => vec![
-                    MenuItem::new(MenuAction::OpenWorkspace),
-                    MenuItem::new(MenuAction::EditWorkspace),
-                ],
+                true => {
+                    let mut items = vec![MenuItem::new(MenuAction::OpenAll)];
+                    if self.open_workspace.as_ref() == Some(id) {
+                        items.push(MenuItem::new(MenuAction::CloseAll));
+                    }
+                    items.push(MenuItem::new(MenuAction::EditWorkspace));
+                    items
+                }
                 false => Vec::new(),
             },
             MenuTarget::Tab(tab) => {
@@ -356,8 +362,9 @@ impl App {
             }
             (MenuTarget::Site(id), MenuAction::OpenSite) => Message::ConnectSite(id.clone()),
             (MenuTarget::Site(id), MenuAction::EditSite) => Message::EditSite(id.clone()),
-            (MenuTarget::Workspace(id), MenuAction::OpenWorkspace) => {
-                Message::OpenWorkspace(id.clone())
+            (MenuTarget::Workspace(id), MenuAction::OpenAll) => Message::OpenWorkspace(id.clone()),
+            (MenuTarget::Workspace(id), MenuAction::CloseAll) => {
+                Message::CloseWorkspace(id.clone())
             }
             (MenuTarget::Workspace(id), MenuAction::EditWorkspace) => {
                 Message::EditWorkspace(id.clone())

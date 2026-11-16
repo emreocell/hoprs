@@ -61,7 +61,8 @@ pub fn label(action: MenuAction) -> &'static str {
         MenuAction::Queue(action) => crate::ui::queue::action_label(action),
         MenuAction::OpenSite => strings::menu_open_files(),
         MenuAction::EditSite | MenuAction::EditWorkspace => strings::edit(),
-        MenuAction::OpenWorkspace => strings::open_workspace(),
+        MenuAction::OpenAll => strings::menu_open_all(),
+        MenuAction::CloseAll => strings::menu_close_all(),
         MenuAction::CloseTab => strings::close_tab(),
         MenuAction::CloseOtherTabs => strings::menu_close_other_tabs(),
     }
@@ -90,7 +91,8 @@ pub fn icon(action: MenuAction) -> Icon {
         MenuAction::Queue(action) => crate::ui::queue::action_icon(action).unwrap_or(Icon::Check),
         MenuAction::OpenSite => Icon::HardDrives,
         MenuAction::EditSite | MenuAction::EditWorkspace => Icon::PencilSimple,
-        MenuAction::OpenWorkspace => Icon::Stack,
+        MenuAction::OpenAll => Icon::Stack,
+        MenuAction::CloseAll => Icon::X,
         MenuAction::CloseTab | MenuAction::CloseOtherTabs => Icon::X,
     }
 }
@@ -116,7 +118,8 @@ pub fn shortcut(action: MenuAction) -> Option<&'static str> {
         | MenuAction::Queue(_)
         | MenuAction::OpenSite
         | MenuAction::EditSite
-        | MenuAction::OpenWorkspace
+        | MenuAction::OpenAll
+        | MenuAction::CloseAll
         | MenuAction::EditWorkspace
         | MenuAction::CloseTab
         | MenuAction::CloseOtherTabs => None,

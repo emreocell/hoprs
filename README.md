@@ -229,8 +229,9 @@ on macOS. On Windows, Credential Manager shows them as `password.hoprs/<site-id>
    `~/.config/filezilla/sitemanager.xml`; `~/.config/filezilla` on macOS too,
    `%APPDATA%\FileZilla\sitemanager.xml` on Windows) and shows a report of what came in and what was
    skipped and why.
-3. **Group sites into a workspace.** "Open workspace" then connects every site in it and
-   restores the tabs you had.
+3. **Group sites into a workspace.** A workspace is a group: click it to
+   show its sites. Right-click it and choose "Open all" to connect every site and restore the
+   tabs you had ("Close all" closes them again).
 4. **Back everything up.** "Export backup…" writes one encrypted file with your sites,
    workspaces and passwords, protected by a password you choose (without it the backup
    cannot be opened). "Restore backup…" on another machine brings all three back. Restoring

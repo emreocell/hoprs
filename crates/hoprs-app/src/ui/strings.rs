@@ -181,8 +181,8 @@ pub fn new_site() -> &'static str {
 pub fn no_matches() -> &'static str {
     tr("no-matches")
 }
-pub fn open_workspace() -> &'static str {
-    tr("open-workspace")
+pub fn menu_open_all() -> &'static str {
+    tr("menu-open-all")
 }
 pub fn edit() -> &'static str {
     tr("edit")
@@ -831,8 +831,8 @@ pub fn waiting_for_you() -> &'static str {
 pub fn closing() -> &'static str {
     tr("closing")
 }
-pub fn close_workspace() -> &'static str {
-    tr("close-workspace")
+pub fn menu_close_all() -> &'static str {
+    tr("menu-close-all")
 }
 pub fn reconnecting_now() -> &'static str {
     tr("reconnecting-now")
