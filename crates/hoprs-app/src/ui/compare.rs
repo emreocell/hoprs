@@ -271,21 +271,28 @@ pub struct Summary {
     pub only_local: usize,
     pub only_remote: usize,
     pub different: usize,
-    /// The footer's text while a run has found no rows yet; the counts are shown otherwise.
+    /// The footer's text while a run is going, paused or failed (or nothing differs); the
+    /// counts are shown otherwise.
     pub progress: Option<String>,
 }
 
 /// The counts of the three groups (not the unreadable ones), or the run's progress.
 pub fn summary(state: &CompareState) -> Summary {
-    let waiting = matches!(
-        state.phase,
-        Phase::Running { .. } | Phase::Paused { .. } | Phase::Debouncing
-    );
+    // A run in flight, paused or failed always says so; an identical result or the
+    // wait before a run shows the footer's text only when there are no rows to count.
+    let progress = match state.phase {
+        Phase::Running { .. }
+        | Phase::Paused { .. }
+        | Phase::Stopped(_)
+        | Phase::Done { partial: true } => true,
+        Phase::Debouncing | Phase::Done { partial: false } => state.rows.is_empty(),
+        Phase::Idle => false,
+    };
     Summary {
         only_local: group_count(state, Group::OnlyLocal),
         only_remote: group_count(state, Group::OnlyRemote),
         different: group_count(state, Group::Different),
-        progress: (waiting && state.rows.is_empty()).then(|| footer(state).text),
+        progress: progress.then(|| footer(state).text),
     }
 }
 
@@ -1157,10 +1164,32 @@ mod tests {
         assert!(summary(&s).progress.is_some());
         s.phase = Phase::Debouncing;
         assert_eq!(summary(&s).progress.as_deref(), Some("1,204 identical"));
-        // Rows already found: the counts, not the progress.
+        // A run in flight says so even with rows already found.
         let mut m = mixed();
         m.phase = Phase::Running { seen: (1, 1) };
+        assert_eq!(summary(&m).progress.as_deref(), Some("Comparing… 2 items"));
+        m.phase = Phase::Paused { seen: (1, 1) };
+        assert_eq!(
+            summary(&m).progress.as_deref(),
+            Some("2 items seen so far; the list is partial.")
+        );
+        m.phase = Phase::Done { partial: true };
+        assert_eq!(
+            summary(&m).progress.as_deref(),
+            Some("Stopped; the list is partial.")
+        );
+        m.phase = Phase::Stopped(Error::coded(ErrorKind::Network, "session-closed", "x"));
+        assert!(
+            summary(&m)
+                .progress
+                .is_some_and(|t| t.starts_with("Comparison stopped: "))
+        );
+        // Finished: the counts when something differs, the identical text otherwise.
+        m.phase = Phase::Done { partial: false };
         assert_eq!(summary(&m).progress, None);
+        let mut clean = state(Vec::new());
+        clean.phase = Phase::Done { partial: false };
+        assert_eq!(summary(&clean).progress.as_deref(), Some("1,204 identical"));
     }
 
     #[test]
