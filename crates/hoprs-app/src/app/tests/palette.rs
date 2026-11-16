@@ -237,6 +237,18 @@ async fn palette_lists_context_actions() {
     let shop = entry(&entries, "Shop").expect("the workspace");
     assert_eq!(shop.item, PaletteItem::Workspace(ws.id.clone()));
     assert!(entry(&entries, strings::palette_open_workspace()).is_some());
+    // Close all only while a workspace is open.
+    let close_label = strings::palette_close_all("Shop");
+    assert!(entry(&entries, &close_label).is_none());
+    app.open_workspace = Some(ws.id.clone());
+    let close = entry(&all(&app), &close_label).expect("close all").clone();
+    assert_eq!(close.item, PaletteItem::CloseWorkspace(ws.id.clone()));
+    assert_eq!(close.group, Group::Action);
+    assert_eq!(
+        format!("{:?}", app.item_message(&close.item)),
+        format!("{:?}", Some(Message::CloseWorkspace(ws.id.clone())))
+    );
+    app.open_workspace = None;
     // The session's actions on the active (terminal) tab, with their shortcuts.
     let new_terminal = entry(&entries, strings::new_terminal_tab()).expect("new terminal tab");
     assert_eq!(new_terminal.item, PaletteItem::NewTerminalTab(terminal));

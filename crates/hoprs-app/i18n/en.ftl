@@ -65,6 +65,8 @@ palette-toggle-log = Toggle log
 palette-close-tab = Close tab
 palette-close-settings = Close settings
 palette-open-workspace = Open workspace…
+# $name is the open workspace: its tabs are saved, then closed.
+palette-close-all = Close all in { $name }
 palette-edit = Edit in editor
 palette-compare-folders = Compare folders
 palette-upload = Upload selection
@@ -92,7 +94,10 @@ key-settings = Ctrl ,
 key-settings-macos = ⌘ ,
 new-site = New site
 no-matches = No matching sites
-open-workspace = Open workspace
+menu-open-all = Open all
+menu-close-all = Close all
+# The tooltip of the mark on the open workspace in the sidebar.
+workspace-open-tip = Workspace open
 edit = Edit
 site-missing = Site missing
 cannot-load-sites = Can't load the saved sites
@@ -349,7 +354,6 @@ connecting = Connecting…
 connected = Connected
 waiting-for-you = Waiting for you
 closing = Saving tabs and closing…
-close-workspace = Close tabs
 reconnecting-now = Reconnecting…
 # A workspace's saved folder is gone; the pane shows a folder above it instead.
 saved-folder-gone = The saved folder { $saved } is gone; showing the nearest folder instead.

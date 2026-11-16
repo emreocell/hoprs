@@ -97,6 +97,12 @@ pub fn palette_toggle_log() -> &'static str {
 pub fn palette_close_tab() -> &'static str {
     tr("palette-close-tab")
 }
+pub fn palette_close_all(name: &str) -> String {
+    tr_args("palette-close-all", &[("name", name.into())])
+}
+pub fn workspace_open_tip() -> &'static str {
+    tr("workspace-open-tip")
+}
 pub fn palette_open_workspace() -> &'static str {
     tr("palette-open-workspace")
 }
@@ -181,8 +187,8 @@ pub fn new_site() -> &'static str {
 pub fn no_matches() -> &'static str {
     tr("no-matches")
 }
-pub fn open_workspace() -> &'static str {
-    tr("open-workspace")
+pub fn menu_open_all() -> &'static str {
+    tr("menu-open-all")
 }
 pub fn edit() -> &'static str {
     tr("edit")
@@ -831,8 +837,8 @@ pub fn waiting_for_you() -> &'static str {
 pub fn closing() -> &'static str {
     tr("closing")
 }
-pub fn close_workspace() -> &'static str {
-    tr("close-workspace")
+pub fn menu_close_all() -> &'static str {
+    tr("menu-close-all")
 }
 pub fn reconnecting_now() -> &'static str {
     tr("reconnecting-now")

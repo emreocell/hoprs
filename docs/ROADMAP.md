@@ -3,8 +3,9 @@
 What is planned, roughly in order, and where help is most welcome. Plans change; the
 [issues](https://github.com/engviniciusbs/hoprs/issues) and
 [discussions](https://github.com/engviniciusbs/hoprs/discussions) are where they get decided.
-Released work is in the [CHANGELOG](../CHANGELOG.md): 1.3.0 (2026-11-16) polished the
-interface (icons, Settings as a tab, right-click menus, a visible drag, a resizable compare
+Released work is in the [CHANGELOG](../CHANGELOG.md): 1.3.1 (2026-11-16) made workspaces
+plain groups in the sidebar (Open all / Close all in their menu) and shows a finished
+transfer in the pane without Refresh; 1.3.0 (2026-11-16) polished the interface (icons, Settings as a tab, right-click menus, a visible drag, a resizable compare
 panel and queue); 1.2.0 (2026-11-16) added the app in Brazilian Portuguese (the language
 follows the OS or is set in Settings) and folder compare (a panel lists what is new, changed
 or missing on each side and transfers only the difference).

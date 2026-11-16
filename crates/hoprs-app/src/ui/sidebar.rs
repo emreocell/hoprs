@@ -19,8 +19,6 @@ use crate::ui::widgets;
 
 pub const WIDTH: f32 = 256.0;
 pub const SEARCH_HEIGHT: f32 = 32.0;
-/// The "Open workspace" button.
-const OPEN_HEIGHT: f32 = 32.0;
 
 /// Whether `site` matches the filter: name, host or user contains it, ignoring case.
 pub fn site_matches(site: &Site, filter: &str) -> bool {
@@ -245,6 +243,22 @@ fn state_look(site: &Site, state: SiteState<'_>) -> (Icon, iced::Color, iced::Co
     }
 }
 
+/// The workspace head's icon and name colours: green and bright while it is the open one.
+fn workspace_look(is_open_workspace: bool, expanded: bool) -> (iced::Color, iced::Color) {
+    let p = palette();
+    let icon = if is_open_workspace {
+        p.success
+    } else {
+        p.muted
+    };
+    let name = if is_open_workspace || expanded {
+        p.ink
+    } else {
+        p.ink_2
+    };
+    (icon, name)
+}
+
 /// `full` on one clipped line cut to `width`; the whole name in a tooltip only when cut.
 fn named<'a>(
     full: &'a str,
@@ -441,15 +455,18 @@ fn workspace<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
         - count_width
         - SCROLL_GUTTER)
         .max(0.0);
+    let is_open_workspace = app.open_workspace.as_ref() == Some(&ws.id);
+    let (icon_color, name_color) = workspace_look(is_open_workspace, open);
+    let glyph = icons::icon(Icon::Stack, icons::SMALL).color(icon_color);
+    let stack_icon: Element<'a, Message> = if is_open_workspace {
+        state_tip(glyph, strings::workspace_open_tip().to_string())
+    } else {
+        glyph.into()
+    };
     let head = button(
         row![
-            icons::icon(Icon::Stack, icons::SMALL).color(p.muted),
-            named(
-                &ws.name,
-                name_width,
-                theme::INTER_MEDIUM,
-                if open { p.ink } else { p.ink_2 }
-            ),
+            stack_icon,
+            named(&ws.name, name_width, theme::INTER_MEDIUM, name_color),
             text(count)
                 .size(theme::TEXT_XS)
                 .color(p.muted)
@@ -467,7 +484,7 @@ fn workspace<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
     })
     .on_press(Message::ToggleWorkspace(ws.id.clone()));
     let head = hover_edit(head.into(), Message::EditWorkspace(ws.id.clone()));
-    // A right press: Open workspace, Edit (mouse only, like the site's).
+    // A right press: Open all, Close all, Edit (mouse only, like the site's).
     let head = mouse_area(head).on_right_press(Message::Menu(MenuMsg::Open(
         MenuTarget::Workspace(ws.id.clone()),
     )));
@@ -501,39 +518,7 @@ fn workspace<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
             .right(theme::SPACE_XS),
     );
 
-    let open_button = button(
-        container(text(strings::open_workspace()).font(theme::INTER_SEMIBOLD))
-            .center_x(Length::Fill)
-            .center_y(Length::Fill),
-    )
-    .width(Length::Fill)
-    .height(OPEN_HEIGHT)
-    .padding(0)
-    .style(theme::button_primary)
-    .on_press(Message::OpenWorkspace(ws.id.clone()));
-    let actions = row![open_button]
-        .spacing(theme::SPACE_XS)
-        .align_y(Alignment::Center);
-    // The open workspace can be closed: its tabs are saved, then closed.
-    let actions = if app.open_workspace.as_ref() == Some(&ws.id) {
-        actions.push(
-            button(text(strings::close_workspace()).size(theme::TEXT_XS))
-                .padding(Padding::from([0.0, theme::SPACE_2XS]))
-                .style(theme::button_text)
-                .on_press(Message::CloseWorkspace(ws.id.clone())),
-        )
-    } else {
-        actions
-    };
-    let actions = container(actions).padding(
-        Padding::ZERO
-            .top(theme::SPACE_SM)
-            .bottom(theme::SPACE_XS)
-            .left(theme::SPACE_MD)
-            .right(theme::SPACE_MD),
-    );
-
-    column![head, nested, actions].into()
+    column![head, nested].into()
 }
 
 fn all_sites(app: &App) -> Element<'_, Message> {
@@ -657,6 +642,14 @@ mod tests {
         assert_eq!(idle.0, Icon::TerminalWindow);
         assert_eq!(connecting.0, Icon::ArrowsClockwise);
         assert_ne!(idle.0, connecting.0);
+    }
+
+    #[test]
+    fn the_open_workspace_is_marked() {
+        let p = palette();
+        assert_eq!(workspace_look(true, false), (p.success, p.ink));
+        assert_eq!(workspace_look(false, false), (p.muted, p.ink_2));
+        assert_eq!(workspace_look(false, true), (p.muted, p.ink));
     }
 
     #[test]

@@ -253,6 +253,8 @@ pub struct App {
     /// Listings sent again after a reconnection, which the reconnect's result does not
     /// repeat ([`reconnect`]).
     replayed: HashSet<files::RequestId>,
+    /// The re-list delay after finished transfers is running ([`transfers`]).
+    relist_armed: bool,
     /// The last tab or listing id handed out.
     next_id: u64,
     /// The last profile read asked for, and the one whose result was applied last.
@@ -356,6 +358,9 @@ pub enum Message {
     Queue(QueueMsg),
     /// An engine event, from the queue's subscription.
     TransferEvent(Event),
+    /// The re-list delay after finished transfers ran out: the panes waiting for it list
+    /// their folder again ([`transfers`]).
+    RelistPanes,
     /// The queue must start over from a snapshot: the subscription just started, or its
     /// receiver lagged and lost events.
     QueueResync,
@@ -855,6 +860,7 @@ impl App {
             compare_ignore_input: None,
             held: HashMap::new(),
             replayed: HashSet::new(),
+            relist_armed: false,
             next_id: 0,
             profiles_requested: RequestId(0),
             profiles_applied: RequestId(0),
@@ -1130,6 +1136,7 @@ impl App {
             } => return self.file_op_done(tab, side, op, result),
             Message::Queue(msg) => return self.queue_msg(msg),
             Message::TransferEvent(event) => return self.transfer_event(event),
+            Message::RelistPanes => return self.relist_panes(),
             Message::QueueResync => return self.resync_queue(),
             Message::QueueSnapshot { request, snapshot } => {
                 return self.queue_snapshot(request, snapshot);

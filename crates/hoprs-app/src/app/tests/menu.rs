@@ -1181,18 +1181,32 @@ async fn site_and_workspace_menus() {
         chosen(&mut app, target, MenuAction::EditSite),
         format!("{:?}", Message::EditSite(a.id.clone()))
     );
-    // A workspace: Open workspace and Edit.
+    // A workspace: Open all and Edit (Close all too, only for the open one).
     let target = MenuTarget::Workspace(ws.id.clone());
     app.update(Message::Menu(MenuMsg::Open(target.clone())));
     let items = open_items(&app);
     assert_eq!(
         actions(&items),
-        [MenuAction::OpenWorkspace, MenuAction::EditWorkspace]
+        [MenuAction::OpenAll, MenuAction::EditWorkspace]
     );
     assert!(items.iter().all(|i| i.enabled && !i.destructive));
     assert_eq!(
-        chosen(&mut app, target.clone(), MenuAction::OpenWorkspace),
+        chosen(&mut app, target.clone(), MenuAction::OpenAll),
         format!("{:?}", Message::OpenWorkspace(ws.id.clone()))
+    );
+    app.open_workspace = Some(ws.id.clone());
+    app.update(Message::Menu(MenuMsg::Open(target.clone())));
+    assert_eq!(
+        actions(&open_items(&app)),
+        [
+            MenuAction::OpenAll,
+            MenuAction::CloseAll,
+            MenuAction::EditWorkspace
+        ]
+    );
+    assert_eq!(
+        chosen(&mut app, target.clone(), MenuAction::CloseAll),
+        format!("{:?}", Message::CloseWorkspace(ws.id.clone()))
     );
     assert_eq!(
         chosen(&mut app, target, MenuAction::EditWorkspace),
