@@ -28,6 +28,18 @@ pub fn go_to_anything() -> &'static str {
 pub fn go_to_anything_key() -> &'static str {
     tr("go-to-anything-key")
 }
+/// The tooltip of the sidebar's ⋯ button.
+pub fn sidebar_options() -> &'static str {
+    tr("sidebar-options")
+}
+
+// Context menus.
+pub fn menu_show_workspaces() -> &'static str {
+    tr("menu-show-workspaces")
+}
+pub fn menu_show_sites() -> &'static str {
+    tr("menu-show-sites")
+}
 
 // The Ctrl+K palette.
 pub fn palette_placeholder() -> &'static str {

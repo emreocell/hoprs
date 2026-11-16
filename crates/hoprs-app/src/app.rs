@@ -66,6 +66,7 @@ pub mod files;
 pub mod import;
 pub mod lifecycle;
 pub mod log;
+pub mod menu;
 pub mod palette;
 pub mod queue;
 pub mod reconnect;
@@ -81,6 +82,7 @@ pub use edit::EditMsg;
 pub use files::{FileKey, Mods, PaneMsg, RequestId};
 pub use lifecycle::ConnStatus;
 pub use log::{LogLevel, LogMsg};
+pub use menu::{ContextMenu, MenuMsg, MenuTarget};
 pub use palette::PaletteMsg;
 pub use queue::{Queue, QueueMsg, QueueTab, RowAction};
 pub use tabs::{SiteConn, Tab, TabId, TabState};
@@ -162,6 +164,14 @@ pub struct App {
     /// The window's width, as the last resize reported it: what fits in the file panes,
     /// toolbars and queue head ([`crate::ui::fit`]).
     pub window_width: f32,
+    /// The window's height, as the last resize reported it (where a menu fits).
+    pub window_height: f32,
+    /// Where the last left or right press in the window was, in logical pixels (the
+    /// root [`crate::ui::pointer`] widget publishes it before the press reaches anything
+    /// else): where a menu opens.
+    pub last_press: iced::Point,
+    /// The context menu, while one is open ([`menu`]).
+    pub menu: Option<ContextMenu>,
     /// The remote files being edited, in the order they started ([`edit`]).
     pub edits: Vec<edit::RemoteEdit>,
     /// Edits whose download and editor are on their way.
@@ -381,8 +391,13 @@ pub enum Message {
         path: PathBuf,
         exists: bool,
     },
-    /// The window was resized to this width.
-    WindowResized(f32),
+    /// The window was resized to this size (logical pixels).
+    WindowResized(iced::Size),
+    /// A left or right press in the window, at this position (logical pixels), before
+    /// the widget under it sees it.
+    PointerPressed(iced::Point),
+    /// Something in the context menu ([`menu`]).
+    Menu(MenuMsg),
     /// Something in a terminal tab: its widget, keyboard, search bar or timers.
     Terminal {
         tab: TabId,
@@ -697,6 +712,8 @@ pub enum Effect {
 
 /// The window's width before the first resize event (`main`'s initial size).
 pub const INITIAL_WINDOW_WIDTH: f32 = 1280.0;
+/// The window's height before the first resize event (`main`'s initial size).
+pub const INITIAL_WINDOW_HEIGHT: f32 = 800.0;
 
 /// Where the tab strip scrolls (relative, 0 to 1) to show tab `index` of `count`.
 ///
@@ -748,6 +765,9 @@ impl App {
             backup: settings::Backup::default(),
             busy_phase: 0,
             window_width: INITIAL_WINDOW_WIDTH,
+            window_height: INITIAL_WINDOW_HEIGHT,
+            last_press: iced::Point::ORIGIN,
+            menu: None,
             edits: Vec::new(),
             edit_opening: Vec::new(),
             toast: None,
@@ -863,6 +883,11 @@ impl App {
         if self.palette.is_some() && (self.dialogs.is_open() || self.closing) {
             self.palette = None;
         }
+        // The same for a context menu, which the palette replaces too.
+        if self.menu.is_some() && (self.dialogs.is_open() || self.closing || self.palette.is_some())
+        {
+            self.menu = None;
+        }
         // Typed backup passwords never outlive the settings page, however it was left.
         if !matches!(self.form, Some(Form::Settings)) {
             self.backup.forget_passwords();
@@ -902,7 +927,13 @@ impl App {
             Message::Log(msg) => return self.log_msg(msg),
             Message::Compare(msg) => return self.compare_msg(msg),
             Message::Palette(msg) => return self.palette_msg(msg),
-            Message::WindowResized(width) => self.window_width = width,
+            Message::WindowResized(size) => {
+                self.window_width = size.width;
+                self.window_height = size.height;
+                self.menu = None;
+            }
+            Message::PointerPressed(at) => self.last_press = at,
+            Message::Menu(msg) => return self.menu_msg(msg),
             Message::FilterSites(filter) => self.site_filter = filter,
             Message::ReloadProfiles => {
                 self.load = Load::Loading;
@@ -970,6 +1001,11 @@ impl App {
                 request_id,
                 result,
             } => return self.listed(tab, side, request_id, result),
+            // Escape closes an open menu, and nothing else sees it.
+            Message::KeyPressed {
+                key: FileKey::Escape,
+                ..
+            } if self.menu.is_some() => self.menu = None,
             Message::KeyPressed { key, shift } => return self.key_pressed(key, shift),
             Message::Key { key, shift } => return self.file_key(key, shift),
             Message::Modifiers(mods) => self.mods = mods,

@@ -38,6 +38,9 @@ brand = hoprs
 no-sessions = No open sessions
 go-to-anything = Go to anything
 go-to-anything-key = Ctrl K
+sidebar-options = Sidebar options
+menu-show-workspaces = Show workspaces
+menu-show-sites = Show all sites
 
 ## The Ctrl+K palette
 

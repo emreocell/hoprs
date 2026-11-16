@@ -5,12 +5,13 @@
 use iced::widget::{button, column, container, image, row, rule, space, text};
 use iced::{Alignment, Element, Length, Padding};
 
-use crate::app::{App, Form, Message, PaletteMsg};
+use crate::app::{App, Form, MenuMsg, MenuTarget, Message, PaletteMsg};
+use crate::ui::icons::Icon;
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
 use crate::ui::{
-    dialogs, edits, files, import, log, palette as command_palette, queue, settings, sidebar,
-    site_form, status, tabs, terminal, workspace_form,
+    dialogs, edits, files, import, log, menu, palette as command_palette, pointer, queue, settings,
+    sidebar, site_form, status, tabs, terminal, widgets, workspace_form,
 };
 
 pub const SIDEBAR_WIDTH: f32 = sidebar::WIDTH;
@@ -44,8 +45,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .height(Length::Fill)
         .style(theme::paper)
         .into();
-    // Never both: a security dialog closes the palette, which does not open under one.
-    dialogs::overlay(app, command_palette::overlay(app, base))
+    // Never more than one: a security dialog closes the palette and a menu, the palette
+    // closes a menu, and neither opens under a dialog.
+    let shown = dialogs::overlay(app, command_palette::overlay(app, menu::overlay(app, base)));
+    // Every left or right press is published with its position first (menus open there).
+    pointer::tracker(shown)
 }
 
 fn hrule<'a>() -> Element<'a, Message> {
@@ -73,8 +77,13 @@ fn top_bar(app: &App) -> Element<'_, Message> {
             text(strings::brand())
                 .size(theme::TEXT_MD)
                 .font(theme::INTER_SEMIBOLD),
-            // Task 4 puts the dots-three menu button here.
             space::horizontal(),
+            widgets::icon_button(
+                Icon::DotsThree,
+                strings::sidebar_options(),
+                None,
+                Some(Message::Menu(MenuMsg::Open(MenuTarget::SidebarOptions))),
+            ),
         ]
         .spacing(theme::SPACE_XS)
         .align_y(Alignment::Center),

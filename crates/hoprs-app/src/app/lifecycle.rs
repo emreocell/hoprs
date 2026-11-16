@@ -443,6 +443,8 @@ impl App {
             | Message::OpenSettings
             | Message::Settings(_)
             | Message::Palette(_)
+            | Message::PointerPressed(_)
+            | Message::Menu(_)
             | Message::Terminal { .. } => Some(Vec::new()),
             _ => None,
         }

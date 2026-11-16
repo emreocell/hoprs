@@ -10,6 +10,7 @@ real display.
 | --- | --- |
 | Every icon is in the font, the font family is `Phosphor`, and `phosphor-glyphs.txt` matches the `Icon` enum (`crates/hoprs-app/src/ui/icons.rs` tests) | Pass |
 | File icons by extension (`for_entry`) | Pass |
+| Context menu model: opens at the last press, closes on Escape, outside click, resize and choice, blocked behind a dialog (`crates/hoprs-app/src/app/tests/menu.rs`); kept inside the window (`ui::menu` tests); press position published before the widget under it (`ui::pointer` tests) | Pass |
 
 ## NEEDS HUMAN
 
@@ -22,3 +23,10 @@ real display.
 
 3. **Logo.** Look at the top of the sidebar at 100% and 200% scale. Expect: the logo is
    sharp, aligned with "hoprs", and there is no version beside it.
+
+4. **Context menu placement and closing.** Click the ⋯ button at the top of the sidebar.
+   Expect: the menu opens at the pointer. Make the window small enough that the button sits
+   near its right edge (or use a later menu near the right and bottom edges) and open it
+   again. Expect: the menu flips to stay fully inside the window. Then check each way out:
+   Escape, a click outside, a scroll and a window resize each close it, and nothing behind
+   it reacts to that click.

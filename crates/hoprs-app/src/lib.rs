@@ -35,7 +35,8 @@ pub use crate::icon::{APP_ID, window_icon};
 
 /// Smallest window that still fits the sidebar and two file panes.
 const MIN_WINDOW: iced::Size = iced::Size::new(960.0, 640.0);
-const INITIAL_WINDOW: iced::Size = iced::Size::new(app::INITIAL_WINDOW_WIDTH, 800.0);
+const INITIAL_WINDOW: iced::Size =
+    iced::Size::new(app::INITIAL_WINDOW_WIDTH, app::INITIAL_WINDOW_HEIGHT);
 /// A frame of the indeterminate progress bar.
 const BUSY_FRAME: std::time::Duration = std::time::Duration::from_millis(50);
 
@@ -234,7 +235,7 @@ fn app_subscription(state: &Hoprs) -> iced::Subscription<Message> {
             effects::edit_feed(feed.0.as_ref())
         }),
         iced::window::close_requests().map(Message::CloseRequested),
-        iced::window::resize_events().map(|(_, size)| Message::WindowResized(size.width)),
+        iced::window::resize_events().map(|(_, size)| Message::WindowResized(size)),
     ];
     // The indeterminate progress bar moves only while an import or a backup runs.
     let busy = state

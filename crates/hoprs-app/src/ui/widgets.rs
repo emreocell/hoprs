@@ -36,7 +36,6 @@ fn hint<'a>(label: &'a str, shortcut: Option<&'a str>) -> Element<'a, Message> {
 
 /// An icon-only button, at least [`ICON_HIT`] square, with a tooltip of `label` and
 /// `shortcut`. Disabled (and dimmed) when `on_press` is `None`.
-#[allow(dead_code)] // Used from Plan 13 task 6 (toolbars, tab bar).
 pub fn icon_button<'a>(
     icon: Icon,
     label: &'a str,
