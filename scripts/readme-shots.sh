@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Captures the README screenshots of hoprs 1.2.0 (docs/images/*.png), driven for real
+# Captures the README screenshots of hoprs (docs/images/*.png), driven for real
 # against the Docker test servers, like site/scripts/capture/run.sh (which this reuses:
 # same Dockerfile, sites.toml and planted trees; the landing page shots are unaffected).
 #   scripts/readme-shots.sh            # capture, convert, tear everything down
 #   KEEP=1 scripts/readme-shots.sh     # leave the servers and the capture box running
+#   LOCAL_DEB=target/deb-ubuntu-24.04/debian/hoprs_1.3.0-1_amd64.deb scripts/readme-shots.sh
+#                                      # shoot a .deb built by scripts/package-deb.sh
+# Without LOCAL_DEB the box downloads DEB_URL (default: the release in the Dockerfile).
 # Click coordinates are physical pixels (logical x 2), found by capturing and looking.
 set -euo pipefail
 
@@ -11,7 +14,6 @@ here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/.." && pwd)
 cap="$repo/site/scripts/capture"
 out="$repo/docs/images"
-deb_url=${DEB_URL:-https://github.com/engviniciusbs/hoprs/releases/download/v1.2.0/hoprs_1.2.0-1_amd64.deb}
 work=$(mktemp -d)
 box=hoprs-readme-shots
 sshd=hoprs-test-sshd-1
@@ -81,13 +83,21 @@ grep -q 'alice@build' /home/alice/.bashrc \
     || printf '%s\n' "PS1='\\[\\033[01;32m\\]\\u@build\\[\\033[00m\\]:\\[\\033[01;34m\\]\\w\\[\\033[00m\\]\\$ '" >> /home/alice/.bashrc
 REMOTE
 
-echo "==> capture box (hoprs 1.2.0)"
-docker build -q -t hoprs-readme-shots --build-arg "DEB_URL=$deb_url" "$cap" >/dev/null
+echo "==> capture box"
+# Built from a temporary context (the Dockerfile and a debs/ folder), so nothing lands in
+# the repo: the local .deb when LOCAL_DEB is set, else an empty debs/ and DEB_URL.
+mkdir -p "$work/ctx/debs"
+cp "$cap/Dockerfile" "$work/ctx/"
+if [ -n "${LOCAL_DEB:-}" ]; then cp "$LOCAL_DEB" "$work/ctx/debs/"; fi
+build_args=()
+if [ -n "${DEB_URL:-}" ]; then build_args=(--build-arg "DEB_URL=$DEB_URL"); fi
+docker build -q -t hoprs-readme-shots "${build_args[@]}" "$work/ctx" >/dev/null
 docker rm -f "$box" >/dev/null 2>&1 || true
 docker run -d --name "$box" --network host \
     --add-host build.example:127.0.0.1 --add-host files.example:127.0.0.1 \
     -v "$cap:/capture:ro" -v "$repo/docker/fixtures/id_ed25519:/fixture/id_ed25519:ro" \
     hoprs-readme-shots sleep infinity >/dev/null
+docker exec "$box" dpkg-query -W hoprs   # which .deb this run shoots
 
 docker exec -i "$box" bash -s <<'LOCAL'
 set -euo pipefail

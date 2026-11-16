@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Captures the landing page screenshots from the released hoprs, driven for real against
-# the Docker test servers (docker/compose.yml). Run from anywhere:
+# Captures the landing page screenshots from hoprs, driven for real against the Docker
+# test servers (docker/compose.yml). Run from anywhere:
 #   site/scripts/capture/run.sh            # capture, convert, tear the servers down
 #   KEEP=1 site/scripts/capture/run.sh     # leave the servers and the capture box running
+#   LOCAL_DEB=target/deb-ubuntu-24.04/debian/hoprs_1.3.0-1_amd64.deb site/scripts/capture/run.sh
+#                                          # shoot a .deb built by scripts/package-deb.sh
+# Without LOCAL_DEB the box downloads DEB_URL (default: the release in the Dockerfile).
 # Writes site/public/shots/{main,split}{,-1440}.{avif,webp} + {main,split}.png and
 # site/public/og.png. Key auth only (the test fixture key); no password, no keyring.
 #
@@ -86,12 +89,20 @@ grep -q 'alice@build' /home/alice/.bashrc \
 REMOTE
 
 echo "==> capture box"
-docker build -q -t hoprs-capture "$here" >/dev/null
+# Built from a temporary context (the Dockerfile and a debs/ folder), so nothing lands in
+# the repo: the local .deb when LOCAL_DEB is set, else an empty debs/ and DEB_URL.
+mkdir -p "$work/ctx/debs"
+cp "$here/Dockerfile" "$work/ctx/"
+if [ -n "${LOCAL_DEB:-}" ]; then cp "$LOCAL_DEB" "$work/ctx/debs/"; fi
+build_args=()
+if [ -n "${DEB_URL:-}" ]; then build_args=(--build-arg "DEB_URL=$DEB_URL"); fi
+docker build -q -t hoprs-capture "${build_args[@]}" "$work/ctx" >/dev/null
 docker rm -f "$box" >/dev/null 2>&1 || true
 docker run -d --name "$box" --network host \
     --add-host build.example:127.0.0.1 --add-host files.example:127.0.0.1 \
     -v "$here:/capture:ro" -v "$repo/docker/fixtures/id_ed25519:/fixture/id_ed25519:ro" \
     hoprs-capture sleep infinity >/dev/null
+docker exec "$box" dpkg-query -W hoprs   # which .deb this run shoots
 
 docker exec -i "$box" bash -s <<'LOCAL'
 set -euo pipefail
