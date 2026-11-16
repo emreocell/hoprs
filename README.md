@@ -186,6 +186,24 @@ The `.dmg` is one universal build for Apple Silicon and Intel Macs.
 `hoprs.exe` links the C runtime statically, so the Visual C++ redistributable is not needed.
 `hoprs --version` and `hoprs --help` print into the cmd or PowerShell window you run them in.
 
+### Updating
+
+hoprs does not update itself. To move to a new version, quit hoprs, download the new file
+from the [latest release](https://github.com/engviniciusbs/hoprs/releases/latest) and install
+it over the old one:
+
+| System | How |
+|---|---|
+| Linux | `sudo apt install ./hoprs_<version>-1_amd64.deb` (replaces the installed version) |
+| macOS | Open the new `.dmg` and drag hoprs to Applications; choose Replace |
+| Windows, `.msi` | Run the new `.msi`; it replaces the installed version |
+| Windows, `.zip` | Unzip the new `.zip` over the old folder |
+
+Your sites, workspaces, settings, transfer queue and saved passwords stay where they are:
+they live in your user folders and the system keyring, not next to the program (see
+[Where your data lives](#where-your-data-lives)). On macOS, steps 3 and 4 above apply to each
+new download ("Open Anyway" once, then Keychain access again).
+
 ### Uninstall
 
 | System | How | Your data |

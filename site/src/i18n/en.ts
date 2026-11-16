@@ -87,6 +87,7 @@ export const en = {
       { q: "Is plain FTP allowed?", a: "Yes. It is labelled ftp (unencrypted). FTPS, explicit and implicit, is supported too." },
       { q: "Does it import from FileZilla?", a: "Yes. It reads sitemanager.xml and reports what was imported and what was skipped." },
       { q: "Does it collect data?", a: "The app: no. It has no accounts and talks only to the servers you add. This website counts visits with Cloudflare Web Analytics, which sets no cookies and stores no personal data." },
+      { q: "How do I update it?", a: "hoprs does not update itself. Download the new version and install it over the old one: on Linux, sudo apt install ./hoprs_<version>-1_amd64.deb; on macOS, drag hoprs to Applications and replace it; on Windows, run the new .msi (it replaces the old version) or unzip the portable build over the old folder. Sites, workspaces, settings and saved passwords are kept." },
       { q: "How do I uninstall it?", a: "Linux: sudo apt remove hoprs. macOS: drag hoprs out of Applications. Windows: remove it in Installed apps. Your data stays; to remove it too, delete ~/.config/hoprs and ~/.local/share/hoprs (Linux), ~/Library/Application Support/hoprs (macOS) or %APPDATA%\\hoprs (Windows), and the keyring entries for service hoprs/<site-id> (shown as password.hoprs/<site-id> and key-passphrase.hoprs/<site-id> in the Windows Credential Manager)." },
       { q: "How do I report a bug?", a: "Open an issue on GitHub. Report vulnerabilities privately through GitHub security advisories." },
     ],
