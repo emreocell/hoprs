@@ -943,7 +943,7 @@ async fn run_file_ops(fake: &Arc<FakeBackend>, effects: &[Effect]) -> Vec<Messag
     messages
 }
 
-fn pane_msg(tab: TabId, side: Side, msg: PaneMsg) -> Message {
+pub(crate) fn pane_msg(tab: TabId, side: Side, msg: PaneMsg) -> Message {
     Message::Pane { tab, side, msg }
 }
 
@@ -974,7 +974,7 @@ async fn connected_tab(fake: &Arc<FakeBackend>, a: &Site) -> App {
 
 /// A connected tab: local `/home/me` holds `a.txt`, `b.txt` and `dir/`; remote `/srv`
 /// holds `r.txt` and `sub/`.
-async fn transfer_tab() -> (Arc<FakeBackend>, App, Site, TabId) {
+pub(crate) async fn transfer_tab() -> (Arc<FakeBackend>, App, Site, TabId) {
     let a = srv_site();
     let fake = Arc::new(FakeBackend::new().with_site(a.clone()));
     let fake = &fake;
@@ -998,7 +998,7 @@ fn srv_site() -> Site {
 }
 
 /// The row of the entry called `name` in the first tab's pane.
-fn row_of(app: &App, side: Side, name: &str) -> usize {
+pub(crate) fn row_of(app: &App, side: Side, name: &str) -> usize {
     let pane = app.tabs[0].pane(side).unwrap();
     usize::from(pane.has_up())
         + pane

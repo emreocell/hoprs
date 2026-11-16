@@ -1378,4 +1378,4 @@ impl Default for App {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

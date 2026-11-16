@@ -7,7 +7,9 @@ use iced::advanced::widget::Operation;
 use iced::advanced::widget::operation::{Focusable, Outcome};
 use iced::event::Status;
 use iced::keyboard::{self, Key, key::Named};
-use iced::widget::{Id, button, column, container, mouse_area, row, rule, scrollable, space, text};
+use iced::widget::{
+    Id, button, column, container, mouse_area, row, rule, scrollable, space, stack, text,
+};
 use iced::{Alignment, Element, Event, Length, Padding, Rectangle, window};
 
 use crate::app::actions::{EditKind, PaneAction};
@@ -21,7 +23,7 @@ use crate::ui::icons::{self, Icon};
 use crate::ui::theme::{self, palette};
 use crate::ui::virtual_list::{self, ROW_HEIGHT};
 use crate::ui::widgets;
-use crate::ui::{file_actions, format, strings};
+use crate::ui::{drag, file_actions, format, strings};
 
 /// The path bar (mockup `.path`: 38 px).
 const PATH_HEIGHT: f32 = 38.0;
@@ -409,13 +411,18 @@ fn pane<'a>(
     let width = fit::pane_width(app.window_width);
     let cols = fit::columns(width, side);
     let conn = app.conn(&tab.site);
+    // The pane a drag under way started in: its selected rows are drawn dimmed.
+    let source = app
+        .drag
+        .is_some_and(|d| d.active && d.tab == tab.id && d.from == side);
     let body: Element<'a, Message> = match tab.pane_status(conn, side) {
         PaneStatus::Loading => skeleton(cols),
-        PaneStatus::Full => list(tab.id, side, pane, this_year, focused, cols, width),
+        PaneStatus::Full => list(tab.id, side, pane, this_year, focused, source, cols, width),
         PaneStatus::Empty => column![
             // `..` stays reachable from an empty folder.
-            pane.has_up()
-                .then(|| file_row(tab.id, side, pane, 0, this_year, focused, cols, width)),
+            pane.has_up().then(|| file_row(
+                tab.id, side, pane, 0, this_year, focused, source, cols, width
+            )),
             centered(text(strings::empty_folder()).color(palette().muted).into()),
         ]
         .into(),
@@ -445,7 +452,9 @@ fn pane<'a>(
         content = content.push(row);
     }
     // A drag from the other pane (or files from the system, on the remote side) would
-    // drop here: a 1 px accent outline and, at the bottom, what the drop does.
+    // drop here: a dashed outline, a wash and, near the bottom, what the drop does, all
+    // over the pane (the list keeps its height). Always a stack, so the pane keeps its
+    // state when a drag passes over it.
     let label = if app.drop_target() == Some((tab.id, side)) {
         app.drop_label()
     } else if side == Side::Remote {
@@ -453,28 +462,27 @@ fn pane<'a>(
     } else {
         None
     };
-    let target = label.is_some();
-    let mut content = content.push(body);
-    if let Some(label) = label {
-        content = content.push(hrule()).push(
-            container(
-                text(label)
-                    .font(theme::MONO)
-                    .size(theme::TEXT_XS)
-                    .color(palette().ink_2),
-            )
-            .padding([theme::SPACE_XS / 2.0, theme::SPACE_MD]),
-        );
-    }
-    let content = container(content.width(Length::FillPortion(1)).height(Length::Fill))
+    let content = content
+        .push(body)
         .width(Length::FillPortion(1))
-        .height(Length::Fill)
-        .style(theme::drop_target(target));
+        .height(Length::Fill);
+    let mut layers = stack![content]
+        .width(Length::FillPortion(1))
+        .height(Length::Fill);
+    if let Some(label) = label {
+        let folder = display_path(&pane.path, home);
+        layers = layers.push(drag::drop_layer(
+            &label,
+            &folder,
+            side == Side::Remote,
+            width,
+        ));
+    }
     // A press anywhere focuses the pane for the keyboard, without taking the click; the
     // pointer going in and out tells a drag where it would drop (a pane that would not
     // take it shows the not-allowed cursor). A right press outside the rows (a row's
     // takes its own) opens the pane's menu.
-    let area = mouse_area(content);
+    let area = mouse_area(layers);
     let area = if app.drag_invalid_over(tab.id, side) {
         area.interaction(iced::mouse::Interaction::NotAllowed)
     } else {
@@ -686,12 +694,14 @@ fn header<'a>(
     cells.height(HEADER_HEIGHT).into()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn list<'a>(
     tab: TabId,
     side: Side,
     pane: &'a Pane,
     this_year: i32,
     focused: bool,
+    source: bool,
     cols: Columns,
     width: f32,
 ) -> Element<'a, Message> {
@@ -707,12 +717,13 @@ fn list<'a>(
                 viewport_h: viewport.bounds().height,
             },
         },
-        move |i| file_row(tab, side, pane, i, this_year, focused, cols, width),
+        move |i| file_row(tab, side, pane, i, this_year, focused, source, cols, width),
     )
 }
 
 /// One 30 px row: click selects, double click enters, hover highlights. The entry being
-/// renamed shows the name editor in its name cell.
+/// renamed shows the name editor in its name cell. In the `source` pane of a drag under
+/// way, a selected row (one being dragged) is drawn at half opacity.
 #[allow(clippy::too_many_arguments)]
 fn file_row<'a>(
     tab: TabId,
@@ -721,6 +732,7 @@ fn file_row<'a>(
     index: usize,
     this_year: i32,
     focused: bool,
+    source: bool,
     cols: Columns,
     width: f32,
 ) -> Element<'a, Message> {
@@ -739,10 +751,12 @@ fn file_row<'a>(
             .align_y(Alignment::Center)
             .clip(true)
     };
+    let dimmed = source && pane.selection.contains(index);
+    let fade = move |color: iced::Color| if dimmed { theme::dim(color) } else { color };
     let data = |value: String| {
         text(value)
             .size(theme::TEXT_SM)
-            .color(p.muted)
+            .color(fade(p.muted))
             .wrapping(text::Wrapping::None)
     };
     let (name, is_dir, size, modified, permissions) = match pane.row(index) {
@@ -806,7 +820,7 @@ fn file_row<'a>(
         name_text
     };
     let mut name_cell = row![
-        icons::icon(kind_icon, icons::ROW).color(if selected { p.ink } else { p.muted }),
+        icons::icon(kind_icon, icons::ROW).color(fade(if selected { p.ink } else { p.muted })),
         name_text
     ]
     .spacing(theme::SPACE_XS)
@@ -816,7 +830,7 @@ fn file_row<'a>(
             text(strings::path_separator())
                 .font(theme::MONO)
                 .size(theme::TEXT_MONO)
-                .color(p.muted),
+                .color(fade(p.muted)),
         );
     }
     let size_text = if is_dir {
@@ -875,7 +889,7 @@ fn file_row<'a>(
         container(cells)
             .width(Length::Fill)
             .height(ROW_HEIGHT)
-            .style(theme::file_row(selected, hovered, cursor, false)),
+            .style(theme::file_row(selected, hovered, cursor, dimmed)),
     )
     .on_press(msg(PaneMsg::Click(index)))
     .on_right_press(msg(PaneMsg::ContextMenu(Some(index))))

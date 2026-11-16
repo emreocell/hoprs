@@ -210,6 +210,10 @@ drop-upload-files =
        *[other] Fazer upload de { $count } arquivos para { $folder }
     }
 drop-upload-files-unknown = Fazer upload de arquivos para { $folder }
+# The chip that follows the pointer in a drag of several items: "+1" after the first
+# name, then the badge with how many go ("2").
+drag-more = +{ $more }
+drag-count = { $count }
 reconnect = Reconectar
 size-unit-b = B
 size-unit-kb = KB

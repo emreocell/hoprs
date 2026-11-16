@@ -231,6 +231,10 @@ drop-upload-files =
        *[other] Upload { $count } files to { $folder }
     }
 drop-upload-files-unknown = Upload files to { $folder }
+# The chip that follows the pointer in a drag of several items: "+1" after the first
+# name, then the badge with how many go ("2").
+drag-more = +{ $more }
+drag-count = { $count }
 reconnect = Reconnect
 # Units of [`crate::ui::format::size`], base 1024.
 size-unit-b = B

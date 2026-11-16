@@ -13,6 +13,7 @@ real display.
 | Context menu model: opens at the last press, closes on Escape, outside click, resize and choice, blocked behind a dialog (`crates/hoprs-app/src/app/tests/menu.rs`); kept inside the window (`ui::menu` tests); press position published before the widget under it (`ui::pointer` tests) | Pass |
 | Sidebar state saved: collapse and hide round-trip through `settings.toml`, invalid values read as shown, the ⋯ menu hides and shows a section (`settings` tests, `app/tests/import_settings.rs`); site state and icon by protocol (`ui::sidebar` tests) | Pass |
 | Panel dividers: a drag resizes the compare panel and the queue from the press position, never below their minimum, saved on release or when the pointer leaves the window; a double-click resets and saves; heights round-trip through `settings.toml`; past the window's cap or the minimum a drag turns back at once; dragging up a short queue never lowers its maximum, dragging down shrinks it from the drawn height; a click or unchanged drag saves nothing; the queue's saved height is its maximum (two rows stay two rows); pointer moves are listened to only while resizing (`app/tests/panels.rs`, `ui::pointer` tests) | Pass |
+| Drag feedback: a drag starts past 4 px, has a target only over the other pane of a connected site and says what a drop does (`app/tests/transfers.rs`); the chip shows the first dragged item and "+N" only once the drag started, and stays inside the window; the drop label splits out the folder (`ui::drag` tests) | Pass |
 | Settings tab: one at most, selecting another tab keeps it, its × returns to the tab it came from (or the last), not saved with a workspace, blocked behind a dialog (`app/tests/tabs.rs`); settings saved and typed passwords forgotten when it is not shown (`app/tests/import_settings.rs`); no connection in the status bar (`app/tests/status.rs`); Ctrl+, opens it even from a focused terminal and sends nothing to the shell (`ui::files`, `ui::terminal`, `terminal::input` tests); palette rows (`app/tests/palette.rs`) | Pass |
 
 ## NEEDS HUMAN
@@ -138,3 +139,17 @@ real display.
       has unsent remote edits asks first, in its tab.
     - Keyboard: Close tab, Open workspace, the sites, Upload/Download (compare panel
       buttons), the queue's actions (Tab to their buttons) stay reachable as before.
+
+14. **Drag feedback.** NEEDS HUMAN. On Linux, macOS and Windows, open a connected site,
+    select two files in the local pane and drag one of them. Expect: nothing moves until
+    the pointer has gone a few pixels; then a chip follows the pointer with the first
+    file's icon and name ("…" when long), "+1" and a badge "2", and stays inside the window
+    near the edges; the two dragged rows are dimmed. Over the remote pane: a dashed grey
+    outline, a faint wash and, near the bottom, "Upload 2 items to /the/folder" (the folder
+    in mono, cut with "…" in a narrow window); the list does not move or shrink. Over the
+    local pane itself, and over a pane whose site is disconnected: no outline, the
+    not-allowed cursor, and releasing there does nothing. Drag remote files to the local
+    pane: "Download N items to ~/…". Drag files from the OS file manager over the remote
+    pane: "Upload N files to …" ("Upload files to …" until the system says how many).
+    Press Escape during a drag, and drag out of the window: both cancel (no chip, no dimmed
+    rows, nothing queued).

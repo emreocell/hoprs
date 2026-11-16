@@ -10,8 +10,8 @@ use crate::ui::icons::Icon;
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
 use crate::ui::{
-    dialogs, edits, files, import, log, menu, palette as command_palette, pointer, queue, settings,
-    sidebar, site_form, status, tabs, terminal, widgets, workspace_form,
+    dialogs, drag, edits, files, import, log, menu, palette as command_palette, pointer, queue,
+    settings, sidebar, site_form, status, tabs, terminal, widgets, workspace_form,
 };
 
 pub const SIDEBAR_WIDTH: f32 = sidebar::WIDTH;
@@ -52,8 +52,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .style(theme::paper)
         .into();
     // Never more than one: a security dialog closes the palette and a menu, the palette
-    // closes a menu, and neither opens under a dialog.
-    let shown = dialogs::overlay(app, command_palette::overlay(app, menu::overlay(app, base)));
+    // closes a menu, and neither opens under a dialog. A drag's chip goes over a menu (a
+    // right press during a drag opens one) and under the palette and the dialogs.
+    let shown = dialogs::overlay(
+        app,
+        command_palette::overlay(app, drag::overlay(app, menu::overlay(app, base))),
+    );
     // Every left or right press is published with its position first (menus open there).
     pointer::tracker(shown)
 }

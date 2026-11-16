@@ -471,14 +471,7 @@ pub fn file_row(
             (false, true) => (Some(p.paper_2), p.ink),
             (false, false) => (None, p.ink_2),
         };
-        let text_color = if dimmed {
-            Color {
-                a: text_color.a * 0.5,
-                ..text_color
-            }
-        } else {
-            text_color
-        };
+        let text_color = if dimmed { dim(text_color) } else { text_color };
         container::Style {
             text_color: Some(text_color),
             background: background.map(Background::Color),
@@ -652,19 +645,46 @@ pub fn progress(_: &Theme) -> progress_bar::Style {
     }
 }
 
-/// The pane a drag (or files from the system) would drop on: a 1 px accent outline.
-pub fn drop_target(active: bool) -> impl Fn(&Theme) -> container::Style {
-    move |_| container::Style {
-        border: if active {
-            Border {
-                color: palette().accent,
-                width: HAIRLINE,
-                radius: radius(),
-            }
-        } else {
-            Border::default()
+/// The faint `ink` wash over a pane a drop would land in (4% alpha).
+pub fn drop_wash(_: &Theme) -> container::Style {
+    let ink = palette().ink;
+    surface(Color { a: 0.04, ..ink })
+}
+
+/// The drag chip that follows the pointer and the drop label: `paper_3`, a 1 px `rule_2`
+/// border, 4 px radius.
+pub fn drag_chip(_: &Theme) -> container::Style {
+    let p = palette();
+    container::Style {
+        text_color: Some(p.ink),
+        border: Border {
+            color: p.rule_2,
+            width: HAIRLINE,
+            radius: radius(),
         },
-        ..container::Style::default()
+        ..surface(p.paper_3)
+    }
+}
+
+/// The count badge in the drag chip: `paper` on `ink`, fully rounded (8 px).
+pub fn drag_badge(_: &Theme) -> container::Style {
+    let p = palette();
+    container::Style {
+        text_color: Some(p.paper),
+        border: Border {
+            radius: Radius::from(8.0),
+            ..Border::default()
+        },
+        ..surface(p.ink)
+    }
+}
+
+/// `color` at half its alpha: a dragged row's icon and data while the drag is under way
+/// (its text through [`file_row`]'s `dimmed`).
+pub fn dim(color: Color) -> Color {
+    Color {
+        a: color.a * 0.5,
+        ..color
     }
 }
 

@@ -512,6 +512,14 @@ pub fn drop_upload_files(count: usize, folder: &str) -> String {
 pub fn drop_upload_files_unknown(folder: &str) -> String {
     tr_args("drop-upload-files-unknown", &[("folder", folder.into())])
 }
+/// The drag chip, after the first name: "+1" for one more item.
+pub fn drag_more(more: usize) -> String {
+    tr_args("drag-more", &[("more", more.into())])
+}
+/// The drag chip's badge: how many items go ("2").
+pub fn drag_count(count: usize) -> String {
+    tr_args("drag-count", &[("count", count.into())])
+}
 /// The size column of a folder.
 pub fn no_size() -> &'static str {
     tr("no-size")

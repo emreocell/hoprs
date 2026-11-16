@@ -14,7 +14,7 @@ A UI polish release.
 - The compare panel and the transfer queue resize by dragging their top edge (double-click resets); heights are remembered; collapse leaves one summary line.
 - Right-click menus on files (with Copy path and Refresh, F5); Shift+F10 or the Menu key opens them from the keyboard.
 - Right-click menus on the compare list, the queue, the sidebar and the tabs (with Close other tabs); Shift+F10 opens the compare list's from the keyboard.
-- Dragging between panes starts after a small move and says what will happen.
+- Dragging between panes starts after a small move and says what will happen: a chip follows the pointer, the dragged rows dim, and the target pane gets a dashed outline and says "Upload 2 items to …".
 
 ## 1.2.0 — 2026-11-16
 
