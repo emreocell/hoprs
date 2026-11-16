@@ -694,10 +694,14 @@ impl App {
             return;
         };
         let row = row.filter(|&r| r < pane.row_count());
-        if let Some(row) = row
-            && !pane.selection.contains(row)
-        {
-            pane.selection.click(row, Mods::default());
+        if let Some(row) = row {
+            if pane.selection.contains(row) {
+                // Keep the selection; the clicked row becomes the cursor, so an action
+                // on one entry (Rename) acts on the row under the pointer.
+                pane.selection.cursor = Some(row);
+            } else {
+                pane.selection.click(row, Mods::default());
+            }
         }
         tab.set_focus(side);
         self.menu = Some(ContextMenu {

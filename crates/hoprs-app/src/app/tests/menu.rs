@@ -223,6 +223,36 @@ async fn right_click_selected_row_keeps_selection() {
 }
 
 #[tokio::test]
+async fn right_click_selected_row_renames_the_clicked_row() {
+    let (_fake, mut app, _a, tab) = transfer_tab().await;
+    let a = row_of(&app, Side::Local, "a.txt");
+    let b = row_of(&app, Side::Local, "b.txt");
+    // Click a, Shift+click b: the cursor sits on b.
+    app.update(pane_msg(tab, Side::Local, PaneMsg::Click(a)));
+    app.update(Message::Modifiers(Mods {
+        ctrl: false,
+        shift: true,
+    }));
+    app.update(pane_msg(tab, Side::Local, PaneMsg::Click(b)));
+    app.update(Message::Modifiers(Mods::default()));
+    // Right-click a: both stay selected, Rename edits a.
+    app.update(right_click(tab, Side::Local, Some(a)));
+    assert!(selected(&app, Side::Local).contains(&a));
+    assert!(selected(&app, Side::Local).contains(&b));
+    let rename = index_of(&app, MenuAction::Rename);
+    app.update(Message::Menu(MenuMsg::Choose(rename)));
+    let Some(PaneAction::Edit(edit)) = &app.tabs[0].local().action else {
+        panic!("{:?}", app.tabs[0].local().action);
+    };
+    assert_eq!(
+        edit.kind,
+        crate::app::actions::EditKind::Rename {
+            from: "a.txt".into()
+        }
+    );
+}
+
+#[tokio::test]
 async fn local_and_remote_items_and_enabled_state() {
     let (_fake, mut app, a, tab) = transfer_tab().await;
     // A local file.
