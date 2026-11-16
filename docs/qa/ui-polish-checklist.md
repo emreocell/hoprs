@@ -16,6 +16,13 @@ real display.
 | Drag feedback: a drag starts past 4 px, has a target only over the other pane of a connected site and says what a drop does (`app/tests/transfers.rs`); the chip shows the first dragged item and "+N" only once the drag started, and stays inside the window; the drop label splits out the folder (`ui::drag` tests) | Pass |
 | Settings tab: one at most, selecting another tab keeps it, its × returns to the tab it came from (or the last), not saved with a workspace, blocked behind a dialog (`app/tests/tabs.rs`); settings saved and typed passwords forgotten when it is not shown (`app/tests/import_settings.rs`); no connection in the status bar (`app/tests/status.rs`); Ctrl+, opens it even from a focused terminal and sends nothing to the shell (`ui::files`, `ui::terminal`, `terminal::input` tests); palette rows (`app/tests/palette.rs`) | Pass |
 
+**Screenshots (2026-11-16, release 1.3.0):** README images (`files`, `menu`, `drag`,
+`settings`, `compare`, `terminal`, `palette`, `pt-br`) and the site's `main`, `split` and
+`og.png` re-shot from a locally built `hoprs_1.3.0-1_amd64.deb` with
+`LOCAL_DEB=… scripts/readme-shots.sh` and `LOCAL_DEB=… site/scripts/capture/run.sh`; each
+image checked by eye (menu and drag visible, no leftover hover tint, Portuguese shot in
+pt-BR). This is not a substitute for the rows below.
+
 ## NEEDS HUMAN
 
 1. **Icon rendering.** Run hoprs at 100%, 150% and 200% scale on Linux, macOS and Windows.

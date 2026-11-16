@@ -169,6 +169,27 @@ until_white() {
     return 1
 }
 shoot() { x import -window root "/tmp/$1.png"; docker cp -q "$box:/tmp/$1.png" "$work/$1.png"; }
+# drag_from X Y TO_X TO_Y [ctrl]: presses at X Y and moves to TO_X TO_Y in steps (a drag
+# starts past 4 px), leaving the button held so the shot shows the drag; drop_cancel ends it
+# with Escape. With "ctrl" the press is a Ctrl+press, which adds the row to the selection
+# instead of selecting it alone, so the drag carries every selected row.
+drag_from() {
+    x xdotool mousemove "$1" "$2"
+    sleep 0.3
+    if [ "${5:-}" = ctrl ]; then x xdotool keydown ctrl; fi
+    x xdotool mousedown 1
+    sleep 0.2
+    x xdotool mousemove $(($1 + 20)) "$2"
+    sleep 0.2
+    if [ "${5:-}" = ctrl ]; then x xdotool keyup ctrl; fi
+    local i
+    for i in 1 2 3 4 5 6; do
+        x xdotool mousemove $(($1 + ($3 - $1) * i / 6)) $(($2 + ($4 - $2) * i / 6))
+        sleep 0.1
+    done
+    sleep 1
+}
+drop_cancel() { x xdotool key Escape; x xdotool mouseup 1; sleep 0.5; }
 
 echo "==> hoprs"
 docker exec -d "$box" Xvfb :99 -screen 0 2880x1800x24 -nolisten tcp
@@ -211,17 +232,18 @@ sleep 4
 docker run --rm --net "container:$sshd" --cap-add NET_ADMIN --entrypoint sh hoprs-test-sshd -c \
     'tc qdisc del dev eth0 ingress 2>/dev/null; tc qdisc add dev eth0 handle ffff: ingress &&
      tc filter add dev eth0 parent ffff: protocol ip u32 match u32 0 0 police rate 24mbit burst 256k drop flowid :1'
-x xdotool mousemove 1200 800 # scroll the local list to its end
-x xdotool click 5
+click 640 738                # local: CHANGELOG.md, then End: the last row, the 64 MB tarball
+x xdotool key End
+x xdotool key ctrl+Return    # Upload
 sleep 1
-click 640 1048               # local: web-app-2.4.1.tar.gz
-x xdotool key ctrl+Return
-x xdotool mousemove 1200 800 # back to the top of the list: no half-cut first row
-x xdotool click 4
+x xdotool key Home           # back to the top of the list: no half-cut first row
 sleep 1
-x xdotool mousemove 2400 1750 # pointer off the rows: no hover tint in the shot
-sleep 8
+echo "==> a drag in progress: two local files over the remote pane"
+click 640 798                # local: deploy.sh
+sleep 6                      # the upload runs on; the compare panel shows it queued
+drag_from 640 858 2200 470 ctrl # index.html joins it; held over the remote pane: chip, outline, "Upload 2 items to ..."
 shoot main
+drop_cancel
 
 echo "==> terminal tab"
 click 660 40                 # tab: "build server ssh"

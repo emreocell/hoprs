@@ -20,7 +20,7 @@ export const en = {
     sentence: "A fast, native file client for Linux, macOS and Windows.",
     downloadFor: "Download for",
     shotAlt:
-      "hoprs files tab: the local project folder on the left, the same folder on the build server on the right, the folder comparison panel below listing what differs between them, and one upload running in the transfer queue.",
+      "hoprs files tab: two local files being dragged onto the build server's folder, which has a dashed outline and the label Upload 2 items to /home/alice/web-app; below, the folder comparison panel listing what differs between the two folders, and one upload running in the transfer queue.",
   },
   fast: {
     title: "Light on memory, quick on the wire.",
@@ -36,7 +36,7 @@ export const en = {
     title: "One connection, two tabs.",
     lead: "A terminal tab and a files tab share one SSH connection. Add more tabs over the same session.",
     shotAlt:
-      "hoprs terminal tab on the same SSH connection, showing ls -la of the project folder while the upload keeps running below.",
+      "hoprs terminal tab on the same SSH connection, showing ls -la of the project folder on the server while the upload keeps running in the queue below.",
   },
   filezilla: {
     title: "Your FileZilla sites, kept.",

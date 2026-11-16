@@ -24,7 +24,7 @@
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
-![hoprs: a saved SSH site open with the local and remote folders side by side, the folder compare panel listing the differences, and an upload running in the transfer queue](docs/images/files.png)
+![hoprs: a saved SSH site open with the local and remote folders side by side, file kind icons and a selected row, the folder compare panel listing the differences, and an upload running in the transfer queue](docs/images/files.png)
 
 hoprs keeps the idea that made FileZilla useful (a list of saved sites you open with one
 click) and puts a terminal, a two-pane file browser, folder compare and a persistent
@@ -100,7 +100,7 @@ transfer queue behind it, in one quiet window that opens in under 100 ms and idl
 | ![The Ctrl+K palette open with "new" typed, listing actions such as New files tab and New folder](docs/images/palette.png) | ![The same files tab with the interface in Brazilian Portuguese](docs/images/pt-br.png) |
 | **Go to anything.** Ctrl+K jumps to tabs, sites, workspaces and actions. | **Em português.** The whole interface in Brazilian Portuguese. |
 
-These are real screenshots of hoprs 1.2.0 against the Docker test servers, taken by
+These are real screenshots of hoprs 1.3.0 against the Docker test servers, taken by
 [`scripts/readme-shots.sh`](scripts/readme-shots.sh).
 
 ## Install
@@ -274,6 +274,9 @@ one side only is one row and is not walked.
   (you chose it after seeing the difference). Nothing is deleted, ever, and nothing moves
   without a click. Double-click a row to take both panes to its folder. The panel is
   keyboard-friendly: arrows move, Space toggles, Enter opens.
+- **Panel size:** drag the top edge of the compare panel (or of the transfer queue) to
+  resize it; a double-click on the edge resets it, and the heights are remembered. The
+  caret collapses the compare panel to one line with the counts.
 - **Servers that cannot set times:** a file hoprs just transferred is shown as identical
   for the rest of the tab's life when its sizes match, even if the server kept an old time.
   FTP listings without `MLSD` only have minute precision, so times within a minute count
@@ -281,11 +284,40 @@ one side only is one row and is not walked.
 
 ### Transfers
 
+![Two local files dragged over the remote pane: a chip with the first name and a "2" badge follows the pointer, the dragged rows are dimmed, and the remote pane has a dashed outline and the label "Upload 2 items to /home/alice/web-app"](docs/images/drag.png)
+
 Select files in either pane and press Ctrl+Enter, or drag them across. Every transfer goes
 into the queue at the bottom, which survives restarts: close hoprs in the middle of an
 upload and it resumes where it stopped. When the destination already exists, hoprs asks
 what to do (ask, overwrite, overwrite if newer, skip, resume), for that item or for the rest
 of the batch.
+
+A drag starts after the pointer moves a few pixels. A chip with the first item's name (and
+"+N" for more) follows the pointer, the dragged rows dim, and the pane that will receive
+them gets a dashed outline and says what a drop does ("Upload 2 items to /the/folder").
+Escape or leaving the window cancels the drag.
+
+### Right-click menus
+
+![The right-click menu open on a remote file: Download, Edit, Rename, Permissions…, Copy path, Refresh, New folder and Delete, each with its icon and key](docs/images/menu.png)
+
+Right-click a file or folder for its actions: Upload or Download, Edit (remote files), Open
+(folders), Rename, Permissions… (remote), Copy path, Refresh (F5), New folder and Delete.
+Items that do not apply are dimmed, not hidden. Right-clicking below the rows gives New
+folder, Refresh and Compare. Shift+F10 or the Menu key opens the menu of the selected row
+from the keyboard; arrows move, Enter runs, Escape closes. The compare list (Upload,
+Download, Show in panes), the queue rows (Pause, Resume, Cancel, Retry, Dismiss), the
+sidebar's sites and workspaces (Open, Edit) and the tabs (Close tab, Close other tabs) have
+menus too.
+
+### Settings
+
+![The Settings tab on its Transfers section: workers per site, what to do when a file already exists, and the keepalive interval](docs/images/settings.png)
+
+Settings open as a tab: Ctrl+, (⌘, on macOS), the gear at the bottom of the sidebar, or
+"Settings" in the Ctrl+K palette. There is only ever one; pressing the shortcut again
+focuses it. A list on the left switches between General, Transfers, Folder compare, Remote
+editing, Terminal and Backup. Closing the tab returns to the tab you came from.
 
 ### Remote editing
 
@@ -313,6 +345,9 @@ On Windows a custom editor must be a program that opens a window and can wait: u
 | F7 | file pane | New folder |
 | Del | file pane | Delete |
 | Ctrl+Enter | file pane | Upload or download the selection |
+| F5 | file pane | Refresh |
+| Shift+F10 or the Menu key | file pane, compare list | Open the selected row's menu |
+| Ctrl+, (Cmd+, on macOS) | anywhere, a focused terminal too | Settings |
 | Tab | files tab | Switch pane |
 
 Terminal shortcuts use Ctrl+Shift on every system, macOS included. Plain Ctrl+K in a focused terminal goes to the shell (in bash it kills the rest of the

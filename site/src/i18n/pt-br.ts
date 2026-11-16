@@ -22,7 +22,7 @@ export const ptBr: Dict = {
     sentence: "Um cliente de arquivos rápido e nativo para Linux, macOS e Windows.",
     downloadFor: "Baixar para",
     shotAlt:
-      "Aba de arquivos do hoprs: a pasta local do projeto à esquerda, a mesma pasta no servidor de build à direita, o painel de comparação de pastas embaixo listando o que difere entre elas e um upload em andamento na fila de transferências.",
+      "Aba de arquivos do hoprs: dois arquivos locais sendo arrastados para a pasta do servidor de build, que ganha um contorno tracejado e o rótulo Upload 2 items to /home/alice/web-app; embaixo, o painel de comparação de pastas listando o que difere entre as duas pastas e um upload em andamento na fila de transferências.",
   },
   fast: {
     title: "Leve na memória, rápido na rede.",
@@ -38,7 +38,7 @@ export const ptBr: Dict = {
     title: "Uma conexão, duas abas.",
     lead: "Uma aba de terminal e uma de arquivos usam a mesma conexão SSH. Abra mais abas na mesma sessão.",
     shotAlt:
-      "Aba de terminal do hoprs na mesma conexão SSH, mostrando ls -la da pasta do projeto enquanto o upload continua embaixo.",
+      "Aba de terminal do hoprs na mesma conexão SSH, mostrando ls -la da pasta do projeto no servidor enquanto o upload continua na fila embaixo.",
   },
   filezilla: {
     title: "Seus sites do FileZilla vêm junto.",
