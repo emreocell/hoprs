@@ -87,3 +87,7 @@ real display.
     not a bug: once a panel stops at a bound, the cursor may turn back into an arrow until
     the pointer is over the edge again (iced applies the resize cursor only over the 7 px
     band).
+    Collapse the compare panel with its caret: one line is left with the differences icon, the
+    three counts (only here, only on the server, different) or the progress while a run has
+    no rows yet, the auto checkbox, expand and close; no resize edge; expanding brings back
+    the height it had.

@@ -1682,6 +1682,15 @@ pub fn compare_partial() -> &'static str {
 pub fn compare_again() -> &'static str {
     tr("compare-again")
 }
+pub fn compare_summary_only_here(count: usize) -> String {
+    tr_args("compare-summary-only-here", &[("count", count.into())])
+}
+pub fn compare_summary_only_server(count: usize) -> String {
+    tr_args("compare-summary-only-server", &[("count", count.into())])
+}
+pub fn compare_summary_different(count: usize) -> String {
+    tr_args("compare-summary-different", &[("count", count.into())])
+}
 pub fn compare_group_only_local(count: usize) -> String {
     tr_args("compare-group-only-local", &[("count", count.into())])
 }

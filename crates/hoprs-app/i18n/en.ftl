@@ -814,6 +814,13 @@ compare-group-only-local = Only on this computer ({ $count })
 compare-group-only-remote = Only on the server ({ $count })
 compare-group-different = Different ({ $count })
 compare-group-unreadable = Could not read ({ $count })
+compare-summary-only-here = { $count } only here
+compare-summary-only-server = { $count } only on the server
+compare-summary-different =
+    { $count ->
+    [1] 1 different
+   *[other] { $count } different
+    }
 compare-local-newer = Local is newer
 compare-remote-newer = Server is newer
 compare-size-differs = Size differs
