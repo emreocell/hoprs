@@ -438,11 +438,28 @@ struct SelectedNames {
 }
 
 impl SelectedNames {
-    fn of(pane: &Pane) -> Self {
-        let name = |row: usize| match pane.row(row)? {
+    /// The name at `row` (`Some(None)`: the `..` row; `None`: past the rows).
+    fn name_of(pane: &Pane, row: usize) -> Option<Option<String>> {
+        match pane.row(row)? {
             Row::Up => Some(None),
             Row::Entry(entry) => Some(Some(entry.name.clone())),
-        };
+        }
+    }
+
+    /// The row of `name` (`None`: the `..` row) among the pane's rows.
+    fn row_of(pane: &Pane, name: &Option<String>) -> Option<usize> {
+        match name {
+            None => pane.has_up().then_some(0),
+            Some(name) => pane
+                .entries
+                .iter()
+                .position(|e| &e.name == name)
+                .map(|i| usize::from(pane.has_up()) + i),
+        }
+    }
+
+    fn of(pane: &Pane) -> Self {
+        let name = |row: usize| Self::name_of(pane, row);
         Self {
             rows: pane
                 .selection
@@ -850,22 +867,18 @@ impl App {
             return Vec::new();
         }
         pane.request = None;
-        // A re-list after transfers keeps the selection by name (the rows may move).
         let soft = std::mem::take(&mut pane.soft);
-        let kept = soft.then(|| SelectedNames::of(pane));
-        let quiet = quiet || soft;
+        if soft {
+            return self.soft_listed(index, side, result);
+        }
         pane.selection = Selection::default();
         pane.hovered = None;
-        // The rows a drag from this pane carried are gone (a re-list keeps them).
-        if !soft && self.drag.is_some_and(|d| d.tab == tab && d.from == side) {
+        // The rows a drag from this pane carried are gone.
+        if self.drag.is_some_and(|d| d.tab == tab && d.from == side) {
             self.drag = None;
         }
         // The rows a menu on this pane was about are gone.
-        if matches!(
-            &self.menu,
-            Some(ContextMenu { target: MenuTarget::Pane { tab: t, side: s, .. }, .. })
-                if *t == tab && *s == side
-        ) {
+        if self.pane_menu_row(tab, side).is_some() {
             self.menu = None;
         }
         let Some(pane) = self.tabs[index].pane_mut(side) else {
@@ -888,9 +901,6 @@ impl App {
                 sort_entries(&mut entries, pane.sort);
                 pane.entries = entries;
                 pane.listing = Listing::Loaded;
-                if let Some(kept) = kept {
-                    pane.selection = kept.restore(pane);
-                }
             }
             Err(error) => {
                 pane.entries.clear();
@@ -917,6 +927,94 @@ impl App {
             }
             Vec::new()
         }
+    }
+
+    /// The row of the menu open on pane `side` of `tab` (`Some(None)`: its empty area), if
+    /// one is open there.
+    fn pane_menu_row(&self, tab: TabId, side: Side) -> Option<Option<usize>> {
+        match &self.menu {
+            Some(ContextMenu {
+                target:
+                    MenuTarget::Pane {
+                        tab: t,
+                        side: s,
+                        row,
+                    },
+                ..
+            }) if *t == tab && *s == side => Some(*row),
+            _ => None,
+        }
+    }
+
+    /// A background re-list after transfers ([`list_pane_soft`](Self::list_pane_soft))
+    /// came back. The user did not ask for it, so it disturbs nothing: the selection, the
+    /// hover, a drag and an open menu follow their entries by name (a menu whose entry is
+    /// gone closes), and no comparison starts. A failure leaves the rows as they were and
+    /// goes to the technical log, unless the folder itself is gone.
+    fn soft_listed(
+        &mut self,
+        index: usize,
+        side: Side,
+        result: Result<Vec<RemoteEntry>, Error>,
+    ) -> Vec<Effect> {
+        let tab = self.tabs[index].id;
+        let menu_row = self.pane_menu_row(tab, side);
+        let Some(pane) = self.tabs[index].pane_mut(side) else {
+            return Vec::new();
+        };
+        let mut entries = match result {
+            Ok(entries) => entries,
+            Err(error) if error.kind != ErrorKind::NotFound => {
+                tracing::warn!(
+                    folder = %pane.path,
+                    %error,
+                    "background re-list after a transfer failed; the rows shown are kept"
+                );
+                return Vec::new();
+            }
+            Err(error) => {
+                pane.entries.clear();
+                pane.selection = Selection::default();
+                pane.hovered = None;
+                pane.listing = Listing::Failed(error);
+                pane.select_after = None;
+                if menu_row.is_some() {
+                    self.menu = None;
+                }
+                if self.drag.is_some_and(|d| d.tab == tab && d.from == side) {
+                    self.drag = None;
+                }
+                return Vec::new();
+            }
+        };
+        let kept = SelectedNames::of(pane);
+        let hovered = pane.hovered.map(|row| SelectedNames::name_of(pane, row));
+        let menu_name = menu_row
+            .flatten()
+            .map(|row| SelectedNames::name_of(pane, row));
+        // FTP listings may carry the folder's own "." and "..".
+        entries.retain(|e| !matches!(e.name.as_str(), "" | "." | "..") && !e.name.contains('/'));
+        sort_entries(&mut entries, pane.sort);
+        pane.entries = entries;
+        pane.listing = Listing::Loaded;
+        pane.selection = kept.restore(pane);
+        pane.hovered = hovered
+            .flatten()
+            .and_then(|name| SelectedNames::row_of(pane, &name));
+        if let Some(name) = menu_name {
+            let row = name.and_then(|name| SelectedNames::row_of(pane, &name));
+            match (row, &mut self.menu) {
+                (
+                    Some(row),
+                    Some(ContextMenu {
+                        target: MenuTarget::Pane { row: at, .. },
+                        ..
+                    }),
+                ) => *at = Some(row),
+                _ => self.menu = None,
+            }
+        }
+        self.select_new_entry(index, side)
     }
 
     /// A restored folder is gone: the pane goes to its parent, and if that is gone too,

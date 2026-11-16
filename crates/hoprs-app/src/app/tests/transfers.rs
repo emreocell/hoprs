@@ -2151,3 +2151,127 @@ async fn done_seen_only_in_a_snapshot_relists() {
     assert_eq!(relist_ticks(&effects), 1, "{effects:?}");
     assert_eq!(listed_panes(&app.update(Message::RelistPanes)).len(), 1);
 }
+
+/// The single listing among `effects`, as `(tab, side, request)`.
+fn the_listing(effects: &[Effect]) -> (TabId, Side, RequestId) {
+    match listings(effects)[..] {
+        [(side, request, _, _)] => {
+            let tab = effects
+                .iter()
+                .find_map(|e| match e {
+                    Effect::List { tab, .. } => Some(*tab),
+                    _ => None,
+                })
+                .unwrap();
+            (tab, side, request)
+        }
+        _ => panic!("expected one listing: {effects:?}"),
+    }
+}
+
+/// A background re-list that fails (a transient error) leaves the rows, the state and the
+/// selection as they were; only a folder that is gone shows its failure.
+#[tokio::test]
+async fn failed_background_relist_keeps_the_rows_unless_the_folder_is_gone() {
+    let (_fake, mut app, a, tab) = transfer_tab().await;
+    synced(
+        &mut app,
+        1,
+        vec![
+            moving(1, &a.id, Direction::Upload, "/home/me/a.txt", "/srv/a.txt"),
+            moving(2, &a.id, Direction::Upload, "/home/me/b.txt", "/srv/b.txt"),
+        ],
+    );
+    let r_row = row_of(&app, Side::Remote, "r.txt");
+    app.update(pane_msg(tab, Side::Remote, PaneMsg::Click(r_row)));
+    app.update(pane_msg(tab, Side::Remote, PaneMsg::Hover(r_row)));
+    let before = app.tabs[0].remote().entries.clone();
+
+    finish(&mut app, 2, 1, TransferState::Done);
+    let (t, side, request_id) = the_listing(&app.update(Message::RelistPanes));
+    let effects = app.update(Message::Listed {
+        tab: t,
+        side,
+        request_id,
+        result: Err(Error::new(ErrorKind::Network, "connection reset")),
+    });
+    assert!(effects.is_empty(), "{effects:?}");
+    let pane = app.tabs[0].remote();
+    assert_eq!(pane.listing, Listing::Loaded);
+    assert_eq!(pane.entries, before);
+    assert_eq!(
+        pane.selection.rows.iter().copied().collect::<Vec<_>>(),
+        [r_row]
+    );
+    assert_eq!(pane.hovered, Some(r_row));
+    assert_eq!(pane.request, None);
+
+    finish(&mut app, 3, 2, TransferState::Done);
+    let (t, side, request_id) = the_listing(&app.update(Message::RelistPanes));
+    app.update(Message::Listed {
+        tab: t,
+        side,
+        request_id,
+        result: Err(Error::new(ErrorKind::NotFound, "no such folder")),
+    });
+    assert!(matches!(
+        app.tabs[0].remote().listing,
+        Listing::Failed(ref e) if e.kind == ErrorKind::NotFound
+    ));
+}
+
+/// A menu opened on a row while a background re-list is out stays open on the same entry
+/// (its row number follows the entry); one whose entry is gone closes.
+#[tokio::test]
+async fn background_relist_keeps_an_open_menu() {
+    let (fake, mut app, a, tab) = transfer_tab().await;
+    synced(
+        &mut app,
+        1,
+        vec![
+            moving(1, &a.id, Direction::Upload, "/home/me/a.txt", "/srv/a.txt"),
+            moving(2, &a.id, Direction::Upload, "/home/me/b.txt", "/srv/b.txt"),
+        ],
+    );
+    touch_remote(&fake, &a.id, "/srv/a.txt");
+    finish(&mut app, 2, 1, TransferState::Done);
+    let effects = app.update(Message::RelistPanes);
+    assert_eq!(listings(&effects).len(), 1);
+    let r_row = row_of(&app, Side::Remote, "r.txt");
+    app.update(pane_msg(
+        tab,
+        Side::Remote,
+        PaneMsg::ContextMenu(Some(r_row)),
+    ));
+    assert!(app.menu.is_some());
+    deliver(&mut app, &fake, &effects).await;
+    let moved = row_of(&app, Side::Remote, "r.txt");
+    assert!(
+        matches!(
+            &app.menu,
+            Some(crate::app::menu::ContextMenu {
+                target: crate::app::menu::MenuTarget::Pane { row: Some(r), .. },
+                ..
+            }) if *r == moved
+        ),
+        "{:?}",
+        app.menu
+    );
+
+    // The entry goes away meanwhile: the menu closes.
+    app.menu = None;
+    touch_remote(&fake, &a.id, "/srv/b.txt");
+    finish(&mut app, 3, 2, TransferState::Done);
+    let effects = app.update(Message::RelistPanes);
+    assert_eq!(listings(&effects).len(), 1);
+    app.update(pane_msg(
+        tab,
+        Side::Remote,
+        PaneMsg::ContextMenu(Some(moved)),
+    ));
+    hoprs_remote::RemoteFs::remove_file(&fake.remote_fs(&a.id), &rpath("/srv/r.txt"))
+        .await
+        .unwrap();
+    deliver(&mut app, &fake, &effects).await;
+    assert!(app.menu.is_none());
+}

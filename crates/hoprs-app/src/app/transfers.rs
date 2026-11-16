@@ -457,6 +457,9 @@ impl App {
                 effects.extend(self.list_pane_soft(index, side));
             }
         }
+        // The tick keeps re-arming while a marked pane stays busy (an editor open for
+        // minutes, say): it does no I/O, only looks at the marks, and stops once no mark
+        // is left (listed, the folder left, or the site down).
         if waiting {
             self.relist_armed = true;
             effects.push(Effect::Later {
