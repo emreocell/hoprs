@@ -410,9 +410,22 @@ impl App {
         }
         self.relist_armed = true;
         vec![Effect::Later {
-            after: RELIST_DELAY,
+            after: self.relist_delay(),
             message: Box::new(Message::RelistPanes),
         }]
+    }
+
+    /// The wait before the marked panes list again: [`RELIST_DELAY`], or longer when a
+    /// marked pane's last quiet re-list took longer (a slow FTP server is not listed back
+    /// to back during a burst).
+    fn relist_delay(&self) -> std::time::Duration {
+        self.tabs
+            .iter()
+            .flat_map(|tab| [tab.pane(Side::Local), tab.pane(Side::Remote)])
+            .flatten()
+            .filter(|pane| pane.relist)
+            .map(|pane| pane.soft_took)
+            .fold(RELIST_DELAY, std::cmp::max)
     }
 
     /// The re-list delay ran out: each marked pane lists its folder again, quietly
@@ -463,7 +476,7 @@ impl App {
         if waiting {
             self.relist_armed = true;
             effects.push(Effect::Later {
-                after: RELIST_DELAY,
+                after: self.relist_delay(),
                 message: Box::new(Message::RelistPanes),
             });
         }

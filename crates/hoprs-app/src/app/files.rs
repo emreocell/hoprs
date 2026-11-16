@@ -156,6 +156,11 @@ pub struct Pane {
     /// The listing in flight is such a quiet re-list: the rows stay on screen meanwhile,
     /// and the selection and the scroll survive it.
     pub soft: bool,
+    /// When the quiet re-list in flight started.
+    pub soft_since: Option<std::time::Instant>,
+    /// How long the last quiet re-list took: the next one waits at least as long (a slow
+    /// FTP listing does not run back to back during a burst of transfers).
+    pub soft_took: std::time::Duration,
 }
 
 /// Where a pane is in its fallback from a saved folder that is gone.
@@ -188,6 +193,8 @@ impl Pane {
             note: None,
             relist: false,
             soft: false,
+            soft_since: None,
+            soft_took: std::time::Duration::ZERO,
         }
     }
 
@@ -528,6 +535,7 @@ impl App {
         // A full listing shows whatever a finished transfer brought.
         pane.relist = false;
         pane.soft = false;
+        pane.soft_since = None;
         pane.offset_y = 0.0;
         let scroll = Effect::ScrollPane {
             tab: tab_id,
@@ -576,6 +584,7 @@ impl App {
         };
         pane.relist = false;
         pane.soft = true;
+        pane.soft_since = Some(std::time::Instant::now());
         pane.request = Some(request_id);
         vec![Effect::List {
             tab: tab_id,
@@ -868,6 +877,9 @@ impl App {
         }
         pane.request = None;
         let soft = std::mem::take(&mut pane.soft);
+        if let Some(since) = pane.soft_since.take() {
+            pane.soft_took = since.elapsed();
+        }
         if soft {
             return self.soft_listed(index, side, result);
         }
@@ -915,17 +927,21 @@ impl App {
             }
             effects
         } else {
-            // A failed listing never reaches `compare_after_listing`: once nothing is
-            // pending any more, an Open's suppression ends here.
-            let idle = [Side::Local, Side::Remote].iter().all(|s| {
-                self.tabs[index]
-                    .pane(*s)
-                    .is_none_or(|p| p.request.is_none())
-            });
-            if idle && let Some(state) = self.tabs[index].compare_mut() {
-                state.suppress_auto = false;
-            }
+            self.failed_listing_ends_suppression(index);
             Vec::new()
+        }
+    }
+
+    /// A failed listing never reaches `compare_after_listing`: once nothing is pending any
+    /// more, an Open's suppression ends here.
+    fn failed_listing_ends_suppression(&mut self, index: usize) {
+        let idle = [Side::Local, Side::Remote].iter().all(|s| {
+            self.tabs[index]
+                .pane(*s)
+                .is_none_or(|p| p.request.is_none())
+        });
+        if idle && let Some(state) = self.tabs[index].compare_mut() {
+            state.suppress_auto = false;
         }
     }
 
@@ -947,10 +963,11 @@ impl App {
     }
 
     /// A background re-list after transfers ([`list_pane_soft`](Self::list_pane_soft))
-    /// came back. The user did not ask for it, so it disturbs nothing: the selection, the
-    /// hover, a drag and an open menu follow their entries by name (a menu whose entry is
-    /// gone closes), and no comparison starts. A failure leaves the rows as they were and
-    /// goes to the technical log, unless the folder itself is gone.
+    /// came back. The user did not ask for it, so it disturbs nothing: the selection (which
+    /// a drag from the pane carries) and an open menu follow their entries by name (a menu
+    /// whose entry is gone closes), the hover stays on the row under the pointer, and no
+    /// comparison starts. A failure leaves the rows as they were and goes to the technical
+    /// log, unless the folder itself is gone.
     fn soft_listed(
         &mut self,
         index: usize,
@@ -984,11 +1001,11 @@ impl App {
                 if self.drag.is_some_and(|d| d.tab == tab && d.from == side) {
                     self.drag = None;
                 }
+                self.failed_listing_ends_suppression(index);
                 return Vec::new();
             }
         };
         let kept = SelectedNames::of(pane);
-        let hovered = pane.hovered.map(|row| SelectedNames::name_of(pane, row));
         let menu_name = menu_row
             .flatten()
             .map(|row| SelectedNames::name_of(pane, row));
@@ -998,9 +1015,8 @@ impl App {
         pane.entries = entries;
         pane.listing = Listing::Loaded;
         pane.selection = kept.restore(pane);
-        pane.hovered = hovered
-            .flatten()
-            .and_then(|name| SelectedNames::row_of(pane, &name));
+        // The pointer has not moved: the hover stays on its row, if the list still has it.
+        pane.hovered = pane.hovered.filter(|row| *row < pane.row_count());
         if let Some(name) = menu_name {
             let row = name.and_then(|name| SelectedNames::row_of(pane, &name));
             match (row, &mut self.menu) {

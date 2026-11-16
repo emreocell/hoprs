@@ -1470,3 +1470,92 @@ async fn ids_of_an_older_run_are_not_attached_to_a_newer_runs_rows() {
     assert!(state(&app).queued.is_empty());
     assert_eq!(state(&app).enqueuing, 0);
 }
+
+// Plan 14 review: a background re-list after transfers keeps the pane's rows on screen,
+// so it neither blocks a comparison nor starts one.
+
+/// A compare-panel batch ends while a background re-list of a pane is out: the final
+/// automatic run still starts.
+#[tokio::test]
+async fn batch_rerun_starts_during_a_background_relist() {
+    let (mut app, fake, _a, tab, run) = running().await;
+    for p in ["a", "b"] {
+        diff_row(
+            &mut app,
+            tab,
+            run,
+            p,
+            EntryKind::File,
+            Status::OnlyLocal,
+            (Some(1), None),
+        );
+    }
+    let effects = app.update(msg(CompareMsg::UploadSelected { tab }));
+    deliver_enqueue(&mut app, &fake, effects).await;
+    let (RowState::Queued(a), RowState::Queued(b)) = (row_state(&app, "a"), row_state(&app, "b"))
+    else {
+        panic!()
+    };
+    app.update(ended(1, a, TransferState::Done));
+    let soft = app.list_pane_soft(0, Side::Remote);
+    assert_eq!(listings(&soft).len(), 1);
+    assert!(app.tabs[0].pane(Side::Remote).unwrap().request.is_some());
+    let last = app.update(ended(2, b, TransferState::Done));
+    assert_eq!(started(&last).len(), 1, "the batch's re-run: {last:?}");
+}
+
+/// A manual Compare and the debounced automatic run after a navigation both start while
+/// the other pane re-lists in the background.
+#[tokio::test]
+async fn compare_starts_during_a_background_relist() {
+    let (mut app, fake, _a, tab, _run) = running().await;
+    app.list_pane_soft(0, Side::Remote);
+    let effects = app.update(msg(CompareMsg::Start { tab }));
+    assert_eq!(started(&effects).len(), 1, "manual Compare: {effects:?}");
+
+    let nav = app.update(pane_msg(
+        tab,
+        Side::Local,
+        PaneMsg::Navigate(rpath("/home/me/sub")),
+    ));
+    let effects = settle_all(&mut app, &fake, run_listings(&fake, &nav).await).await;
+    let waits = debounces(&effects);
+    assert_eq!(waits.len(), 1, "{effects:?}");
+    app.list_pane_soft(0, Side::Remote);
+    let effects = app.update(msg(CompareMsg::Debounced {
+        tab,
+        generation: waits[0].1,
+    }));
+    assert_eq!(started(&effects).len(), 1, "debounced run: {effects:?}");
+}
+
+/// Plan 12 rule R3: with compare auto on, a background re-list coming back starts no
+/// run and arms no debounce.
+#[tokio::test]
+async fn a_background_relist_starts_no_comparison() {
+    let (mut app, fake, _a, effects) = open(true).await;
+    let tab = app.tabs[0].id;
+    let generation = debounces(&effects)[0].1;
+    let effects = app.update(msg(CompareMsg::Debounced { tab, generation }));
+    let run = started(&effects)[0].0;
+    app.update(msg(CompareMsg::Finished {
+        tab,
+        run,
+        result: Ok(Summary {
+            identical: 1,
+            differences: 0,
+            partial: false,
+            stopped: false,
+        }),
+    }));
+    for side in [Side::Local, Side::Remote] {
+        let soft = app.list_pane_soft(0, side);
+        let after = settle_all(&mut app, &fake, run_listings(&fake, &soft).await).await;
+        assert!(
+            started(&after).is_empty() && debounces(&after).is_empty(),
+            "{after:?}"
+        );
+        assert!(cancelled(&after).is_empty());
+    }
+    assert!(matches!(state(&app).phase, Phase::Done { .. }));
+}

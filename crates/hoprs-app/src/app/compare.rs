@@ -779,12 +779,14 @@ impl App {
         effects
     }
 
-    /// Both panes listed and the site connected.
+    /// Both panes listed and the site connected. A background re-list in flight
+    /// ([`list_pane_soft`](Self::list_pane_soft)) keeps its rows on screen, so the pane
+    /// still counts as listed.
     fn compare_ready(&self, index: usize) -> bool {
         let tab = &self.tabs[index];
         let listed = |side| {
             tab.pane(side)
-                .is_some_and(|p| p.listing == Listing::Loaded && p.request.is_none())
+                .is_some_and(|p| p.listing == Listing::Loaded && (p.request.is_none() || p.soft))
         };
         listed(Side::Local)
             && listed(Side::Remote)

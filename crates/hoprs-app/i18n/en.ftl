@@ -67,8 +67,6 @@ palette-close-settings = Close settings
 palette-open-workspace = Open workspace…
 # $name is the open workspace: its tabs are saved, then closed.
 palette-close-all = Close all in { $name }
-# The tooltip of the mark on the open workspace in the sidebar.
-workspace-open-tip = Open
 palette-edit = Edit in editor
 palette-compare-folders = Compare folders
 palette-upload = Upload selection
@@ -98,6 +96,8 @@ new-site = New site
 no-matches = No matching sites
 menu-open-all = Open all
 menu-close-all = Close all
+# The tooltip of the mark on the open workspace in the sidebar.
+workspace-open-tip = Workspace open
 edit = Edit
 site-missing = Site missing
 cannot-load-sites = Can't load the saved sites

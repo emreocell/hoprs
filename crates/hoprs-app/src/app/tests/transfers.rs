@@ -1989,6 +1989,7 @@ async fn relist_keeps_selection_and_rename_editor() {
     );
     let r_row = row_of(&app, Side::Remote, "r.txt");
     app.update(pane_msg(tab, Side::Remote, PaneMsg::Click(r_row)));
+    app.update(pane_msg(tab, Side::Remote, PaneMsg::Hover(r_row)));
     app.update(pane_msg(
         tab,
         Side::Remote,
@@ -2011,6 +2012,8 @@ async fn relist_keeps_selection_and_rename_editor() {
     );
     assert_eq!(pane.selection.cursor, Some(moved));
     assert_eq!(pane.offset_y, 12.0);
+    // The hover is where the pointer is: the same row, now another entry.
+    assert_eq!(pane.hovered, Some(r_row));
 
     // F2 on r.txt, a name typed; then b.txt lands.
     app.update(pane_msg(tab, Side::Remote, PaneMsg::Rename));
@@ -2208,6 +2211,8 @@ async fn failed_background_relist_keeps_the_rows_unless_the_folder_is_gone() {
 
     finish(&mut app, 3, 2, TransferState::Done);
     let (t, side, request_id) = the_listing(&app.update(Message::RelistPanes));
+    // As for any failed listing, an Open's suppression ends once nothing is pending.
+    app.tabs[0].compare_mut().unwrap().suppress_auto = true;
     app.update(Message::Listed {
         tab: t,
         side,
@@ -2218,6 +2223,7 @@ async fn failed_background_relist_keeps_the_rows_unless_the_folder_is_gone() {
         app.tabs[0].remote().listing,
         Listing::Failed(ref e) if e.kind == ErrorKind::NotFound
     ));
+    assert!(!app.tabs[0].compare().unwrap().suppress_auto);
 }
 
 /// A menu opened on a row while a background re-list is out stays open on the same entry
@@ -2274,4 +2280,66 @@ async fn background_relist_keeps_an_open_menu() {
         .unwrap();
     deliver(&mut app, &fake, &effects).await;
     assert!(app.menu.is_none());
+}
+
+/// The hover stays on the pointer's row through a background re-list; a row the shorter
+/// list no longer has is hovered no more.
+#[tokio::test]
+async fn background_relist_drops_a_hover_past_the_last_row() {
+    let (fake, mut app, a, tab) = transfer_tab().await;
+    synced(
+        &mut app,
+        1,
+        vec![moving(
+            1,
+            &a.id,
+            Direction::Upload,
+            "/home/me/a.txt",
+            "/srv/a.txt",
+        )],
+    );
+    finish(&mut app, 2, 1, TransferState::Done);
+    let effects = app.update(Message::RelistPanes);
+    assert_eq!(listings(&effects).len(), 1);
+    let past = app.tabs[0].remote().row_count() + 3;
+    app.update(pane_msg(tab, Side::Remote, PaneMsg::Hover(past)));
+    deliver(&mut app, &fake, &effects).await;
+    assert_eq!(app.tabs[0].remote().hovered, None);
+}
+
+/// A pane whose last background re-list was slow waits at least that long before the
+/// next one (FTP during a burst).
+#[tokio::test]
+async fn a_slow_relist_lengthens_the_next_delay() {
+    let (_fake, mut app, a, _tab) = transfer_tab().await;
+    synced(
+        &mut app,
+        1,
+        vec![
+            moving(1, &a.id, Direction::Upload, "/home/me/a.txt", "/srv/a.txt"),
+            moving(2, &a.id, Direction::Upload, "/home/me/b.txt", "/srv/b.txt"),
+        ],
+    );
+    let effects = finish(&mut app, 2, 1, TransferState::Done);
+    assert_eq!(relist_ticks(&effects), 1);
+    let (t, side, request_id) = the_listing(&app.update(Message::RelistPanes));
+    app.update(Message::Listed {
+        tab: t,
+        side,
+        request_id,
+        result: Ok(Vec::new()),
+    });
+    let slow = std::time::Duration::from_secs(3);
+    app.tabs[0].pane_mut(Side::Remote).unwrap().soft_took = slow;
+    let effects = finish(&mut app, 3, 2, TransferState::Done);
+    let delays: Vec<_> = effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Later { after, message } if matches!(**message, Message::RelistPanes) => {
+                Some(*after)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(delays, [slow]);
 }
