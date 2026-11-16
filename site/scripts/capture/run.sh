@@ -102,7 +102,7 @@ install -m 600 /fixture/id_ed25519 "$H/.ssh/id_ed25519"
 ssh-keyscan -p 2222 build.example > "$H/.ssh/known_hosts" 2>/dev/null
 cp /capture/sites.toml "$H/.config/hoprs/sites.toml"
 d=$H/projects/web-app
-mkdir -p "$d"/{src/components,src/pages,assets/img,dist/assets,scripts}
+mkdir -p "$d"/{src/components,src/pages,assets/img,assets/fonts,dist/assets,config,logs}
 cd "$d"
 printf 'export default {};\n' > src/main.ts
 for f in Header Footer Nav Card; do printf 'export default function %s() { return null; }\n' "$f" > "src/components/$f.tsx"; done
@@ -121,12 +121,22 @@ printf '# Changelog\n\n## 2.4.1\n\n- Fix the pricing page on narrow screens.\n' 
 printf 'node_modules\ndist\n.env\n' > .gitignore
 printf '<!doctype html>\n' > index.html
 printf '{ "compilerOptions": { "strict": true } }\n' > tsconfig.json
-printf 'export default {};\n' > vite.config.ts
-printf '#!/usr/bin/env bash\n' > scripts/release.sh
+# README shots: most of the project exists on both sides, so the compare panel shows a short
+# "Only on this computer" group (CHANGELOG, dist, the 64 MB tarball), one server-only folder
+# (releases/) and a "Different" group (size or time differs); the rest is identical.
+printf 'export default {};\n' > src/pages/about.tsx
+printf 'export default {};\n' > src/pages/pricing.tsx
+printf 'export function render(el) {\n  el.textContent = "ok";\n}\n' > src/render.ts
+head -c 40960 /dev/urandom > assets/img/logo.png
+head -c 98304 /dev/urandom > assets/fonts/inter.woff2
+printf 'PORT=3000\nDEBUG=1\n' > config/app.env
+for i in $(seq 1 120); do echo "127.0.0.1 - - [12/Nov/2026:10:$((i % 60)):00 +0000] \"GET / HTTP/1.1\" 200 512"; done > logs/access.log
+for i in $(seq 1 12); do echo "2026/11/12 10:$((i % 60)):00 [warn] upstream timed out"; done > logs/error.log
 head -c 67108864 /dev/urandom > web-app-2.4.1.tar.gz
-touch -d '2026-10-02 09:14' src src/* src/*/* tsconfig.json .gitignore vite.config.ts scripts scripts/*
+touch -d '2026-10-02 09:14' src src/* src/*/* tsconfig.json .gitignore
 touch -d '2026-10-21 16:40' assets assets/* assets/*/* index.html README.md
-touch -d '2026-11-03 11:05' nginx.conf package.json package-lock.json deploy.sh
+touch -d '2026-11-03 11:05' nginx.conf package.json package-lock.json deploy.sh config config/*
+touch -d '2026-11-12 09:10' logs logs/*
 touch -d '2026-11-14 09:31' dist dist/* dist/*/* CHANGELOG.md web-app-2.4.1.tar.gz
 chown -R dev:dev "$H"
 LOCAL
@@ -166,14 +176,10 @@ sleep 3
 
 echo "==> files tab: one finished upload, one in flight"
 click 968 40                 # tab: "build server sftp"
-sleep 2
-click 640 678                # local: CHANGELOG.md
+sleep 6                      # the listings and the folder comparison settle
+click 640 738                # local: CHANGELOG.md
 x xdotool key ctrl+Return    # Upload
-sleep 2
-click 2200 618 2             # remote: into src/ and back to .., which re-lists the folder
-sleep 1.5
-click 2200 318 2
-sleep 1.5
+sleep 5                      # the listings and the comparison refresh by themselves
 # ls -la in the terminal tab now, before the throttle below slows the keystrokes down.
 click 660 40                 # tab: "build server ssh"
 sleep 1
@@ -185,21 +191,31 @@ for line in 'clear' 'cd web-app && ls -la'; do
 done
 sleep 0.5
 click 968 40
-sleep 1
+sleep 2
+click 2200 618 2             # remote: into src/ and back to .., which re-lists both folders
+sleep 1.5
+click 2200 318 2
+sleep 4
 # Slow the server's inbound traffic so the big upload is still running when captured.
 docker run --rm --net "container:$sshd" --cap-add NET_ADMIN --entrypoint sh hoprs-test-sshd -c \
     'tc qdisc del dev eth0 ingress 2>/dev/null; tc qdisc add dev eth0 handle ffff: ingress &&
      tc filter add dev eth0 parent ffff: protocol ip u32 match u32 0 0 police rate 24mbit burst 256k drop flowid :1'
-click 640 1218               # local: web-app-2.4.1.tar.gz
+x xdotool mousemove 1200 800 # scroll the local list to its end
+x xdotool click 5
+sleep 1
+click 640 1048               # local: web-app-2.4.1.tar.gz
 x xdotool key ctrl+Return
-x xdotool mousemove 2400 1500 # pointer off the rows: no hover tint in the shot
-sleep 9
+x xdotool mousemove 1200 800 # back to the top of the list: no half-cut first row
+x xdotool click 4
+sleep 1
+x xdotool mousemove 2400 1750 # pointer off the rows: no hover tint in the shot
+sleep 8
 shoot main
 
 echo "==> terminal tab"
 click 660 40                 # tab: "build server ssh"
 until_white 540 78           # its underline
-x xdotool mousemove 2400 1500
+x xdotool mousemove 2400 1750
 sleep 1
 shoot split
 
