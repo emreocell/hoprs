@@ -151,7 +151,7 @@ impl App {
         self.drag
             .and_then(|d| self.tab_index(d.tab).zip(Some(d.from)))
             .and_then(|(index, side)| self.tabs[index].pane(side))
-            .map_or(0, |pane| pane.selected_entries().len())
+            .map_or(0, |pane| pane.selected_count())
     }
 
     /// What a drop would do, for the target pane: "Upload 2 items to /srv",

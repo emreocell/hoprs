@@ -55,12 +55,12 @@ pub struct Ghost {
 pub fn ghost(app: &App) -> Option<Ghost> {
     let drag = app.drag.filter(|d| d.active)?;
     let index = app.tab_index(drag.tab)?;
-    let entries = app.tabs[index].pane(drag.from)?.selected_entries();
-    let first = entries.first()?;
+    let pane = app.tabs[index].pane(drag.from)?;
+    let first = pane.first_selected_entry()?;
     Some(Ghost {
         icon: icons::for_entry(&first.name, first.kind),
         name: first.name.clone(),
-        more: entries.len() - 1,
+        more: pane.selected_count() - 1,
     })
 }
 
@@ -272,6 +272,33 @@ mod tests {
         );
         app.update(Message::DragCancel);
         assert_eq!(ghost(&app), None);
+    }
+
+    /// The drag's cheap count and first entry agree with the full selection, with `..`
+    /// and a row past the listing (left by a shorter relist) selected too.
+    #[tokio::test]
+    async fn selected_count_matches_selected_entries() {
+        let (_fake, app, _a, _tab) = transfer_tab().await;
+        let mut pane = app.tabs[0].pane(Side::Local).unwrap().clone();
+        assert!(pane.has_up());
+        let b = row_of(&app, Side::Local, "b.txt");
+        let a = row_of(&app, Side::Local, "a.txt");
+        for rows in [
+            vec![],
+            vec![0],
+            vec![b],
+            vec![0, a, b],
+            vec![a, b, pane.row_count(), pane.row_count() + 5],
+        ] {
+            pane.selection.rows = rows.iter().copied().collect();
+            let full = pane.selected_entries();
+            assert_eq!(pane.selected_count(), full.len(), "{rows:?}");
+            assert_eq!(
+                pane.first_selected_entry(),
+                full.first().copied(),
+                "{rows:?}"
+            );
+        }
     }
 
     #[tokio::test]
