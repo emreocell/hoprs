@@ -306,10 +306,12 @@ pub(crate) fn lost_banner<'a>(app: &'a App, tab: &'a Tab) -> Option<Element<'a, 
     } else {
         strings::reconnect()
     };
-    let reconnect = button(text(label))
-        .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
-        .style(theme::button_outline)
-        .on_press_maybe((!conn.reconnecting).then_some(Message::ReconnectSession(tab.id)));
+    let reconnect = widgets::outlined(
+        button(text(label))
+            .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
+            .on_press_maybe((!conn.reconnecting).then_some(Message::ReconnectSession(tab.id))),
+        !conn.reconnecting,
+    );
     Some(
         container(
             row![reason, space::horizontal(), reconnect]

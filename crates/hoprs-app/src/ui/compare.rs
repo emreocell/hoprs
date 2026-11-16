@@ -581,14 +581,17 @@ fn diff_row<'a>(
 fn foot(id: TabId, f: Footer, compact: bool) -> Element<'static, Message> {
     let p = palette();
     let button_of = |label: &'static str, on: Option<CompareMsg>| {
-        button(
-            text(label)
-                .size(theme::TEXT_XS)
-                .wrapping(text::Wrapping::None),
+        let enabled = on.is_some();
+        widgets::outlined(
+            button(
+                text(label)
+                    .size(theme::TEXT_XS)
+                    .wrapping(text::Wrapping::None),
+            )
+            .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
+            .on_press_maybe(on.map(Message::Compare)),
+            enabled,
         )
-        .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_XS]))
-        .style(theme::button_outline)
-        .on_press_maybe(on.map(Message::Compare))
     };
     let mut bar = row![
         container(

@@ -105,17 +105,19 @@ pub fn tool_button<'a>(
         .on_press_maybe(on_press)
 }
 
-/// An outlined text button; while disabled (`on_press` is `None`) its outline is dashed.
-#[allow(dead_code)] // No caller yet: the dashed disabled outline waits for a dialog that needs it.
-pub fn outline_button<'a>(label: &'a str, on_press: Option<Message>) -> Element<'a, Message> {
-    // `disabled` (about 3:1 on `paper`): `rule_2` was too faint to read as dashes.
-    let dash = on_press.is_none().then(|| palette().disabled);
+/// The dash colour of an outline button: `disabled` (about 3:1 on `paper`, since `rule_2`
+/// was too faint to read as dashes) while it cannot be pressed, none while it can.
+pub fn outline_dash(enabled: bool) -> Option<iced::Color> {
+    (!enabled).then(|| palette().disabled)
+}
+
+/// An outline-style `button`, solid while `enabled` and dashed once it is disabled (give it
+/// `on_press_maybe` with the same condition). Takes any button, so icons and custom
+/// padding keep their layout.
+pub fn outlined<'a>(button: button::Button<'a, Message>, enabled: bool) -> Element<'a, Message> {
     dashed(
-        button(text(label))
-            .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
-            .style(theme::button_outline_dashed)
-            .on_press_maybe(on_press),
-        dash,
+        button.style(theme::button_outline_dashed),
+        outline_dash(enabled),
     )
 }
 
@@ -250,4 +252,25 @@ pub fn busy<'a>(label: &'a str, phase: u32) -> Element<'a, Message> {
     column![text(label).size(theme::TEXT_SM).color(palette().muted), bar]
         .spacing(theme::SPACE_XS)
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iced::widget::button as iced_button;
+
+    #[test]
+    fn a_disabled_outline_button_is_dashed_and_an_enabled_one_solid() {
+        let p = palette();
+        assert_eq!(outline_dash(false), Some(p.disabled));
+        assert_eq!(outline_dash(true), None);
+        // The wrapped button's own border is transparent only while disabled, so the
+        // dashes are the outline and nothing shifts.
+        let style = |status| theme::button_outline_dashed(&iced::Theme::Dark, status);
+        assert_eq!(
+            style(iced_button::Status::Disabled).border.color,
+            iced::Color::TRANSPARENT
+        );
+        assert_eq!(style(iced_button::Status::Active).border.color, p.rule);
+    }
 }

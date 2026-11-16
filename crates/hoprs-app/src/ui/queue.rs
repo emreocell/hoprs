@@ -29,6 +29,9 @@ const BAR_WIDTH: f32 = 180.0;
 const PERCENT_WIDTH: f32 = 48.0;
 const SPEED_WIDTH: f32 = 96.0;
 const STATUS_WIDTH: f32 = BAR_WIDTH + PERCENT_WIDTH + SPEED_WIDTH + 2.0 * theme::SPACE_MD;
+/// The row actions: the icon ones need only about 3 x 22 px, but a conflict row keeps text
+/// answers (Skip, Overwrite, Resume) beside its Cancel, so the column keeps room for those
+/// and every row lines up.
 const ACTIONS_WIDTH: f32 = 236.0;
 /// The rows' part of the 210 px region: the rest is the head and its two rules.
 const BODY_MAX_HEIGHT: f32 = QUEUE_MAX_HEIGHT - QUEUE_HEAD_HEIGHT - 2.0 * theme::HAIRLINE;

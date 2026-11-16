@@ -18,7 +18,7 @@ use crate::settings::{
 use crate::ui::site_form::Password;
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
-use crate::ui::widgets::{busy, confirm_with, failure, field};
+use crate::ui::widgets::{self, busy, confirm_with, failure, field};
 
 fn msg(m: SettingsMsg) -> Message {
     Message::Settings(m)
@@ -129,11 +129,13 @@ fn primary(label: &str, on_press: Option<Message>) -> Element<'_, Message> {
 }
 
 fn outlined(label: &str, on_press: Option<Message>) -> Element<'_, Message> {
-    button(text(label))
-        .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_SM]))
-        .style(theme::button_outline)
-        .on_press_maybe(on_press)
-        .into()
+    let enabled = on_press.is_some();
+    widgets::outlined(
+        button(text(label))
+            .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_SM]))
+            .on_press_maybe(on_press),
+        enabled,
+    )
 }
 
 fn plain(label: &str, on_press: Option<Message>) -> Element<'_, Message> {

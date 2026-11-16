@@ -496,7 +496,6 @@ mod tests {
         "palette-key-find",
         "ssh-options",
         "ftp-options",
-        "close-tab",
         // Terms kept in English, or words that are the same in Portuguese.
         "palette-group-site",
         "palette-group-workspace",
@@ -520,8 +519,6 @@ mod tests {
         "path-separator",
         "home-dir",
         "no-size",
-        "upload-arrow",
-        "download-arrow",
         "key-new-folder",
         "key-rename",
         "key-delete",
