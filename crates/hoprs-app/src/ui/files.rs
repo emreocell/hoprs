@@ -25,12 +25,13 @@ use crate::ui::{file_actions, format, strings};
 
 /// The path bar (mockup `.path`: 38 px).
 const PATH_HEIGHT: f32 = 38.0;
-/// The toolbar's height (its 22 px buttons with padding; estimated, nothing fixes it).
-const TOOLBAR_HEIGHT: f32 = 36.0;
-/// The column header's height (a 12 px label with padding; estimated).
-const HEADER_HEIGHT: f32 = 28.0;
+/// The toolbar's height (a row of [`ROW_HEIGHT`], see `file_actions::toolbar`).
+const TOOLBAR_HEIGHT: f32 = ROW_HEIGHT;
+/// The column header's height: fixed on its row (a 12 px label with 8 px padding fits).
+const HEADER_HEIGHT: f32 = 32.0;
 /// The least a files tab gives its two panes: the chrome (the focus line, the path bar,
-/// the toolbar, the column header and their four rules) and five rows.
+/// the toolbar, the column header and their rules) and five rows. The transient bars of
+/// `file_actions::bars` (errors, hints) and the new-folder row are not counted.
 pub const PANES_MIN_HEIGHT: f32 = theme::HAIRLINE
     + PATH_HEIGHT
     + TOOLBAR_HEIGHT
@@ -636,7 +637,7 @@ fn header<'a>(
             .padding(Padding::from([theme::SPACE_XS, theme::SPACE_MD])),
         );
     }
-    cells.into()
+    cells.height(HEADER_HEIGHT).into()
 }
 
 fn list<'a>(

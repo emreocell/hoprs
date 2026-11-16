@@ -167,6 +167,9 @@ pub struct Settings {
     pub queue_height: f32,
 }
 
+/// Keys [`file_of`] leaves out when they hold their default.
+const OPTIONAL_KEYS: [&str; 1] = ["compare_height"];
+
 /// The largest height a saved panel size may have.
 const PANEL_HEIGHT_MAX: f32 = 10_000.0;
 
@@ -176,7 +179,8 @@ fn panel_height(value: Option<toml::Value>) -> Option<f32> {
         toml::Value::Float(f) => f as f32,
         toml::Value::Integer(i) => i as f32,
         _ => return None,
-    };
+    }
+    .round();
     (height.is_finite() && height > 0.0 && height <= PANEL_HEIGHT_MAX).then_some(height)
 }
 
@@ -490,6 +494,12 @@ fn render_over(existing: &str, settings: &Settings) -> Result<String> {
     {
         ours.remove("language");
     }
+    // An optional key that is now at its default is written by nobody: drop the old one.
+    for key in OPTIONAL_KEYS {
+        if !ours.contains_key(key) {
+            table.remove(key);
+        }
+    }
     table.extend(ours);
     Ok(toml::to_string(&table).expect("a parsed table always serializes"))
 }
@@ -630,7 +640,7 @@ mod tests {
     #[test]
     fn panel_heights_roundtrip_and_invalid() {
         let tall = Settings {
-            compare_height: Some(240.5),
+            compare_height: Some(241.0),
             queue_height: 300.0,
             ..Settings::default()
         };
@@ -649,14 +659,32 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.toml");
-        std::fs::write(&path, "future_key = 1\ncompare_height = 240.5\n").unwrap();
+        std::fs::write(&path, "future_key = 1\ncompare_height = 241.0\n").unwrap();
         let loaded = load(&path).settings;
-        assert_eq!(loaded.compare_height, Some(240.5));
+        assert_eq!(loaded.compare_height, Some(241.0));
         save(&path, &loaded).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("future_key = 1"), "{text}");
-        assert!(text.contains("compare_height = 240.5"), "{text}");
+        assert!(text.contains("compare_height = 241.0"), "{text}");
         assert!(text.contains("queue_height = 210.0"), "{text}");
+    }
+
+    #[test]
+    fn resetting_compare_height_removes_the_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        std::fs::write(&path, "future_key = 1\n").unwrap();
+        let mut s = load(&path).settings;
+        s.compare_height = Some(240.3);
+        save(&path, &s).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("compare_height = 240.0"), "{text}");
+        s.compare_height = None;
+        save(&path, &s).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("compare_height"), "{text}");
+        assert!(text.contains("future_key = 1"), "{text}");
+        assert_eq!(load(&path).settings.compare_height, None);
     }
 
     #[test]
