@@ -1329,3 +1329,33 @@ fn close_other_tabs_ignored_while_closing() {
     );
     assert!(app.settings_tab.is_some());
 }
+
+/// While the window closes, where the lists are and how far they scrolled still get
+/// stored (the bounds reporter would otherwise publish them again every event); the
+/// user's input stays ignored.
+#[tokio::test]
+async fn lists_placed_and_scrolled_while_closing() {
+    let (_fake, mut app, _a, tab) = transfer_tab().await;
+    app.closing = true;
+    let bounds = iced::Rectangle::new(Point::new(300.0, 200.0), Size::new(400.0, 600.0));
+    assert!(
+        app.update(pane_msg(tab, Side::Local, PaneMsg::Placed(bounds)))
+            .is_empty()
+    );
+    assert_eq!(app.tabs[0].local().bounds, bounds);
+    app.update(pane_msg(
+        tab,
+        Side::Local,
+        PaneMsg::Scrolled {
+            offset_y: 30.0,
+            viewport_h: 500.0,
+        },
+    ));
+    assert_eq!(app.tabs[0].local().offset_y, 30.0);
+    app.update(Message::Queue(QueueMsg::Scrolled { offset_y: 12.0 }));
+    assert_eq!(app.queue.offset_y, 12.0);
+    // A click is still dropped.
+    let before = app.tabs[0].local().selection.clone();
+    app.update(pane_msg(tab, Side::Local, PaneMsg::Click(1)));
+    assert_eq!(app.tabs[0].local().selection, before);
+}
