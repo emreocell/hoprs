@@ -34,9 +34,13 @@ pub fn hint<'a>(label: &'a str, shortcut: Option<&'a str>) -> Element<'a, Messag
         .into()
 }
 
-/// `content` with a tooltip of `label` (no shortcut) below it.
-pub fn tip<'a>(content: impl Into<Element<'a, Message>>, label: &'a str) -> Element<'a, Message> {
-    tooltip(content, hint(label, None), tooltip::Position::Bottom).into()
+/// `content` with a tooltip of `label` and `shortcut` below it.
+pub fn tip<'a>(
+    content: impl Into<Element<'a, Message>>,
+    label: &'a str,
+    shortcut: Option<&'a str>,
+) -> Element<'a, Message> {
+    tooltip(content, hint(label, shortcut), tooltip::Position::Bottom).into()
 }
 
 /// An icon-only button, at least [`ICON_HIT`] square, with a tooltip of `label` and

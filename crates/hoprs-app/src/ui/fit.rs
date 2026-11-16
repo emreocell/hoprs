@@ -24,9 +24,12 @@ const TOOLBAR_FULL_REMOTE: f32 = 612.0;
 /// "Permissões…").
 const TOOLBAR_FULL_REMOTE_PT: f32 = 632.0;
 const TOOLBAR_FULL_LOCAL: f32 = 460.0;
-/// Below this pane width (either side) the toolbar shows icons only (labels and keys in
-/// the tooltips): with icons the six remote actions need ~505 px with labels.
-const TOOLBAR_NARROW: f32 = 510.0;
+/// Below these pane widths the toolbar shows icons only (labels and keys in the
+/// tooltips). The labelled remote toolbar needs ~505 px (more in Portuguese, ~525 px) and
+/// the local one ~365 px, estimated, not measured: each threshold has a margin of 24 px.
+const TOOLBAR_NARROW_REMOTE: f32 = 530.0;
+const TOOLBAR_NARROW_REMOTE_PT: f32 = 550.0;
+const TOOLBAR_NARROW_LOCAL: f32 = 390.0;
 /// Below this center width the queue head uses short labels.
 const QUEUE_HEAD_FULL: f32 = 900.0;
 
@@ -120,16 +123,22 @@ impl Toolbar {
 
 /// The toolbar form for a pane `pane` px wide.
 pub fn toolbar(pane: f32, side: Side) -> Toolbar {
-    let full = match side {
-        Side::Local => TOOLBAR_FULL_LOCAL,
-        Side::Remote if crate::i18n::language() == crate::i18n::Language::PtBr => {
-            TOOLBAR_FULL_REMOTE_PT
-        }
-        Side::Remote => TOOLBAR_FULL_REMOTE,
+    let pt = crate::i18n::language() == crate::i18n::Language::PtBr;
+    let (full, narrow) = match side {
+        Side::Local => (
+            TOOLBAR_FULL_LOCAL,
+            if pt {
+                TOOLBAR_NARROW_LOCAL + 15.0
+            } else {
+                TOOLBAR_NARROW_LOCAL
+            },
+        ),
+        Side::Remote if pt => (TOOLBAR_FULL_REMOTE_PT, TOOLBAR_NARROW_REMOTE_PT),
+        Side::Remote => (TOOLBAR_FULL_REMOTE, TOOLBAR_NARROW_REMOTE),
     };
     if pane >= full {
         Toolbar::Full
-    } else if pane >= TOOLBAR_NARROW {
+    } else if pane >= narrow {
         Toolbar::Compact
     } else {
         Toolbar::Narrow
@@ -298,14 +307,34 @@ mod tests {
         }
     }
 
-    /// The Portuguese labels are wider: the remote toolbar needs 20 px more for its hints.
+    /// The Portuguese labels are wider: the remote toolbar needs more room for its hints
+    /// and for its labels (Compact), each with a margin.
     #[test]
     fn remote_toolbar_needs_more_room_in_portuguese() {
         crate::i18n::set_language(crate::i18n::Language::PtBr);
-        assert_eq!(toolbar(pane_width(1500.0), Side::Remote), Toolbar::Compact);
-        assert_eq!(toolbar(pane_width(1520.0), Side::Remote), Toolbar::Full);
+        assert_eq!(
+            toolbar(TOOLBAR_FULL_REMOTE_PT - 1.0, Side::Remote),
+            Toolbar::Compact
+        );
+        assert_eq!(toolbar(TOOLBAR_FULL_REMOTE_PT, Side::Remote), Toolbar::Full);
+        assert_eq!(
+            toolbar(TOOLBAR_NARROW_REMOTE_PT - 1.0, Side::Remote),
+            Toolbar::Narrow
+        );
+        assert_eq!(
+            toolbar(TOOLBAR_NARROW_REMOTE_PT, Side::Remote),
+            Toolbar::Compact
+        );
+        // English has its own, smaller boundaries.
         crate::i18n::set_language(crate::i18n::Language::En);
-        assert_eq!(toolbar(pane_width(1480.0), Side::Remote), Toolbar::Full);
+        assert_eq!(
+            toolbar(TOOLBAR_NARROW_REMOTE_PT - 1.0, Side::Remote),
+            Toolbar::Compact
+        );
+        assert_eq!(
+            toolbar(TOOLBAR_FULL_REMOTE_PT - 1.0, Side::Remote),
+            Toolbar::Full
+        );
     }
 
     #[test]
@@ -313,10 +342,24 @@ mod tests {
         // Every button has a 16 px icon, so the hints need wider panes than before.
         assert_eq!(toolbar(pane_width(1480.0), Side::Remote), Toolbar::Full);
         assert_eq!(toolbar(pane_width(1440.0), Side::Remote), Toolbar::Compact);
+        assert_eq!(
+            toolbar(TOOLBAR_NARROW_REMOTE, Side::Remote),
+            Toolbar::Compact
+        );
+        assert_eq!(
+            toolbar(TOOLBAR_NARROW_REMOTE - 1.0, Side::Remote),
+            Toolbar::Narrow
+        );
         assert_eq!(toolbar(pane_width(1180.0), Side::Local), Toolbar::Full);
-        assert_eq!(toolbar(pane_width(1280.0), Side::Remote), Toolbar::Compact);
+        assert_eq!(toolbar(TOOLBAR_NARROW_LOCAL, Side::Local), Toolbar::Compact);
+        assert_eq!(
+            toolbar(TOOLBAR_NARROW_LOCAL - 1.0, Side::Local),
+            Toolbar::Narrow
+        );
+        // The default 1280 px window (512 px panes): the remote side is icons only, with
+        // the margin the labelled form needs.
+        assert_eq!(toolbar(pane_width(1280.0), Side::Remote), Toolbar::Narrow);
         assert_eq!(toolbar(pane_width(1280.0), Side::Local), Toolbar::Full);
-        assert_eq!(toolbar(pane_width(1200.0), Side::Remote), Toolbar::Narrow);
         // At the 960 px minimum (352 px panes) both toolbars are icons only.
         assert_eq!(toolbar(pane_width(960.0), Side::Remote), Toolbar::Narrow);
         assert_eq!(toolbar(pane_width(960.0), Side::Local), Toolbar::Narrow);

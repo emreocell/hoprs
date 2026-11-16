@@ -43,7 +43,7 @@ real display.
    the focused pane (white) and in the other pane (grey); long names end in "…" with the
    full name on hover (and no tooltip on names that fit); a deep path in the path bar
    keeps its first and last folders with "…" between (hover shows the whole path). The
-   toolbar buttons have icons; below about 1280 px windows the key hints go, and at about
-   1200 px and under the buttons are icons only with their label and key on hover. In the
+   toolbar buttons have icons; below about a 1480 px window the key hints go, and under about
+   1320 px (the default 1280 px window) the remote buttons are icons only with their label and key on hover. In the
    compare panel: group headers have icons, rows have kind icons and a selection bar, the
    collapse and close buttons are icons.

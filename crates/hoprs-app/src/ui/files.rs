@@ -414,6 +414,19 @@ fn centered(content: Element<'_, Message>) -> Element<'_, Message> {
         .into()
 }
 
+/// Where the separators go between the kept crumbs of [`fit_crumbs`]: `(separator
+/// before, item)` for each. The root "/" is itself the separator after it, so none is
+/// drawn right after it (`/…/src`, `/home`).
+fn crumb_layout(kept: &[Option<usize>], root_first: bool) -> Vec<(bool, Option<usize>)> {
+    kept.iter()
+        .enumerate()
+        .map(|(n, entry)| {
+            let after_root = root_first && n == 1;
+            (n > 0 && !after_root, *entry)
+        })
+        .collect()
+}
+
 /// "Local" or the site's name (with its icon), then the clickable breadcrumb in mono,
 /// elided in the middle when the pane is too narrow for it.
 fn path_bar<'a>(
@@ -439,33 +452,29 @@ fn path_bar<'a>(
     let kept = fit_crumbs(&all, max_chars);
     let root_first = crumb_is_root(&pane.path, home);
     let mut crumbs = row![].align_y(Alignment::Center);
-    let mut previous: Option<usize> = None;
     let separator = || {
         text(strings::path_separator())
             .font(theme::MONO)
             .size(theme::TEXT_MONO)
             .color(p.rule_2)
     };
-    for entry in kept {
+    for (sep, entry) in crumb_layout(&kept, root_first) {
+        if sep {
+            crumbs = crumbs.push(separator());
+        }
         let Some(i) = entry else {
             // The elided middle: "…" with the whole path on hover.
-            crumbs = crumbs.push(separator()).push(widgets::tip(
+            crumbs = crumbs.push(widgets::tip(
                 text(strings::ellipsis())
                     .font(theme::MONO)
                     .size(theme::TEXT_MONO)
                     .color(p.muted),
                 pane.path.as_str(),
+                None,
             ));
-            previous = None;
             continue;
         };
         let crumb = &all[i];
-        // The root "/" is itself the separator before the first folder.
-        let after_root = i == 1 && root_first && previous == Some(0);
-        if i > 0 && !after_root {
-            crumbs = crumbs.push(separator());
-        }
-        previous = Some(i);
         crumbs = crumbs.push(
             button(
                 text(crumb.label.clone())
@@ -542,7 +551,15 @@ fn header<'a>(
         });
         button(label)
             .width(width)
-            .padding(Padding::from([theme::SPACE_XS, theme::SPACE_MD]))
+            .padding(Padding {
+                left: if key == SortKey::Name {
+                    // In line with the names: past the selection bar and the kind icon.
+                    theme::SPACE_MD + SELECTION_BAR + icons::ROW + theme::SPACE_XS
+                } else {
+                    theme::SPACE_MD
+                },
+                ..Padding::from([theme::SPACE_XS, theme::SPACE_MD])
+            })
             .style(theme::header_cell)
             .on_press(msg(PaneMsg::Sort(key)))
     };
@@ -693,7 +710,7 @@ fn file_row<'a>(
         .wrapping(text::Wrapping::None)
         .into();
     let name_text = if cut {
-        widgets::tip(name_text, name)
+        widgets::tip(name_text, name, None)
     } else {
         name_text
     };
@@ -935,6 +952,25 @@ mod tests {
         assert_eq!(all.len(), 7);
         assert!(all.iter().all(Option::is_some));
         assert_eq!(fit_crumbs(&crumbs[..2], 1), [Some(0), Some(1)]);
+    }
+
+    #[test]
+    fn crumb_layout_has_no_double_slash_after_root() {
+        // `/…/src`: the root, the gap, then a separator only before src.
+        assert_eq!(
+            crumb_layout(&[Some(0), None, Some(5)], true),
+            [(false, Some(0)), (false, None), (true, Some(5))]
+        );
+        // `/home/me`.
+        assert_eq!(
+            crumb_layout(&[Some(0), Some(1), Some(2)], true),
+            [(false, Some(0)), (false, Some(1)), (true, Some(2))]
+        );
+        // From `~`: separators everywhere but first.
+        assert_eq!(
+            crumb_layout(&[Some(0), Some(1)], false),
+            [(false, Some(0)), (true, Some(1))]
+        );
     }
 
     fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {

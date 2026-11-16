@@ -515,7 +515,7 @@ fn diff_row<'a>(
         .wrapping(text::Wrapping::None)
         .into();
     let path = if cut {
-        widgets::tip(path, &row_data.diff.path)
+        widgets::tip(path, &row_data.diff.path, None)
     } else {
         path
     };

@@ -187,7 +187,7 @@ fn edit_action<'a>(
             tooltip::Position::Bottom,
         )
         .into(),
-        _ if icon_only => widgets::tip(button, strings::edit_file()),
+        _ if icon_only => widgets::tip(button, strings::edit_file(), Some(strings::key_edit())),
         _ => button.into(),
     }
 }
