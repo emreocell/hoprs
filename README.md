@@ -1,20 +1,45 @@
-# hoprs
+<p align="center">
+  <img src="crates/hoprs-app/assets/icon/hoprs.svg" width="96" height="96" alt="hoprs logo">
+</p>
 
-Website: https://hoprs.online
+<h1 align="center">hoprs</h1>
 
-A fast, native SSH, SFTP, FTP and FTPS desktop client for Linux, macOS and Windows, written in Rust.
+<p align="center">
+  <strong>SSH, SFTP and FTP in one window.</strong><br>
+  A fast, native SSH, SFTP, FTP and FTPS desktop client for Linux, macOS and Windows, written in Rust.
+</p>
+
+<p align="center">
+  <a href="https://github.com/engviniciusbs/hoprs/releases/latest"><img src="https://img.shields.io/github/v/release/engviniciusbs/hoprs?label=release&color=f5f5f5&labelColor=141414" alt="Latest release"></a>
+  <a href="https://github.com/engviniciusbs/hoprs/actions/workflows/ci.yml"><img src="https://github.com/engviniciusbs/hoprs/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-f5f5f5?labelColor=141414" alt="License: MIT OR Apache-2.0"></a>
+  <img src="https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-f5f5f5?labelColor=141414" alt="Platforms: Linux, macOS, Windows">
+</p>
+
+<p align="center">
+  <a href="https://hoprs.online">Website</a> ·
+  <a href="https://github.com/engviniciusbs/hoprs/releases/latest">Download</a> ·
+  <a href="#first-steps">First steps</a> ·
+  <a href="CHANGELOG.md">Changelog</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a>
+</p>
+
+![hoprs: a saved SSH site open with the local and remote folders side by side, the folder compare panel listing the differences, and an upload running in the transfer queue](docs/images/files.png)
 
 hoprs keeps the idea that made FileZilla useful (a list of saved sites you open with one
-click) and puts a terminal, a two-pane file browser and a persistent transfer queue behind
-it, in one quiet window that opens in under 100 ms and idles at about 33 MB.
+click) and puts a terminal, a two-pane file browser, folder compare and a persistent
+transfer queue behind it, in one quiet window that opens in under 100 ms and idles at about
+33 MB.
 
 - **Version:** 1.2.0 ([changelog](CHANGELOG.md))
 - **Platforms:** Linux (Ubuntu 24.04 or newer, amd64), macOS 11 or newer (Apple Silicon and Intel), Windows 10 or newer (x64).
+- **Languages:** English and Brazilian Portuguese.
 - **License:** MIT OR Apache-2.0
 
 ## Contents
 
 - [Features](#features)
+- [Screenshots](#screenshots)
 - [Install](#install)
 - [First steps](#first-steps)
 - [Using hoprs](#using-hoprs)
@@ -65,6 +90,18 @@ it, in one quiet window that opens in under 100 ms and idles at about 33 MB.
 - **Command palette:** Ctrl+K (Cmd+K on macOS) jumps to any tab, site, workspace or action.
 - **Technical log:** a log panel and `RUST_LOG` support, with no passwords, file contents or
   terminal bytes in it.
+
+## Screenshots
+
+| | |
+|---|---|
+| ![The folder compare panel: files only on the server and files that differ, two of them selected, with Upload selected and Download selected enabled](docs/images/compare.png) | ![An SSH terminal tab after ls -la, sharing its connection with the files tab, while an upload keeps running in the queue](docs/images/terminal.png) |
+| **Folder compare.** See what differs, pick, then upload or download. | **Terminal.** SSH shell and files over one connection. |
+| ![The Ctrl+K palette open with "new" typed, listing actions such as New files tab and New folder](docs/images/palette.png) | ![The same files tab with the interface in Brazilian Portuguese](docs/images/pt-br.png) |
+| **Go to anything.** Ctrl+K jumps to tabs, sites, workspaces and actions. | **Em português.** The whole interface in Brazilian Portuguese. |
+
+These are real screenshots of hoprs 1.2.0 against the Docker test servers, taken by
+[`scripts/readme-shots.sh`](scripts/readme-shots.sh).
 
 ## Install
 
@@ -332,11 +369,11 @@ needed.
 
 - **Rust 1.99.1.** `rust-toolchain.toml` pins it; with [rustup](https://rustup.rs) installed,
   the right toolchain (with `rustfmt` and `clippy`) is fetched on the first `cargo` command.
-- **A C toolchain** for the crypto dependencies:
-
-  ```sh
-  sudo apt install build-essential cmake pkg-config
-  ```
+- **A C toolchain and CMake** for the crypto dependencies:
+  - Ubuntu / Debian: `sudo apt install build-essential cmake pkg-config`
+  - macOS: `xcode-select --install` and `brew install cmake`
+  - Windows: Visual Studio Build Tools ("Desktop development with C++"),
+    [CMake](https://cmake.org) and [NASM](https://www.nasm.us) on `PATH`
 
 - **Docker** (optional) for the integration tests and for building the `.deb`.
 
@@ -375,6 +412,7 @@ and idles under 80 MB, and that removing and purging the package keep user data.
 | `scripts/package-windows.sh`, `scripts/check-windows.ps1` | Build and check the `.msi` and `.zip` (on Windows) |
 | `scripts/release-notes.sh` | Prints a version's section of the changelog |
 | `scripts/workspace-version.sh` | Prints the workspace version |
+| `scripts/readme-shots.sh` | Retakes the README screenshots from the released `.deb` against the Docker test servers |
 
 ## Architecture
 
@@ -475,8 +513,8 @@ because shared runners are noisy.
 3. Tag and push:
 
    ```sh
-   git tag v1.0.1
-   git push origin v1.0.1
+   git tag -a vX.Y.Z -m "hoprs X.Y.Z"
+   git push origin vX.Y.Z
    ```
 
 `.github/workflows/release.yml` checks the tag against the workspace version, builds and
