@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::i18n::Language;
 use crate::terminal::TermTheme;
+use crate::ui::layout::QUEUE_MAX_HEIGHT;
 
 pub const FILE_NAME: &str = "settings.toml";
 pub const WORKERS_MIN: usize = 1;
@@ -129,7 +130,7 @@ pub struct SectionState {
     pub hidden: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     /// Transfer workers per site (`1..=16`), for the connections made from now on.
     pub workers_per_site: usize,
@@ -159,6 +160,24 @@ pub struct Settings {
     pub workspaces: SectionState,
     /// The sidebar's All sites section.
     pub sites: SectionState,
+    /// The compare panel's height in px; `None` is its default share of the tab. Clamped
+    /// where it is drawn, never rewritten for a small window.
+    pub compare_height: Option<f32>,
+    /// The queue's maximum height in px (it still shrinks to its rows).
+    pub queue_height: f32,
+}
+
+/// The largest height a saved panel size may have.
+const PANEL_HEIGHT_MAX: f32 = 10_000.0;
+
+/// A saved panel height: finite, positive, at most [`PANEL_HEIGHT_MAX`].
+fn panel_height(value: Option<toml::Value>) -> Option<f32> {
+    let height = match value? {
+        toml::Value::Float(f) => f as f32,
+        toml::Value::Integer(i) => i as f32,
+        _ => return None,
+    };
+    (height.is_finite() && height > 0.0 && height <= PANEL_HEIGHT_MAX).then_some(height)
 }
 
 /// The names a folder compare skips until the user changes the list.
@@ -197,6 +216,8 @@ impl Default for Settings {
             compare_ignore: compare_ignore_default(),
             workspaces: SectionState::default(),
             sites: SectionState::default(),
+            compare_height: None,
+            queue_height: QUEUE_MAX_HEIGHT,
         }
     }
 }
@@ -273,6 +294,10 @@ struct File {
     sites_collapsed: Option<toml::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sites_hidden: Option<toml::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compare_height: Option<toml::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    queue_height: Option<toml::Value>,
 }
 
 /// A bool key; anything else (or missing) is `false`.
@@ -391,6 +416,8 @@ pub fn parse(content: &str) -> Result<Settings> {
             collapsed: flag(file.sites_collapsed),
             hidden: flag(file.sites_hidden),
         },
+        compare_height: panel_height(file.compare_height),
+        queue_height: panel_height(file.queue_height).unwrap_or(defaults.queue_height),
     })
 }
 
@@ -422,6 +449,14 @@ fn file_of(settings: &Settings) -> File {
         workspaces_hidden: Some(toml::Value::Boolean(settings.workspaces.hidden)),
         sites_collapsed: Some(toml::Value::Boolean(settings.sites.collapsed)),
         sites_hidden: Some(toml::Value::Boolean(settings.sites.hidden)),
+        compare_height: settings
+            .compare_height
+            .and_then(|h| panel_height(Some(toml::Value::Float(f64::from(h)))))
+            .map(|h| toml::Value::Float(f64::from(h))),
+        queue_height: Some(toml::Value::Float(f64::from(
+            panel_height(Some(toml::Value::Float(f64::from(settings.queue_height))))
+                .unwrap_or(QUEUE_MAX_HEIGHT),
+        ))),
     }
 }
 
@@ -590,6 +625,38 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("future_key = 1"), "{text}");
         assert!(text.contains("sites_hidden = true"), "{text}");
+    }
+
+    #[test]
+    fn panel_heights_roundtrip_and_invalid() {
+        let tall = Settings {
+            compare_height: Some(240.5),
+            queue_height: 300.0,
+            ..Settings::default()
+        };
+        assert_eq!(parse(&render(&tall)).unwrap(), tall);
+        let defaults = parse("").unwrap();
+        assert_eq!(defaults.compare_height, None);
+        assert_eq!(defaults.queue_height, QUEUE_MAX_HEIGHT);
+        let integers = parse("compare_height = 240\nqueue_height = 300").unwrap();
+        assert_eq!(integers.compare_height, Some(240.0));
+        assert_eq!(integers.queue_height, 300.0);
+        for bad in ["-5", "0", "nan", "inf", "1e9", "\"tall\""] {
+            let s = parse(&format!("compare_height = {bad}\nqueue_height = {bad}")).unwrap();
+            assert_eq!(s.compare_height, None, "{bad}");
+            assert_eq!(s.queue_height, QUEUE_MAX_HEIGHT, "{bad}");
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        std::fs::write(&path, "future_key = 1\ncompare_height = 240.5\n").unwrap();
+        let loaded = load(&path).settings;
+        assert_eq!(loaded.compare_height, Some(240.5));
+        save(&path, &loaded).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("future_key = 1"), "{text}");
+        assert!(text.contains("compare_height = 240.5"), "{text}");
+        assert!(text.contains("queue_height = 210.0"), "{text}");
     }
 
     #[test]

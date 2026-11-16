@@ -5,7 +5,10 @@
 use std::borrow::Cow;
 
 use crate::backend::Side;
-use crate::ui::sidebar;
+use crate::ui::files::PANES_MIN_HEIGHT;
+use crate::ui::layout::{STATUS_HEIGHT, TOP_BAR_HEIGHT};
+use crate::ui::theme::HAIRLINE;
+use crate::ui::{compare, queue, sidebar};
 
 /// Fixed file table columns; the name takes the rest.
 pub const SIZE_WIDTH: f32 = 88.0;
@@ -55,6 +58,40 @@ pub fn ellipsize(text: &str, width: f32, size: f32, advance: f32) -> Cow<'_, str
     }
     let kept: String = text.chars().take(budget.saturating_sub(1)).collect();
     Cow::Owned(format!("{kept}\u{2026}"))
+}
+
+/// The compare panel's height in a tab area `area` px tall: `wanted` (the saved one), or
+/// [`compare::DEFAULT_SHARE`] of the area; never above what leaves the panes five rows,
+/// never below [`compare::MIN_HEIGHT`] (which wins when the window is too small for both).
+pub fn compare_height(area: f32, wanted: Option<f32>) -> f32 {
+    let wanted = wanted.unwrap_or(area * compare::DEFAULT_SHARE);
+    wanted.min(area - PANES_MIN_HEIGHT).max(compare::MIN_HEIGHT)
+}
+
+/// The most the queue may take of a `window_height` px window: `wanted` (the saved one),
+/// but the panes keep five rows (and the compare panel its minimum, `compare_shown`) next
+/// to the log (when `log_open`), the top bar and the status bar. At least
+/// [`queue::MIN_HEIGHT`]. The queue still shrinks to its rows below this.
+pub fn queue_max(window_height: f32, wanted: f32, log_open: bool, compare_shown: bool) -> f32 {
+    let log = if log_open { log_height() } else { 0.0 };
+    let compare = if compare_shown {
+        compare::MIN_HEIGHT
+    } else {
+        0.0
+    };
+    let room = window_height
+        - TOP_BAR_HEIGHT
+        - HAIRLINE
+        - STATUS_HEIGHT
+        - log
+        - PANES_MIN_HEIGHT
+        - compare;
+    wanted.min(room).max(queue::MIN_HEIGHT)
+}
+
+/// The log panel with its head and rules.
+fn log_height() -> f32 {
+    crate::ui::layout::QUEUE_HEAD_HEIGHT + 3.0 * HAIRLINE + crate::ui::layout::LOG_BODY_HEIGHT
 }
 
 /// The columns a file table shows besides Name and Size.
@@ -209,6 +246,40 @@ pub fn queue_head(window: f32, has_policy: bool) -> QueueHead {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compare_default_is_thirty_percent() {
+        assert_eq!(compare_height(900.0, None), 270.0);
+    }
+
+    #[test]
+    fn compare_clamps_to_its_minimum_and_the_panes() {
+        assert_eq!(compare_height(900.0, Some(800.0)), 900.0 - PANES_MIN_HEIGHT);
+        assert_eq!(compare_height(300.0, None), compare::MIN_HEIGHT);
+        assert_eq!(compare_height(300.0, Some(800.0)), compare::MIN_HEIGHT);
+        assert_eq!(compare_height(900.0, Some(1.0)), compare::MIN_HEIGHT);
+        assert_eq!(compare_height(900.0, Some(240.5)), 240.5);
+    }
+
+    #[test]
+    fn queue_max_clamps() {
+        let chrome = TOP_BAR_HEIGHT + HAIRLINE + STATUS_HEIGHT;
+        // Room enough: the saved value.
+        assert_eq!(queue_max(1200.0, 300.0, false, false), 300.0);
+        // 600 at 800 px leaves the panes their five rows.
+        assert_eq!(
+            queue_max(800.0, 600.0, false, false),
+            800.0 - chrome - PANES_MIN_HEIGHT
+        );
+        // The log and a compare panel take their room first.
+        assert_eq!(
+            queue_max(800.0, 600.0, false, true),
+            800.0 - chrome - PANES_MIN_HEIGHT - compare::MIN_HEIGHT
+        );
+        assert!(queue_max(800.0, 600.0, true, false) < queue_max(800.0, 600.0, false, false));
+        // A tiny window: the queue's minimum.
+        assert_eq!(queue_max(300.0, 600.0, true, true), queue::MIN_HEIGHT);
+    }
 
     const ALL: Columns = Columns {
         modified: true,

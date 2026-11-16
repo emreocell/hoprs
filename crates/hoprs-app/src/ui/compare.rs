@@ -24,23 +24,14 @@ use crate::ui::theme::{self, palette};
 use crate::ui::virtual_list::{self, ROW_HEIGHT};
 use crate::ui::{format, strings, widgets};
 
-/// The fewest lines the rows' region shows (a group header counts as one).
-pub const MIN_BODY_LINES: usize = 4;
-/// The most lines it shows, however tall the window.
-pub const MAX_BODY_LINES: usize = 10;
-/// The region's smallest height.
-pub const MIN_BODY_HEIGHT: f32 = MIN_BODY_LINES as f32 * ROW_HEIGHT;
+/// The panel's share of the tab area until the user drags it.
+pub const DEFAULT_SHARE: f32 = 0.30;
 /// The head and the foot with their rules.
 const CHROME_HEIGHT: f32 = 2.0 * QUEUE_HEAD_HEIGHT + 3.0 * theme::HAIRLINE;
-
-/// The rows' region height for a tab area `area` px tall: the panel (head, rows, foot)
-/// takes at most 35% of it, so the panes keep their room; between
-/// [`MIN_BODY_LINES`] and [`MAX_BODY_LINES`] whole lines.
-pub fn body_height(area: f32) -> f32 {
-    let room = (area * 0.35 - CHROME_HEIGHT) / ROW_HEIGHT;
-    let lines = (room.floor().max(0.0) as usize).clamp(MIN_BODY_LINES, MAX_BODY_LINES);
-    lines as f32 * ROW_HEIGHT
-}
+/// The panel's least height: its head and foot, their rules and two rows.
+pub const MIN_HEIGHT: f32 = CHROME_HEIGHT + MIN_BODY_HEIGHT;
+/// The rows' region's least height.
+pub const MIN_BODY_HEIGHT: f32 = 2.0 * ROW_HEIGHT;
 const STATUS_WIDTH: f32 = 148.0;
 const SIZES_WIDTH: f32 = 128.0;
 
@@ -281,6 +272,7 @@ pub fn view<'a>(app: &'a App, tab: &'a Tab, area: f32) -> Option<Element<'a, Mes
     let msg = move |m: CompareMsg| Message::Compare(m);
     let head = head(state, app.settings.compare_auto);
     let compact = app.window_width < 1180.0;
+    let height = fit::compare_height(area, app.settings.compare_height);
 
     let (local, remote) = if compact {
         (short_root(&head.local), short_root(&head.remote))
@@ -358,14 +350,19 @@ pub fn view<'a>(app: &'a App, tab: &'a Tab, area: f32) -> Option<Element<'a, Mes
     if !state.collapsed {
         region = region
             .push(rule::horizontal(theme::HAIRLINE).style(theme::rule_1px))
-            .push(body(
-                tab,
-                state,
-                &foot_content,
-                lines,
-                body_height(area),
-                app.window_width,
-            ))
+            .push(
+                container(body(
+                    tab,
+                    state,
+                    &foot_content,
+                    lines,
+                    height - CHROME_HEIGHT,
+                    app.window_width,
+                ))
+                .width(Length::Fill)
+                .height(height - CHROME_HEIGHT)
+                .clip(true),
+            )
             .push(rule::horizontal(theme::HAIRLINE).style(theme::rule_1px))
             .push(foot(id, foot_content, compact));
     }
@@ -932,17 +929,6 @@ mod tests {
         let f = footer(&s);
         assert_eq!(f.text, "1,204 identical");
         assert!(f.actions.is_empty());
-    }
-
-    #[test]
-    fn body_height_grows_with_the_window() {
-        // 1280x800: the tab area is ~690 px; the panes keep their room.
-        assert_eq!(body_height(690.0), 5.0 * ROW_HEIGHT);
-        assert_eq!(body_height(300.0), MIN_BODY_HEIGHT);
-        // 1280x1000.
-        assert_eq!(body_height(890.0), 7.0 * ROW_HEIGHT);
-        assert_eq!(body_height(5000.0), MAX_BODY_LINES as f32 * ROW_HEIGHT);
-        assert!(body_height(0.0) >= MIN_BODY_HEIGHT);
     }
 
     #[test]

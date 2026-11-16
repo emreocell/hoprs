@@ -17,7 +17,7 @@ use crate::app::{App, Message, QueueMsg, QueueTab, RowAction};
 use crate::ui::file_actions::error_bar;
 use crate::ui::fit;
 use crate::ui::icons::{self, Icon};
-use crate::ui::layout::{QUEUE_HEAD_HEIGHT, QUEUE_MAX_HEIGHT, UNDERLINE};
+use crate::ui::layout::{QUEUE_HEAD_HEIGHT, UNDERLINE};
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
 use crate::ui::virtual_list::{self, ROW_HEIGHT};
@@ -33,8 +33,31 @@ const STATUS_WIDTH: f32 = BAR_WIDTH + PERCENT_WIDTH + SPEED_WIDTH + 2.0 * theme:
 /// answers (Skip, Overwrite, Resume) beside its Cancel, so the column keeps room for those
 /// and every row lines up.
 const ACTIONS_WIDTH: f32 = 236.0;
-/// The rows' part of the 210 px region: the rest is the head and its two rules.
-const BODY_MAX_HEIGHT: f32 = QUEUE_MAX_HEIGHT - QUEUE_HEAD_HEIGHT - 2.0 * theme::HAIRLINE;
+/// The queue's least height: its head, its two rules and one row.
+pub const MIN_HEIGHT: f32 = QUEUE_HEAD_HEIGHT + 2.0 * theme::HAIRLINE + ROW_HEIGHT;
+/// The head and its rules above the rows.
+const CHROME_HEIGHT: f32 = QUEUE_HEAD_HEIGHT + 2.0 * theme::HAIRLINE;
+
+/// The most the queue takes at the window's height now.
+pub fn max_height(app: &App) -> f32 {
+    fit::queue_max(
+        app.window_height,
+        app.settings.queue_height,
+        app.log.open,
+        compare_shown(app),
+    )
+}
+
+/// Whether the center shows a compare panel (a files tab with one open).
+fn compare_shown(app: &App) -> bool {
+    app.form.is_none()
+        && !app.settings_shown()
+        && app
+            .active_tab
+            .and_then(|i| app.tabs.get(i))
+            .and_then(|tab| tab.compare())
+            .is_some_and(|state| state.visible())
+}
 /// The 4 px progress bar.
 const BAR_GIRTH: f32 = 4.0;
 
@@ -190,7 +213,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     }
     container(region)
         .width(Length::Fill)
-        .max_height(QUEUE_MAX_HEIGHT)
+        .max_height(max_height(app))
         .into()
 }
 
@@ -230,7 +253,7 @@ fn body(app: &App) -> Element<'_, Message> {
     }
     let count = rows.len();
     // As tall as the rows, up to the queue's cap (a `Fill` list would grow the region).
-    let height = (count as f32 * ROW_HEIGHT).min(BODY_MAX_HEIGHT);
+    let height = (count as f32 * ROW_HEIGHT).min(max_height(app) - CHROME_HEIGHT);
     let list = virtual_list::view(
         scroll_id(),
         count,
