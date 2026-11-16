@@ -349,7 +349,8 @@ pub fn view<'a>(app: &'a App, tab: &'a Tab, area: f32) -> Option<Element<'a, Mes
         divider::inert()
     } else {
         let dragged = app.resize.is_some_and(|r| r.panel == Panel::Compare);
-        divider::view(Panel::Compare, height, dragged)
+        let cap = fit::compare_height(area, Some(f32::INFINITY));
+        divider::view(Panel::Compare, height, cap, dragged)
     };
     let mut region = column![divider, top];
     if !state.collapsed {

@@ -12,7 +12,7 @@ real display.
 | File icons by extension (`for_entry`) | Pass |
 | Context menu model: opens at the last press, closes on Escape, outside click, resize and choice, blocked behind a dialog (`crates/hoprs-app/src/app/tests/menu.rs`); kept inside the window (`ui::menu` tests); press position published before the widget under it (`ui::pointer` tests) | Pass |
 | Sidebar state saved: collapse and hide round-trip through `settings.toml`, invalid values read as shown, the ⋯ menu hides and shows a section (`settings` tests, `app/tests/import_settings.rs`); site state and icon by protocol (`ui::sidebar` tests) | Pass |
-| Panel dividers: a drag resizes the compare panel and the queue from the press position, never below their minimum, saved on release or when the pointer leaves the window; a double-click resets and saves; heights round-trip through `settings.toml`; the queue's saved height is its maximum (two rows stay two rows); pointer moves are listened to only while resizing (`app/tests/panels.rs`, `ui::pointer` tests) | Pass |
+| Panel dividers: a drag resizes the compare panel and the queue from the press position, never below their minimum, saved on release or when the pointer leaves the window; a double-click resets and saves; heights round-trip through `settings.toml`; past the window's cap or the minimum a drag turns back at once; dragging up a short queue never lowers its maximum, dragging down shrinks it from the drawn height; a click or unchanged drag saves nothing; the queue's saved height is its maximum (two rows stay two rows); pointer moves are listened to only while resizing (`app/tests/panels.rs`, `ui::pointer` tests) | Pass |
 | Settings tab: one at most, selecting another tab keeps it, its × returns to the tab it came from (or the last), not saved with a workspace, blocked behind a dialog (`app/tests/tabs.rs`); settings saved and typed passwords forgotten when it is not shown (`app/tests/import_settings.rs`); no connection in the status bar (`app/tests/status.rs`); Ctrl+, opens it even from a focused terminal and sends nothing to the shell (`ui::files`, `ui::terminal`, `terminal::input` tests); palette rows (`app/tests/palette.rs`) | Pass |
 
 ## NEEDS HUMAN
@@ -81,4 +81,9 @@ real display.
     (compare about 30% of the tab, queue 210 px at most); the heights are the same after a
     restart. Make the window shorter: the panels shrink before the file panes lose their
     last five rows, and grow back when the window does. A terminal tab shows only the
-    queue's edge; the settings tab has no queue.
+    queue's edge; the settings tab has no queue. While dragging, the panel follows the
+    pointer at once in both directions, also after going past its smallest or largest
+    size; dragging up a queue with only a few rows does not shrink its maximum. Expected,
+    not a bug: once a panel stops at a bound, the cursor may turn back into an arrow until
+    the pointer is over the edge again (iced applies the resize cursor only over the 7 px
+    band).

@@ -16,9 +16,10 @@ pub const HIT: f32 = 7.0;
 const GRIP_WIDTH: f32 = 24.0;
 const GRIP_HEIGHT: f32 = 3.0;
 
-/// The divider of `panel`, drawn `height` px tall now (where a drag starts from).
-/// `hovered_grip`: the grip shows even without the pointer over it (a drag in progress).
-pub fn view<'a>(panel: Panel, height: f32, hovered_grip: bool) -> Element<'a, Message> {
+/// The divider of `panel`, drawn `height` px tall now (where a drag starts from) and
+/// `cap` px at most in the window now. `hovered_grip`: the grip shows even without the
+/// pointer over it (a drag in progress).
+pub fn view<'a>(panel: Panel, height: f32, cap: f32, hovered_grip: bool) -> Element<'a, Message> {
     let grip = container(
         container(space())
             .width(GRIP_WIDTH)
@@ -33,7 +34,7 @@ pub fn view<'a>(panel: Panel, height: f32, hovered_grip: bool) -> Element<'a, Me
     };
     mouse_area(container(band).width(Length::Fill).height(HIT))
         .interaction(mouse::Interaction::ResizingVertically)
-        .on_press(Message::Divider(DividerMsg::Press { panel, height }))
+        .on_press(Message::Divider(DividerMsg::Press { panel, height, cap }))
         .on_double_click(Message::Divider(DividerMsg::Reset(panel)))
         .into()
 }

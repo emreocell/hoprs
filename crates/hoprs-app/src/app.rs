@@ -103,19 +103,28 @@ pub enum Panel {
     Queue,
 }
 
-/// A divider drag: where the press was and how tall the panel was drawn then.
+/// A divider drag. The anchor (`start_y`, `start_height`) is where the press was and how
+/// tall the panel was drawn then; it moves to the pointer whenever the height hits a
+/// bound, so the panel follows the pointer at once when it turns back.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Resize {
     pub panel: Panel,
     pub start_y: f32,
     pub start_height: f32,
+    /// The height the panel was drawn at when pressed (fixed for the whole drag).
+    pub drawn: f32,
+    /// The most the panel can be drawn at in the window now.
+    pub cap: f32,
+    /// The panel's setting when pressed (`None`: the compare panel's default).
+    pub saved_at_press: Option<f32>,
 }
 
 /// Something on a panel's divider.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum DividerMsg {
-    /// A press: a resize starts from `height`, the height the panel was drawn at.
-    Press { panel: Panel, height: f32 },
+    /// A press: a resize starts from `height`, the height the panel was drawn at, up to
+    /// `cap`, the most the window lets it have now.
+    Press { panel: Panel, height: f32, cap: f32 },
     /// A double-click: the panel's default height.
     Reset(Panel),
 }

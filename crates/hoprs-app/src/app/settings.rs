@@ -678,58 +678,96 @@ impl App {
 
     /// A press or double-click on a panel's divider. A press starts a resize at the
     /// press's position ([`App::last_press`], published before the divider's message);
-    /// a double-click puts the panel back to its default height and saves it.
+    /// a double-click puts the panel back to its default height and saves it (if that
+    /// changed anything).
     pub(super) fn divider_msg(&mut self, msg: DividerMsg) -> Vec<Effect> {
         match msg {
-            DividerMsg::Press { panel, height } => {
+            DividerMsg::Press { panel, height, cap } => {
                 self.resize = Some(Resize {
                     panel,
                     start_y: self.last_press.y,
                     start_height: height,
+                    drawn: height,
+                    cap,
+                    saved_at_press: self.panel_setting(panel),
                 });
                 Vec::new()
             }
             DividerMsg::Reset(panel) => {
                 // The double-click's second press started a resize: it ends here.
                 self.resize = None;
+                let before = self.panel_setting(panel);
                 match panel {
                     Panel::Compare => self.settings.compare_height = None,
                     Panel::Queue => {
-                        self.settings.queue_height = crate::ui::layout::QUEUE_MAX_HEIGHT
+                        self.settings.queue_height = crate::ui::layout::QUEUE_MAX_HEIGHT;
                     }
                 }
-                self.save_settings_effect().into_iter().collect()
+                self.save_panel_if_changed(panel, before)
             }
         }
     }
 
-    /// The pointer moved: while a divider is dragged, its panel is as much taller as the
-    /// pointer went up, never below the panel's minimum (the window caps it where it is
-    /// drawn). Saved when the button is up.
+    /// The saved height of `panel` (`None`: the compare panel's default share).
+    fn panel_setting(&self, panel: Panel) -> Option<f32> {
+        match panel {
+            Panel::Compare => self.settings.compare_height,
+            Panel::Queue => Some(self.settings.queue_height),
+        }
+    }
+
+    /// Saves the settings when `panel`'s height is no longer `before` (a plain click on a
+    /// divider writes nothing).
+    fn save_panel_if_changed(&mut self, panel: Panel, before: Option<f32>) -> Vec<Effect> {
+        if self.panel_setting(panel) == before {
+            return Vec::new();
+        }
+        self.save_settings_effect().into_iter().collect()
+    }
+
+    /// The pointer moved: while a divider is dragged, its panel follows the pointer, as
+    /// much taller as it went up, between the panel's minimum and the window's cap now
+    /// (past either, the anchor moves with the pointer so turning back acts at once).
+    /// Below the height drawn at the press the setting is that height; above it the
+    /// setting only grows: the queue's setting is its maximum, so a queue drawn shorter
+    /// than its maximum keeps that maximum until the drag passes it. Saved when the button
+    /// is up.
     pub(super) fn pointer_moved(&mut self, at: iced::Point) {
-        let Some(resize) = self.resize else {
+        let Some(resize) = self.resize.as_mut() else {
             return;
         };
+        let min = match resize.panel {
+            Panel::Compare => crate::ui::compare::MIN_HEIGHT,
+            Panel::Queue => crate::ui::queue::MIN_HEIGHT,
+        };
         let wanted = resize.start_height + (resize.start_y - at.y);
+        let height = wanted.min(resize.cap).max(min);
+        if height != wanted {
+            resize.start_y = at.y;
+            resize.start_height = height;
+        }
+        let saved = resize.saved_at_press.unwrap_or(resize.drawn);
+        let value = if height < resize.drawn {
+            Some(round_panel_height(height))
+        } else if height <= saved {
+            resize.saved_at_press
+        } else {
+            Some(round_panel_height(height))
+        };
         match resize.panel {
-            Panel::Compare => {
-                self.settings.compare_height = Some(round_panel_height(
-                    wanted.max(crate::ui::compare::MIN_HEIGHT),
-                ));
-            }
+            Panel::Compare => self.settings.compare_height = value,
             Panel::Queue => {
-                self.settings.queue_height =
-                    round_panel_height(wanted.max(crate::ui::queue::MIN_HEIGHT));
+                self.settings.queue_height = value.unwrap_or(crate::ui::layout::QUEUE_MAX_HEIGHT);
             }
         }
     }
 
     /// The button went up or the pointer left the window: a resize ends with the height
-    /// it reached, saved.
+    /// it reached, saved if it changed.
     pub(super) fn end_resize(&mut self) -> Vec<Effect> {
-        if self.resize.take().is_none() {
+        let Some(resize) = self.resize.take() else {
             return Vec::new();
-        }
-        self.save_settings_effect().into_iter().collect()
+        };
+        self.save_panel_if_changed(resize.panel, resize.saved_at_press)
     }
 }

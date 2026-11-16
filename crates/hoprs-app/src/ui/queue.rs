@@ -36,6 +36,13 @@ const STATUS_WIDTH: f32 = BAR_WIDTH + PERCENT_WIDTH + SPEED_WIDTH + 2.0 * theme:
 const ACTIONS_WIDTH: f32 = 236.0;
 /// The queue's least height: its divider, its head, the rule under it and one row.
 pub const MIN_HEIGHT: f32 = CHROME_HEIGHT + ROW_HEIGHT;
+/// A one-line note in place of the rows ("Nothing queued"): fixed, so the queue's drawn
+/// height is known.
+const NOTE_HEIGHT: f32 = ROW_HEIGHT + theme::SPACE_SM;
+/// The two-line note of an empty queue (title and hint).
+const NOTE_2_HEIGHT: f32 = 2.0 * ROW_HEIGHT;
+/// The queue's error bar, about: one line of 12 px text beside "Dismiss", with its padding.
+const ERROR_BAR_ESTIMATE: f32 = 36.0;
 /// The divider, the head and the rule above the rows.
 const CHROME_HEIGHT: f32 = divider::HIT + QUEUE_HEAD_HEIGHT + theme::HAIRLINE;
 
@@ -49,22 +56,42 @@ pub fn max_height(app: &App) -> f32 {
     )
 }
 
-/// The height the queue is drawn at now (where a drag of its divider starts): its rows up
-/// to [`max_height`]; the head alone while hidden. With no rows to list (a note stands
-/// for them) or an error bar above them, [`max_height`]: their height is not fixed.
+/// The most the queue can be drawn at in the window now, whatever its saved maximum.
+pub fn cap(app: &App) -> f32 {
+    fit::queue_max(
+        app.window_height,
+        f32::INFINITY,
+        app.log.open,
+        compare_shown(app),
+    )
+}
+
+/// The height the queue is drawn at now (where a drag of its divider starts): its rows,
+/// or the note standing for them, up to [`max_height`]; the head alone while hidden. An
+/// error bar counts as [`ERROR_BAR_ESTIMATE`] (its text may wrap).
 pub fn drawn_height(app: &App) -> f32 {
     if !app.queue_open {
         return divider::HIT + QUEUE_HEAD_HEIGHT;
     }
-    let max = max_height(app);
     let queue = &app.queue;
-    if queue.error.is_some() || queue.len() == 0 {
-        return max;
-    }
-    match queue.rows_in(queue.tab).len() {
-        0 => max,
-        count => (CHROME_HEIGHT + count as f32 * ROW_HEIGHT).min(max),
-    }
+    let body = if queue.len() == 0 {
+        if queue.resyncing() {
+            NOTE_HEIGHT
+        } else {
+            NOTE_2_HEIGHT
+        }
+    } else {
+        match queue.rows_in(queue.tab).len() {
+            0 => NOTE_HEIGHT,
+            count => count as f32 * ROW_HEIGHT,
+        }
+    };
+    let error = if queue.error.is_some() {
+        ERROR_BAR_ESTIMATE
+    } else {
+        0.0
+    };
+    (CHROME_HEIGHT + error + body).min(max_height(app))
 }
 
 /// Whether the center shows a compare panel (a files tab with one open).
@@ -224,7 +251,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // A hidden queue has nothing to resize: the same band, inert.
     let top = if app.queue_open {
         let dragged = app.resize.is_some_and(|r| r.panel == Panel::Queue);
-        divider::view(Panel::Queue, drawn_height(app), dragged)
+        divider::view(Panel::Queue, drawn_height(app), cap(app), dragged)
     } else {
         divider::inert()
     };
@@ -246,14 +273,19 @@ pub fn view(app: &App) -> Element<'_, Message> {
 fn body(app: &App) -> Element<'_, Message> {
     let queue = &app.queue;
     let p = palette();
-    let note = |line: Element<'static, Message>| -> Element<'static, Message> {
+    let note = |line: Element<'static, Message>, height: f32| -> Element<'static, Message> {
         container(line)
             .padding(Padding::from([theme::SPACE_SM, theme::SPACE_MD]))
+            .height(height)
+            .clip(true)
             .into()
     };
     if queue.len() == 0 {
         if queue.resyncing() {
-            return note(text(strings::queue_loading()).color(p.muted).into());
+            return note(
+                text(strings::queue_loading()).color(p.muted).into(),
+                NOTE_HEIGHT,
+            );
         }
         return note(
             column![
@@ -264,6 +296,7 @@ fn body(app: &App) -> Element<'_, Message> {
             ]
             .spacing(theme::SPACE_3XS)
             .into(),
+            NOTE_2_HEIGHT,
         );
     }
     let rows = queue.rows_in(queue.tab);
@@ -274,7 +307,7 @@ fn body(app: &App) -> Element<'_, Message> {
             QueueTab::Failed => strings::nothing_failed(),
             QueueTab::Done => strings::nothing_done(),
         };
-        return note(text(empty).color(p.muted).into());
+        return note(text(empty).color(p.muted).into(), NOTE_HEIGHT);
     }
     let count = rows.len();
     // As tall as the rows, up to the queue's cap (a `Fill` list would grow the region).
