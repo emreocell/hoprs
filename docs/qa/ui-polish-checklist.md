@@ -44,6 +44,8 @@ real display.
    full name on hover (and no tooltip on names that fit); a deep path in the path bar
    keeps its first and last folders with "…" between (hover shows the whole path). The
    toolbar buttons have icons; below about a 1480 px window the key hints go, and under about
-   1320 px (the default 1280 px window) the remote buttons are icons only with their label and key on hover. In the
+   1320 px Permissions and Edit lose their labels first (the default 1280 px window shows
+   Download, New folder, Rename and Delete with labels, in English and Portuguese, nothing
+   clipped), and under about 1130 px every button is icons only with their label and key on hover. In the
    compare panel: group headers have icons, rows have kind icons and a selection bar, the
    collapse and close buttons are icons.

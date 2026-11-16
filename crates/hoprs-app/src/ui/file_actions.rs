@@ -33,6 +33,8 @@ pub fn toolbar<'a>(
     let compact = !form.hints();
     // The narrowest panes show the icons only; the tooltips carry label and key.
     let short = form.icons_only();
+    // Permissions and Edit lose their labels first.
+    let trim = form.trimmed();
     let Some(pane) = tab.pane(side) else {
         return space().into();
     };
@@ -70,7 +72,7 @@ pub fn toolbar<'a>(
             PaneMsg::Transfer,
         ));
         if side == Side::Remote {
-            bar = bar.push(edit_action(edit, compact, short, msg(PaneMsg::Edit)));
+            bar = bar.push(edit_action(edit, compact, trim, msg(PaneMsg::Edit)));
         }
         bar = bar
             .push(action(
@@ -95,13 +97,22 @@ pub fn toolbar<'a>(
                 PaneMsg::Delete,
             ));
         if side == Side::Remote {
-            bar = bar.push(action(
-                Icon::LockKey,
-                strings::permissions(),
-                None,
-                chmod,
-                PaneMsg::Permissions,
-            ));
+            bar = bar.push(if trim {
+                widgets::icon_button(
+                    Icon::LockKey,
+                    strings::permissions(),
+                    None,
+                    chmod.then(|| msg(PaneMsg::Permissions)),
+                )
+            } else {
+                action(
+                    Icon::LockKey,
+                    strings::permissions(),
+                    None,
+                    chmod,
+                    PaneMsg::Permissions,
+                )
+            });
         }
     }
     bar = bar.push(space().width(Length::Fill));
