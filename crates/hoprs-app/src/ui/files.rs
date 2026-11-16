@@ -819,20 +819,22 @@ fn file_row<'a>(
     } else {
         name_text
     };
-    let mut name_cell = row![
-        icons::icon(kind_icon, icons::ROW).color(fade(if selected { p.ink } else { p.muted })),
-        name_text
-    ]
-    .spacing(theme::SPACE_XS)
-    .align_y(Alignment::Center);
+    // The name and its "/" sit in one zero-spacing row so the slash touches the name.
+    let mut name_and_slash = row![name_text].align_y(Alignment::Center);
     if is_dir && !up {
-        name_cell = name_cell.push(
+        name_and_slash = name_and_slash.push(
             text(strings::path_separator())
                 .font(theme::MONO)
                 .size(theme::TEXT_MONO)
                 .color(fade(p.muted)),
         );
     }
+    let name_cell = row![
+        icons::icon(kind_icon, icons::ROW).color(fade(if selected { p.ink } else { p.muted })),
+        name_and_slash
+    ]
+    .spacing(theme::SPACE_XS)
+    .align_y(Alignment::Center);
     let size_text = if is_dir {
         data(size)
     } else {

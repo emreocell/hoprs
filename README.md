@@ -24,14 +24,14 @@
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
-![hoprs: a saved SSH site open with the local and remote folders side by side, the folder compare panel listing the differences, and an upload running in the transfer queue](docs/images/files.png)
+![hoprs: a saved SSH site open with the local and remote folders side by side, file kind icons and a selected row, the folder compare panel listing the differences, and an upload running in the transfer queue](docs/images/files.png)
 
 hoprs keeps the idea that made FileZilla useful (a list of saved sites you open with one
 click) and puts a terminal, a two-pane file browser, folder compare and a persistent
 transfer queue behind it, in one quiet window that opens in under 100 ms and idles at about
 33 MB.
 
-- **Version:** 1.2.0 ([changelog](CHANGELOG.md))
+- **Version:** 1.3.0 ([changelog](CHANGELOG.md))
 - **Platforms:** Linux (Ubuntu 24.04 or newer, amd64), macOS 11 or newer (Apple Silicon and Intel), Windows 10 or newer (x64).
 - **Languages:** English and Brazilian Portuguese.
 - **License:** MIT OR Apache-2.0
@@ -100,7 +100,7 @@ transfer queue behind it, in one quiet window that opens in under 100 ms and idl
 | ![The Ctrl+K palette open with "new" typed, listing actions such as New files tab and New folder](docs/images/palette.png) | ![The same files tab with the interface in Brazilian Portuguese](docs/images/pt-br.png) |
 | **Go to anything.** Ctrl+K jumps to tabs, sites, workspaces and actions. | **Em português.** The whole interface in Brazilian Portuguese. |
 
-These are real screenshots of hoprs 1.2.0 against the Docker test servers, taken by
+These are real screenshots of hoprs 1.3.0 against the Docker test servers, taken by
 [`scripts/readme-shots.sh`](scripts/readme-shots.sh).
 
 ## Install
@@ -111,32 +111,32 @@ Every release has these files on the
 
 | System | File |
 |---|---|
-| Linux (Ubuntu 24.04 or newer, amd64) | `hoprs_1.2.0-1_amd64.deb` |
-| macOS 11 or newer, Apple Silicon and Intel | `hoprs_1.2.0_macos_universal.dmg` |
-| Windows 10 or newer, x64 (installer, per machine) | `hoprs_1.2.0_windows_x64.msi` |
-| Windows 10 or newer, x64 (portable) | `hoprs_1.2.0_windows_x64.zip` |
+| Linux (Ubuntu 24.04 or newer, amd64) | `hoprs_1.3.0-1_amd64.deb` |
+| macOS 11 or newer, Apple Silicon and Intel | `hoprs_1.3.0_macos_universal.dmg` |
+| Windows 10 or newer, x64 (installer, per machine) | `hoprs_1.3.0_windows_x64.msi` |
+| Windows 10 or newer, x64 (portable) | `hoprs_1.3.0_windows_x64.zip` |
 
 The macOS and Windows builds are **not signed** with a paid certificate (see the steps
 below), so each system warns once on first launch.
 
 ### Linux: the `.deb` (recommended)
 
-1. Download `hoprs_1.2.0-1_amd64.deb` and `SHA256SUMS`.
+1. Download `hoprs_1.3.0-1_amd64.deb` and `SHA256SUMS`.
 2. Check the download and install it:
 
    ```sh
    sha256sum -c SHA256SUMS --ignore-missing
-   sudo apt install ./hoprs_1.2.0-1_amd64.deb
+   sudo apt install ./hoprs_1.3.0-1_amd64.deb
    ```
 
-   Expected output of the first command: `hoprs_1.2.0-1_amd64.deb: OK`. `apt` installs the
+   Expected output of the first command: `hoprs_1.3.0-1_amd64.deb: OK`. `apt` installs the
    libraries hoprs needs (Wayland, X11, Vulkan/EGL loaders, D-Bus).
 
 3. Start hoprs from the app menu, or run:
 
    ```sh
    hoprs             # opens the window
-   hoprs --version   # prints "hoprs 1.2.0"
+   hoprs --version   # prints "hoprs 1.3.0"
    hoprs --help
    ```
 
@@ -145,7 +145,7 @@ and exits.
 
 ### macOS: the `.dmg`
 
-1. Download `hoprs_1.2.0_macos_universal.dmg` and `SHA256SUMS`, and check it:
+1. Download `hoprs_1.3.0_macos_universal.dmg` and `SHA256SUMS`, and check it:
 
    ```sh
    shasum -a 256 -c SHA256SUMS --ignore-missing
@@ -170,11 +170,11 @@ The `.dmg` is one universal build for Apple Silicon and Intel Macs.
 
 ### Windows: the `.msi` or the `.zip`
 
-1. Download `hoprs_1.2.0_windows_x64.msi` (or the portable `hoprs_1.2.0_windows_x64.zip`)
+1. Download `hoprs_1.3.0_windows_x64.msi` (or the portable `hoprs_1.3.0_windows_x64.zip`)
    and `SHA256SUMS`. In PowerShell, compare the hash with the line in `SHA256SUMS`:
 
    ```powershell
-   (Get-FileHash .\hoprs_1.2.0_windows_x64.msi -Algorithm SHA256).Hash
+   (Get-FileHash .\hoprs_1.3.0_windows_x64.msi -Algorithm SHA256).Hash
    ```
 
 2. Run the `.msi`. It installs per machine (it asks for administrator rights) and adds a
@@ -185,6 +185,24 @@ The `.dmg` is one universal build for Apple Silicon and Intel Macs.
 
 `hoprs.exe` links the C runtime statically, so the Visual C++ redistributable is not needed.
 `hoprs --version` and `hoprs --help` print into the cmd or PowerShell window you run them in.
+
+### Updating
+
+hoprs does not update itself. To move to a new version, quit hoprs, download the new file
+from the [latest release](https://github.com/engviniciusbs/hoprs/releases/latest) and install
+it over the old one:
+
+| System | How |
+|---|---|
+| Linux | `sudo apt install ./hoprs_<version>-1_amd64.deb` (replaces the installed version) |
+| macOS | Open the new `.dmg` and drag hoprs to Applications; choose Replace |
+| Windows, `.msi` | Run the new `.msi`; it replaces the installed version |
+| Windows, `.zip` | Unzip the new `.zip` over the old folder |
+
+Your sites, workspaces, settings, transfer queue and saved passwords stay where they are:
+they live in your user folders and the system keyring, not next to the program (see
+[Where your data lives](#where-your-data-lives)). On macOS, steps 3 and 4 above apply to each
+new download ("Open Anyway" once, then Keychain access again).
 
 ### Uninstall
 
@@ -256,6 +274,9 @@ one side only is one row and is not walked.
   (you chose it after seeing the difference). Nothing is deleted, ever, and nothing moves
   without a click. Double-click a row to take both panes to its folder. The panel is
   keyboard-friendly: arrows move, Space toggles, Enter opens.
+- **Panel size:** drag the top edge of the compare panel (or of the transfer queue) to
+  resize it; a double-click on the edge resets it, and the heights are remembered. The
+  caret collapses the compare panel to one line with the counts.
 - **Servers that cannot set times:** a file hoprs just transferred is shown as identical
   for the rest of the tab's life when its sizes match, even if the server kept an old time.
   FTP listings without `MLSD` only have minute precision, so times within a minute count
@@ -263,11 +284,40 @@ one side only is one row and is not walked.
 
 ### Transfers
 
+![Two local files dragged over the remote pane: a chip with the first name and a "2" badge follows the pointer, the dragged rows are dimmed, and the remote pane has a dashed outline and the label "Upload 2 items to /home/alice/web-app"](docs/images/drag.png)
+
 Select files in either pane and press Ctrl+Enter, or drag them across. Every transfer goes
 into the queue at the bottom, which survives restarts: close hoprs in the middle of an
 upload and it resumes where it stopped. When the destination already exists, hoprs asks
 what to do (ask, overwrite, overwrite if newer, skip, resume), for that item or for the rest
 of the batch.
+
+A drag starts after the pointer moves a few pixels. A chip with the first item's name (and
+"+N" for more) follows the pointer, the dragged rows dim, and the pane that will receive
+them gets a dashed outline and says what a drop does ("Upload 2 items to /the/folder").
+Escape or leaving the window cancels the drag.
+
+### Right-click menus
+
+![The right-click menu open on a remote file: Download, Edit, Rename, Permissions…, Copy path, Refresh, New folder and Delete, each with its icon and key](docs/images/menu.png)
+
+Right-click a file or folder for its actions: Upload or Download, Edit (remote files), Open
+(folders), Rename, Permissions… (remote), Copy path, Refresh (F5), New folder and Delete.
+Items that do not apply are dimmed, not hidden. Right-clicking below the rows gives New
+folder, Refresh and Compare. Shift+F10 or the Menu key opens the menu of the selected row
+from the keyboard; arrows move, Enter runs, Escape closes. The compare list (Upload,
+Download, Show in panes), the queue rows (Pause, Resume, Cancel, Retry, Dismiss), the
+sidebar's sites and workspaces (Open, Edit) and the tabs (Close tab, Close other tabs) have
+menus too.
+
+### Settings
+
+![The Settings tab on its Transfers section: workers per site, what to do when a file already exists, and the keepalive interval](docs/images/settings.png)
+
+Settings open as a tab: Ctrl+, (⌘, on macOS), the gear at the bottom of the sidebar, or
+"Settings" in the Ctrl+K palette. There is only ever one; pressing the shortcut again
+focuses it. A list on the left switches between General, Transfers, Folder compare, Remote
+editing, Terminal and Backup. Closing the tab returns to the tab you came from.
 
 ### Remote editing
 
@@ -295,6 +345,9 @@ On Windows a custom editor must be a program that opens a window and can wait: u
 | F7 | file pane | New folder |
 | Del | file pane | Delete |
 | Ctrl+Enter | file pane | Upload or download the selection |
+| F5 | file pane | Refresh |
+| Shift+F10 or the Menu key | file pane, compare list | Open the selected row's menu |
+| Ctrl+, (Cmd+, on macOS) | anywhere, a focused terminal too | Settings |
 | Tab | files tab | Switch pane |
 
 Terminal shortcuts use Ctrl+Shift on every system, macOS included. Plain Ctrl+K in a focused terminal goes to the shell (in bash it kills the rest of the
@@ -391,7 +444,7 @@ The binary ends up in `target/release/hoprs`.
 
 ```sh
 scripts/package-deb.sh                                              # needs Docker
-scripts/check-deb.sh target/deb-ubuntu-24.04/debian/hoprs_1.2.0-1_amd64.deb
+scripts/check-deb.sh target/deb-ubuntu-24.04/debian/hoprs_1.3.0-1_amd64.deb
 ```
 
 `package-deb.sh` builds inside an Ubuntu 24.04 container pinned by digest, with

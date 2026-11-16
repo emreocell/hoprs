@@ -3,15 +3,14 @@
 What is planned, roughly in order, and where help is most welcome. Plans change; the
 [issues](https://github.com/engviniciusbs/hoprs/issues) and
 [discussions](https://github.com/engviniciusbs/hoprs/discussions) are where they get decided.
-Released work is in the [CHANGELOG](../CHANGELOG.md): 1.2.0 (2026-11-16) added the app in
-Brazilian Portuguese (the language follows the OS or is set in Settings) and folder compare
-(a panel lists what is new, changed or missing on each side and transfers only the
-difference).
+Released work is in the [CHANGELOG](../CHANGELOG.md): 1.3.0 (2026-11-16) polished the
+interface (icons, Settings as a tab, right-click menus, a visible drag, a resizable compare
+panel and queue); 1.2.0 (2026-11-16) added the app in Brazilian Portuguese (the language
+follows the OS or is set in Settings) and folder compare (a panel lists what is new, changed
+or missing on each side and transfers only the difference).
 
 ## Next
 
-- **UI polish (1.3.0)**: icons, Settings as a tab, right-click menus, visible drag, resizable
-  panels — in progress.
 - **Sync on top of compare:** delete one-sided files, mirror a folder, compare by content
   or checksum (see the Plan 12 follow-ups).
 

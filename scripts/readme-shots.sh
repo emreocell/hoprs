@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Captures the README screenshots of hoprs 1.2.0 (docs/images/*.png), driven for real
+# Captures the README screenshots of hoprs (docs/images/*.png), driven for real
 # against the Docker test servers, like site/scripts/capture/run.sh (which this reuses:
 # same Dockerfile, sites.toml and planted trees; the landing page shots are unaffected).
 #   scripts/readme-shots.sh            # capture, convert, tear everything down
 #   KEEP=1 scripts/readme-shots.sh     # leave the servers and the capture box running
+#   LOCAL_DEB=target/deb-ubuntu-24.04/debian/hoprs_1.3.0-1_amd64.deb scripts/readme-shots.sh
+#                                      # shoot a .deb built by scripts/package-deb.sh
+# Without LOCAL_DEB the box downloads DEB_URL (default: the release in the Dockerfile).
 # Click coordinates are physical pixels (logical x 2), found by capturing and looking.
 set -euo pipefail
 
@@ -11,7 +14,6 @@ here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/.." && pwd)
 cap="$repo/site/scripts/capture"
 out="$repo/docs/images"
-deb_url=${DEB_URL:-https://github.com/engviniciusbs/hoprs/releases/download/v1.2.0/hoprs_1.2.0-1_amd64.deb}
 work=$(mktemp -d)
 box=hoprs-readme-shots
 sshd=hoprs-test-sshd-1
@@ -81,13 +83,21 @@ grep -q 'alice@build' /home/alice/.bashrc \
     || printf '%s\n' "PS1='\\[\\033[01;32m\\]\\u@build\\[\\033[00m\\]:\\[\\033[01;34m\\]\\w\\[\\033[00m\\]\\$ '" >> /home/alice/.bashrc
 REMOTE
 
-echo "==> capture box (hoprs 1.2.0)"
-docker build -q -t hoprs-readme-shots --build-arg "DEB_URL=$deb_url" "$cap" >/dev/null
+echo "==> capture box"
+# Built from a temporary context (the Dockerfile and a debs/ folder), so nothing lands in
+# the repo: the local .deb when LOCAL_DEB is set, else an empty debs/ and DEB_URL.
+mkdir -p "$work/ctx/debs"
+cp "$cap/Dockerfile" "$work/ctx/"
+if [ -n "${LOCAL_DEB:-}" ]; then cp "$LOCAL_DEB" "$work/ctx/debs/"; fi
+build_args=()
+if [ -n "${DEB_URL:-}" ]; then build_args=(--build-arg "DEB_URL=$DEB_URL"); fi
+docker build -q -t hoprs-readme-shots "${build_args[@]}" "$work/ctx" >/dev/null
 docker rm -f "$box" >/dev/null 2>&1 || true
 docker run -d --name "$box" --network host \
     --add-host build.example:127.0.0.1 --add-host files.example:127.0.0.1 \
     -v "$cap:/capture:ro" -v "$repo/docker/fixtures/id_ed25519:/fixture/id_ed25519:ro" \
     hoprs-readme-shots sleep infinity >/dev/null
+docker exec "$box" dpkg-query -W hoprs   # which .deb this run shoots
 
 docker exec -i "$box" bash -s <<'LOCAL'
 set -euo pipefail
@@ -177,6 +187,27 @@ open_files() {
     x xdotool mousemove 2400 1750
 }
 quit_hoprs() { docker exec "$box" pkill -x hoprs || true; sleep 1; }
+# drag_from X Y TO_X TO_Y [ctrl]: presses at X Y and moves to TO_X TO_Y in steps (a drag
+# starts past 4 px), leaving the button held so the shot shows the drag; drop_cancel ends it
+# with Escape. With "ctrl" the press is a Ctrl+press, which adds the row to the selection
+# instead of selecting it alone, so the drag carries every selected row.
+drag_from() {
+    x xdotool mousemove "$1" "$2"
+    sleep 0.3
+    if [ "${5:-}" = ctrl ]; then x xdotool keydown ctrl; fi
+    x xdotool mousedown 1
+    sleep 0.2
+    x xdotool mousemove $(($1 + 20)) "$2"
+    sleep 0.2
+    if [ "${5:-}" = ctrl ]; then x xdotool keyup ctrl; fi
+    local i
+    for i in 1 2 3 4 5 6; do
+        x xdotool mousemove $(($1 + ($3 - $1) * i / 6)) $(($2 + ($4 - $2) * i / 6))
+        sleep 0.1
+    done
+    sleep 1
+}
+drop_cancel() { x xdotool key Escape; x xdotool mouseup 1; sleep 0.5; }
 
 echo "==> hoprs"
 docker exec -d "$box" Xvfb :99 -screen 0 2880x1800x24 -nolisten tcp
@@ -184,24 +215,27 @@ sleep 1
 launch
 open_files
 
-echo "==> palette"
-x xdotool key ctrl+k
+echo "==> compare panel: taller, two differing files selected"
+# Drag the panel's top edge up (to just below its largest height, so the panes keep whole
+# rows); every group shows.
+drag_from 1600 1111 1600 712
+x xdotool mouseup 1
 sleep 1
-x xdotool type --delay 80 new
-sleep 1
-shoot palette
-x xdotool key Escape
-sleep 1
-
-echo "==> compare panel: two differing files selected"
-x xdotool mousemove 1200 1300
-x xdotool click 5            # one wheel notch: the list jumps four rows
-sleep 1
-click 556 1330               # checkbox: deploy.sh
-click 556 1390               # checkbox: index.html
+click 556 1240               # checkbox: deploy.sh
+click 556 1300               # checkbox: index.html
 x xdotool mousemove 2400 1750
 sleep 1
 shoot compare
+click 1600 713 2             # double-click the edge: back to the default height (saved)
+sleep 1
+
+echo "==> Settings tab, Transfers section"
+x xdotool key ctrl+comma
+sleep 1.5
+click 652 186                # section list: Transfers
+x xdotool mousemove 2400 1750
+sleep 1
+shoot settings
 quit_hoprs
 
 echo "==> Brazilian Portuguese"
@@ -220,7 +254,7 @@ shoot pt-br
 quit_hoprs
 docker exec "$sshd" rm -f /home/alice/web-app/CHANGELOG.md   # the English run uploads it again
 
-echo "==> English: finished and in-flight uploads"
+echo "==> English: finished and in-flight uploads, a drag"
 launch
 open_files
 click 640 738                # local: CHANGELOG.md
@@ -246,14 +280,40 @@ sleep 4
 docker run --rm --net "container:$sshd" --cap-add NET_ADMIN --entrypoint sh hoprs-test-sshd -c \
     'tc qdisc del dev eth0 ingress 2>/dev/null; tc qdisc add dev eth0 handle ffff: ingress &&
      tc filter add dev eth0 parent ffff: protocol ip u32 match u32 0 0 police rate 24mbit burst 256k drop flowid :1'
-x xdotool mousemove 1200 800 # scroll the local list to its end
-x xdotool click 5
+click 640 738                # local: CHANGELOG.md, then End: the last row, the 64 MB tarball
+x xdotool key End
+x xdotool key ctrl+Return    # Upload
 sleep 1
-click 640 1048               # local: web-app-2.4.1.tar.gz
-x xdotool key ctrl+Return
+x xdotool key Home           # back to the top of the list: no half-cut first row
+sleep 1
+click 640 798                # local: deploy.sh, the selected row
 x xdotool mousemove 2400 1750
-sleep 9
+sleep 6
 shoot files
+drag_from 640 858 2200 470 ctrl # index.html joins deploy.sh; held over the remote pane
+shoot drag
+drop_cancel
+
+echo "==> right-click menu on a remote file"
+x xdotool mousemove 1856 798  # remote: deploy.sh (CHANGELOG.md is above it now)
+sleep 0.3
+x xdotool click 3
+sleep 1
+x xdotool mousemove 2000 888 # hover the second item, Edit
+sleep 1
+shoot menu
+x xdotool key Escape
+sleep 1
+
+echo "==> palette"
+x xdotool mousemove 2400 1750
+x xdotool key ctrl+k
+sleep 1
+x xdotool type --delay 80 new
+sleep 1
+shoot palette
+x xdotool key Escape
+sleep 1
 
 echo "==> terminal tab"
 click 660 40                 # tab: "build server ssh"
@@ -264,8 +324,8 @@ shoot terminal
 
 echo "==> convert"
 mkdir -p "$out"
-for s in files compare terminal palette pt-br; do docker cp -q "$work/$s.png" "$box:/tmp/$s.png"; done
-docker exec "$box" bash -c 'cd /tmp; for s in files compare terminal palette pt-br; do
+for s in files menu drag settings compare terminal palette pt-br; do docker cp -q "$work/$s.png" "$box:/tmp/$s.png"; done
+docker exec "$box" bash -c 'cd /tmp; for s in files menu drag settings compare terminal palette pt-br; do
     convert "$s.png" -strip -filter Lanczos -resize 1440x900 -colors 256 -define png:compression-level=9 "out-$s.png"; done'
-for s in files compare terminal palette pt-br; do docker cp -q "$box:/tmp/out-$s.png" "$out/$s.png"; done
+for s in files menu drag settings compare terminal palette pt-br; do docker cp -q "$box:/tmp/out-$s.png" "$out/$s.png"; done
 ls -l "$out"
