@@ -124,6 +124,11 @@ pub fn map_key(
         ctrl: modifiers.control(),
         alt: modifiers.alt(),
     };
+    // Ctrl+, (Cmd+, on macOS) opens Settings ([`crate::ui::files::key_message`]): the
+    // shell gets nothing, not even the comma.
+    if modifiers.command() && !modifiers.alt() && key.as_ref() == keyboard::Key::Character(",") {
+        return None;
+    }
     let key = match key {
         keyboard::Key::Named(named) => match named {
             Named::Enter => Key::Enter,
@@ -815,6 +820,12 @@ mod tests {
         use keyboard::{Key as IcedKey, Modifiers as M};
         let ch = |s: &str| IcedKey::Character(s.into());
         let named = IcedKey::Named;
+        // Ctrl+, (Cmd+, on macOS) is Settings: nothing for the shell.
+        assert_eq!(map_key(&ch(","), &ch(","), Some(","), M::COMMAND), None);
+        assert_eq!(
+            map_key(&ch(","), &ch(","), Some(","), M::empty()).map(|(k, _)| k),
+            Some(Key::Char(','))
+        );
         // Plain typing: the text produced.
         assert_eq!(
             map_key(&ch("a"), &ch("a"), Some("a"), M::empty()),

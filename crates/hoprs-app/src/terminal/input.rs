@@ -93,6 +93,8 @@ pub fn encode_key(key: &Key, mods: Modifiers, mode: TermMode) -> Option<Vec<u8>>
     let bytes = match key {
         Key::Text(text) if text.is_empty() => return None,
         Key::Text(text) => alt_prefixed(text.as_bytes()),
+        // Ctrl+, is the app's (Settings): never the shell's.
+        Key::Char(',') if mods.ctrl && !mods.alt => return None,
         Key::Char(c) => match ctrl_code(*c).filter(|_| mods.ctrl) {
             Some(code) => alt_prefixed(&[code]),
             None => alt_prefixed(c.encode_utf8(&mut [0; 4]).as_bytes()),
@@ -316,6 +318,21 @@ mod tests {
         assert_eq!(normal(Key::Delete, all), bytes("\x1b[3;8~"));
         // Ctrl on a character with no control code sends the character.
         assert_eq!(normal(Key::Char('1'), CTRL), bytes("1"));
+    }
+
+    /// Ctrl+, opens Settings (even from a focused terminal): it sends nothing to the
+    /// shell, as it has no control code.
+    #[test]
+    fn ctrl_comma_sends_nothing() {
+        assert_eq!(normal(Key::Char(','), CTRL), None);
+        let ctrl_shift = Modifiers {
+            shift: true,
+            ..CTRL
+        };
+        assert_eq!(normal(Key::Char(','), ctrl_shift), None);
+        // A plain comma, or Alt+comma, still types.
+        assert_eq!(normal(Key::Char(','), NONE), bytes(","));
+        assert_eq!(normal(Key::Char(','), ALT), bytes("\x1b,"));
     }
 
     #[test]

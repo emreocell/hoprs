@@ -441,6 +441,8 @@ impl App {
             | Message::OpenImport
             | Message::Import(_)
             | Message::OpenSettings
+            | Message::SelectSettings
+            | Message::CloseSettings
             | Message::Settings(_)
             | Message::Palette(_)
             | Message::PointerPressed(_)

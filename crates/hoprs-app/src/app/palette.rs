@@ -5,7 +5,8 @@
 //! - the active tab's own actions (the focused pane's F7 / F2 / Del / F4 / Ctrl+Enter, the
 //!   terminal's copy, paste and search), then Reconnect, the new tabs on its session and
 //!   Close tab;
-//! - "Go to": every open tab ("site · kind");
+//! - "Go to": every open tab ("site · kind"), the settings tab included (with "Close
+//!   settings", first while it is shown);
 //! - the global actions (New site, Open workspace…, the queue and log toggles, Import from
 //!   FileZilla, Settings);
 //! - every saved site (connect, or focus its tab) and workspace (open).
@@ -142,9 +143,13 @@ const EMPTY_SITES: usize = 4;
 
 /// The rows without a query, so that every kind is reachable without typing: up to
 /// [`EMPTY_CONTEXT`] of the active tab's own actions, up to [`EMPTY_TABS`] other tabs
-/// (not `active`), "Open workspace…" and Settings, up to [`EMPTY_SITES`] sites, then the
+/// (not `active`, nor the settings tab while it is shown), "Open workspace…" and Settings, up to [`EMPTY_SITES`] sites, then the
 /// other global actions and everything left, in [`App::palette_entries`]' order.
-fn empty_query_order(entries: Vec<Entry>, active: Option<TabId>) -> Vec<Entry> {
+fn empty_query_order(
+    entries: Vec<Entry>,
+    active: Option<TabId>,
+    settings_shown: bool,
+) -> Vec<Entry> {
     let mut context = Vec::new();
     let mut tabs = Vec::new();
     let mut go_to = Vec::new();
@@ -153,7 +158,12 @@ fn empty_query_order(entries: Vec<Entry>, active: Option<TabId>) -> Vec<Entry> {
     for entry in entries {
         match &entry.item {
             PaletteItem::Tab(id) if Some(*id) == active => {}
-            PaletteItem::Tab(_) if tabs.len() < EMPTY_TABS => tabs.push(entry),
+            PaletteItem::SettingsTab if settings_shown => {}
+            // Not the shown tab's action: listed, not offered first.
+            PaletteItem::CloseSettings if !settings_shown => rest.push(entry),
+            PaletteItem::Tab(_) | PaletteItem::SettingsTab if tabs.len() < EMPTY_TABS => {
+                tabs.push(entry);
+            }
             PaletteItem::OpenWorkspace | PaletteItem::Settings => go_to.push(entry),
             PaletteItem::Site(_) if sites.len() < EMPTY_SITES => sites.push(entry),
             PaletteItem::FileKey(..)
@@ -165,6 +175,7 @@ fn empty_query_order(entries: Vec<Entry>, active: Option<TabId>) -> Vec<Entry> {
             | PaletteItem::NewTerminalTab(_)
             | PaletteItem::NewFilesTab(_)
             | PaletteItem::CloseTab(_)
+            | PaletteItem::CloseSettings
                 if context.len() < EMPTY_CONTEXT =>
             {
                 context.push(entry);
@@ -211,6 +222,10 @@ pub enum PaletteItem {
     /// The tab's lost (or failed) connection.
     Reconnect(TabId),
     CloseTab(TabId),
+    /// Go to the settings tab (listed while it is open).
+    SettingsTab,
+    /// Close the settings tab.
+    CloseSettings,
     /// "Open workspace…": narrows the palette to the workspaces.
     OpenWorkspace,
     /// A key of the focused pane (`Side`) of the active files tab.
@@ -337,6 +352,15 @@ impl App {
             if let Some(index) = self.active_tab.filter(|&i| i < self.tabs.len()) {
                 self.tab_actions(index, &mut out);
             }
+            let close_settings = Entry::action(
+                PaletteItem::CloseSettings,
+                strings::palette_close_settings(),
+                None,
+            );
+            // The shown settings tab's own action, as Close tab is a tab's.
+            if self.settings_shown() {
+                out.push(close_settings.clone());
+            }
             out.extend(self.tabs.iter().map(|tab| Entry {
                 item: PaletteItem::Tab(tab.id),
                 label: tab_label(self, tab),
@@ -345,6 +369,15 @@ impl App {
                 shortcut: None,
                 mono: true,
             }));
+            if self.settings_tab.is_some() {
+                out.push(Entry {
+                    group: Group::Tab,
+                    ..Entry::action(PaletteItem::SettingsTab, strings::settings(), None)
+                });
+                if !self.settings_shown() {
+                    out.push(close_settings);
+                }
+            }
             out.push(Entry::action(
                 PaletteItem::NewSite,
                 strings::new_site(),
@@ -361,10 +394,14 @@ impl App {
                 (PaletteItem::ToggleQueue, strings::palette_toggle_queue()),
                 (PaletteItem::ToggleLog, strings::palette_toggle_log()),
                 (PaletteItem::ImportFilezilla, strings::import_filezilla()),
-                (PaletteItem::Settings, strings::settings()),
             ] {
                 out.push(Entry::action(item, label, None));
             }
+            out.push(Entry::action(
+                PaletteItem::Settings,
+                strings::settings(),
+                Some(strings::key_settings()),
+            ));
             out.extend(self.sites.iter().map(|site| Entry {
                 item: PaletteItem::Site(site.id.clone()),
                 label: site.name.clone(),
@@ -401,7 +438,7 @@ impl App {
                 .active_tab
                 .and_then(|i| self.tabs.get(i))
                 .map(|tab| tab.id);
-            empty_query_order(entries, active)
+            empty_query_order(entries, active, self.settings_shown())
         } else {
             ranked(entries, |e| e.score(query), |e| e.label.to_lowercase())
         };
@@ -561,6 +598,8 @@ impl App {
             PaletteItem::NewSite => Message::NewSite,
             PaletteItem::ImportFilezilla => Message::OpenImport,
             PaletteItem::Settings => Message::OpenSettings,
+            PaletteItem::SettingsTab => Message::SelectSettings,
+            PaletteItem::CloseSettings => Message::CloseSettings,
             PaletteItem::ToggleQueue => Message::ToggleQueue,
             PaletteItem::ToggleLog => Message::Log(LogMsg::Toggle),
             PaletteItem::NewTerminalTab(tab) => Message::NewTab {

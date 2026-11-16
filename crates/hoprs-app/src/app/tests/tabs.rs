@@ -760,3 +760,143 @@ async fn close_and_reconnect_moves_every_tab_to_the_new_session() {
         Effect::List { side: Side::Remote, session: Some(s), .. } if *s == new
     )));
 }
+
+/// Plan 13 Task 8: the settings tab. A separate slot in the strip: at most one, and while
+/// it is selected no session tab is.
+#[tokio::test]
+async fn open_settings_twice_focuses_one_tab() {
+    let s = ssh_site("prod", OpenAs::Files);
+    let (mut app, _fake, _) = connected(&s).await;
+    assert_eq!(app.active_tab, Some(0));
+    app.update(Message::OpenSettings);
+    app.update(Message::OpenSettings);
+    let tab = app.settings_tab.as_ref().expect("one settings tab");
+    assert!(tab.active);
+    assert_eq!(tab.section, crate::app::settings::SettingsSection::General);
+    assert_eq!(app.active_tab, None);
+    assert!(app.settings_shown());
+    assert_eq!(app.tabs.len(), 1, "no session tab added");
+}
+
+#[tokio::test]
+async fn select_tab_leaves_settings_open_and_returns() {
+    let s = ssh_site("prod", OpenAs::Files);
+    let (mut app, _fake, _) = connected(&s).await;
+    app.update(Message::OpenSettings);
+    app.update(Message::SelectTab(0));
+    assert_eq!(app.active_tab, Some(0));
+    let tab = app.settings_tab.as_ref().expect("still open");
+    assert!(!tab.active);
+    assert!(!app.settings_shown());
+    // Back to it from the strip.
+    app.update(Message::SelectSettings);
+    assert!(app.settings_shown());
+    assert_eq!(app.active_tab, None);
+    // A form covers it, the strip still shows it; selecting it again drops the form.
+    app.update(Message::NewSite);
+    assert!(!app.settings_shown());
+    assert!(app.settings_tab.as_ref().is_some_and(|t| t.active));
+    app.update(Message::SelectSettings);
+    assert!(app.form.is_none());
+    assert!(app.settings_shown());
+}
+
+#[tokio::test]
+async fn close_settings_returns_to_previous_tab() {
+    let a = ssh_site("a", OpenAs::Files);
+    let b = ssh_site("b", OpenAs::Files);
+    let c = ssh_site("c", OpenAs::Files);
+    let fake = Arc::new(
+        FakeBackend::new()
+            .with_site(a.clone())
+            .with_site(b.clone())
+            .with_site(c.clone()),
+    );
+    let mut app = loaded(&fake).await;
+    for site in [&a, &b, &c] {
+        app.update(Message::ConnectSite(site.id.clone()));
+    }
+    assert_eq!(app.tabs.len(), 3);
+    app.update(Message::SelectTab(1));
+    let from = app.tabs[1].id;
+    app.update(Message::OpenSettings);
+    app.update(Message::CloseSettings);
+    assert!(app.settings_tab.is_none());
+    assert_eq!(app.active_tab, app.tab_index(from));
+
+    // The tab it came from closed meanwhile: the last tab.
+    app.update(Message::OpenSettings);
+    app.update(Message::CloseTab(from));
+    assert!(
+        app.settings_shown(),
+        "closing another tab keeps it selected"
+    );
+    app.update(Message::CloseSettings);
+    assert_eq!(app.active_tab, Some(app.tabs.len() - 1));
+
+    // Not selected: closing it changes no selection.
+    app.update(Message::OpenSettings);
+    app.update(Message::SelectTab(0));
+    app.update(Message::CloseSettings);
+    assert!(app.settings_tab.is_none());
+    assert_eq!(app.active_tab, Some(0));
+
+    // No session tab at all: nothing selected after.
+    let mut app = App::new();
+    app.update(Message::OpenSettings);
+    assert!(app.settings_shown());
+    app.update(Message::CloseSettings);
+    assert!(app.settings_tab.is_none());
+    assert_eq!(app.active_tab, None);
+}
+
+#[tokio::test]
+async fn settings_tab_not_restored_with_workspace() {
+    let s = ssh_site("prod", OpenAs::Files);
+    let ws = workspace("Shop", &[&s.id]);
+    let fake = Arc::new(
+        FakeBackend::new()
+            .with_site(s.clone())
+            .with_workspace(ws.clone()),
+    );
+    let mut app = loaded(&fake).await;
+    let sites = connect_effect(app.update(Message::OpenWorkspace(ws.id.clone())));
+    drive(&mut app, &fake, sites).await;
+    app.update(Message::OpenSettings);
+    let effects = without_panes(app.update(Message::CloseWorkspace(ws.id.clone())));
+    let Some(Effect::SaveTabs { tabs, .. }) = effects.first() else {
+        panic!("{effects:?}");
+    };
+    // Only the session tab is saved.
+    assert_eq!(tabs[0].0, s.id);
+    assert_eq!(tabs.len(), 1);
+    assert_eq!(tabs[0].1.len(), 1, "one saved tab: the files tab");
+    assert!(app.settings_tab.is_some(), "the workspace's close keeps it");
+    assert!(app.settings_shown());
+
+    // Reopened: its tabs come back, the settings tab stays one, now not selected.
+    app.update(Message::OpenWorkspace(ws.id.clone()));
+    assert_eq!(app.tabs.len(), 1);
+    assert_eq!(app.active_tab, Some(0));
+    let tab = app.settings_tab.as_ref().expect("still there");
+    assert!(!tab.active);
+}
+
+#[tokio::test]
+async fn ctrl_comma_blocked_by_dialog() {
+    let mut app = App::new();
+    let request = PromptRequest {
+        id: PromptId(1),
+        session: SessionId(1),
+        site: SiteId::new(),
+        key: "h:22".into(),
+        kind: PromptKind::Password {
+            user: "u".into(),
+            host: "h".into(),
+        },
+    };
+    app.update(Message::Prompt(BrokerEvent::Request(request)));
+    assert!(app.dialogs.is_open());
+    app.update(Message::OpenSettings);
+    assert!(app.settings_tab.is_none());
+}

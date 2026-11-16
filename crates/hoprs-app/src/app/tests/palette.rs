@@ -367,7 +367,7 @@ async fn enter_runs_and_closes() {
         .expect("settings listed");
     app.update(palette(PaletteMsg::Pick(index)));
     assert!(app.palette.is_none());
-    assert!(matches!(app.form, Some(Form::Settings)));
+    assert!(app.settings_shown());
     // Enter with nothing matching does nothing, and keeps the palette open.
     app.update(palette(PaletteMsg::Open));
     app.update(palette(PaletteMsg::Query("zzzz".into())));
@@ -703,4 +703,35 @@ async fn results_computed_only_when_needed() {
     app.update(pressed(FileKey::Enter));
     assert_eq!(results_computed(), before + 2);
     assert!(app.palette.is_none());
+}
+
+/// Plan 13 Task 8: Settings shows its key; while the settings tab is open the palette
+/// goes to it like a tab, and closes it.
+#[test]
+fn palette_lists_the_settings_tab() {
+    let mut app = App::new();
+    let rows = all(&app);
+    let settings = entry(&rows, strings::settings()).expect("settings listed");
+    assert_eq!(settings.item, PaletteItem::Settings);
+    assert_eq!(settings.shortcut, Some(strings::key_settings()));
+    assert!(!rows.iter().any(|e| e.item == PaletteItem::SettingsTab));
+    assert!(!rows.iter().any(|e| e.item == PaletteItem::CloseSettings));
+
+    app.update(Message::OpenSettings);
+    let rows = all(&app);
+    let tab = rows
+        .iter()
+        .find(|e| e.item == PaletteItem::SettingsTab)
+        .expect("listed among the tabs");
+    assert_eq!(tab.group, Group::Tab);
+    let close = entry(&rows, strings::palette_close_settings()).expect("close listed");
+    assert_eq!(close.item, PaletteItem::CloseSettings);
+    // An empty query offers closing it first.
+    app.update(palette(PaletteMsg::Open));
+    assert_eq!(
+        app.palette_results().first().map(|e| e.item.clone()),
+        Some(PaletteItem::CloseSettings)
+    );
+    app.update(palette(PaletteMsg::Run));
+    assert!(app.settings_tab.is_none());
 }

@@ -144,6 +144,18 @@ pub fn import_filezilla() -> &'static str {
 pub fn settings() -> &'static str {
     tr("settings")
 }
+/// The key that opens Settings, as the palette shows it (Cmd on macOS).
+pub fn key_settings() -> &'static str {
+    if cfg!(target_os = "macos") {
+        tr("key-settings-macos")
+    } else {
+        tr("key-settings")
+    }
+}
+/// The palette's row that closes the settings tab.
+pub fn palette_close_settings() -> &'static str {
+    tr("palette-close-settings")
+}
 pub fn new_site() -> &'static str {
     tr("new-site")
 }

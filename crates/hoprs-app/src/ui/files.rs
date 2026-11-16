@@ -135,6 +135,16 @@ pub fn key_message(event: Event, status: Status, _: window::Id) -> Option<Messag
         {
             (status != Status::Captured).then_some(Message::Palette(PaletteMsg::Open))
         }
+        // Ctrl+, (Cmd+, on macOS): Settings, whatever took the key. A focused terminal
+        // captures every key, but Ctrl+, sends nothing to its shell.
+        keyboard::Event::KeyPressed {
+            key,
+            physical_key,
+            modifiers,
+            ..
+        } if modifiers.command() && !modifiers.alt() && key.to_latin(physical_key) == Some(',') => {
+            Some(Message::OpenSettings)
+        }
         keyboard::Event::ModifiersChanged(modifiers) => Some(Message::Modifiers(Mods {
             ctrl: modifiers.command(),
             shift: modifiers.shift(),
@@ -1078,6 +1088,40 @@ mod tests {
                 "{c} {modifiers:?}"
             );
         }
+    }
+
+    /// Ctrl+, (Cmd+, on macOS) opens Settings whatever the status: a focused terminal
+    /// captures every key, and Ctrl+, sends nothing to a shell anyway.
+    #[test]
+    fn ctrl_comma_opens_settings_even_when_captured() {
+        let id = window::Id::unique();
+        let press = |c: &str, modifiers| {
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: Key::Character(c.into()),
+                modified_key: Key::Character(c.into()),
+                physical_key: keyboard::key::Physical::Unidentified(
+                    keyboard::key::NativeCode::Unidentified,
+                ),
+                location: keyboard::Location::Standard,
+                modifiers,
+                text: None,
+                repeat: false,
+            })
+        };
+        let opens = |m: Option<Message>| matches!(m, Some(Message::OpenSettings));
+        let ctrl = keyboard::Modifiers::COMMAND;
+        for status in [Status::Captured, Status::Ignored] {
+            assert!(
+                opens(key_message(press(",", ctrl), status, id)),
+                "{status:?}"
+            );
+            assert!(
+                key_message(press(",", keyboard::Modifiers::default()), status, id).is_none(),
+                "{status:?}"
+            );
+        }
+        let alt = keyboard::Modifiers::COMMAND | keyboard::Modifiers::ALT;
+        assert!(key_message(press(",", alt), Status::Ignored, id).is_none());
     }
 
     #[test]

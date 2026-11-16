@@ -40,8 +40,6 @@ pub enum Form {
     /// "Import from FileZilla" ([`App::import`] holds its state, which outlives the view
     /// while an import runs).
     Import,
-    /// The settings page ([`App::settings`], [`App::backup`]).
-    Settings,
     /// The question about unsent remote edits before the window or a workspace closes
     /// ([`App::center_ask`]).
     QuitEdits,
@@ -85,7 +83,7 @@ pub use log::{LogLevel, LogMsg};
 pub use menu::{ContextMenu, MenuMsg, MenuTarget};
 pub use palette::PaletteMsg;
 pub use queue::{Queue, QueueMsg, QueueTab, RowAction};
-pub use settings::{SidebarMsg, SidebarSection};
+pub use settings::{SettingsTab, SidebarMsg, SidebarSection};
 pub use tabs::{SiteConn, Tab, TabId, TabState};
 pub use terminal::TerminalMsg;
 
@@ -124,6 +122,9 @@ pub struct App {
     /// The connection of each site with tabs, shared by those tabs ([`tabs`]).
     pub conns: HashMap<SiteId, SiteConn>,
     pub active_tab: Option<usize>,
+    /// The settings tab, drawn after the session tabs while it is open ([`settings`]).
+    /// Selected (`active`) only while `active_tab` is `None`.
+    pub settings_tab: Option<SettingsTab>,
     /// A sidebar action failed (opening the profile folder).
     pub sidebar_error: Option<Error>,
     /// Where a local pane starts when its site names no folder.
@@ -371,8 +372,13 @@ pub enum Message {
     /// The import finished: its report, or why the file could not be read.
     Imported(Result<ImportReport, Error>),
     SitemanagerDeleted(Result<(), Error>),
-    /// The sidebar's "Settings".
+    /// The sidebar's gear, the palette or Ctrl+, (Cmd+, on macOS): opens the settings
+    /// tab, or selects it.
     OpenSettings,
+    /// A click on the settings tab in the strip.
+    SelectSettings,
+    /// The settings tab's ×.
+    CloseSettings,
     Settings(settings::SettingsMsg),
     /// Folding or hiding a sidebar section.
     Sidebar(SidebarMsg),
@@ -748,6 +754,7 @@ impl App {
             tabs: Vec::new(),
             conns: HashMap::new(),
             active_tab: None,
+            settings_tab: None,
             sidebar_error: None,
             home: dirs::home_dir().as_deref().and_then(files::local_path),
             mods: Mods::default(),
@@ -893,8 +900,15 @@ impl App {
         {
             self.menu = None;
         }
+        // A session tab became active (selected, opened, a close question shown): the
+        // settings tab is no longer selected.
+        if self.active_tab.is_some()
+            && let Some(settings) = &mut self.settings_tab
+        {
+            settings.active = false;
+        }
         // Typed backup passwords never outlive the settings page, however it was left.
-        if !matches!(self.form, Some(Form::Settings)) {
+        if !self.settings_shown() {
             self.backup.forget_passwords();
             // The same for the typed fields: the next visit starts from what is saved.
             self.compare_ignore_input = None;
@@ -1070,6 +1084,12 @@ impl App {
             Message::Imported(result) => return self.imported(result),
             Message::SitemanagerDeleted(result) => self.sitemanager_deleted(result),
             Message::OpenSettings => return self.open_settings(),
+            Message::SelectSettings => {
+                if self.settings_tab.is_some() {
+                    return self.open_settings();
+                }
+            }
+            Message::CloseSettings => return self.close_settings(),
             Message::Settings(msg) => return self.settings_msg(msg),
             Message::SettingsLoaded(loaded) => self.settings_loaded(loaded),
             Message::QueueStatus(Some(error)) => self.queue_unavailable(error),
@@ -1165,7 +1185,7 @@ impl App {
             match form {
                 Form::Site(form) => form.finished(Some(error.clone())),
                 Form::Workspace(form) => form.finished(Some(error.clone())),
-                Form::Import | Form::Settings | Form::QuitEdits => {}
+                Form::Import | Form::QuitEdits => {}
             }
         }
         let error = result.err();

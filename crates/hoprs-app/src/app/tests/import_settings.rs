@@ -304,7 +304,7 @@ fn delete_source_needs_confirmation() {
 fn export_refuses_empty_password_in_ui() {
     let mut app = App::new();
     app.update(Message::OpenSettings);
-    assert!(matches!(app.form, Some(Form::Settings)));
+    assert!(app.settings_shown());
     backup(&mut app, BackupMsg::OpenExport);
     assert_eq!(app.backup.panel, BackupPanel::Export);
     backup(
@@ -795,9 +795,9 @@ fn settings_changes_apply_and_save() {
         [Effect::SetPolicy(ConflictPolicy::Skip)]
     ));
 
-    // Close returns to the tabs.
-    settings(&mut app, SettingsMsg::Close);
-    assert!(app.form.is_none());
+    // Its × closes the tab.
+    app.update(Message::CloseSettings);
+    assert!(app.settings_tab.is_none());
 }
 
 /// The real effects against the fake backend: the import, the delete, the backup and
@@ -1034,4 +1034,50 @@ fn sidebar_menu_hides_and_shows() {
     app.update(open());
     app.update(Message::Menu(MenuMsg::Choose(1)));
     assert!(!app.settings.sites.hidden);
+}
+
+/// Plan 13 Task 8: the settings page is a tab; a change made there applies and is saved
+/// as before.
+#[test]
+fn settings_change_in_tab_is_saved() {
+    let mut app = App::new();
+    app.update(Message::OpenSettings);
+    assert!(app.settings_shown());
+    let effects = settings(&mut app, SettingsMsg::Workers(5));
+    match &effects[..] {
+        [Effect::SetWorkers(5), Effect::SaveSettings(saved)] => {
+            assert_eq!(saved.workers_per_site, 5);
+        }
+        other => panic!("{other:?}"),
+    }
+    app.update(Message::SettingsSaved(Ok(())));
+    let effects = settings(&mut app, SettingsMsg::Policy(ConflictPolicy::Skip));
+    assert!(matches!(
+        effects[..],
+        [
+            Effect::SetPolicy(ConflictPolicy::Skip),
+            Effect::SaveSettings(_)
+        ]
+    ));
+}
+
+/// Typed backup passwords and fields go as soon as the settings tab is not shown (another
+/// tab selected, or the tab closed), as they did when the page was a form.
+#[tokio::test]
+async fn typed_passwords_forgotten_when_settings_not_shown() {
+    let site = site("prod", "h", "u", Protocol::Ftp);
+    let fake = Arc::new(FakeBackend::new().with_site(site.clone()));
+    let mut app = loaded(&fake).await;
+    app.update(Message::ConnectSite(site.id.clone()));
+    for leave in [Message::SelectTab(0), Message::CloseSettings] {
+        app.update(Message::OpenSettings);
+        backup(&mut app, BackupMsg::OpenExport);
+        backup(&mut app, BackupMsg::ExportPassword(Password("e".into())));
+        app.compare_ignore_input = Some("a, ".into());
+        app.update(Message::Modifiers(Mods::default()));
+        assert_eq!(app.backup.export_password.0, "e", "kept while shown");
+        app.update(leave.clone());
+        assert!(app.backup.export_password.0.is_empty(), "{leave:?}");
+        assert_eq!(app.compare_ignore_input, None, "{leave:?}");
+    }
 }

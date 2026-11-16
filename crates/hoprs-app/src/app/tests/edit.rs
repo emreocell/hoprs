@@ -748,7 +748,7 @@ async fn editor_setting_roundtrip() {
     use crate::settings::{self as file, EDITOR_DEFAULT};
 
     let mut app = App::new();
-    app.form = Some(Form::Settings);
+    app.update(Message::OpenSettings);
     assert_eq!(app.settings.editor_command, "system");
     assert_eq!(EDITOR_DEFAULT, "system");
 
@@ -769,7 +769,7 @@ async fn editor_setting_roundtrip() {
     assert_eq!(app.editor_input.as_deref(), Some("   "));
     assert_eq!(app.settings.editor_command, "code --wait");
     // Leaving the page forgets the blank field.
-    app.update(Message::Settings(settings::SettingsMsg::Close));
+    app.update(Message::CloseSettings);
     assert_eq!(app.editor_input, None);
 
     // The file: written and read back, unknown keys kept; blank in the file is the default.
@@ -1254,7 +1254,7 @@ async fn center_questions_never_overwrite_and_forms_stack() {
 
     // Two parks: both forms come back, in order.
     let mut app = App::new();
-    app.form = Some(Form::Settings);
+    app.form = Some(Form::Site(SiteForm::new_site()));
     app.park_form_for_tests();
     app.form = Some(Form::Import);
     app.park_form_for_tests();
@@ -1263,7 +1263,7 @@ async fn center_questions_never_overwrite_and_forms_stack() {
     assert!(matches!(app.form, Some(Form::Import)));
     app.form = None;
     app.unpark_form_for_tests();
-    assert!(matches!(app.form, Some(Form::Settings)));
+    assert!(matches!(app.form, Some(Form::Site(_))));
 }
 
 fn session_state(app: &mut App, session: SessionId, state: hoprs_core::ConnectionState) {
@@ -1432,7 +1432,7 @@ async fn compare_settings_messages_save() {
             .is_empty()
     );
 
-    app.form = Some(Form::Settings);
+    app.update(Message::OpenSettings);
     let effects = app.update(Message::Settings(settings::SettingsMsg::CompareIgnore(
         " a, ,*.log ".into(),
     )));
@@ -1443,6 +1443,6 @@ async fn compare_settings_messages_save() {
     assert_eq!(app.compare_ignore_input.as_deref(), Some(" a, ,*.log "));
     app.update(Message::SettingsSaved(Ok(())));
 
-    app.update(Message::Settings(settings::SettingsMsg::Close));
+    app.update(Message::CloseSettings);
     assert_eq!(app.compare_ignore_input, None);
 }

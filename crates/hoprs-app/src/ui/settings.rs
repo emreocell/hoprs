@@ -1,4 +1,4 @@
-//! The settings page in the center: transfers (workers per site, conflict policy,
+//! The settings tab's page in the center: transfers (workers per site, conflict policy,
 //! keepalive), the terminal (font size, scrollback, theme) and the encrypted backup.
 
 use std::fmt;
@@ -370,14 +370,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
     .menu_style(theme::menu);
 
     let content = column![
-        row![
-            text(strings::settings_title())
-                .size(theme::TEXT_MD)
-                .font(theme::INTER_SEMIBOLD),
-            space::horizontal(),
-            plain(strings::done(), Some(msg(SettingsMsg::Close))),
-        ]
-        .align_y(Alignment::Center),
+        text(strings::settings_title())
+            .size(theme::TEXT_MD)
+            .font(theme::INTER_SEMIBOLD),
         hrule(),
         field(strings::settings_language(), language.into(), None),
         hrule(),

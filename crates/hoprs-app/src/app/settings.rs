@@ -1,5 +1,11 @@
-//! The settings page (center, no modal): workers per site, the default conflict policy,
-//! the keepalive, the terminal, and the encrypted backup (export and restore).
+//! The settings page, shown as a tab in the strip (no modal): workers per site, the
+//! default conflict policy, the keepalive, the terminal, and the encrypted backup (export
+//! and restore).
+//!
+//! The settings tab is a slot of its own ([`App::settings_tab`]), not a session [`Tab`](super::Tab)
+//! (it has no site): at most one, never saved with a workspace. While it is selected no
+//! session tab is (`active_tab` is `None`), so every "active tab" path shows no
+//! connection; closing it returns to the tab it came from.
 //!
 //! A change applies at once (the policy to the engine, the workers and the keepalive to
 //! the next connections) and is saved to `settings.toml`, unless that file was unreadable at start:
@@ -15,7 +21,7 @@ use hoprs_transfer::ConflictPolicy;
 use hoprs_vault::{BackupImportReport, ExportReport, ImportMode};
 use secrecy::SecretString;
 
-use super::{App, Effect, Form, PickTarget};
+use super::{App, Effect, PickTarget, TabId};
 use crate::settings::{
     LanguageChoice, SettingsLoad, TerminalTheme, clamp_font_size, clamp_keepalive,
     clamp_scrollback, clamp_workers, valid_editor,
@@ -43,7 +49,31 @@ pub enum SettingsMsg {
     /// The compare's ignore list as typed (comma-separated): saved as parsed.
     CompareIgnore(String),
     Backup(BackupMsg),
-    Close,
+}
+
+/// A section of the settings tab (its left navigation).
+// Drawn and switched by Task 9 of Plan 13; only `General` is built until then.
+#[allow(dead_code)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum SettingsSection {
+    #[default]
+    General,
+    Transfers,
+    Compare,
+    Editing,
+    Terminal,
+    Backup,
+}
+
+/// The settings tab in the strip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingsTab {
+    pub section: SettingsSection,
+    /// Selected: the center shows it, and no session tab is active.
+    pub active: bool,
+    /// The session tab that was selected when it was opened (or last selected), where
+    /// closing it returns.
+    pub return_to: Option<TabId>,
 }
 
 #[derive(Debug, Clone)]
@@ -212,9 +242,50 @@ impl App {
         }
     }
 
+    /// Whether the center shows the settings tab (selected, no form over it).
+    pub fn settings_shown(&self) -> bool {
+        self.form.is_none() && self.settings_tab.as_ref().is_some_and(|tab| tab.active)
+    }
+
+    /// Opens the settings tab, or selects it if it is open (there is at most one), and
+    /// scrolls the strip to it. Like selecting a tab, it drops the form shown.
     pub(super) fn open_settings(&mut self) -> Vec<Effect> {
-        self.form = Some(Form::Settings);
+        self.form = None;
+        let from = self.shown_session_tab();
+        let tab = self.settings_tab.get_or_insert(SettingsTab {
+            section: SettingsSection::default(),
+            active: false,
+            return_to: None,
+        });
+        if from.is_some() {
+            tab.return_to = from;
+        }
+        tab.active = true;
+        self.active_tab = None;
+        // It is the strip's last tab: bring it into view.
+        vec![Effect::ScrollTabs { x: 1.0 }]
+    }
+
+    /// The settings tab's ×: it goes; if it was selected, the tab it came from is
+    /// selected again if still open, else the last tab.
+    pub(super) fn close_settings(&mut self) -> Vec<Effect> {
+        let Some(tab) = self.settings_tab.take() else {
+            return Vec::new();
+        };
+        if tab.active {
+            self.active_tab = tab
+                .return_to
+                .and_then(|id| self.tab_index(id))
+                .or_else(|| self.tabs.len().checked_sub(1));
+        }
         Vec::new()
+    }
+
+    /// The selected session tab's id, if any.
+    fn shown_session_tab(&self) -> Option<TabId> {
+        self.active_tab
+            .and_then(|i| self.tabs.get(i))
+            .map(|tab| tab.id)
     }
 
     pub(super) fn settings_loaded(&mut self, loaded: SettingsLoad) {
@@ -335,16 +406,6 @@ impl App {
                 self.save_settings_effect().into_iter().collect()
             }
             SettingsMsg::Backup(msg) => self.backup_msg(msg),
-            SettingsMsg::Close => {
-                if matches!(self.form, Some(Form::Settings)) {
-                    self.form = None;
-                }
-                // Typed passwords don't outlive the page, nor does a blank editor field.
-                self.backup.forget_passwords();
-                self.editor_input = None;
-                self.compare_ignore_input = None;
-                Vec::new()
-            }
         }
     }
 

@@ -12,6 +12,7 @@ real display.
 | File icons by extension (`for_entry`) | Pass |
 | Context menu model: opens at the last press, closes on Escape, outside click, resize and choice, blocked behind a dialog (`crates/hoprs-app/src/app/tests/menu.rs`); kept inside the window (`ui::menu` tests); press position published before the widget under it (`ui::pointer` tests) | Pass |
 | Sidebar state saved: collapse and hide round-trip through `settings.toml`, invalid values read as shown, the ⋯ menu hides and shows a section (`settings` tests, `app/tests/import_settings.rs`); site state and icon by protocol (`ui::sidebar` tests) | Pass |
+| Settings tab: one at most, selecting another tab keeps it, its × returns to the tab it came from (or the last), not saved with a workspace, blocked behind a dialog (`app/tests/tabs.rs`); settings saved and typed passwords forgotten when it is not shown (`app/tests/import_settings.rs`); no connection in the status bar (`app/tests/status.rs`); Ctrl+, opens it even from a focused terminal and sends nothing to the shell (`ui::files`, `ui::terminal`, `terminal::input` tests); palette rows (`app/tests/palette.rs`) | Pass |
 
 ## NEEDS HUMAN
 
@@ -58,3 +59,11 @@ real display.
    with its label. The status bar shows a green plug when connected, a red warning when the
    connection is lost, and a lock before the login method on SSH and FTPS but not on plain
    FTP. The Log button stays highlighted while the panel is open.
+
+8. **Settings tab.** NEEDS HUMAN. Ctrl+, (Cmd+, on macOS) opens Settings from a file tab,
+   from a focused terminal (nothing typed in the shell) and with no tabs. Expect: a
+   "Settings" tab with a gear after the session tabs, selected; no queue under it and no
+   connection in the status bar (the Log button stays). Press Ctrl+, again, or use the
+   sidebar gear or Ctrl+K › Settings: the same tab is focused, never a second one. Click a
+   session tab and back; then close Settings with its ×: the tab you came from is selected
+   again.

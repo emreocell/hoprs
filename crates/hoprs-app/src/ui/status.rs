@@ -1,6 +1,7 @@
 //! The status bar (mockup v2): the active tab's connection state, `user@host:port` in
 //! mono, how the session logged in, and the open workspace's "3 of 3 sites in Shop"; on
-//! the right, "Log" opens the technical log panel.
+//! the right, "Log" opens the technical log panel. The settings tab has no connection:
+//! only the workspace part and Log.
 
 use hoprs_core::{Protocol, Site};
 use iced::widget::{column, container, row, rule, space, text};
@@ -25,7 +26,8 @@ pub enum Tone {
 /// What the status bar shows, as text (pure: the view only draws it).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StatusLine {
-    pub state: String,
+    /// `None` on the settings tab (no connection to speak of).
+    pub state: Option<String>,
     pub tone: Tone,
     /// `user@host:port` of the active tab's site.
     pub endpoint: Option<String>,
@@ -51,10 +53,22 @@ pub fn line(app: &App) -> StatusLine {
         let name = &app.workspace(id)?.name;
         Some(strings::workspace_status(connected, total, name))
     });
+    // The settings tab: no session tab is active (`active_tab` is `None` then).
+    let settings = app.settings_shown();
     let tab = app.active_tab.and_then(|i| app.tabs.get(i));
     let site = tab.and_then(|t| app.site(&t.site));
     let (state, tone) = match tab.map(|t| app.conn(&t.site).conn_status()) {
         _ if app.closing => (strings::closing().to_owned(), Tone::Muted),
+        None if settings => {
+            return StatusLine {
+                state: None,
+                tone: Tone::Muted,
+                endpoint: None,
+                encryption: None,
+                auth: None,
+                workspace,
+            };
+        }
         None => (strings::not_connected().to_owned(), Tone::Muted),
         Some(ConnStatus::Connecting) => (strings::connecting().to_owned(), Tone::Muted),
         Some(ConnStatus::Connected) => (strings::connected().to_owned(), Tone::Ok),
@@ -74,7 +88,7 @@ pub fn line(app: &App) -> StatusLine {
         _ => None,
     };
     StatusLine {
-        state,
+        state: Some(state),
         tone,
         endpoint: site.map(|s| strings::endpoint(&s.user, &s.host, s.port)),
         encryption: site.and_then(encryption_icon),
@@ -96,16 +110,17 @@ pub fn view(app: &App) -> Element<'_, Message> {
         Tone::Error => (Icon::Warning, p.error),
         Tone::Muted => (Icon::Plug, p.muted),
     };
-    let mut items = row![
+    let state = line.state.map(|state| {
         row![
             icons::icon(state_icon, icons::SMALL).color(state_color),
-            text(line.state).size(theme::TEXT_XS).color(color),
+            text(state).size(theme::TEXT_XS).color(color),
         ]
         .spacing(theme::SPACE_2XS)
         .align_y(Alignment::Center)
-    ]
-    .spacing(theme::SPACE_LG)
-    .align_y(Alignment::Center);
+    });
+    let mut items = row![state]
+        .spacing(theme::SPACE_LG)
+        .align_y(Alignment::Center);
     if let Some(endpoint) = line.endpoint {
         items = items.push(text(endpoint).font(theme::MONO).size(theme::TEXT_XS));
     }

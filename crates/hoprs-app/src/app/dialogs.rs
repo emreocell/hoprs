@@ -586,6 +586,8 @@ fn behind_overlay(msg: &Message) -> bool {
         | Message::OpenImport
         | Message::Import(_)
         | Message::OpenSettings
+        | Message::SelectSettings
+        | Message::CloseSettings
         | Message::Settings(_)
         | Message::PointerPressed(_)
         | Message::Menu(_)

@@ -4,7 +4,7 @@
 //! tab, "New terminal tab" and "New files tab" add one on the same session. The active
 //! tab sits on `paper_3` over the 2 px white underline. Tabs past the window's width
 //! scroll sideways (Shift+wheel or a touchpad), as the mockup's `overflow-x: auto` strip
-//! does.
+//! does. The settings tab, while open, comes after the session tabs.
 
 use hoprs_core::{Protocol, Site, TabKind};
 use iced::widget::scrollable::{Direction, Scrollbar};
@@ -34,7 +34,7 @@ pub fn strip_id() -> Id {
 
 /// The tab strip, or the "No open sessions" placeholder.
 pub fn view(app: &App) -> Element<'_, Message> {
-    if app.tabs.is_empty() {
+    if app.tabs.is_empty() && app.settings_tab.is_none() {
         return container(
             text(strings::no_sessions())
                 .size(theme::TEXT_XS)
@@ -50,7 +50,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .tabs
         .iter()
         .enumerate()
-        .map(|(i, tab)| session_tab(app, i, tab)))
+        .map(|(i, tab)| session_tab(app, i, tab))
+        .chain(
+            app.settings_tab
+                .as_ref()
+                .map(|tab| settings_tab(tab.active)),
+        ))
     .spacing(theme::SPACE_3XS)
     .height(Length::Fill);
     // A thin bar over the underlines, shown only when the tabs overflow.
@@ -110,6 +115,47 @@ fn session_actions(app: &App) -> Option<Element<'_, Message>> {
         .padding(Padding::ZERO.left(theme::SPACE_XS).right(theme::SPACE_XS))
         .into(),
     )
+}
+
+/// The settings tab: the gear, "Settings" and its ×.
+fn settings_tab<'a>(active: bool) -> Element<'a, Message> {
+    let p = palette();
+    let label = row![
+        icons::icon(Icon::GearSix, icons::SMALL).color(if active { p.ink } else { p.muted }),
+        text(strings::settings())
+            .size(theme::TEXT_SM)
+            .wrapping(text::Wrapping::None),
+        widgets::icon_button_small(
+            Icon::X,
+            strings::close_tab(),
+            None,
+            Some(Message::CloseSettings),
+        ),
+    ]
+    .spacing(theme::SPACE_XS)
+    .align_y(Alignment::Center);
+    let button = button(
+        container(label)
+            .height(Length::Fill)
+            .align_y(Alignment::Center),
+    )
+    .height(Length::Fill)
+    .padding(Padding::ZERO.left(theme::SPACE_MD).right(theme::SPACE_XS))
+    .style(theme::tab(active))
+    .on_press(Message::SelectSettings);
+    column![button, underline(active)]
+        .width(Length::Shrink)
+        .into()
+}
+
+/// The accent line under a tab, drawn only under the selected one.
+fn underline<'a>(active: bool) -> Element<'a, Message> {
+    let line = container(space()).width(Length::Fill).height(UNDERLINE);
+    if active {
+        line.style(theme::underline).into()
+    } else {
+        line.into()
+    }
 }
 
 fn session_tab<'a>(app: &'a App, index: usize, tab: &'a Tab) -> Element<'a, Message> {
@@ -176,13 +222,9 @@ fn session_tab<'a>(app: &'a App, index: usize, tab: &'a Tab) -> Element<'a, Mess
         .into(),
         None => button.into(),
     };
-    let underline = container(space()).width(Length::Fill).height(UNDERLINE);
-    let underline = if active {
-        underline.style(theme::underline)
-    } else {
-        underline
-    };
-    column![button, underline].width(Length::Shrink).into()
+    column![button, underline(active)]
+        .width(Length::Shrink)
+        .into()
 }
 
 #[cfg(test)]

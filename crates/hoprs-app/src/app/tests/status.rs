@@ -87,7 +87,7 @@ async fn status_texts_for_each_state() {
 
     // Nothing open: only the state.
     let line = status::line(&app);
-    assert_eq!(line.state, strings::not_connected());
+    assert_eq!(line.state.as_deref(), Some(strings::not_connected()));
     assert_eq!(
         (line.endpoint, line.auth, line.workspace),
         (None, None, None)
@@ -95,7 +95,7 @@ async fn status_texts_for_each_state() {
 
     let sites = connect_effect(app.update(Message::OpenWorkspace(ws.id.clone())));
     let line = status::line(&app);
-    assert_eq!(line.state, "Connecting…");
+    assert_eq!(line.state.as_deref(), Some("Connecting…"));
     assert_eq!(line.endpoint.as_deref(), Some("deploy@203.0.113.4:22"));
     assert_eq!(line.auth, None, "nothing authenticated yet");
     assert_eq!(line.workspace.as_deref(), Some("0 of 3 sites in Shop"));
@@ -103,7 +103,7 @@ async fn status_texts_for_each_state() {
     drive(&mut app, &fake, sites).await;
     let session = session_of(&app, &a.id);
     let line = status::line(&app);
-    assert_eq!(line.state, "Connected");
+    assert_eq!(line.state.as_deref(), Some("Connected"));
     assert_eq!(line.workspace.as_deref(), Some("3 of 3 sites in Shop"));
 
     // The session's feed: the method that logged in, then each state.
@@ -124,7 +124,7 @@ async fn status_texts_for_each_state() {
         ConnectionState::Reconnecting { attempt: 2 },
     );
     let line = status::line(&app);
-    assert_eq!(line.state, "Reconnecting (2/5)");
+    assert_eq!(line.state.as_deref(), Some("Reconnecting (2/5)"));
     assert_eq!(line.workspace.as_deref(), Some("2 of 3 sites in Shop"));
     assert_eq!(
         line.auth.as_deref(),
@@ -132,13 +132,19 @@ async fn status_texts_for_each_state() {
         "kept while reconnecting"
     );
     state(&mut app, session, ConnectionState::WaitingForUser);
-    assert_eq!(status::line(&app).state, "Waiting for you");
+    assert_eq!(status::line(&app).state.as_deref(), Some("Waiting for you"));
     let lost = Error::new(ErrorKind::Network, "Connection lost");
     state(&mut app, session, ConnectionState::Disconnected(lost));
-    assert_eq!(status::line(&app).state, "Disconnected — Connection lost");
+    assert_eq!(
+        status::line(&app).state.as_deref(),
+        Some("Disconnected — Connection lost")
+    );
     // A state for a session no tab has (closed meanwhile) changes nothing.
     assert!(state(&mut app, SessionId(999), ConnectionState::Connected).is_empty());
-    assert_eq!(status::line(&app).state, "Disconnected — Connection lost");
+    assert_eq!(
+        status::line(&app).state.as_deref(),
+        Some("Disconnected — Connection lost")
+    );
 
     // The other methods.
     for (method, label) in [
@@ -175,7 +181,10 @@ async fn status_texts_for_each_state() {
     let sites = connect_effect(app.update(Message::ConnectSite(d.id.clone())));
     drive(&mut app, &fake, sites).await;
     let line = status::line(&app);
-    assert_eq!(line.state, "Disconnected — Authentication failed");
+    assert_eq!(
+        line.state.as_deref(),
+        Some("Disconnected — Authentication failed")
+    );
     assert_eq!(line.workspace, None, "no workspace open");
 }
 
@@ -470,7 +479,10 @@ async fn close_request_saves_then_shuts_down_in_order() {
     assert_eq!(tabs.len(), 2);
     assert_eq!(tabs[0].1[0].remote_dir.as_deref(), Some("/var/www"));
     assert!(app.closing);
-    assert_eq!(status::line(&app).state, strings::closing());
+    assert_eq!(
+        status::line(&app).state.as_deref(),
+        Some(strings::closing())
+    );
     // (A second request while closing force-closes: see
     // `panicking_shutdown_and_second_request_still_exit`.)
 
@@ -1119,4 +1131,31 @@ async fn action_during_transport_reconnect_waits_and_runs_once() {
         "no stale replay ids: {:?}",
         app.replayed
     );
+}
+
+/// Plan 13 Task 8: the settings tab has no connection: no state, endpoint nor login; the
+/// open workspace's count stays.
+#[tokio::test]
+async fn settings_tab_status_line_has_no_connection() {
+    let a = site("Shop prod", "203.0.113.4", "deploy", Protocol::Ssh);
+    let ws = workspace("Shop", &[&a.id]);
+    let fake = Arc::new(
+        FakeBackend::new()
+            .with_site(a.clone())
+            .with_workspace(ws.clone()),
+    );
+    let mut app = loaded(&fake).await;
+    let sites = connect_effect(app.update(Message::OpenWorkspace(ws.id.clone())));
+    drive(&mut app, &fake, sites).await;
+    assert_eq!(status::line(&app).state.as_deref(), Some("Connected"));
+    app.update(Message::OpenSettings);
+    let line = status::line(&app);
+    assert_eq!(line.state, None);
+    assert_eq!((line.endpoint, line.auth), (None, None));
+    assert_eq!(
+        line.workspace,
+        Some(strings::workspace_status(1, 1, "Shop"))
+    );
+    select(&mut app, &a.id);
+    assert_eq!(status::line(&app).state.as_deref(), Some("Connected"));
 }
