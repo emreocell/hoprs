@@ -52,7 +52,7 @@ pub fn toolbar<'a>(
             if short {
                 widgets::icon_button(icon, label, key, on_press)
             } else {
-                widgets::tool_button(icon, label, key.filter(|_| !compact), on_press).into()
+                widgets::tool_button(icon, label, key, !compact, on_press)
             }
         };
     let (transfer_icon, transfer) = match side {
@@ -124,7 +124,7 @@ pub fn toolbar<'a>(
         bar = bar.push(if short {
             widgets::icon_button(Icon::GitDiff, strings::compare_button(), None, start)
         } else {
-            widgets::tool_button(Icon::GitDiff, strings::compare_button(), None, start).into()
+            widgets::tool_button(Icon::GitDiff, strings::compare_button(), None, true, start)
         });
     }
     if let Some(busy) = &pane.busy {
@@ -172,7 +172,7 @@ fn edit_action<'a>(
             text(strings::key_edit())
                 .font(theme::MONO)
                 .size(theme::TEXT_TAG)
-                .color(p.disabled),
+                .color(p.muted),
         );
     }
     let refused = matches!(edit, Some(Err(_)));
@@ -198,7 +198,9 @@ fn edit_action<'a>(
             tooltip::Position::Bottom,
         )
         .into(),
-        _ if icon_only => widgets::tip(button, strings::edit_file(), Some(strings::key_edit())),
+        _ if icon_only || compact => {
+            widgets::tip(button, strings::edit_file(), Some(strings::key_edit()))
+        }
         _ => button.into(),
     }
 }

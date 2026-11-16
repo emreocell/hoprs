@@ -51,7 +51,18 @@ pub fn icon_button<'a>(
     shortcut: Option<&'a str>,
     on_press: Option<Message>,
 ) -> Element<'a, Message> {
-    icon_toggle(icon, label, shortcut, on_press, false)
+    icon_toggle_sized(icon, label, shortcut, on_press, false, icons::ROW)
+}
+
+/// [`icon_button`] with a glyph of `size` (the tab bar and sidebar rows use
+/// [`icons::SMALL`]); the hit area stays [`ICON_HIT`].
+pub fn icon_button_small<'a>(
+    icon: Icon,
+    label: &'a str,
+    shortcut: Option<&'a str>,
+    on_press: Option<Message>,
+) -> Element<'a, Message> {
+    icon_toggle_sized(icon, label, shortcut, on_press, false, icons::SMALL)
 }
 
 /// [`icon_button`] that keeps its ink look while `active` (the panel it toggles is open).
@@ -62,7 +73,18 @@ pub fn icon_toggle<'a>(
     on_press: Option<Message>,
     active: bool,
 ) -> Element<'a, Message> {
-    let glyph = container(icons::icon(icon, icons::ROW))
+    icon_toggle_sized(icon, label, shortcut, on_press, active, icons::ROW)
+}
+
+fn icon_toggle_sized<'a>(
+    icon: Icon,
+    label: &'a str,
+    shortcut: Option<&'a str>,
+    on_press: Option<Message>,
+    active: bool,
+    size: f32,
+) -> Element<'a, Message> {
+    let glyph = container(icons::icon(icon, size))
         .center_x(Length::Fill)
         .center_y(Length::Fill);
     let body = button(glyph)
@@ -74,16 +96,21 @@ pub fn icon_toggle<'a>(
     tooltip(body, hint(label, shortcut), tooltip::Position::Bottom).into()
 }
 
+/// Whether [`tool_button`] needs a tooltip: it has a shortcut that is not shown inline.
+pub fn tool_button_needs_tip(shortcut: Option<&str>, show_key: bool) -> bool {
+    shortcut.is_some() && !show_key
+}
+
 /// A toolbar button: the icon, then the label (the look of the pane toolbars' actions).
-/// Disabled (and dimmed) when `on_press` is `None`; the tooltip carries the shortcut.
+/// Disabled (and dimmed) when `on_press` is `None`. The shortcut shows as a key hint next
+/// to the label when `show_key`; otherwise it goes in a tooltip with the label.
 pub fn tool_button<'a>(
     icon: Icon,
     label: &'a str,
     shortcut: Option<&'a str>,
+    show_key: bool,
     on_press: Option<Message>,
-) -> button::Button<'a, Message> {
-    // The tooltip needs an element around the button, so the shortcut shows as a key
-    // hint next to the label instead, like the toolbars did.
+) -> Element<'a, Message> {
     let mut content = row![
         icons::icon(icon, icons::ROW),
         text(label)
@@ -91,18 +118,23 @@ pub fn tool_button<'a>(
             .wrapping(text::Wrapping::None)
     ]
     .spacing(theme::SPACE_2XS);
-    if let Some(key) = shortcut {
+    if let Some(key) = shortcut.filter(|_| show_key) {
         content = content.push(
             text(key)
                 .font(theme::MONO)
                 .size(theme::TEXT_TAG)
-                .color(palette().disabled),
+                .color(palette().muted),
         );
     }
-    button(content.align_y(Alignment::Center))
+    let body = button(content.align_y(Alignment::Center))
         .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_2XS]))
         .style(theme::button_text)
-        .on_press_maybe(on_press)
+        .on_press_maybe(on_press);
+    if tool_button_needs_tip(shortcut, show_key) {
+        tip(body, label, shortcut)
+    } else {
+        body.into()
+    }
 }
 
 /// The dash colour of an outline button: `disabled` (about 3:1 on `paper`, since `rule_2`
@@ -258,6 +290,14 @@ pub fn busy<'a>(label: &'a str, phase: u32) -> Element<'a, Message> {
 mod tests {
     use super::*;
     use iced::widget::button as iced_button;
+
+    #[test]
+    fn tool_button_tooltip_only_when_the_key_is_hidden() {
+        assert!(tool_button_needs_tip(Some("F2"), false));
+        assert!(!tool_button_needs_tip(Some("F2"), true));
+        assert!(!tool_button_needs_tip(None, false));
+        assert!(!tool_button_needs_tip(None, true));
+    }
 
     #[test]
     fn a_disabled_outline_button_is_dashed_and_an_enabled_one_solid() {

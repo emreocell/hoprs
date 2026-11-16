@@ -348,9 +348,6 @@ fn pane<'a>(
     let width = fit::pane_width(app.window_width);
     let cols = fit::columns(width, side);
     let conn = app.conn(&tab.site);
-    let place_icon = app
-        .site(&tab.site)
-        .map_or(Icon::HardDrives, crate::ui::sidebar::site_icon);
     let body: Element<'a, Message> = match tab.pane_status(conn, side) {
         PaneStatus::Loading => skeleton(cols),
         PaneStatus::Full => list(tab.id, side, pane, this_year, focused, cols, width),
@@ -370,7 +367,7 @@ fn pane<'a>(
             .width(Length::Fill)
             .height(theme::HAIRLINE)
             .style(theme::pane_focus(focused)),
-        path_bar(place, side, place_icon, pane, home, width, msg),
+        path_bar(place, side, pane, home, width, msg),
         hrule(),
         file_actions::toolbar(tab, conn, side, fit::toolbar(width, side)),
         hrule(),
@@ -429,12 +426,20 @@ fn crumb_layout(kept: &[Option<usize>], root_first: bool) -> Vec<(bool, Option<u
         .collect()
 }
 
+/// The icon of a pane's place: the desktop for Local, a drive for a remote (an SSH site's
+/// files pane too: it is files, not a terminal).
+fn place_icon(side: Side) -> Icon {
+    match side {
+        Side::Local => Icon::Desktop,
+        Side::Remote => Icon::HardDrives,
+    }
+}
+
 /// "Local" or the site's name (with its icon), then the clickable breadcrumb in mono,
 /// elided in the middle when the pane is too narrow for it.
 fn path_bar<'a>(
     place: &'a str,
     side: Side,
-    protocol_icon: Icon,
     pane: &'a Pane,
     home: Option<&RemotePath>,
     width: f32,
@@ -489,10 +494,7 @@ fn path_bar<'a>(
             .on_press(msg(PaneMsg::Navigate(crumb.target.clone()))),
         );
     }
-    let place_icon = match side {
-        Side::Local => Icon::Desktop,
-        Side::Remote => protocol_icon,
-    };
+    let place_icon = place_icon(side);
     row![
         icons::icon(place_icon, icons::ROW).color(p.muted),
         text(place)
@@ -917,6 +919,12 @@ pub(crate) fn not_connected<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Messa
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn place_icon_is_a_drive_for_every_remote() {
+        assert_eq!(place_icon(Side::Local), Icon::Desktop);
+        assert_eq!(place_icon(Side::Remote), Icon::HardDrives);
+    }
+
     use super::*;
 
     fn path(s: &str) -> RemotePath {

@@ -57,6 +57,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             Icon::DownloadSimple,
             strings::import_filezilla(),
             None,
+            true,
             Some(Message::OpenImport),
         ),
         space::horizontal(),
@@ -152,7 +153,7 @@ fn group<'a>(
     on_new: Message,
     body: Element<'a, Message>,
 ) -> Element<'a, Message> {
-    let caret = widgets::icon_button(
+    let caret = widgets::icon_button_small(
         if collapsed {
             Icon::CaretRight
         } else {
@@ -172,7 +173,7 @@ fn group<'a>(
             .color(palette().muted)
             .into()
     } else {
-        widgets::icon_button(Icon::Plus, new_label, None, Some(on_new))
+        widgets::icon_button_small(Icon::Plus, new_label, None, Some(on_new))
     };
     let head = row![
         caret,
@@ -229,6 +230,44 @@ pub fn site_icon(site: &Site) -> Icon {
     }
 }
 
+/// The icon, its colour and the name's colour of a site row by `state`. Connecting reads
+/// as busy (arrows, name dimmed) so it differs from Idle.
+fn state_look(site: &Site, state: SiteState<'_>) -> (Icon, iced::Color, iced::Color) {
+    let p = palette();
+    match state {
+        SiteState::Idle => (site_icon(site), p.muted, p.ink_2),
+        SiteState::Connecting => (Icon::ArrowsClockwise, p.muted, p.ink_2),
+        SiteState::Connected => (Icon::PlugsConnected, p.success, p.ink),
+        SiteState::Failed(_) => (Icon::Warning, p.error, p.ink_2),
+    }
+}
+
+/// `full` on one clipped line cut to `width`; the whole name in a tooltip only when cut.
+fn named<'a>(
+    full: &'a str,
+    width: f32,
+    font: iced::Font,
+    color: iced::Color,
+) -> Element<'a, Message> {
+    let shown = fit::ellipsize(full, width, theme::TEXT_SM, fit::INTER_ADVANCE);
+    let cut = matches!(shown, std::borrow::Cow::Owned(_));
+    let line: Element<'a, Message> = container(
+        text(shown)
+            .font(font)
+            .size(theme::TEXT_SM)
+            .color(color)
+            .wrapping(text::Wrapping::None),
+    )
+    .width(Length::Fill)
+    .clip(true)
+    .into();
+    if cut {
+        widgets::tip(line, full, None)
+    } else {
+        line
+    }
+}
+
 /// Horizontal room around a site row in the All sites list: the list's and the button's
 /// padding.
 const ROW_CHROME: f32 = 4.0 * theme::SPACE_XS;
@@ -276,12 +315,7 @@ fn site_row<'a>(app: &'a App, site: &'a Site, edit: bool, chrome: f32) -> Elemen
         - tag_width
         - SCROLL_GUTTER)
         .max(0.0);
-    let (glyph, glyph_color, name_color) = match state {
-        SiteState::Idle => (site_icon(site), p.muted, p.ink_2),
-        SiteState::Connecting => (site_icon(site), p.muted, p.ink_2),
-        SiteState::Connected => (Icon::PlugsConnected, p.success, p.ink),
-        SiteState::Failed(_) => (Icon::Warning, p.error, p.ink_2),
-    };
+    let (glyph, glyph_color, name_color) = state_look(site, state);
     let glyph = icons::icon(glyph, icons::SMALL).color(glyph_color);
     let glyph: Element<'a, Message> = match state {
         SiteState::Idle => glyph.into(),
@@ -289,19 +323,7 @@ fn site_row<'a>(app: &'a App, site: &'a Site, edit: bool, chrome: f32) -> Elemen
         SiteState::Connected => state_tip(glyph, strings::connected().to_owned()),
         SiteState::Failed(error) => state_tip(glyph, strings::error(error)),
     };
-    let name = container(
-        text(fit::ellipsize(
-            &site.name,
-            name_width,
-            theme::TEXT_SM,
-            fit::INTER_ADVANCE,
-        ))
-        .size(theme::TEXT_SM)
-        .color(name_color)
-        .wrapping(text::Wrapping::None),
-    )
-    .width(Length::Fill)
-    .clip(true);
+    let name = named(&site.name, name_width, theme::INTER, name_color);
     let open = button(
         row![
             glyph,
@@ -413,19 +435,12 @@ fn workspace<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
     let head = button(
         row![
             icons::icon(Icon::Stack, icons::SMALL).color(p.muted),
-            container(
-                text(fit::ellipsize(
-                    &ws.name,
-                    name_width,
-                    theme::TEXT_SM,
-                    fit::INTER_ADVANCE
-                ))
-                .font(theme::INTER_MEDIUM)
-                .color(if open { p.ink } else { p.ink_2 })
-                .wrapping(text::Wrapping::None)
-            )
-            .width(Length::Fill)
-            .clip(true),
+            named(
+                &ws.name,
+                name_width,
+                theme::INTER_MEDIUM,
+                if open { p.ink } else { p.ink_2 }
+            ),
             text(count)
                 .size(theme::TEXT_XS)
                 .color(p.muted)
@@ -483,7 +498,7 @@ fn workspace<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
     .padding(0)
     .style(theme::button_primary)
     .on_press(Message::OpenWorkspace(ws.id.clone()));
-    let actions = row![open_button,]
+    let actions = row![open_button]
         .spacing(theme::SPACE_XS)
         .align_y(Alignment::Center);
     // The open workspace can be closed: its tabs are saved, then closed.
@@ -607,6 +622,28 @@ mod tests {
             keyring_unavailable: false,
         });
         assert_eq!(site_state(&app, &id), SiteState::Failed(&error));
+    }
+
+    #[test]
+    fn a_name_is_cut_only_when_it_does_not_fit() {
+        let cut = |name, width| {
+            matches!(
+                fit::ellipsize(name, width, theme::TEXT_SM, fit::INTER_ADVANCE),
+                std::borrow::Cow::Owned(_)
+            )
+        };
+        assert!(!cut("short", 200.0));
+        assert!(cut("a very long site name that cannot fit", 60.0));
+    }
+
+    #[test]
+    fn connecting_looks_busy_not_idle() {
+        let site = Site::new("s", "h", "u", Protocol::Ssh);
+        let idle = state_look(&site, SiteState::Idle);
+        let connecting = state_look(&site, SiteState::Connecting);
+        assert_eq!(idle.0, Icon::TerminalWindow);
+        assert_eq!(connecting.0, Icon::ArrowsClockwise);
+        assert_ne!(idle.0, connecting.0);
     }
 
     #[test]

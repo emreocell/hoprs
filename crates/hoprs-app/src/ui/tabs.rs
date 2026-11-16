@@ -95,7 +95,7 @@ fn session_actions(app: &App) -> Option<Element<'_, Message>> {
     let index = app.active_tab.filter(|&i| app.can_open_session_tab(i))?;
     let tab = app.tabs[index].id;
     let action = |icon, label, kind| {
-        widgets::icon_button(icon, label, None, Some(Message::NewTab { tab, kind }))
+        widgets::icon_button_small(icon, label, None, Some(Message::NewTab { tab, kind }))
     };
     Some(
         row![
@@ -125,7 +125,7 @@ fn session_tab<'a>(app: &'a App, index: usize, tab: &'a Tab) -> Element<'a, Mess
         icons::SMALL,
     )
     .color(if active { p.ink } else { p.muted });
-    let close = widgets::icon_button(
+    let close = widgets::icon_button_small(
         Icon::X,
         strings::close_tab(),
         None,
