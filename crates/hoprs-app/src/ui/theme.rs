@@ -221,6 +221,16 @@ pub fn button_outline(_: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// [`button_outline`] for a button wrapped in `dashed`: disabled, its own border is
+/// transparent (same width, so nothing shifts) and the dashes are the outline.
+pub fn button_outline_dashed(theme: &Theme, status: button::Status) -> button::Style {
+    let mut style = button_outline(theme, status);
+    if status == button::Status::Disabled {
+        style.border.color = Color::TRANSPARENT;
+    }
+    style
+}
+
 /// A session tab in the top bar; the active one also gets the accent
 /// underline from [`underline`].
 pub fn tab(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
@@ -803,6 +813,15 @@ mod tests {
         assert_eq!(button_primary(&Theme::Dark, d).text_color, p.disabled);
         assert_eq!(queue_action(&Theme::Dark, d).text_color, p.disabled);
         assert_eq!(icon_button(&Theme::Dark, d).text_color, p.disabled);
+    }
+
+    #[test]
+    fn dashed_outline_button_has_no_border_of_its_own_when_disabled() {
+        let off = button_outline_dashed(&Theme::Dark, button::Status::Disabled);
+        assert_eq!(off.border.color, Color::TRANSPARENT);
+        assert_eq!(off.border.width, HAIRLINE);
+        let on = button_outline_dashed(&Theme::Dark, button::Status::Active);
+        assert_eq!(on.border.color, palette().rule);
     }
 
     #[test]

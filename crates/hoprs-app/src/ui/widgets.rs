@@ -90,11 +90,12 @@ pub fn tool_button<'a>(
 /// An outlined text button; while disabled (`on_press` is `None`) its outline is dashed.
 #[allow(dead_code)] // Used from Plan 13 task 6 (toolbars, dialogs).
 pub fn outline_button<'a>(label: &'a str, on_press: Option<Message>) -> Element<'a, Message> {
-    let dash = on_press.is_none().then(|| palette().rule_2);
+    // `disabled` (about 3:1 on `paper`): `rule_2` was too faint to read as dashes.
+    let dash = on_press.is_none().then(|| palette().disabled);
     dashed(
         button(text(label))
             .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
-            .style(theme::button_outline)
+            .style(theme::button_outline_dashed)
             .on_press_maybe(on_press),
         dash,
     )
