@@ -1031,6 +1031,29 @@ async fn compare_menu_closes_when_its_rows_go() {
 }
 
 #[tokio::test]
+async fn compare_menu_closes_on_a_new_run() {
+    let (_fake, mut app, tab) = compare_rows().await;
+    app.update(compare_right_click(tab, 1));
+    assert!(app.menu.is_some());
+    app.update(Message::Compare(CompareMsg::Start { tab }));
+    assert!(app.menu.is_none());
+}
+
+#[tokio::test]
+async fn compare_menu_closes_on_a_folder_change() {
+    let (_fake, mut app, tab) = compare_rows().await;
+    app.update(compare_right_click(tab, 1));
+    assert!(app.menu.is_some());
+    app.update(pane_msg(
+        tab,
+        Side::Local,
+        PaneMsg::Navigate(rpath("/home/me/sub")),
+    ));
+    assert!(compare_state(&app).rows.is_empty());
+    assert!(app.menu.is_none());
+}
+
+#[tokio::test]
 async fn queue_menu_matches_row_actions() {
     let fake = Arc::new(FakeBackend::new());
     let s = SiteId::new();
