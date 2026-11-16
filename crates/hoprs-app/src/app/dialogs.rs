@@ -588,7 +588,8 @@ fn behind_overlay(msg: &Message) -> bool {
         | Message::OpenSettings
         | Message::Settings(_)
         | Message::PointerPressed(_)
-        | Message::Menu(_) => true,
+        | Message::Menu(_)
+        | Message::Sidebar(_) => true,
         // The terminal's keyboard, mouse and search: never under a dialog or the palette
         // (its timers and replies still land).
         Message::Terminal { msg, .. } => !matches!(

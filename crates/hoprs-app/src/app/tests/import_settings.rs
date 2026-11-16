@@ -995,3 +995,43 @@ async fn language_choice_switches_labels_and_saves() {
     assert_eq!(strings::language_system(), "System");
     assert_eq!(strings::settings_language(), "Language");
 }
+
+#[test]
+fn sidebar_toggle_saves() {
+    use crate::app::{SidebarMsg, SidebarSection};
+    let mut app = App::new();
+    let effects = app.update(Message::Sidebar(SidebarMsg::ToggleCollapsed(
+        SidebarSection::Sites,
+    )));
+    assert!(app.settings.sites.collapsed);
+    assert!(!app.settings.workspaces.collapsed);
+    let [Effect::SaveSettings(saved)] = &effects[..] else {
+        panic!("expected one SaveSettings, got {effects:?}");
+    };
+    assert!(saved.sites.collapsed);
+}
+
+#[test]
+fn sidebar_menu_hides_and_shows() {
+    use crate::app::menu::{MenuMsg, MenuTarget};
+    let mut app = App::new();
+    let open = || Message::Menu(MenuMsg::Open(MenuTarget::SidebarOptions));
+    app.update(open());
+    let items = app.menu_items(&MenuTarget::SidebarOptions);
+    assert_eq!(items.len(), 2);
+    assert!(items.iter().all(|item| item.enabled));
+    assert_eq!(items[1].checked, Some(true));
+    // Show all sites (checked): hides it, and the menu closes.
+    let effects = app.update(Message::Menu(MenuMsg::Choose(1)));
+    assert!(app.settings.sites.hidden);
+    assert!(!app.settings.workspaces.hidden);
+    assert!(matches!(&effects[..], [Effect::SaveSettings(_)]));
+    assert!(app.menu.is_none());
+    let items = app.menu_items(&MenuTarget::SidebarOptions);
+    assert_eq!(items[1].checked, Some(false));
+    assert_eq!(items[0].checked, Some(true));
+    // Choosing it again shows the section.
+    app.update(open());
+    app.update(Message::Menu(MenuMsg::Choose(1)));
+    assert!(!app.settings.sites.hidden);
+}

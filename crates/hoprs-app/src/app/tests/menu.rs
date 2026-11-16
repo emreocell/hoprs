@@ -86,18 +86,6 @@ fn choose_disabled_or_missing_item_does_nothing() {
     app.update(open());
     assert!(app.update(Message::Menu(MenuMsg::Choose(99))).is_empty());
     assert!(app.menu.is_none());
-    // A disabled item: the menu closes, nothing runs.
-    app.update(open());
-    let items = app.menu_items(&MenuTarget::SidebarOptions);
-    let disabled = items
-        .iter()
-        .position(|item| !item.enabled)
-        .expect("Task 5 wires the sidebar items; until then they are disabled");
-    assert!(
-        app.update(Message::Menu(MenuMsg::Choose(disabled)))
-            .is_empty()
-    );
-    assert!(app.menu.is_none());
 }
 
 #[test]

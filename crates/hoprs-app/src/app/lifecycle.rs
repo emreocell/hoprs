@@ -445,6 +445,7 @@ impl App {
             | Message::Palette(_)
             | Message::PointerPressed(_)
             | Message::Menu(_)
+            | Message::Sidebar(_)
             | Message::Terminal { .. } => Some(Vec::new()),
             _ => None,
         }

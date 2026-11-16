@@ -11,6 +11,7 @@ real display.
 | Every icon is in the font, the font family is `Phosphor`, and `phosphor-glyphs.txt` matches the `Icon` enum (`crates/hoprs-app/src/ui/icons.rs` tests) | Pass |
 | File icons by extension (`for_entry`) | Pass |
 | Context menu model: opens at the last press, closes on Escape, outside click, resize and choice, blocked behind a dialog (`crates/hoprs-app/src/app/tests/menu.rs`); kept inside the window (`ui::menu` tests); press position published before the widget under it (`ui::pointer` tests) | Pass |
+| Sidebar state saved: collapse and hide round-trip through `settings.toml`, invalid values read as shown, the ⋯ menu hides and shows a section (`settings` tests, `app/tests/import_settings.rs`); site state and icon by protocol (`ui::sidebar` tests) | Pass |
 
 ## NEEDS HUMAN
 
@@ -30,3 +31,9 @@ real display.
    again. Expect: the menu flips to stay fully inside the window. Then check each way out:
    Escape, a click outside, a scroll and a window resize each close it, and nothing behind
    it reacts to that click.
+
+5. **Sidebar rows.** Hover several site and workspace rows. Expect: the pencil appears only
+   on the hovered row (over the protocol tag or count) and opens its form; connected sites
+   show a green plug and a white name; a site that failed shows a red warning, and hovering
+   the icon shows the error. Collapse and hide both sections from the caret and the ⋯ menu,
+   restart, and expect the same state.

@@ -164,7 +164,54 @@ fn path_of(field: &str) -> Result<PathBuf, &'static str> {
     }
 }
 
+/// A sidebar section.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SidebarSection {
+    Workspaces,
+    Sites,
+}
+
+/// Something in the sidebar's sections.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SidebarMsg {
+    /// Folds or unfolds a section to its heading.
+    ToggleCollapsed(SidebarSection),
+    /// Hides a section (⋯ menu) or shows it again.
+    SetHidden {
+        section: SidebarSection,
+        hidden: bool,
+    },
+}
+
 impl App {
+    pub(super) fn sidebar_msg(&mut self, msg: SidebarMsg) -> Vec<Effect> {
+        match msg {
+            SidebarMsg::ToggleCollapsed(section) => {
+                let state = self.section_mut(section);
+                state.collapsed = !state.collapsed;
+            }
+            SidebarMsg::SetHidden { section, hidden } => {
+                self.section_mut(section).hidden = hidden;
+            }
+        }
+        self.save_settings_effect().into_iter().collect()
+    }
+
+    fn section_mut(&mut self, section: SidebarSection) -> &mut crate::settings::SectionState {
+        match section {
+            SidebarSection::Workspaces => &mut self.settings.workspaces,
+            SidebarSection::Sites => &mut self.settings.sites,
+        }
+    }
+
+    /// The state of a sidebar section.
+    pub fn section(&self, section: SidebarSection) -> crate::settings::SectionState {
+        match section {
+            SidebarSection::Workspaces => self.settings.workspaces,
+            SidebarSection::Sites => self.settings.sites,
+        }
+    }
+
     pub(super) fn open_settings(&mut self) -> Vec<Effect> {
         self.form = Some(Form::Settings);
         Vec::new()

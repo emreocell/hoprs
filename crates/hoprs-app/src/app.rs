@@ -85,6 +85,7 @@ pub use log::{LogLevel, LogMsg};
 pub use menu::{ContextMenu, MenuMsg, MenuTarget};
 pub use palette::PaletteMsg;
 pub use queue::{Queue, QueueMsg, QueueTab, RowAction};
+pub use settings::{SidebarMsg, SidebarSection};
 pub use tabs::{SiteConn, Tab, TabId, TabState};
 pub use terminal::TerminalMsg;
 
@@ -373,6 +374,8 @@ pub enum Message {
     /// The sidebar's "Settings".
     OpenSettings,
     Settings(settings::SettingsMsg),
+    /// Folding or hiding a sidebar section.
+    Sidebar(SidebarMsg),
     SettingsLoaded(SettingsLoad),
     /// Why the persistent queue could not be opened at start, if it could not.
     QueueStatus(Option<Error>),
@@ -936,6 +939,7 @@ impl App {
             }
             Message::PointerPressed(at) => self.last_press = at,
             Message::Menu(msg) => return self.menu_msg(msg),
+            Message::Sidebar(msg) => return self.sidebar_msg(msg),
             Message::FilterSites(filter) => self.site_filter = filter,
             Message::ReloadProfiles => {
                 self.load = Load::Loading;

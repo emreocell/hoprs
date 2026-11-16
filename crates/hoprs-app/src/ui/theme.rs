@@ -316,6 +316,12 @@ fn surface(background: Color) -> container::Style {
     }
 }
 
+/// The patch behind the pencil that shows on a hovered sidebar row: the row's hover
+/// ground, hiding what it covers.
+pub fn hover_patch(_: &Theme) -> container::Style {
+    surface(palette().paper_3)
+}
+
 /// The window ground.
 pub fn paper(_: &Theme) -> container::Style {
     surface(palette().paper)

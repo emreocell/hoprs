@@ -122,8 +122,15 @@ pub fn workspaces() -> &'static str {
 pub fn all_sites() -> &'static str {
     tr("all-sites")
 }
-pub fn new() -> &'static str {
-    tr("new")
+/// The sidebar's note when both sections are hidden.
+pub fn sidebar_all_hidden() -> &'static str {
+    tr("sidebar-all-hidden")
+}
+pub fn sidebar_collapse() -> &'static str {
+    tr("sidebar-collapse")
+}
+pub fn sidebar_expand() -> &'static str {
+    tr("sidebar-expand")
 }
 pub fn no_workspaces() -> &'static str {
     tr("no-workspaces")

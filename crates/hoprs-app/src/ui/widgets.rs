@@ -56,7 +56,6 @@ pub fn icon_button<'a>(
 
 /// A toolbar button: the icon, then the label (the look of the pane toolbars' actions).
 /// Disabled (and dimmed) when `on_press` is `None`; the tooltip carries the shortcut.
-#[allow(dead_code)] // Used from Plan 13 task 6 (pane toolbars).
 pub fn tool_button<'a>(
     icon: Icon,
     label: &'a str,

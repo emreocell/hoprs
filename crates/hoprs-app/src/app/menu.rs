@@ -15,7 +15,7 @@
 
 use iced::Point;
 
-use super::{App, Effect, Message};
+use super::{App, Effect, Message, SidebarMsg, SidebarSection};
 
 /// The open menu.
 #[derive(Debug, Clone, PartialEq)]
@@ -94,27 +94,37 @@ impl App {
     /// The items of `target`'s menu, as the app is now.
     pub fn menu_items(&self, target: &MenuTarget) -> Vec<MenuItem> {
         match target {
-            // Task 5 of Plan 13 wires these to the sidebar's hidden sections; until then
-            // both sections always show and the items cannot change that.
-            MenuTarget::SidebarOptions => [MenuAction::ShowWorkspaces, MenuAction::ShowSites]
-                .into_iter()
-                .map(|action| MenuItem {
-                    enabled: false,
-                    checked: Some(true),
-                    ..MenuItem::new(action)
-                })
-                .collect(),
+            MenuTarget::SidebarOptions => [
+                (MenuAction::ShowWorkspaces, SidebarSection::Workspaces),
+                (MenuAction::ShowSites, SidebarSection::Sites),
+            ]
+            .into_iter()
+            .map(|(action, section)| MenuItem {
+                checked: Some(!self.section(section).hidden),
+                ..MenuItem::new(action)
+            })
+            .collect(),
             #[cfg(test)]
             MenuTarget::TestNavigate { .. } => vec![MenuItem::new(MenuAction::TestNavigate)],
         }
     }
 
+    /// The message that flips whether `section` is hidden.
+    fn set_hidden(&self, section: SidebarSection) -> Message {
+        Message::Sidebar(SidebarMsg::SetHidden {
+            section,
+            hidden: !self.section(section).hidden,
+        })
+    }
+
     /// The message `action` sends for `target`, if it does anything now.
     fn menu_message(&self, target: &MenuTarget, action: MenuAction) -> Option<Message> {
         match (target, action) {
-            // Task 5 of Plan 13: `Message::Sidebar(SidebarMsg::SetHidden { .. })`.
-            (MenuTarget::SidebarOptions, MenuAction::ShowWorkspaces | MenuAction::ShowSites) => {
-                None
+            (MenuTarget::SidebarOptions, MenuAction::ShowWorkspaces) => {
+                Some(self.set_hidden(SidebarSection::Workspaces))
+            }
+            (MenuTarget::SidebarOptions, MenuAction::ShowSites) => {
+                Some(self.set_hidden(SidebarSection::Sites))
             }
             #[cfg(test)]
             (MenuTarget::TestNavigate { tab, to }, MenuAction::TestNavigate) => {
