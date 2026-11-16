@@ -156,6 +156,7 @@ pub fn pointer_message(event: Event, _: Status, _: window::Id) -> Option<Message
         // Any button: a release the drop doesn't use still ends the drag.
         Event::Mouse(mouse::Event::ButtonReleased(_)) => Some(Message::DragEnd),
         Event::Mouse(mouse::Event::CursorLeft) => Some(Message::DragCancel),
+        // One per file: the app counts them for the drop label.
         Event::Window(window::Event::FileHovered(_)) => Some(Message::FilesHovered(true)),
         Event::Window(window::Event::FilesHoveredLeft) => Some(Message::FilesHovered(false)),
         Event::Window(window::Event::FileDropped(path)) => Some(Message::FileDropped(path)),

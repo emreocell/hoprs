@@ -172,6 +172,14 @@ impl App {
         }
         if down {
             self.site_connection_down(&site);
+            // A drag in one of the site's tabs ends: its target (or source) went away.
+            if let Some(drag) = self.drag
+                && self
+                    .tab_index(drag.tab)
+                    .is_some_and(|i| self.tabs[i].site == site)
+            {
+                self.drag = None;
+            }
         }
         // Refused for good: the actions waiting for a reconnection fail now. Given up for a
         // network reason while they waited for the transport's own round: the app

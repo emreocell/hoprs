@@ -13,7 +13,7 @@ use iced::{Point, Rectangle};
 
 use super::actions::{Busy, PaneAction};
 use super::menu::{ContextMenu, MenuTarget};
-use super::{App, Effect, TabId};
+use super::{App, Drag, Effect, TabId};
 use crate::backend::Side;
 use crate::ui::virtual_list::ROW_HEIGHT;
 
@@ -540,8 +540,16 @@ impl App {
             PaneMsg::Click(row) => {
                 if row < pane.row_count() {
                     pane.selection.click(row, mods);
-                    // A press on a row may start a drag to the other pane.
-                    self.drag = Some((tab, side));
+                    // A press on a row may start a drag to the other pane (once the
+                    // pointer moves far enough from the press).
+                    let at = self.last_press;
+                    self.drag = Some(Drag {
+                        tab,
+                        from: side,
+                        origin: at,
+                        at,
+                        active: false,
+                    });
                 }
             }
             PaneMsg::Open(row) => {
@@ -749,6 +757,10 @@ impl App {
         pane.request = None;
         pane.selection = Selection::default();
         pane.hovered = None;
+        // The rows a drag from this pane carried are gone.
+        if self.drag.is_some_and(|d| d.tab == tab && d.from == side) {
+            self.drag = None;
+        }
         // The rows a menu on this pane was about are gone.
         if matches!(
             &self.menu,

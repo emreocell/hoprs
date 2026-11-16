@@ -487,6 +487,31 @@ pub fn path_separator() -> &'static str {
 pub fn home_dir() -> &'static str {
     tr("home-dir")
 }
+/// A drag from the local pane over the remote one: "Upload 2 items to /srv".
+pub fn drop_upload(count: usize, folder: &str) -> String {
+    tr_args(
+        "drop-upload",
+        &[("count", count.into()), ("folder", folder.into())],
+    )
+}
+/// A drag from the remote pane over the local one: "Download 1 item to ~/Downloads".
+pub fn drop_download(count: usize, folder: &str) -> String {
+    tr_args(
+        "drop-download",
+        &[("count", count.into()), ("folder", folder.into())],
+    )
+}
+/// Files from the system over the remote pane: "Upload 3 files to /srv".
+pub fn drop_upload_files(count: usize, folder: &str) -> String {
+    tr_args(
+        "drop-upload-files",
+        &[("count", count.into()), ("folder", folder.into())],
+    )
+}
+/// Files from the system over the remote pane, their count not known yet.
+pub fn drop_upload_files_unknown(folder: &str) -> String {
+    tr_args("drop-upload-files-unknown", &[("folder", folder.into())])
+}
 /// The size column of a folder.
 pub fn no_size() -> &'static str {
     tr("no-size")

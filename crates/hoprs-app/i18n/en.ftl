@@ -211,6 +211,26 @@ home-dir = ~
 # The size column of a folder.
 no-size = -
 empty-folder = This folder is empty
+# A drag between panes, at the bottom of the pane it would drop on: "Upload 2 items to
+# /srv", "Download 1 item to ~/Downloads" (the folder in mono, cut with "…").
+drop-upload =
+    { $count ->
+        [one] Upload { $count } item to { $folder }
+       *[other] Upload { $count } items to { $folder }
+    }
+drop-download =
+    { $count ->
+        [one] Download { $count } item to { $folder }
+       *[other] Download { $count } items to { $folder }
+    }
+# Files from the system file manager over the remote pane; "-unknown" while the system
+# has not said how many.
+drop-upload-files =
+    { $count ->
+        [one] Upload { $count } file to { $folder }
+       *[other] Upload { $count } files to { $folder }
+    }
+drop-upload-files-unknown = Upload files to { $folder }
 reconnect = Reconnect
 # Units of [`crate::ui::format::size`], base 1024.
 size-unit-b = B

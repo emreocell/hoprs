@@ -187,6 +187,29 @@ path-separator = /
 home-dir = ~
 no-size = -
 empty-folder = Esta pasta está vazia
+# A drag between panes, at the bottom of the pane it would drop on: "Upload 2 items to
+# /srv", "Download 1 item to ~/Downloads" (the folder in mono, cut with "…").
+drop-upload =
+    { $count ->
+        [0] Fazer upload de { $count } itens para { $folder }
+        [one] Fazer upload de { $count } item para { $folder }
+       *[other] Fazer upload de { $count } itens para { $folder }
+    }
+drop-download =
+    { $count ->
+        [0] Fazer download de { $count } itens para { $folder }
+        [one] Fazer download de { $count } item para { $folder }
+       *[other] Fazer download de { $count } itens para { $folder }
+    }
+# Files from the system file manager over the remote pane; "-unknown" while the system
+# has not said how many.
+drop-upload-files =
+    { $count ->
+        [0] Fazer upload de { $count } arquivos para { $folder }
+        [one] Fazer upload de { $count } arquivo para { $folder }
+       *[other] Fazer upload de { $count } arquivos para { $folder }
+    }
+drop-upload-files-unknown = Fazer upload de arquivos para { $folder }
 reconnect = Reconectar
 size-unit-b = B
 size-unit-kb = KB

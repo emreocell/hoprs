@@ -685,10 +685,10 @@ impl App {
         self.import.running() || self.backup.running()
     }
 
-    /// Whether the pointer's moves are wanted: only while a divider is dragged (the
-    /// subscription that sends them runs only then).
+    /// Whether the pointer's moves are wanted: only while a divider is dragged or a press
+    /// on a row may become a drag (the subscription that sends them runs only then).
     pub fn tracks_pointer(&self) -> bool {
-        self.resize.is_some()
+        self.resize.is_some() || self.drag.is_some()
     }
 
     /// A press or double-click on a panel's divider. A press starts a resize at the
@@ -748,6 +748,7 @@ impl App {
     /// than its maximum keeps that maximum until the drag passes it. Saved when the button
     /// is up.
     pub(super) fn pointer_moved(&mut self, at: iced::Point) {
+        self.drag_moved(at);
         let Some(resize) = self.resize.as_mut() else {
             return;
         };

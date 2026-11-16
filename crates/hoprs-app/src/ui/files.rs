@@ -81,6 +81,21 @@ pub fn breadcrumb_segments(path: &RemotePath, home: Option<&RemotePath>) -> Vec<
     crumbs
 }
 
+/// `path` as one line, the way the breadcrumb shows it: under `home` (local side) it
+/// starts with `~`.
+pub fn display_path(path: &RemotePath, home: Option<&RemotePath>) -> String {
+    let root_first = crumb_is_root(path, home);
+    let mut out = String::new();
+    for (i, crumb) in breadcrumb_segments(path, home).iter().enumerate() {
+        // The root's label is the separator itself.
+        if i > 1 || (i == 1 && !root_first) {
+            out.push_str(strings::path_separator());
+        }
+        out.push_str(&crumb.label);
+    }
+    out
+}
+
 /// Which breadcrumb segments fit `max_chars` characters: indices in order, one `None`
 /// for the elided middle. A segment costs its label plus one separator, the gap two; the
 /// first and last always stay, then segments are added from the end while they fit.
@@ -429,23 +444,43 @@ fn pane<'a>(
     if let Some(row) = file_actions::new_folder_row(tab.id, side, pane) {
         content = content.push(row);
     }
-    let content = content
-        .push(body)
-        .width(Length::FillPortion(1))
-        .height(Length::Fill);
     // A drag from the other pane (or files from the system, on the remote side) would
-    // drop here: a 1 px accent outline.
-    let target = app.drop_target() == Some((tab.id, side))
-        || (app.os_drag && side == Side::Remote && tab.can_act(conn, Side::Remote));
-    let content = container(content)
+    // drop here: a 1 px accent outline and, at the bottom, what the drop does.
+    let label = if app.drop_target() == Some((tab.id, side)) {
+        app.drop_label()
+    } else if side == Side::Remote {
+        app.os_drop_label()
+    } else {
+        None
+    };
+    let target = label.is_some();
+    let mut content = content.push(body);
+    if let Some(label) = label {
+        content = content.push(hrule()).push(
+            container(
+                text(label)
+                    .font(theme::MONO)
+                    .size(theme::TEXT_XS)
+                    .color(palette().ink_2),
+            )
+            .padding([theme::SPACE_XS / 2.0, theme::SPACE_MD]),
+        );
+    }
+    let content = container(content.width(Length::FillPortion(1)).height(Length::Fill))
         .width(Length::FillPortion(1))
         .height(Length::Fill)
         .style(theme::drop_target(target));
     // A press anywhere focuses the pane for the keyboard, without taking the click; the
-    // pointer going in and out tells a drag where it would drop. A right press outside
-    // the rows (a row's takes its own) opens the pane's menu.
-    mouse_area(content)
-        .on_release(msg(PaneMsg::Focus))
+    // pointer going in and out tells a drag where it would drop (a pane that would not
+    // take it shows the not-allowed cursor). A right press outside the rows (a row's
+    // takes its own) opens the pane's menu.
+    let area = mouse_area(content);
+    let area = if app.drag_invalid_over(tab.id, side) {
+        area.interaction(iced::mouse::Interaction::NotAllowed)
+    } else {
+        area
+    };
+    area.on_release(msg(PaneMsg::Focus))
         .on_right_press(msg(PaneMsg::ContextMenu(None)))
         .on_enter(msg(PaneMsg::PointerIn))
         .on_exit(msg(PaneMsg::PointerOut))
@@ -1015,6 +1050,19 @@ mod tests {
         assert_eq!(all.len(), 7);
         assert!(all.iter().all(Option::is_some));
         assert_eq!(fit_crumbs(&crumbs[..2], 1), [Some(0), Some(1)]);
+    }
+
+    #[test]
+    fn display_path_reads_like_the_breadcrumb() {
+        let home = path("/home/me");
+        assert_eq!(super::display_path(&path("/"), None), "/");
+        assert_eq!(super::display_path(&path("/srv/www"), None), "/srv/www");
+        assert_eq!(super::display_path(&path("/home/me"), Some(&home)), "~");
+        assert_eq!(
+            super::display_path(&path("/home/me/Downloads/x"), Some(&home)),
+            "~/Downloads/x"
+        );
+        assert_eq!(super::display_path(&path("/etc"), Some(&home)), "/etc");
     }
 
     #[test]

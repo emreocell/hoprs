@@ -595,6 +595,10 @@ impl App {
     pub(super) fn close_tab(&mut self, index: usize) -> Vec<Effect> {
         let tab = self.tabs.remove(index);
         self.close_asks.remove(&tab.id);
+        // A drag from it has nowhere to go.
+        if self.drag.is_some_and(|d| d.tab == tab.id) {
+            self.drag = None;
+        }
         self.active_tab = match self.active_tab {
             _ if self.tabs.is_empty() => None,
             Some(active) if active > index => Some(active - 1),

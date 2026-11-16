@@ -103,6 +103,22 @@ pub enum Panel {
     Queue,
 }
 
+/// How far (logical px) the pointer must move from a press on a row before a drag
+/// between panes starts; up to it the press stays a click.
+pub const DRAG_THRESHOLD: f32 = 4.0;
+
+/// A press on a row of pane `from` that may become a drag to the other pane: `origin` is
+/// where the press was, `at` where the pointer is now; `active` once it moved more than
+/// [`DRAG_THRESHOLD`] (and from then on, until the button is up).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Drag {
+    pub tab: TabId,
+    pub from: Side,
+    pub origin: iced::Point,
+    pub at: iced::Point,
+    pub active: bool,
+}
+
 /// A divider drag. The anchor (`start_y`, `start_height`) is where the press was and how
 /// tall the panel was drawn then; it moves to the pointer whenever the height hits a
 /// bound, so the panel follows the pointer at once when it turns back.
@@ -166,12 +182,15 @@ pub struct App {
     pub mods: Mods,
     /// The transfer queue panel.
     pub queue: Queue,
-    /// A press on a row started a possible drag from this pane (until the button is up).
-    pub drag: Option<(TabId, Side)>,
+    /// A press on a row started a possible drag from its pane (until the button is up).
+    pub drag: Option<Drag>,
     /// The pane under the pointer.
     pub pointer: Option<(TabId, Side)>,
     /// Files from the system file manager hover the window.
     pub os_drag: bool,
+    /// How many files the system said hover the window (one `FileHovered` each; 0 while
+    /// it has not said yet).
+    pub os_drag_count: usize,
     /// The security and credential dialogs: the one shown and those waiting.
     pub dialogs: Dialogs,
     /// The workspace "Open workspace" opened last, until it is closed: its tabs and
@@ -355,7 +374,8 @@ pub enum Message {
     Cleared(Result<usize, Error>),
     /// A file or folder dropped on the window from the system file manager.
     FileDropped(PathBuf),
-    /// Files from the system file manager entered (`true`) or left the window.
+    /// Files from the system file manager entered (`true`, once per file) or left the
+    /// window.
     FilesHovered(bool),
     /// A mouse button went up, anywhere: ends a drag between panes (dropping it only over
     /// the other pane).
@@ -805,6 +825,7 @@ impl App {
             drag: None,
             pointer: None,
             os_drag: false,
+            os_drag_count: 0,
             dialogs: Dialogs::default(),
             open_workspace: None,
             closing: false,
@@ -916,6 +937,11 @@ impl App {
     pub fn update(&mut self, msg: Message) -> Vec<Effect> {
         // A palette row to run becomes the action's own message.
         let msg = self.palette_command(msg);
+        // Escape cancels a drag under way first (no menu is open during one: its
+        // backdrop takes the press that would start it).
+        let Some(msg) = self.drag_key(msg) else {
+            return Vec::new();
+        };
         // An open menu has the keyboard first (Enter chooses its highlighted item).
         let Some(msg) = self.menu_key(msg) else {
             return Vec::new();
@@ -1109,7 +1135,7 @@ impl App {
             Message::ControlDone { id, result } => self.control_done(id, result),
             Message::Cleared(result) => return self.cleared(result),
             Message::FileDropped(path) => return self.file_dropped(&path),
-            Message::FilesHovered(hovered) => self.os_drag = hovered,
+            Message::FilesHovered(hovered) => self.files_hovered(hovered),
             Message::DragEnd => return self.drag_end(),
             Message::DragCancel => return self.drag_cancel(),
             Message::Prompt(event) => return self.prompt_event(event),
