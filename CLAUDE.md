@@ -37,8 +37,8 @@ Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI) for Linux, Windows and m
 - Docker integration tests: `docker compose -f docker/compose.yml up -d --build --wait`, then `cargo test --workspace --all-features -- --ignored --test-threads=1`.
 - **v1.1.0 released (2026-11-14), Plan 10 merged (PR #11):** tag `v1.1.0` on `1f06850`, GitHub Release with `.deb`, universal `.dmg`, `.msi`, portable `.zip` and `SHA256SUMS` (checksums verified after download); the site switched to 1.1.0 through the post-release deploy. Follow-ups: `docs/superpowers/plans/2026-11-12-01-followups.md` section Plan 10.
 - **Next step (Plan 10):** the author runs the NEEDS HUMAN rows of `docs/qa/release-1.1-checklist.md` on real Windows and macOS machines (the macOS Cmd+Q known issue first).
-- **Plan 12 (folder compare)** is on branch `folder-compare` (PR pending); the author runs the NEEDS HUMAN rows of `docs/qa/folder-compare-checklist.md`. Follow-ups: section Plan 12 in `docs/superpowers/plans/2026-11-12-01-followups.md`.
-- **Plan 11 (pt-BR UI)** is on branch `app-i18n-pt-br` (PR pending); then the author runs the NEEDS HUMAN rows of `docs/qa/i18n-checklist.md`.
+- **Plan 11 (pt-BR UI) merged (PR #15)** and **Plan 12 (folder compare) merged (PR #23)**, both unreleased (CHANGELOG `1.2.0 — unreleased`). Contributor docs merged (PR #16), starter issues #17–#22.
+- **Next step (1.2.0):** the author runs the NEEDS HUMAN rows of `docs/qa/i18n-checklist.md` and `docs/qa/folder-compare-checklist.md`; then bump to 1.2.0 and tag. Follow-ups: sections Plan 11 and Plan 12 in `docs/superpowers/plans/2026-11-12-01-followups.md`.
 
 ## Decisions already made (do not re-litigate)
 
