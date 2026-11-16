@@ -97,6 +97,12 @@ pub fn palette_toggle_log() -> &'static str {
 pub fn palette_close_tab() -> &'static str {
     tr("palette-close-tab")
 }
+pub fn palette_close_all(name: &str) -> String {
+    tr_args("palette-close-all", &[("name", name.into())])
+}
+pub fn workspace_open_tip() -> &'static str {
+    tr("workspace-open-tip")
+}
 pub fn palette_open_workspace() -> &'static str {
     tr("palette-open-workspace")
 }

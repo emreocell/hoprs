@@ -228,6 +228,8 @@ pub enum PaletteItem {
     CloseSettings,
     /// "Open workspace…": narrows the palette to the workspaces.
     OpenWorkspace,
+    /// "Close all in <workspace>": the open workspace's tabs are saved, then closed.
+    CloseWorkspace(WorkspaceId),
     /// A key of the focused pane (`Side`) of the active files tab.
     FileKey(FileKey, Side),
     Copy(TabId),
@@ -389,6 +391,16 @@ impl App {
                     strings::palette_open_workspace(),
                     None,
                 ));
+            }
+            if let Some(ws) = self
+                .open_workspace
+                .as_ref()
+                .and_then(|id| self.workspaces.iter().find(|w| &w.id == id))
+            {
+                out.push(Entry {
+                    label: strings::palette_close_all(&ws.name),
+                    ..Entry::action(PaletteItem::CloseWorkspace(ws.id.clone()), "", None)
+                });
             }
             for (item, label) in [
                 (PaletteItem::ToggleQueue, strings::palette_toggle_queue()),
@@ -595,7 +607,7 @@ impl App {
     }
 
     /// The message a row sends: the same as the action's own button or key.
-    fn item_message(&self, item: &PaletteItem) -> Option<Message> {
+    pub(super) fn item_message(&self, item: &PaletteItem) -> Option<Message> {
         Some(match item {
             PaletteItem::Tab(id) => Message::SelectTab(self.tab_index(*id)?),
             PaletteItem::Site(id) => Message::ConnectSite(id.clone()),
@@ -619,6 +631,7 @@ impl App {
                 self.reconnect_message(&self.tabs[self.tab_index(*id)?])?
             }
             PaletteItem::CloseTab(id) => Message::CloseTab(*id),
+            PaletteItem::CloseWorkspace(id) => Message::CloseWorkspace(id.clone()),
             PaletteItem::OpenWorkspace => Message::Palette(PaletteMsg::Scope(Scope::Workspaces)),
             PaletteItem::FileKey(key, _) => Message::Key {
                 key: *key,

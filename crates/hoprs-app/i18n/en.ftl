@@ -65,6 +65,10 @@ palette-toggle-log = Toggle log
 palette-close-tab = Close tab
 palette-close-settings = Close settings
 palette-open-workspace = Open workspace…
+# $name is the open workspace: its tabs are saved, then closed.
+palette-close-all = Close all in { $name }
+# The tooltip of the mark on the open workspace in the sidebar.
+workspace-open-tip = Open
 palette-edit = Edit in editor
 palette-compare-folders = Compare folders
 palette-upload = Upload selection
