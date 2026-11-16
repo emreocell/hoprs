@@ -2,8 +2,6 @@
 //! `assets/fonts/Phosphor-hoprs.ttf`, built by `scripts/icons-subset.sh` from
 //! `assets/fonts/phosphor-glyphs.txt`.
 
-// Until the views use these (Plan 13 tasks 2 onward), only the tests do.
-#![allow(dead_code)]
 use hoprs_core::EntryKind;
 use iced::Font;
 use iced::widget::{Text, text};
@@ -18,6 +16,8 @@ pub const ROW: f32 = 16.0;
 pub const SMALL: f32 = 15.0;
 
 /// One glyph of the icon font.
+// Some variants are drawn only from Plan 13 task 7 (menus, tabs, sidebar, queue).
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Icon {
     Folder,
@@ -74,6 +74,7 @@ pub enum Icon {
 }
 
 impl Icon {
+    #[allow(dead_code)] // Used by the tests; the font check lists every icon.
     pub const ALL: [Icon; 51] = [
         Icon::Folder,
         Icon::FolderPlus,
@@ -186,6 +187,7 @@ impl Icon {
     }
 
     /// The Phosphor kebab-case name.
+    #[allow(dead_code)] // Used by the tests.
     pub const fn name(self) -> &'static str {
         match self {
             Icon::Folder => "folder",

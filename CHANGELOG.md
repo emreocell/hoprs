@@ -7,6 +7,7 @@ A UI polish release.
 - Icons (Phosphor, MIT) on actions, files, tabs and the sidebar.
 - Disabled actions are readable and look disabled.
 - Sidebar sections collapse and can be hidden (⋯ menu); connected sites are marked; Edit is a pencil on hover.
+- Files and folders have kind icons; the selected row has a clear bar; long names end in … with the full name on hover.
 - The hoprs logo at the top of the sidebar; the version moved to Settings.
 
 ## 1.2.0 — 2026-11-16

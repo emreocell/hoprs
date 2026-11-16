@@ -857,13 +857,6 @@ pub fn rename() -> &'static str {
 pub fn permissions() -> &'static str {
     tr("permissions")
 }
-/// Short toolbar labels for the narrowest panes (`ui::fit::Toolbar::Narrow`).
-pub fn new_folder_short() -> &'static str {
-    tr("new-folder-short")
-}
-pub fn permissions_short() -> &'static str {
-    tr("permissions-short")
-}
 pub fn key_new_folder() -> &'static str {
     tr("key-new-folder")
 }

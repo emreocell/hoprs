@@ -493,7 +493,6 @@ pub fn file_row(
 
 /// The 2 px bar on the left of a selected row: `ink` while its pane (or list) has the
 /// keyboard, `rule_2` otherwise.
-#[allow(dead_code)] // Drawn by the file lists from Plan 13 tasks 6 and 7.
 pub fn selection_bar(focused: bool) -> impl Fn(&Theme) -> container::Style {
     move |_| {
         let p = palette();

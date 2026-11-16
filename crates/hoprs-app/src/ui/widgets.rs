@@ -18,7 +18,7 @@ use crate::ui::theme::{self, palette};
 pub const ICON_HIT: f32 = 22.0;
 
 /// The tooltip body: `label`, then the shortcut in mono when there is one.
-fn hint<'a>(label: &'a str, shortcut: Option<&'a str>) -> Element<'a, Message> {
+pub fn hint<'a>(label: &'a str, shortcut: Option<&'a str>) -> Element<'a, Message> {
     let line = row![text(label).size(theme::TEXT_XS)]
         .push(shortcut.map(|key| {
             text(key)
@@ -32,6 +32,11 @@ fn hint<'a>(label: &'a str, shortcut: Option<&'a str>) -> Element<'a, Message> {
         .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
         .style(theme::dialog_box)
         .into()
+}
+
+/// `content` with a tooltip of `label` (no shortcut) below it.
+pub fn tip<'a>(content: impl Into<Element<'a, Message>>, label: &'a str) -> Element<'a, Message> {
+    tooltip(content, hint(label, None), tooltip::Position::Bottom).into()
 }
 
 /// An icon-only button, at least [`ICON_HIT`] square, with a tooltip of `label` and
@@ -86,7 +91,7 @@ pub fn tool_button<'a>(
 }
 
 /// An outlined text button; while disabled (`on_press` is `None`) its outline is dashed.
-#[allow(dead_code)] // Used from Plan 13 task 6 (toolbars, dialogs).
+#[allow(dead_code)] // Used from Plan 13 task 7 (dialogs).
 pub fn outline_button<'a>(label: &'a str, on_press: Option<Message>) -> Element<'a, Message> {
     // `disabled` (about 3:1 on `paper`): `rule_2` was too faint to read as dashes.
     let dash = on_press.is_none().then(|| palette().disabled);
@@ -101,7 +106,7 @@ pub fn outline_button<'a>(label: &'a str, on_press: Option<Message>) -> Element<
 
 /// `full` cut with an ellipsis to the `width` it has, on one clipped line; the tooltip
 /// shows `full` only when it was cut.
-#[allow(dead_code)] // Used from Plan 13 task 6 (tab labels, file names).
+#[allow(dead_code)] // Used from Plan 13 task 7 (tab labels).
 pub fn fitted<'a>(full: &'a str, width: f32, size: f32, font: Font) -> Element<'a, Message> {
     let advance = if font.family == theme::MONO.family {
         fit::MONO_ADVANCE
@@ -111,7 +116,7 @@ pub fn fitted<'a>(full: &'a str, width: f32, size: f32, font: Font) -> Element<'
     let shown = fit::ellipsize(full, width, size, advance);
     let cut = matches!(shown, Cow::Owned(_));
     let line: Element<'a, Message> = container(
-        text(shown.into_owned())
+        text(shown)
             .size(size)
             .font(font)
             .wrapping(text::Wrapping::None),

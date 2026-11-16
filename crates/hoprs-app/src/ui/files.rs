@@ -17,12 +17,16 @@ use crate::app::{
 };
 use crate::backend::Side;
 use crate::ui::fit::{self, Columns, MODIFIED_WIDTH, PERMISSIONS_WIDTH, SIZE_WIDTH};
+use crate::ui::icons::{self, Icon};
 use crate::ui::theme::{self, palette};
 use crate::ui::virtual_list::{self, ROW_HEIGHT};
+use crate::ui::widgets;
 use crate::ui::{file_actions, format, strings};
 
 /// The path bar (mockup `.path`: 38 px).
 const PATH_HEIGHT: f32 = 38.0;
+/// Width of a selected row's bar.
+const SELECTION_BAR: f32 = 2.0;
 /// Rows of the loading skeleton.
 const SKELETON_ROWS: usize = 8;
 
@@ -62,6 +66,30 @@ pub fn breadcrumb_segments(path: &RemotePath, home: Option<&RemotePath>) -> Vec<
         });
     }
     crumbs
+}
+
+/// Which breadcrumb segments fit `max_chars` characters: indices in order, one `None`
+/// for the elided middle. A segment costs its label plus one separator, the gap two; the
+/// first and last always stay, then segments are added from the end while they fit.
+pub fn fit_crumbs(crumbs: &[Crumb], max_chars: usize) -> Vec<Option<usize>> {
+    let cost = |i: usize| crumbs[i].label.chars().count() + 1;
+    let n = crumbs.len();
+    let total: usize = (0..n).map(cost).sum();
+    if n <= 2 || total <= max_chars {
+        return (0..n).map(Some).collect();
+    }
+    let mut used = cost(0) + cost(n - 1) + 2;
+    let mut from = n - 1;
+    while from > 1 && used + cost(from - 1) <= max_chars {
+        from -= 1;
+        used += cost(from);
+    }
+    let mut out = vec![Some(0)];
+    if from > 1 {
+        out.push(None);
+    }
+    out.extend((from..n).map(Some));
+    out
 }
 
 /// The id of a pane's scrollable, for [`crate::app::Effect::ScrollPane`].
@@ -318,13 +346,16 @@ fn pane<'a>(
     let width = fit::pane_width(app.window_width);
     let cols = fit::columns(width, side);
     let conn = app.conn(&tab.site);
+    let place_icon = app
+        .site(&tab.site)
+        .map_or(Icon::HardDrives, crate::ui::sidebar::site_icon);
     let body: Element<'a, Message> = match tab.pane_status(conn, side) {
         PaneStatus::Loading => skeleton(cols),
-        PaneStatus::Full => list(tab.id, side, pane, this_year, focused, cols),
+        PaneStatus::Full => list(tab.id, side, pane, this_year, focused, cols, width),
         PaneStatus::Empty => column![
             // `..` stays reachable from an empty folder.
             pane.has_up()
-                .then(|| file_row(tab.id, side, pane, 0, this_year, focused, cols)),
+                .then(|| file_row(tab.id, side, pane, 0, this_year, focused, cols, width)),
             centered(text(strings::empty_folder()).color(palette().muted).into()),
         ]
         .into(),
@@ -337,7 +368,7 @@ fn pane<'a>(
             .width(Length::Fill)
             .height(theme::HAIRLINE)
             .style(theme::pane_focus(focused)),
-        path_bar(place, pane, home, msg),
+        path_bar(place, side, place_icon, pane, home, width, msg),
         hrule(),
         file_actions::toolbar(tab, conn, side, fit::toolbar(width, side)),
         hrule(),
@@ -383,41 +414,76 @@ fn centered(content: Element<'_, Message>) -> Element<'_, Message> {
         .into()
 }
 
-/// "Local" or the site's name, then the clickable breadcrumb in mono.
+/// "Local" or the site's name (with its icon), then the clickable breadcrumb in mono,
+/// elided in the middle when the pane is too narrow for it.
 fn path_bar<'a>(
     place: &'a str,
+    side: Side,
+    protocol_icon: Icon,
     pane: &'a Pane,
     home: Option<&RemotePath>,
+    width: f32,
     msg: impl Fn(PaneMsg) -> Message,
 ) -> Element<'a, Message> {
     let p = palette();
+    let all = breadcrumb_segments(&pane.path, home);
+    // Room for the crumbs: the pane minus its padding, the icon and the place name.
+    let place_px = place.chars().count() as f32 * theme::TEXT_XS * fit::INTER_ADVANCE;
+    let room = width
+        - 2.0 * theme::SPACE_MD
+        - icons::ROW
+        - place_px
+        - 2.0 * theme::SPACE_SM
+        - theme::SPACE_2XS;
+    let max_chars = (room / (theme::TEXT_MONO * fit::MONO_ADVANCE)).max(0.0) as usize;
+    let kept = fit_crumbs(&all, max_chars);
+    let root_first = crumb_is_root(&pane.path, home);
     let mut crumbs = row![].align_y(Alignment::Center);
-    for (i, crumb) in breadcrumb_segments(&pane.path, home)
-        .into_iter()
-        .enumerate()
-    {
-        // The root "/" is itself the separator before the first folder.
-        if i > 0 && !(i == 1 && crumb_is_root(&pane.path, home)) {
-            crumbs = crumbs.push(
-                text(strings::path_separator())
+    let mut previous: Option<usize> = None;
+    let separator = || {
+        text(strings::path_separator())
+            .font(theme::MONO)
+            .size(theme::TEXT_MONO)
+            .color(p.rule_2)
+    };
+    for entry in kept {
+        let Some(i) = entry else {
+            // The elided middle: "…" with the whole path on hover.
+            crumbs = crumbs.push(separator()).push(widgets::tip(
+                text(strings::ellipsis())
                     .font(theme::MONO)
                     .size(theme::TEXT_MONO)
-                    .color(p.rule_2),
-            );
+                    .color(p.muted),
+                pane.path.as_str(),
+            ));
+            previous = None;
+            continue;
+        };
+        let crumb = &all[i];
+        // The root "/" is itself the separator before the first folder.
+        let after_root = i == 1 && root_first && previous == Some(0);
+        if i > 0 && !after_root {
+            crumbs = crumbs.push(separator());
         }
+        previous = Some(i);
         crumbs = crumbs.push(
             button(
-                text(crumb.label)
+                text(crumb.label.clone())
                     .font(theme::MONO)
                     .size(theme::TEXT_MONO)
                     .wrapping(text::Wrapping::None),
             )
             .padding(Padding::from([0.0, theme::SPACE_3XS]))
             .style(theme::crumb)
-            .on_press(msg(PaneMsg::Navigate(crumb.target))),
+            .on_press(msg(PaneMsg::Navigate(crumb.target.clone()))),
         );
     }
+    let place_icon = match side {
+        Side::Local => Icon::Desktop,
+        Side::Remote => protocol_icon,
+    };
     row![
+        icons::icon(place_icon, icons::ROW).color(p.muted),
         text(place)
             .size(theme::TEXT_XS)
             .color(p.muted)
@@ -429,7 +495,7 @@ fn path_bar<'a>(
             .anchor_right()
             .width(Length::Fill),
     ]
-    .spacing(theme::SPACE_SM)
+    .spacing(theme::SPACE_2XS)
     .align_y(Alignment::Center)
     .height(PATH_HEIGHT)
     .padding(Padding::ZERO.left(theme::SPACE_MD).right(theme::SPACE_MD))
@@ -519,6 +585,7 @@ fn list<'a>(
     this_year: i32,
     focused: bool,
     cols: Columns,
+    width: f32,
 ) -> Element<'a, Message> {
     virtual_list::view(
         scroll_id(tab, side),
@@ -532,12 +599,13 @@ fn list<'a>(
                 viewport_h: viewport.bounds().height,
             },
         },
-        move |i| file_row(tab, side, pane, i, this_year, focused, cols),
+        move |i| file_row(tab, side, pane, i, this_year, focused, cols, width),
     )
 }
 
 /// One 30 px row: click selects, double click enters, hover highlights. The entry being
 /// renamed shows the name editor in its name cell.
+#[allow(clippy::too_many_arguments)]
 fn file_row<'a>(
     tab: TabId,
     side: Side,
@@ -546,6 +614,7 @@ fn file_row<'a>(
     this_year: i32,
     focused: bool,
     cols: Columns,
+    width: f32,
 ) -> Element<'a, Message> {
     let p = palette();
     let msg = move |msg: PaneMsg| Message::Pane { tab, side, msg };
@@ -599,17 +668,41 @@ fn file_row<'a>(
         }
         _ => None,
     };
+    let selected = pane.selection.contains(index);
+    // The kind icon: muted, ink when the row is selected.
+    let kind_icon = match pane.row(index) {
+        Some(Row::Entry(entry)) => icons::for_entry(&entry.name, entry.kind),
+        _ => Icon::ArrowBendLeftUp,
+    };
+    // Cut to the column with "…" (the folder's "/" keeps its character), the whole name
+    // on hover only when cut.
+    let mut room = fit::name_width(width, cols);
+    if is_dir && !up {
+        room -= theme::TEXT_MONO * fit::MONO_ADVANCE;
+    }
+    let shown = fit::ellipsize(name, room, theme::TEXT_MONO, fit::MONO_ADVANCE);
+    let cut = matches!(shown, std::borrow::Cow::Owned(_));
     // Folders: medium weight in ink, with a muted "/" (mockup `.dir::after`).
+    let name_text: Element<'a, Message> = text(shown)
+        .font(if is_dir {
+            theme::MONO_MEDIUM
+        } else {
+            theme::MONO
+        })
+        .size(theme::TEXT_MONO)
+        .wrapping(text::Wrapping::None)
+        .into();
+    let name_text = if cut {
+        widgets::tip(name_text, name)
+    } else {
+        name_text
+    };
     let mut name_cell = row![
-        text(name)
-            .font(if is_dir {
-                theme::MONO_MEDIUM
-            } else {
-                theme::MONO
-            })
-            .size(theme::TEXT_MONO)
-            .wrapping(text::Wrapping::None)
-    ];
+        icons::icon(kind_icon, icons::ROW).color(if selected { p.ink } else { p.muted }),
+        name_text
+    ]
+    .spacing(theme::SPACE_XS)
+    .align_y(Alignment::Center);
     if is_dir && !up {
         name_cell = name_cell.push(
             text(strings::path_separator())
@@ -635,7 +728,19 @@ fn file_row<'a>(
             .into(),
         None => cell(name_cell.into(), Length::Fill, false).into(),
     };
+    // The selection bar, or the same room transparent so the text never shifts.
+    let bar = container(space())
+        .width(SELECTION_BAR)
+        .height(Length::Fill)
+        .style(move |t: &iced::Theme| {
+            if selected {
+                theme::selection_bar(focused)(t)
+            } else {
+                container::Style::default()
+            }
+        });
     let mut cells = row![
+        bar,
         name_cell,
         cell(size_text.into(), Length::Fixed(SIZE_WIDTH), true),
     ];
@@ -656,7 +761,6 @@ fn file_row<'a>(
             false,
         ));
     }
-    let selected = pane.selection.contains(index);
     let hovered = pane.hovered == Some(index);
     let cursor = focused && pane.selection.cursor == Some(index);
     mouse_area(
@@ -806,6 +910,31 @@ mod tests {
             .into_iter()
             .map(|c| (c.label, c.target.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn fit_crumbs_keeps_ends() {
+        let labels = [
+            "/",
+            "home",
+            "me",
+            "projects",
+            "web-app",
+            "src",
+            "components",
+        ];
+        let crumbs: Vec<Crumb> = labels
+            .iter()
+            .map(|l| Crumb {
+                label: (*l).to_owned(),
+                target: RemotePath::root(),
+            })
+            .collect();
+        assert_eq!(fit_crumbs(&crumbs, 20), [Some(0), None, Some(5), Some(6)]);
+        let all = fit_crumbs(&crumbs, 60);
+        assert_eq!(all.len(), 7);
+        assert!(all.iter().all(Option::is_some));
+        assert_eq!(fit_crumbs(&crumbs[..2], 1), [Some(0), Some(1)]);
     }
 
     fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {

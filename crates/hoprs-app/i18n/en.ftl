@@ -344,9 +344,6 @@ workspace-status = { $connected } of { $sites } in { $name }
 new-folder = New folder
 rename = Rename
 permissions = Permissions…
-# Short toolbar labels for the narrowest panes (`ui::fit::Toolbar::Narrow`).
-new-folder-short = Folder
-permissions-short = Perms…
 key-new-folder = F7
 key-rename = F2
 key-delete = Del

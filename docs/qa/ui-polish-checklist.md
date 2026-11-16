@@ -37,3 +37,13 @@ real display.
    show a green plug and a white name; a site that failed shows a red warning, and hovering
    the icon shows the error. Collapse and hide both sections from the caret and the ⋯ menu,
    restart, and expect the same state.
+
+6. **Panes and compare panel.** NEEDS HUMAN. Open a site. Expect: folders and files told
+   apart at a glance (kind icons; `..` has its own); the selected row shows a 2 px bar in
+   the focused pane (white) and in the other pane (grey); long names end in "…" with the
+   full name on hover (and no tooltip on names that fit); a deep path in the path bar
+   keeps its first and last folders with "…" between (hover shows the whole path). The
+   toolbar buttons have icons; below about 1280 px windows the key hints go, and at about
+   1200 px and under the buttons are icons only with their label and key on hover. In the
+   compare panel: group headers have icons, rows have kind icons and a selection bar, the
+   collapse and close buttons are icons.

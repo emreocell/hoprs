@@ -13,14 +13,16 @@ use crate::app::{Message, PaneMsg, SiteConn, Tab, TabId};
 use crate::backend::Side;
 use crate::ui::files::edit_id;
 use crate::ui::fit::Toolbar;
+use crate::ui::icons::{self, Icon};
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
 use crate::ui::virtual_list::ROW_HEIGHT;
+use crate::ui::widgets;
 
 /// The toolbar under the path bar: the actions, each with its key, and on the right the
 /// operation in flight.
 /// `form` ([`crate::ui::fit::toolbar`]): below Full no key hints, and while an operation
-/// runs only its progress (the actions are all dim then); Narrow also uses short labels.
+/// runs only its progress (the actions are all dim then); Narrow shows icons only.
 pub fn toolbar<'a>(
     tab: &'a Tab,
     conn: &SiteConn,
@@ -29,12 +31,8 @@ pub fn toolbar<'a>(
 ) -> Element<'a, Message> {
     let p = palette();
     let compact = !form.hints();
-    let short = form.short_labels();
-    let (new_folder, permissions) = if short {
-        (strings::new_folder_short(), strings::permissions_short())
-    } else {
-        (strings::new_folder(), strings::permissions())
-    };
+    // The narrowest panes show the icons only; the tooltips carry label and key.
+    let short = form.icons_only();
     let Some(pane) = tab.pane(side) else {
         return space().into();
     };
@@ -46,29 +44,18 @@ pub fn toolbar<'a>(
     let can = tab.can_act(conn, side);
     let some = can && !pane.selected_entries().is_empty();
     let chmod = can && !pane.permission_targets().is_empty();
-    let action = |label: &'a str, key: Option<&'a str>, enabled: bool, pane_msg: PaneMsg| {
-        let mut content = row![
-            text(label)
-                .size(theme::TEXT_XS)
-                .wrapping(text::Wrapping::None)
-        ]
-        .spacing(theme::SPACE_2XS);
-        if let Some(key) = key.filter(|_| !compact) {
-            content = content.push(
-                text(key)
-                    .font(theme::MONO)
-                    .size(theme::TEXT_TAG)
-                    .color(p.rule_2),
-            );
-        }
-        button(content.align_y(Alignment::Center))
-            .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_2XS]))
-            .style(theme::button_text)
-            .on_press_maybe(enabled.then(|| msg(pane_msg)))
-    };
-    let transfer = match side {
-        Side::Local => strings::upload(),
-        Side::Remote => strings::download(),
+    let action =
+        |icon: Icon, label: &'a str, key: Option<&'a str>, enabled: bool, pane_msg: PaneMsg| {
+            let on_press = enabled.then(|| msg(pane_msg));
+            if short {
+                widgets::icon_button(icon, label, key, on_press)
+            } else {
+                widgets::tool_button(icon, label, key.filter(|_| !compact), on_press).into()
+            }
+        };
+    let (transfer_icon, transfer) = match side {
+        Side::Local => (Icon::UploadSimple, strings::upload()),
+        Side::Remote => (Icon::DownloadSimple, strings::download()),
     };
     let mut bar = row![];
     // Edit (remote): the selected file, or why it can't be (the hint, on the right).
@@ -76,62 +63,58 @@ pub fn toolbar<'a>(
     // A narrow pane while an operation runs: only its progress (every action is dim).
     if !(compact && pane.busy.is_some()) {
         bar = bar.push(action(
+            transfer_icon,
             transfer,
             Some(strings::key_transfer()),
             tab.can_transfer(conn, side),
             PaneMsg::Transfer,
         ));
         if side == Side::Remote {
-            bar = bar.push(edit_action(edit, compact, msg(PaneMsg::Edit)));
+            bar = bar.push(edit_action(edit, compact, short, msg(PaneMsg::Edit)));
         }
         bar = bar
-            .push(full_label_tip(
-                action(
-                    new_folder,
-                    Some(strings::key_new_folder()),
-                    can,
-                    PaneMsg::NewFolder,
-                ),
-                short,
+            .push(action(
+                Icon::FolderSimplePlus,
                 strings::new_folder(),
                 Some(strings::key_new_folder()),
+                can,
+                PaneMsg::NewFolder,
             ))
             .push(action(
+                Icon::Textbox,
                 strings::rename(),
                 Some(strings::key_rename()),
                 some,
                 PaneMsg::Rename,
             ))
             .push(action(
+                Icon::Trash,
                 strings::delete(),
                 Some(strings::key_delete()),
                 some,
                 PaneMsg::Delete,
             ));
         if side == Side::Remote {
-            bar = bar.push(full_label_tip(
-                action(permissions, None, chmod, PaneMsg::Permissions),
-                short,
+            bar = bar.push(action(
+                Icon::LockKey,
                 strings::permissions(),
                 None,
+                chmod,
+                PaneMsg::Permissions,
             ));
         }
     }
     bar = bar.push(space().width(Length::Fill));
     // Folder compare: one button for the tab, at the right of the local toolbar.
     if side == Side::Local && !(compact && pane.busy.is_some()) {
-        bar = bar.push(
-            button(
-                text(strings::compare_button())
-                    .size(theme::TEXT_XS)
-                    .wrapping(text::Wrapping::None),
-            )
-            .padding(Padding::from([theme::SPACE_3XS, theme::SPACE_2XS]))
-            .style(theme::button_text)
-            .on_press_maybe(tab.can_act(conn, Side::Remote).then_some(Message::Compare(
-                crate::app::CompareMsg::Start { tab: tab.id },
-            ))),
-        );
+        let start = tab.can_act(conn, Side::Remote).then_some(Message::Compare(
+            crate::app::CompareMsg::Start { tab: tab.id },
+        ));
+        bar = bar.push(if short {
+            widgets::icon_button(Icon::GitDiff, strings::compare_button(), None, start)
+        } else {
+            widgets::tool_button(Icon::GitDiff, strings::compare_button(), None, start).into()
+        });
     }
     if let Some(busy) = &pane.busy {
         let label = match busy.kind {
@@ -154,57 +137,31 @@ pub fn toolbar<'a>(
         .into()
 }
 
-/// A short-labelled toolbar button (`short`, the Narrow form) with its full label and key
-/// as a tooltip, in the Edit hint's style; otherwise the button as it is.
-fn full_label_tip<'a>(
-    button: iced::widget::Button<'a, Message>,
-    short: bool,
-    label: &'a str,
-    key: Option<&'a str>,
-) -> Element<'a, Message> {
-    if !short {
-        return button.into();
-    }
-    let hint = row![text(label).size(theme::TEXT_XS)]
-        .push(key.map(|key| {
-            text(key)
-                .font(theme::MONO)
-                .size(theme::TEXT_TAG)
-                .color(palette().muted)
-        }))
-        .spacing(theme::SPACE_XS)
-        .align_y(Alignment::Center);
-    tooltip(
-        button,
-        container(hint)
-            .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
-            .style(theme::dialog_box),
-        tooltip::Position::Bottom,
-    )
-    .into()
-}
-
 /// "Edit F4" (remote). Off without a selection. On a folder, a link or a file over
 /// 50 MB it looks off too, but a click (like F4) still answers: the reason shows inline
 /// in the bar above the table; hovering shows it as well.
 fn edit_action<'a>(
     edit: Option<Result<hoprs_core::RemotePath, &'static str>>,
     compact: bool,
+    icon_only: bool,
     on_press: Message,
 ) -> Element<'a, Message> {
     let p = palette();
-    let mut content = row![
-        text(strings::edit_file())
-            .size(theme::TEXT_XS)
-            .wrapping(text::Wrapping::None)
-    ]
-    .spacing(theme::SPACE_2XS);
-    if !compact {
+    let mut content =
+        row![icons::icon(Icon::PencilSimpleLine, icons::ROW)].spacing(theme::SPACE_2XS);
+    if !icon_only {
+        content = content.push(
+            text(strings::edit_file())
+                .size(theme::TEXT_XS)
+                .wrapping(text::Wrapping::None),
+        );
+    }
+    if !compact && !icon_only {
         content = content.push(
             text(strings::key_edit())
                 .font(theme::MONO)
                 .size(theme::TEXT_TAG)
-                .color(p.rule_2),
+                .color(p.disabled),
         );
     }
     let refused = matches!(edit, Some(Err(_)));
@@ -230,6 +187,7 @@ fn edit_action<'a>(
             tooltip::Position::Bottom,
         )
         .into(),
+        _ if icon_only => widgets::tip(button, strings::edit_file()),
         _ => button.into(),
     }
 }
