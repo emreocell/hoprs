@@ -2,6 +2,29 @@
 
 One section per task; later tasks append theirs.
 
+## Task 1: workspace groups (2026-11-16)
+
+| Check | Result |
+| --- | --- |
+| An expanded workspace shows its sites and nothing else: no Open workspace button, no Close link | Pass: covered by the sidebar view change (no control left to render) |
+| Right-click a workspace: Open all, Edit; Close all too while it is the open one; choosing them opens or closes the workspace | Pass: `site_and_workspace_menus` |
+| The palette lists Open workspace and, while one is open, "Close all in (workspace name)" | Pass: `palette_lists_context_actions` |
+| The open workspace is marked (green stack icon, "Workspace open" tooltip); the others are not | Pass: `the_open_workspace_is_marked` |
+| The row, the menus, the palette and the mark look right in English and pt-BR, on a real display | NEEDS HUMAN: steps below |
+
+### NEEDS HUMAN
+
+1. **Groups.** Expand a workspace in the sidebar: only its sites show, no button under them.
+   Click a site inside it: that site opens on its own, like any site.
+2. **Menu.** Right-click the workspace: "Open all" and "Edit". Choose Open all: every site
+   connects and the saved tabs come back; the workspace gets a green stack icon whose
+   tooltip reads "Workspace open". Right-click it again: "Close all" is there too; choose it:
+   the tabs are saved and closed, and the mark goes.
+3. **Palette.** With the workspace open, press Ctrl+K and type "close": "Close all in
+   (workspace name)" is listed and does the same as the menu item.
+4. **pt-BR.** Switch Settings › Language to Português and repeat steps 2 and 3: "Abrir
+   todos", "Fechar todos", "Workspace aberto", "Fechar todos em (nome do workspace)".
+
 ## Task 2: refresh after transfers (2026-11-16)
 
 | Check | Result |

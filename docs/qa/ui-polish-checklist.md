@@ -138,14 +138,16 @@ pt-BR). This is not a substitute for the rows below.
       conflict's answers stay in the row). An item on a row that finished meanwhile does
       nothing.
     - Sidebar: right-click a site (Open files, Edit; also a site inside an open workspace) and
-      a workspace head (Open all, Edit; Close all too while it is the open one, marked by a green stack icon with an "Open" tooltip). No Disconnect, no Delete. Shift+F10 does
-      nothing there (mouse only).
+      a workspace head (Open all, Edit; Close all too while it is the open one, marked by a
+      green stack icon with a "Workspace open" tooltip). No Disconnect, no Delete. Shift+F10
+      does nothing there (mouse only).
     - Tabs: right-click a session tab and the settings tab: Close tab, Close other tabs
       (dimmed when it is the only tab). Close other tabs keeps the clicked tab, selected,
       closes the rest (the settings tab too, unless it is the one kept); a site whose last tab
       has unsent remote edits asks first, in its tab.
-    - Keyboard: Close tab, Open workspace, Close all in <workspace> (palette, while one is open), the sites, Upload/Download (compare panel
-      buttons), the queue's actions (Tab to their buttons) stay reachable as before.
+    - Keyboard: Close tab, Open workspace, "Close all in" the open workspace (palette), the
+      sites, Upload/Download (compare panel buttons), the queue's actions (Tab to their
+      buttons) stay reachable as before.
 
 14. **Drag feedback.** NEEDS HUMAN. On Linux, macOS and Windows, open a connected site,
     select two files in the local pane and drag one of them. Expect: nothing moves until
