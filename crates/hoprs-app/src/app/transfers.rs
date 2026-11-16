@@ -5,18 +5,23 @@
 use std::path::Path;
 
 use hoprs_core::{Error, ErrorKind, RemotePath, SiteId};
-use hoprs_transfer::{Direction, Event, TransferId, TransferSpec};
+use hoprs_transfer::{Direction, Event, EventKind, TransferId, TransferSpec, TransferState};
 
 use hoprs_core::ConnectionState;
 use iced::Point;
 
 use super::files::{FileKey, RequestId, local_path};
+use super::menu::{ContextMenu, MenuTarget};
 use super::queue::QueueMsg;
 use super::{App, DRAG_THRESHOLD, Effect, Message};
 use crate::app::TabId;
 use crate::backend::{ControlOp, Side, TransferSnapshot};
 use crate::ui::files::display_path;
 use crate::ui::strings;
+
+/// How long finished transfers wait before their folders are listed again: the endings
+/// of a burst (a folder, a multi-file drop) share one listing per pane.
+pub const RELIST_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// The other pane.
 pub fn other(side: Side) -> Side {
@@ -114,13 +119,7 @@ impl App {
     /// Whether pane `side` of tab `index` takes a drop: it can act, and the site's
     /// connection is up (a remote pane on a lost or reconnecting session is no target).
     fn takes_drop(&self, index: usize, side: Side) -> bool {
-        self.can_act(index, side)
-            && (side == Side::Local
-                || self
-                    .tab_conn(index)
-                    .conn
-                    .as_ref()
-                    .is_none_or(|state| *state == ConnectionState::Connected))
+        self.can_act(index, side) && (side == Side::Local || self.site_up(index))
     }
 
     /// The pane a drag would drop on now: the pane under the pointer, if a drag that moved
@@ -325,8 +324,20 @@ impl App {
 
     pub(super) fn transfer_event(&mut self, event: Event) -> Vec<Effect> {
         let mut effects = self.compare_transfer_event(&event);
+        let done = match &event.kind {
+            EventKind::StateChanged {
+                id,
+                state: TransferState::Done,
+            } => Some(*id),
+            _ => None,
+        };
         if self.queue.on_event(event) {
             effects.extend(self.resync_queue());
+        }
+        // Looked up after the event: an item whose row the queue does not hold yet (its
+        // events wait for a snapshot) is found by the snapshot's comparison instead.
+        if let Some(id) = done {
+            effects.extend(self.refresh_after_transfer(id));
         }
         effects
     }
@@ -337,8 +348,121 @@ impl App {
         snapshot: TransferSnapshot,
     ) -> Vec<Effect> {
         let mut effects = self.compare_snapshot(&snapshot.items);
+        // Endings the lost events never told (the first snapshot is the state at start).
+        let before = self.queue.has_snapshot().then(|| self.queue.done_ids());
         if self.queue.on_snapshot(request, snapshot) {
             effects.extend(self.resync_queue());
+        }
+        if let Some(before) = before {
+            let now: Vec<TransferId> = self
+                .queue
+                .done_ids()
+                .into_iter()
+                .filter(|id| !before.contains(id))
+                .collect();
+            for id in now {
+                effects.extend(self.refresh_after_transfer(id));
+            }
+        }
+        effects
+    }
+
+    /// Whether the site of the tab at `index` is up: it has a session and the session's
+    /// feed does not say it is lost or reconnecting.
+    fn site_up(&self, index: usize) -> bool {
+        let conn = self.tab_conn(index);
+        conn.session().is_some()
+            && conn
+                .conn
+                .as_ref()
+                .is_none_or(|state| *state == ConnectionState::Connected)
+    }
+
+    /// Transfer `id` is done: every files pane showing its destination folder, on its side
+    /// (and, remote, of its site) and with the site up, is marked for a quiet re-list,
+    /// which runs when the [`RELIST_DELAY`] runs out (one timer for a burst).
+    pub(super) fn refresh_after_transfer(&mut self, id: TransferId) -> Vec<Effect> {
+        let Some(spec) = self.queue.row(id).map(|row| row.item.spec.clone()) else {
+            return Vec::new();
+        };
+        let (side, destination) = match spec.direction {
+            Direction::Upload => (Side::Remote, spec.remote),
+            Direction::Download => (Side::Local, spec.local),
+        };
+        let Some(folder) = destination.parent() else {
+            return Vec::new();
+        };
+        let mut marked = false;
+        for index in 0..self.tabs.len() {
+            if side == Side::Remote && (self.tabs[index].site != spec.site || !self.site_up(index))
+            {
+                continue;
+            }
+            if let Some(pane) = self.tabs[index].pane_mut(side)
+                && pane.path == folder
+            {
+                pane.relist = true;
+                marked = true;
+            }
+        }
+        if !marked || self.relist_armed {
+            return Vec::new();
+        }
+        self.relist_armed = true;
+        vec![Effect::Later {
+            after: RELIST_DELAY,
+            message: Box::new(Message::RelistPanes),
+        }]
+    }
+
+    /// The re-list delay ran out: each marked pane lists its folder again, quietly
+    /// ([`list_pane_soft`](Self::list_pane_soft)). A pane that is busy (a listing out, a
+    /// file operation, an editor, confirmation or dialog open, its menu open, a drag from
+    /// it) keeps its mark and the delay starts again, so a pane lists at most once per
+    /// delay and never while it lists already; one whose site went down drops it (the
+    /// reconnection lists it).
+    pub(super) fn relist_panes(&mut self) -> Vec<Effect> {
+        self.relist_armed = false;
+        let mut effects = Vec::new();
+        let mut waiting = false;
+        for index in 0..self.tabs.len() {
+            for side in [Side::Local, Side::Remote] {
+                let tab = &self.tabs[index];
+                let Some(pane) = tab.pane(side).filter(|pane| pane.relist) else {
+                    continue;
+                };
+                if side == Side::Remote && !self.site_up(index) {
+                    if let Some(pane) = self.tabs[index].pane_mut(side) {
+                        pane.relist = false;
+                    }
+                    continue;
+                }
+                let menu_open = matches!(
+                    &self.menu,
+                    Some(ContextMenu { target: MenuTarget::Pane { tab: t, side: s, .. }, .. })
+                        if *t == tab.id && *s == side
+                );
+                let dragged = self
+                    .drag
+                    .is_some_and(|d| d.active && d.tab == tab.id && d.from == side);
+                if pane.request.is_some()
+                    || pane.busy.is_some()
+                    || pane.action.is_some()
+                    || menu_open
+                    || dragged
+                {
+                    waiting = true;
+                    continue;
+                }
+                effects.extend(self.list_pane_soft(index, side));
+            }
+        }
+        if waiting {
+            self.relist_armed = true;
+            effects.push(Effect::Later {
+                after: RELIST_DELAY,
+                message: Box::new(Message::RelistPanes),
+            });
         }
         effects
     }

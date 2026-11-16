@@ -1707,3 +1707,447 @@ async fn escape_closes_dialog_or_palette_before_drag() {
     app.update(escape);
     assert_eq!(app.drag, None);
 }
+
+// Plan 14, Task 2: a finished transfer re-lists its destination folder where it is shown.
+
+/// A queued file transfer of `site` (`local` <-> `remote`).
+fn moving(id: i64, site: &SiteId, direction: Direction, local: &str, remote: &str) -> TransferItem {
+    TransferItem {
+        id: TransferId(id),
+        parent: None,
+        spec: spec(site, direction, local, remote),
+        is_dir: Some(false),
+        size: Some(1),
+        bytes_done: 0,
+        state: TransferState::Queued,
+    }
+}
+
+/// How many re-list timers `effects` start.
+fn relist_ticks(effects: &[Effect]) -> usize {
+    effects
+        .iter()
+        .filter(|e| {
+            matches!(e, Effect::Later { after, message }
+                if *after == crate::app::transfers::RELIST_DELAY
+                    && matches!(**message, Message::RelistPanes))
+        })
+        .count()
+}
+
+/// The `(tab, side, folder)` of each listing among `effects`.
+fn listed_panes(effects: &[Effect]) -> Vec<(TabId, Side, String)> {
+    effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::List {
+                tab, side, path, ..
+            } => Some((*tab, *side, path.to_string())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn finish(app: &mut App, seq: u64, id: i64, state: TransferState) -> Vec<Effect> {
+    app.update(Message::TransferEvent(changed(seq, id, state)))
+}
+
+/// Delivers the results of the listings among `effects`; returns what they caused.
+async fn deliver(app: &mut App, fake: &Arc<FakeBackend>, effects: &[Effect]) -> Vec<Effect> {
+    let mut after = Vec::new();
+    for message in run_listings(fake, effects).await {
+        after.extend(app.update(message));
+    }
+    after
+}
+
+fn touch_remote(fake: &FakeBackend, site: &SiteId, path: &str) {
+    fake.remote_fs(site)
+        .add_file(path, b"x", std::time::SystemTime::UNIX_EPOCH);
+}
+
+/// An upload's Done re-lists the remote pane showing its folder, a download's the local
+/// one: once, after the batching delay, quietly (rows kept on screen meanwhile, no scroll
+/// to the top, no comparison re-armed).
+#[tokio::test]
+async fn done_item_relists_the_pane_showing_its_folder() {
+    let (fake, mut app, a, tab) = transfer_tab().await;
+    synced(
+        &mut app,
+        1,
+        vec![
+            moving(1, &a.id, Direction::Upload, "/home/me/a.txt", "/srv/a.txt"),
+            moving(
+                2,
+                &a.id,
+                Direction::Download,
+                "/home/me/r2.txt",
+                "/srv/r.txt",
+            ),
+        ],
+    );
+    touch_remote(&fake, &a.id, "/srv/a.txt");
+    let effects = finish(&mut app, 2, 1, TransferState::Done);
+    assert_eq!(relist_ticks(&effects), 1, "{effects:?}");
+    assert!(
+        listings(&effects).is_empty(),
+        "nothing lists before the delay"
+    );
+
+    let effects = app.update(Message::RelistPanes);
+    assert_eq!(listed_panes(&effects), [(tab, Side::Remote, "/srv".into())]);
+    assert_eq!(
+        app.tabs[0].remote().listing,
+        Listing::Loaded,
+        "no loading flash"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::ScrollPane { .. })),
+        "{effects:?}"
+    );
+    let after = deliver(&mut app, &fake, &effects).await;
+    assert!(after.is_empty(), "no comparison re-armed: {after:?}");
+    assert!(entry_names(&app, 0, Side::Remote).contains(&"a.txt".to_string()));
+
+    fake.local_fs()
+        .add_file("/home/me/r2.txt", b"r", std::time::SystemTime::UNIX_EPOCH);
+    let effects = finish(&mut app, 3, 2, TransferState::Done);
+    assert_eq!(relist_ticks(&effects), 1);
+    let effects = app.update(Message::RelistPanes);
+    assert_eq!(
+        listed_panes(&effects),
+        [(tab, Side::Local, "/home/me".into())]
+    );
+    deliver(&mut app, &fake, &effects).await;
+    assert!(entry_names(&app, 0, Side::Local).contains(&"r2.txt".to_string()));
+}
+
+/// Another folder, the other side, another site: nothing re-lists. Nor does a folder the
+/// pane left before the delay ran out (Review Focus 2).
+#[tokio::test]
+async fn other_folder_other_side_other_site_not_relisted() {
+    let (fake, mut app, a, tab) = transfer_tab().await;
+    let b = site("b", "h2", "u", Protocol::Ftp);
+    synced(
+        &mut app,
+        1,
+        vec![
+            moving(
+                1,
+                &a.id,
+                Direction::Upload,
+                "/home/me/a.txt",
+                "/srv/sub/a.txt",
+            ),
+            // The remote side of `/home/me` (the local pane's folder).
+            moving(2, &a.id, Direction::Upload, "/x/a.txt", "/home/me/a.txt"),
+            // The local side of `/srv` (the remote pane's folder).
+            moving(3, &a.id, Direction::Download, "/srv/r.txt", "/x/r.txt"),
+            // Another site's `/srv`.
+            moving(4, &b.id, Direction::Upload, "/home/me/a.txt", "/srv/a.txt"),
+            moving(5, &a.id, Direction::Upload, "/home/me/b.txt", "/srv/b.txt"),
+        ],
+    );
+    for (seq, id) in [(2, 1), (3, 2), (4, 3), (5, 4)] {
+        let effects = finish(&mut app, seq, id, TransferState::Done);
+        assert_eq!(relist_ticks(&effects), 0, "item {id}: {effects:?}");
+    }
+    assert!(listings(&app.update(Message::RelistPanes)).is_empty());
+
+    // Into `/srv`, but the pane goes to `/srv/sub` before the delay ends.
+    assert_eq!(
+        relist_ticks(&finish(&mut app, 6, 5, TransferState::Done)),
+        1
+    );
+    let effects = app.update(pane_msg(
+        tab,
+        Side::Remote,
+        PaneMsg::Navigate(rpath("/srv/sub")),
+    ));
+    settle(&mut app, &fake, run_listings(&fake, &effects).await).await;
+    assert_eq!(app.tabs[0].remote().path, rpath("/srv/sub"));
+    let effects = app.update(Message::RelistPanes);
+    assert!(listings(&effects).is_empty(), "{effects:?}");
+    assert_eq!(relist_ticks(&effects), 0, "nothing left waiting");
+}
+
+#[tokio::test]
+async fn failed_cancelled_skipped_do_not_relist() {
+    let (_fake, mut app, a, _tab) = transfer_tab().await;
+    synced(
+        &mut app,
+        1,
+        (1..=3)
+            .map(|i| moving(i, &a.id, Direction::Upload, "/home/me/a.txt", "/srv/a.txt"))
+            .collect(),
+    );
+    let ends = [
+        failed("denied"),
+        TransferState::Cancelled,
+        TransferState::Skipped("exists".into()),
+    ];
+    for (i, state) in ends.into_iter().enumerate() {
+        let id = i as i64 + 1;
+        let effects = finish(&mut app, id as u64 + 1, id, state);
+        assert_eq!(relist_ticks(&effects), 0, "item {id}: {effects:?}");
+    }
+    assert!(listings(&app.update(Message::RelistPanes)).is_empty());
+}
+
+/// Review Focus 1: ten items finishing together give one timer and one listing; more
+/// finishing while that listing is out wait for it, then give one more.
+#[tokio::test]
+async fn burst_of_done_items_gives_one_listing() {
+    let (fake, mut app, a, tab) = transfer_tab().await;
+    synced(
+        &mut app,
+        1,
+        (1..=20)
+            .map(|i| {
+                moving(
+                    i,
+                    &a.id,
+                    Direction::Upload,
+                    &format!("/home/me/f{i}"),
+                    &format!("/srv/f{i}"),
+                )
+            })
+            .collect(),
+    );
+    let mut ticks = 0;
+    for id in 1..=10 {
+        touch_remote(&fake, &a.id, &format!("/srv/f{id}"));
+        ticks += relist_ticks(&finish(&mut app, id as u64 + 1, id, TransferState::Done));
+    }
+    assert_eq!(ticks, 1);
+    let first = app.update(Message::RelistPanes);
+    assert_eq!(listed_panes(&first), [(tab, Side::Remote, "/srv".into())]);
+
+    // The listing is still out.
+    let mut ticks = 0;
+    for id in 11..=20 {
+        touch_remote(&fake, &a.id, &format!("/srv/f{id}"));
+        ticks += relist_ticks(&finish(&mut app, id as u64 + 1, id, TransferState::Done));
+    }
+    assert_eq!(ticks, 1);
+    let effects = app.update(Message::RelistPanes);
+    assert!(listings(&effects).is_empty(), "never two listings at once");
+    assert_eq!(relist_ticks(&effects), 1, "it waits for the listing out");
+    deliver(&mut app, &fake, &first).await;
+    let effects = app.update(Message::RelistPanes);
+    assert_eq!(listed_panes(&effects), [(tab, Side::Remote, "/srv".into())]);
+    deliver(&mut app, &fake, &effects).await;
+    assert_eq!(app.tabs[0].remote().entries.len(), 22);
+    assert_eq!(relist_ticks(&app.update(Message::RelistPanes)), 0);
+}
+
+/// A listing the user started (F5) is out when the item ends: the re-list follows it.
+#[tokio::test]
+async fn listing_in_flight_defers_the_relist() {
+    let (fake, mut app, a, tab) = transfer_tab().await;
+    synced(
+        &mut app,
+        1,
+        vec![moving(
+            1,
+            &a.id,
+            Direction::Upload,
+            "/home/me/a.txt",
+            "/srv/a.txt",
+        )],
+    );
+    let refresh = app.update(pane_msg(tab, Side::Remote, PaneMsg::Refresh));
+    assert_eq!(listings(&refresh).len(), 1);
+    assert_eq!(
+        relist_ticks(&finish(&mut app, 2, 1, TransferState::Done)),
+        1
+    );
+    let effects = app.update(Message::RelistPanes);
+    assert!(listings(&effects).is_empty(), "{effects:?}");
+    assert_eq!(relist_ticks(&effects), 1);
+    touch_remote(&fake, &a.id, "/srv/a.txt");
+    settle(&mut app, &fake, run_listings(&fake, &refresh).await).await;
+    let effects = app.update(Message::RelistPanes);
+    assert_eq!(listed_panes(&effects), [(tab, Side::Remote, "/srv".into())]);
+}
+
+/// Review Focus 4: the selection and the scroll survive a re-list (by name: the rows
+/// moved); an open rename editor holds the re-list back until it closes, its typed text
+/// untouched.
+#[tokio::test]
+async fn relist_keeps_selection_and_rename_editor() {
+    let (fake, mut app, a, tab) = transfer_tab().await;
+    synced(
+        &mut app,
+        1,
+        vec![
+            moving(1, &a.id, Direction::Upload, "/home/me/a.txt", "/srv/a.txt"),
+            moving(2, &a.id, Direction::Upload, "/home/me/b.txt", "/srv/b.txt"),
+        ],
+    );
+    let r_row = row_of(&app, Side::Remote, "r.txt");
+    app.update(pane_msg(tab, Side::Remote, PaneMsg::Click(r_row)));
+    app.update(pane_msg(
+        tab,
+        Side::Remote,
+        PaneMsg::Scrolled {
+            offset_y: 12.0,
+            viewport_h: 400.0,
+        },
+    ));
+    touch_remote(&fake, &a.id, "/srv/a.txt");
+    finish(&mut app, 2, 1, TransferState::Done);
+    let effects = app.update(Message::RelistPanes);
+    assert_eq!(listings(&effects).len(), 1);
+    deliver(&mut app, &fake, &effects).await;
+    let moved = row_of(&app, Side::Remote, "r.txt");
+    assert_ne!(moved, r_row, "a.txt sorts before r.txt");
+    let pane = app.tabs[0].remote();
+    assert_eq!(
+        pane.selection.rows.iter().copied().collect::<Vec<_>>(),
+        [moved]
+    );
+    assert_eq!(pane.selection.cursor, Some(moved));
+    assert_eq!(pane.offset_y, 12.0);
+
+    // F2 on r.txt, a name typed; then b.txt lands.
+    app.update(pane_msg(tab, Side::Remote, PaneMsg::Rename));
+    app.update(pane_msg(
+        tab,
+        Side::Remote,
+        PaneMsg::EditChanged("typed".into()),
+    ));
+    touch_remote(&fake, &a.id, "/srv/b.txt");
+    finish(&mut app, 3, 2, TransferState::Done);
+    let effects = app.update(Message::RelistPanes);
+    assert!(listings(&effects).is_empty(), "the editor holds it back");
+    assert_eq!(relist_ticks(&effects), 1);
+    let typed = |app: &App| match &app.tabs[0].remote().action {
+        Some(crate::app::actions::PaneAction::Edit(edit)) => Some(edit.value.clone()),
+        _ => None,
+    };
+    assert_eq!(typed(&app).as_deref(), Some("typed"));
+    app.update(pane_msg(tab, Side::Remote, PaneMsg::CancelAction));
+    let effects = app.update(Message::RelistPanes);
+    assert_eq!(listings(&effects).len(), 1);
+    deliver(&mut app, &fake, &effects).await;
+    assert!(entry_names(&app, 0, Side::Remote).contains(&"b.txt".to_string()));
+}
+
+/// Review Focus 3: two tabs of the site on `/srv` both re-list; another site's tab on
+/// `/srv` does not. Local folders are the same machine for every tab.
+#[tokio::test]
+async fn same_remote_folder_in_two_tabs_both_relist() {
+    // Several tabs share a session on an SSH site.
+    let mut a = site("a", "h", "u", Protocol::Ssh);
+    a.remote_dir = Some("/srv".into());
+    let mut b = site("b", "h2", "u", Protocol::Ftp);
+    b.remote_dir = Some("/srv".into());
+    let fake = Arc::new(FakeBackend::new().with_site(a.clone()).with_site(b.clone()));
+    fake.remote_fs(&a.id).add_dir("/srv");
+    fake.remote_fs(&b.id).add_dir("/srv");
+    let mut app = connected_tab(&fake, &a).await;
+    let first = app.tabs[0].id;
+    let effects = app.update(Message::NewTab {
+        tab: first,
+        kind: hoprs_core::TabKind::Files,
+    });
+    settle(&mut app, &fake, run_listings(&fake, &effects).await).await;
+    let effects = app.update(Message::ConnectSite(b.id.clone()));
+    settle(&mut app, &fake, run_listings(&fake, &effects).await).await;
+    let backend: Arc<dyn BackendApi> = fake.clone();
+    let messages: Vec<Message> = effects::connect_sites(backend, vec![b.id.clone()])
+        .collect()
+        .await;
+    settle(&mut app, &fake, messages).await;
+    assert_eq!(
+        app.tabs.len(),
+        3,
+        "{:?}",
+        app.tabs
+            .iter()
+            .map(|t| (t.site.clone(), t.kind()))
+            .collect::<Vec<_>>()
+    );
+    let of_a: Vec<TabId> = app
+        .tabs
+        .iter()
+        .filter(|t| t.site == a.id)
+        .map(|t| t.id)
+        .collect();
+    assert_eq!(of_a.len(), 2);
+    for t in &app.tabs {
+        assert_eq!(t.remote().path, rpath("/srv"));
+        assert_eq!(t.remote().listing, Listing::Loaded);
+    }
+
+    synced(
+        &mut app,
+        1,
+        vec![
+            moving(1, &a.id, Direction::Upload, "/home/me/a.txt", "/srv/a.txt"),
+            moving(
+                2,
+                &b.id,
+                Direction::Download,
+                "/home/me/z.txt",
+                "/srv/z.txt",
+            ),
+        ],
+    );
+    assert_eq!(
+        relist_ticks(&finish(&mut app, 2, 1, TransferState::Done)),
+        1
+    );
+    let mut got = listed_panes(&app.update(Message::RelistPanes));
+    got.sort_by_key(|(t, _, _)| t.0);
+    let want: Vec<_> = of_a
+        .iter()
+        .map(|t| (*t, Side::Remote, "/srv".to_string()))
+        .collect();
+    assert_eq!(got, want);
+
+    // A download lands in `/home/me`, which every tab's local pane shows.
+    assert_eq!(
+        relist_ticks(&finish(&mut app, 3, 2, TransferState::Done)),
+        1
+    );
+    let effects = app.update(Message::RelistPanes);
+    let got = listed_panes(&effects);
+    assert_eq!(got.len(), 3, "{got:?}");
+    assert!(
+        got.iter()
+            .all(|(_, side, path)| *side == Side::Local && path == "/home/me")
+    );
+}
+
+/// Endings only a snapshot shows (the events were lost to a lag) re-list too; the first
+/// snapshot, the queue's state at start, does not.
+#[tokio::test]
+async fn done_seen_only_in_a_snapshot_relists() {
+    let (_fake, mut app, a, _tab) = transfer_tab().await;
+    let mut done = moving(1, &a.id, Direction::Upload, "/home/me/a.txt", "/srv/a.txt");
+    done.state = TransferState::Done;
+    // `synced` asserts the first snapshot causes nothing.
+    synced(
+        &mut app,
+        1,
+        vec![
+            done,
+            moving(2, &a.id, Direction::Upload, "/home/me/b.txt", "/srv/b.txt"),
+        ],
+    );
+    let request = snapshot_request(&app.update(Message::QueueResync));
+    let mut now = moving(2, &a.id, Direction::Upload, "/home/me/b.txt", "/srv/b.txt");
+    now.state = TransferState::Done;
+    let mut still = moving(1, &a.id, Direction::Upload, "/home/me/a.txt", "/srv/a.txt");
+    still.state = TransferState::Done;
+    let effects = app.update(Message::QueueSnapshot {
+        request,
+        snapshot: snapshot(5, vec![still, now]),
+    });
+    assert_eq!(relist_ticks(&effects), 1, "{effects:?}");
+    assert_eq!(listed_panes(&app.update(Message::RelistPanes)).len(), 1);
+}

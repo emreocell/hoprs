@@ -164,6 +164,8 @@ pub struct Queue {
     pub workers: usize,
     /// The list's scroll offset.
     pub offset_y: f32,
+    /// A snapshot was applied (the queue knows the engine's state, not only its start).
+    snapshotted: bool,
 }
 
 impl Default for Queue {
@@ -192,6 +194,7 @@ impl Queue {
             session_policy: None,
             workers: 0,
             offset_y: 0.0,
+            snapshotted: false,
         }
     }
 
@@ -287,6 +290,21 @@ impl Queue {
     /// The site connected again (its tab did): its transfers will run.
     pub fn site_restored(&mut self, site: &SiteId) {
         self.paused_sites.remove(site);
+    }
+
+    /// Whether a snapshot was applied already: the first one is the engine's state at
+    /// start, not news.
+    pub fn has_snapshot(&self) -> bool {
+        self.snapshotted
+    }
+
+    /// The ids of the rows that are done.
+    pub fn done_ids(&self) -> HashSet<TransferId> {
+        self.rows
+            .values()
+            .filter(|row| row.item.state == TransferState::Done)
+            .map(|row| row.item.id)
+            .collect()
     }
 
     /// Whether the queue waits for a snapshot.
@@ -464,6 +482,7 @@ impl Queue {
         }
         let buffer = std::mem::take(buffer);
         self.sync = Sync::Live;
+        self.snapshotted = true;
         self.last_seq = snapshot.seq;
         self.workers = snapshot.workers;
         self.rows = snapshot

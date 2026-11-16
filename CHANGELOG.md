@@ -3,6 +3,7 @@
 ## 1.3.1 — unreleased
 
 - Workspaces are plain groups in the sidebar: the big "Open workspace" button and the "Close tabs" link are gone. Right-click a workspace for "Open all", "Close all" (the open workspace) and "Edit".
+- A finished upload, download or drag shows up without Refresh: the destination folder is listed again, quietly (selection and scroll kept), in every pane that shows it; a burst of files gives one listing per pane every half second at most.
 
 ## 1.3.0 — 2026-11-16
 
