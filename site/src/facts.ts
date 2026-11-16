@@ -2,7 +2,7 @@
 const maintainer = "engviniciusbs";
 const maintainerUrl = `https://github.com/${maintainer}`;
 const repoUrl = `${maintainerUrl}/hoprs`;
-const version = "1.2.0";
+const version = "1.3.0";
 // The date of the GitHub Release above (CHANGELOG.md), shown as "Updated" in the footer.
 const releaseDate = "2026-11-16";
 const debName = `hoprs_${version}-1_amd64.deb`;

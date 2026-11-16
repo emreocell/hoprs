@@ -1,8 +1,8 @@
 # Changelog
 
-## 1.3.0 — unreleased
+## 1.3.0 — 2026-11-16
 
-A UI polish release.
+hoprs gets a polished interface: icons, right-click menus, a drag that says what it will do, Settings as a tab, and a compare panel and queue you can resize.
 
 - Icons (Phosphor, MIT) on actions, files, tabs and the sidebar.
 - Disabled actions are readable and look disabled.
