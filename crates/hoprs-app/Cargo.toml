@@ -142,6 +142,9 @@ assets = [
     ["assets/icon/hoprs-512.png", "usr/share/icons/hicolor/512x512/apps/io.github.engviniciusbs.hoprs.png", "644"],
     ["../../LICENSE-MIT", "usr/share/doc/hoprs/", "644"],
     ["../../LICENSE-APACHE", "usr/share/doc/hoprs/", "644"],
+    ["assets/fonts/OFL-Inter.txt", "usr/share/doc/hoprs/fonts/", "644"],
+    ["assets/fonts/OFL-JetBrainsMono.txt", "usr/share/doc/hoprs/fonts/", "644"],
+    ["assets/fonts/LICENSE-Phosphor.txt", "usr/share/doc/hoprs/fonts/", "644"],
 ]
 
 # macOS and Windows installers, built with cargo-packager (the version is pinned in the
@@ -171,6 +174,13 @@ license-file = "../../LICENSE-MIT"
 # The .app takes the .icns as is (the first .icns listed); the .msi takes the first .ico
 # (Add/Remove Programs and the Start menu shortcut).
 icons = ["assets/icon/hoprs.icns", "assets/icon/hoprs.ico"]
+# The bundled fonts' licences (OFL for Inter and JetBrains Mono, MIT for Phosphor): in the
+# .app's Contents/Resources/licenses and next to hoprs.exe in the .msi.
+resources = [
+    { src = "assets/fonts/OFL-Inter.txt", target = "licenses/OFL-Inter.txt" },
+    { src = "assets/fonts/OFL-JetBrainsMono.txt", target = "licenses/OFL-JetBrainsMono.txt" },
+    { src = "assets/fonts/LICENSE-Phosphor.txt", target = "licenses/LICENSE-Phosphor.txt" },
+]
 
 [package.metadata.packager.macos]
 # Also the binary's deployment target (MACOSX_DEPLOYMENT_TARGET in package-macos.sh).
