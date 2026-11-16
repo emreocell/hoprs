@@ -1002,6 +1002,13 @@ impl App {
         if self.shown_tab() != shown {
             self.menu = None;
         }
+        // Everything the menu offered went (its queue row finished, its site, workspace
+        // or tab is gone): no empty box stays behind.
+        if let Some(menu) = &self.menu
+            && self.menu_items(&menu.target).is_empty()
+        {
+            self.menu = None;
+        }
         // The center now shows another tab (or a tab instead of a form): its lists'
         // scrollables must match the offsets the panes remember.
         if self.shown_tab() != shown && self.shown_tab().is_some() {

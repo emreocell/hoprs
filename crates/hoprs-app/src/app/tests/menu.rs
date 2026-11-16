@@ -1072,8 +1072,11 @@ async fn queue_menu_matches_row_actions() {
             MenuAction::Queue(RowAction::Cancel)
         ]
     );
-    // A conflict's answers stay in its row.
-    assert!(queue_menu(&mut app, 3).is_empty());
+    // A conflict's answers stay in its row: no menu (not an empty box).
+    app.update(Message::Menu(MenuMsg::Open(MenuTarget::QueueRow(
+        TransferId(3),
+    ))));
+    assert!(app.menu.is_none());
     // Each item is the row's button.
     queue_menu(&mut app, 1);
     let effects = app.update(Message::Menu(MenuMsg::Choose(0)));
@@ -1108,8 +1111,10 @@ async fn queue_menu_on_removed_row_does_nothing() {
         TransferId(1),
     ))));
     assert_eq!(open_items(&app).len(), 2);
-    // The row goes (cleared, or a new snapshot without it) while the menu is open.
+    // The row goes (cleared, or a new snapshot without it) while the menu is open: the
+    // menu, empty now, closes.
     synced(&mut app, 4, Vec::new());
+    assert!(app.menu.is_none());
     let effects = app.update(Message::Menu(MenuMsg::Choose(0)));
     assert!(
         !effects.iter().any(|e| matches!(e, Effect::Control { .. })),
@@ -1170,12 +1175,28 @@ async fn site_and_workspace_menus() {
         chosen(&mut app, target, MenuAction::EditWorkspace),
         format!("{:?}", Message::EditWorkspace(ws.id.clone()))
     );
-    // Gone since: no items, a choice does nothing.
-    app.update(Message::Menu(MenuMsg::Open(
-        MenuTarget::Site(SiteId::new()),
-    )));
-    assert!(open_items(&app).is_empty());
+    // Gone since: no items, so no menu; a choice does nothing.
+    let gone = MenuTarget::Site(SiteId::new());
+    assert!(app.menu_items(&gone).is_empty());
+    app.update(Message::Menu(MenuMsg::Open(gone)));
+    assert!(app.menu.is_none());
     assert!(app.update(Message::Menu(MenuMsg::Choose(0))).is_empty());
+}
+
+#[tokio::test]
+async fn menu_closes_when_its_tab_closes() {
+    let (mut app, _sa, _sb) = three_tabs().await;
+    app.update(Message::SelectTab(0));
+    let other = app.tabs[2].id;
+    // The menu of a tab the center does not show.
+    app.update(Message::Menu(MenuMsg::Open(MenuTarget::Tab(
+        TabRef::Session(other),
+    ))));
+    assert!(app.menu.is_some());
+    app.update(Message::CloseTab(other));
+    assert!(app.tab_index(other).is_none());
+    assert_eq!(app.active_tab, Some(0), "the shown tab did not change");
+    assert!(app.menu.is_none(), "an empty menu does not stay open");
 }
 
 /// Two sites: `a` (SSH, terminal and files tabs on one session) and `b` (FTP), connected,
