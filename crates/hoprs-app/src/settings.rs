@@ -173,6 +173,12 @@ const OPTIONAL_KEYS: [&str; 1] = ["compare_height"];
 /// The largest height a saved panel size may have.
 const PANEL_HEIGHT_MAX: f32 = 10_000.0;
 
+/// A dragged panel height as it is kept and saved: whole pixels, at most
+/// [`PANEL_HEIGHT_MAX`] (what [`panel_height`] reads back).
+pub fn round_panel_height(height: f32) -> f32 {
+    height.round().min(PANEL_HEIGHT_MAX)
+}
+
 /// A saved panel height: finite, positive, at most [`PANEL_HEIGHT_MAX`].
 fn panel_height(value: Option<toml::Value>) -> Option<f32> {
     let height = match value? {

@@ -21,10 +21,10 @@ use hoprs_transfer::ConflictPolicy;
 use hoprs_vault::{BackupImportReport, ExportReport, ImportMode};
 use secrecy::SecretString;
 
-use super::{App, Effect, PickTarget, TabId};
+use super::{App, DividerMsg, Effect, Panel, PickTarget, Resize, TabId};
 use crate::settings::{
     LanguageChoice, SettingsLoad, TerminalTheme, clamp_font_size, clamp_keepalive,
-    clamp_scrollback, clamp_workers, valid_editor,
+    clamp_scrollback, clamp_workers, round_panel_height, valid_editor,
 };
 use crate::ui::site_form::Password;
 use crate::ui::strings;
@@ -430,7 +430,7 @@ impl App {
     /// Saves the settings, unless the file was unreadable: it is never overwritten. One
     /// save at a time: a change made while one runs is saved when it ends, so the file
     /// always ends up with the latest settings (two writes never race).
-    fn save_settings_effect(&mut self) -> Option<Effect> {
+    pub(super) fn save_settings_effect(&mut self) -> Option<Effect> {
         if self.settings_load_error.is_some() {
             return None;
         }
@@ -668,5 +668,68 @@ impl App {
     /// An import or a backup runs: the progress indicator moves.
     pub fn busy(&self) -> bool {
         self.import.running() || self.backup.running()
+    }
+
+    /// Whether the pointer's moves are wanted: only while a divider is dragged (the
+    /// subscription that sends them runs only then).
+    pub fn tracks_pointer(&self) -> bool {
+        self.resize.is_some()
+    }
+
+    /// A press or double-click on a panel's divider. A press starts a resize at the
+    /// press's position ([`App::last_press`], published before the divider's message);
+    /// a double-click puts the panel back to its default height and saves it.
+    pub(super) fn divider_msg(&mut self, msg: DividerMsg) -> Vec<Effect> {
+        match msg {
+            DividerMsg::Press { panel, height } => {
+                self.resize = Some(Resize {
+                    panel,
+                    start_y: self.last_press.y,
+                    start_height: height,
+                });
+                Vec::new()
+            }
+            DividerMsg::Reset(panel) => {
+                // The double-click's second press started a resize: it ends here.
+                self.resize = None;
+                match panel {
+                    Panel::Compare => self.settings.compare_height = None,
+                    Panel::Queue => {
+                        self.settings.queue_height = crate::ui::layout::QUEUE_MAX_HEIGHT
+                    }
+                }
+                self.save_settings_effect().into_iter().collect()
+            }
+        }
+    }
+
+    /// The pointer moved: while a divider is dragged, its panel is as much taller as the
+    /// pointer went up, never below the panel's minimum (the window caps it where it is
+    /// drawn). Saved when the button is up.
+    pub(super) fn pointer_moved(&mut self, at: iced::Point) {
+        let Some(resize) = self.resize else {
+            return;
+        };
+        let wanted = resize.start_height + (resize.start_y - at.y);
+        match resize.panel {
+            Panel::Compare => {
+                self.settings.compare_height = Some(round_panel_height(
+                    wanted.max(crate::ui::compare::MIN_HEIGHT),
+                ));
+            }
+            Panel::Queue => {
+                self.settings.queue_height =
+                    round_panel_height(wanted.max(crate::ui::queue::MIN_HEIGHT));
+            }
+        }
+    }
+
+    /// The button went up or the pointer left the window: a resize ends with the height
+    /// it reached, saved.
+    pub(super) fn end_resize(&mut self) -> Vec<Effect> {
+        if self.resize.take().is_none() {
+            return Vec::new();
+        }
+        self.save_settings_effect().into_iter().collect()
     }
 }

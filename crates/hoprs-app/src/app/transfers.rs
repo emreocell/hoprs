@@ -83,23 +83,26 @@ impl App {
     }
 
     /// The pointer left the window: a drag started in it ends without dropping (its
-    /// release may never reach the window).
-    pub(super) fn drag_cancel(&mut self) {
+    /// release may never reach the window); a divider's resize ends with the height it
+    /// reached, saved.
+    pub(super) fn drag_cancel(&mut self) -> Vec<Effect> {
         self.drag = None;
         self.pointer = None;
+        self.end_resize()
     }
 
     /// A mouse button went up anywhere: a drag that ends over the other pane sends its
-    /// selection there; any other ends with nothing.
+    /// selection there; any other ends with nothing. A divider's resize ends and is saved.
     pub(super) fn drag_end(&mut self) -> Vec<Effect> {
+        let mut effects = self.end_resize();
         let target = self.drop_target();
         let Some((tab, from)) = self.drag.take() else {
-            return Vec::new();
+            return effects;
         };
-        match (target, self.tab_index(tab)) {
-            (Some(_), Some(index)) => self.transfer_selection(index, from),
-            _ => Vec::new(),
+        if let (Some(_), Some(index)) = (target, self.tab_index(tab)) {
+            effects.extend(self.transfer_selection(index, from));
         }
+        effects
     }
 
     /// A file or folder dropped from the system file manager: uploaded into the remote

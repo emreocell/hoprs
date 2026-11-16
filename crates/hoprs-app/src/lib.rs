@@ -256,6 +256,11 @@ fn app_subscription(state: &Hoprs) -> iced::Subscription<Message> {
             effects::shell_feed(feed.2.as_ref(), feed.0, feed.1)
         })
     });
+    // The pointer's moves, only while a divider is dragged.
+    let pointer = state
+        .app
+        .tracks_pointer()
+        .then(|| iced::event::listen_with(ui::pointer::moved_message));
     // The log panel takes the new lines while it is open.
     let log = state
         .app
@@ -267,6 +272,7 @@ fn app_subscription(state: &Hoprs) -> iced::Subscription<Message> {
             .into_iter()
             .chain(busy)
             .chain(log)
+            .chain(pointer)
             .chain(sessions)
             .chain(shells),
     )

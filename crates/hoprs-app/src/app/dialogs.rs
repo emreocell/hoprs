@@ -590,6 +590,8 @@ fn behind_overlay(msg: &Message) -> bool {
         | Message::CloseSettings
         | Message::Settings(_)
         | Message::PointerPressed(_)
+        | Message::PointerMoved(_)
+        | Message::Divider(_)
         | Message::Menu(_)
         | Message::Sidebar(_) => true,
         // The terminal's keyboard, mouse and search: never under a dialog or the palette

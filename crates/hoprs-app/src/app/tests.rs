@@ -1443,6 +1443,7 @@ mod import_settings;
 mod log;
 mod menu;
 mod palette;
+mod panels;
 mod status;
 mod tabs;
 mod terminal;

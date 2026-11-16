@@ -96,6 +96,30 @@ pub enum WorkspaceRow<'a> {
     Missing(SiteId),
 }
 
+/// A panel whose height the user drags ([`crate::ui::divider`]).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Panel {
+    Compare,
+    Queue,
+}
+
+/// A divider drag: where the press was and how tall the panel was drawn then.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Resize {
+    pub panel: Panel,
+    pub start_y: f32,
+    pub start_height: f32,
+}
+
+/// Something on a panel's divider.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum DividerMsg {
+    /// A press: a resize starts from `height`, the height the panel was drawn at.
+    Press { panel: Panel, height: f32 },
+    /// A double-click: the panel's default height.
+    Reset(Panel),
+}
+
 /// The whole UI state.
 #[derive(Debug)]
 pub struct App {
@@ -172,6 +196,8 @@ pub struct App {
     /// root [`crate::ui::pointer`] widget publishes it before the press reaches anything
     /// else): where a menu opens.
     pub last_press: iced::Point,
+    /// A divider being dragged: the panel it resizes, until the button is up.
+    pub resize: Option<Resize>,
     /// The context menu, while one is open ([`menu`]).
     pub menu: Option<ContextMenu>,
     /// The remote files being edited, in the order they started ([`edit`]).
@@ -405,6 +431,11 @@ pub enum Message {
     /// A left or right press in the window, at this position (logical pixels), before
     /// the widget under it sees it.
     PointerPressed(iced::Point),
+    /// The pointer moved, at this position (logical pixels): sent only while
+    /// [`App::tracks_pointer`].
+    PointerMoved(iced::Point),
+    /// A press or double-click on the divider at the top of a panel.
+    Divider(DividerMsg),
     /// Something in the context menu ([`menu`]).
     Menu(MenuMsg),
     /// Something in a terminal tab: its widget, keyboard, search bar or timers.
@@ -777,6 +808,7 @@ impl App {
             window_width: INITIAL_WINDOW_WIDTH,
             window_height: INITIAL_WINDOW_HEIGHT,
             last_press: iced::Point::ORIGIN,
+            resize: None,
             menu: None,
             edits: Vec::new(),
             edit_opening: Vec::new(),
@@ -961,6 +993,8 @@ impl App {
                 self.menu = None;
             }
             Message::PointerPressed(at) => self.last_press = at,
+            Message::PointerMoved(at) => self.pointer_moved(at),
+            Message::Divider(msg) => return self.divider_msg(msg),
             Message::Menu(msg) => return self.menu_msg(msg),
             Message::Sidebar(msg) => return self.sidebar_msg(msg),
             Message::FilterSites(filter) => self.site_filter = filter,
@@ -1066,7 +1100,7 @@ impl App {
             Message::FileDropped(path) => return self.file_dropped(&path),
             Message::FilesHovered(hovered) => self.os_drag = hovered,
             Message::DragEnd => return self.drag_end(),
-            Message::DragCancel => self.drag_cancel(),
+            Message::DragCancel => return self.drag_cancel(),
             Message::Prompt(event) => return self.prompt_event(event),
             Message::Dialog(msg) => return self.dialog_msg(msg),
             Message::KnownHosts { tab, msg } => return self.known_hosts_msg(tab, msg),

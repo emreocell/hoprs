@@ -16,7 +16,8 @@ use iced::widget::{
 use iced::{Alignment, Element, Length, Padding};
 
 use crate::app::compare::{CompareState, Group, Phase, Row, RowState};
-use crate::app::{App, CompareMsg, Message, Tab, TabId};
+use crate::app::{App, CompareMsg, Message, Panel, Tab, TabId};
+use crate::ui::divider;
 use crate::ui::fit;
 use crate::ui::icons::{self, Icon};
 use crate::ui::layout::QUEUE_HEAD_HEIGHT;
@@ -26,9 +27,9 @@ use crate::ui::{format, strings, widgets};
 
 /// The panel's share of the tab area until the user drags it.
 pub const DEFAULT_SHARE: f32 = 0.30;
-/// The head and the foot with their rules.
-const CHROME_HEIGHT: f32 = 2.0 * QUEUE_HEAD_HEIGHT + 3.0 * theme::HAIRLINE;
-/// The panel's least height: its head and foot, their rules and two rows.
+/// The divider, the head and the foot with their rules.
+const CHROME_HEIGHT: f32 = divider::HIT + 2.0 * QUEUE_HEAD_HEIGHT + 2.0 * theme::HAIRLINE;
+/// The panel's least height: its divider, head and foot, their rules and two rows.
 pub const MIN_HEIGHT: f32 = CHROME_HEIGHT + MIN_BODY_HEIGHT;
 /// The rows' region's least height.
 pub const MIN_BODY_HEIGHT: f32 = 2.0 * ROW_HEIGHT;
@@ -343,10 +344,14 @@ pub fn view<'a>(app: &'a App, tab: &'a Tab, area: f32) -> Option<Element<'a, Mes
 
     let foot_content = footer(state);
     let lines = lines(state);
-    let mut region = column![
-        rule::horizontal(theme::HAIRLINE).style(theme::rule_strong),
-        top,
-    ];
+    // A collapsed panel has no height to drag: the same band, inert.
+    let divider = if state.collapsed {
+        divider::inert()
+    } else {
+        let dragged = app.resize.is_some_and(|r| r.panel == Panel::Compare);
+        divider::view(Panel::Compare, height, dragged)
+    };
+    let mut region = column![divider, top];
     if !state.collapsed {
         region = region
             .push(rule::horizontal(theme::HAIRLINE).style(theme::rule_1px))

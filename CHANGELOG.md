@@ -11,6 +11,7 @@ A UI polish release.
 - Tabs, the transfer queue and the status bar use icons: kind icons on tabs, icon-only close, new tab, queue and Log buttons with tooltips, a lock for encrypted connections.
 - The hoprs logo at the top of the sidebar; the version moved to Settings.
 - Settings open as a tab with a section list (Ctrl+, or ⌘,).
+- The compare panel and the transfer queue resize by dragging their top edge (double-click resets); heights are remembered.
 
 ## 1.2.0 — 2026-11-16
 

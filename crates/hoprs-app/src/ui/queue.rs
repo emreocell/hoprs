@@ -13,7 +13,8 @@ use iced::{Alignment, Element, Event, Length, Padding, window};
 use hoprs_transfer::{Direction, ResolveAction};
 
 use crate::app::queue::{QueueRow, RowStatus};
-use crate::app::{App, Message, QueueMsg, QueueTab, RowAction};
+use crate::app::{App, Message, Panel, QueueMsg, QueueTab, RowAction};
+use crate::ui::divider;
 use crate::ui::file_actions::error_bar;
 use crate::ui::fit;
 use crate::ui::icons::{self, Icon};
@@ -33,10 +34,10 @@ const STATUS_WIDTH: f32 = BAR_WIDTH + PERCENT_WIDTH + SPEED_WIDTH + 2.0 * theme:
 /// answers (Skip, Overwrite, Resume) beside its Cancel, so the column keeps room for those
 /// and every row lines up.
 const ACTIONS_WIDTH: f32 = 236.0;
-/// The queue's least height: its head, its two rules and one row.
-pub const MIN_HEIGHT: f32 = QUEUE_HEAD_HEIGHT + 2.0 * theme::HAIRLINE + ROW_HEIGHT;
-/// The head and its rules above the rows.
-const CHROME_HEIGHT: f32 = QUEUE_HEAD_HEIGHT + 2.0 * theme::HAIRLINE;
+/// The queue's least height: its divider, its head, the rule under it and one row.
+pub const MIN_HEIGHT: f32 = CHROME_HEIGHT + ROW_HEIGHT;
+/// The divider, the head and the rule above the rows.
+const CHROME_HEIGHT: f32 = divider::HIT + QUEUE_HEAD_HEIGHT + theme::HAIRLINE;
 
 /// The most the queue takes at the window's height now.
 pub fn max_height(app: &App) -> f32 {
@@ -46,6 +47,24 @@ pub fn max_height(app: &App) -> f32 {
         app.log.open,
         compare_shown(app),
     )
+}
+
+/// The height the queue is drawn at now (where a drag of its divider starts): its rows up
+/// to [`max_height`]; the head alone while hidden. With no rows to list (a note stands
+/// for them) or an error bar above them, [`max_height`]: their height is not fixed.
+pub fn drawn_height(app: &App) -> f32 {
+    if !app.queue_open {
+        return divider::HIT + QUEUE_HEAD_HEIGHT;
+    }
+    let max = max_height(app);
+    let queue = &app.queue;
+    if queue.error.is_some() || queue.len() == 0 {
+        return max;
+    }
+    match queue.rows_in(queue.tab).len() {
+        0 => max,
+        count => (CHROME_HEIGHT + count as f32 * ROW_HEIGHT).min(max),
+    }
 }
 
 /// Whether the center shows a compare panel (a files tab with one open).
@@ -202,8 +221,14 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .height(QUEUE_HEAD_HEIGHT)
         .padding(Padding::ZERO.left(theme::SPACE_MD).right(theme::SPACE_SM));
 
-    let strong = rule::horizontal(theme::HAIRLINE).style(theme::rule_strong);
-    let mut region = column![strong, head];
+    // A hidden queue has nothing to resize: the same band, inert.
+    let top = if app.queue_open {
+        let dragged = app.resize.is_some_and(|r| r.panel == Panel::Queue);
+        divider::view(Panel::Queue, drawn_height(app), dragged)
+    } else {
+        divider::inert()
+    };
+    let mut region = column![top, head];
     if app.queue_open {
         region = region.push(rule::horizontal(theme::HAIRLINE).style(theme::rule_1px));
         if let Some(error) = &queue.error {
