@@ -14,17 +14,26 @@
 //! footer line, which stays while a newer version is known ([`App::update_offer`]). Check
 //! now finding a newer release opens it too. It never takes the keyboard focus. A failed
 //! automatic check only logs; Check now shows its result in Settings.
+//!
+//! **Updating** ([`Phase`]): Update downloads this install's installer and verifies it
+//! against the release's `SHA256SUMS` ([`Effect::DownloadUpdate`]); one download at a
+//! time, and a newer release learned meanwhile waits. No package for this install, or
+//! the asset or `SHA256SUMS` missing, opens the release page instead. The verified file
+//! is opened with the system handler ([`Effect::OpenInstaller`]) at once on macOS and
+//! Linux (hoprs stays; Linux also shows [`install_command`] with Copy); Windows waits for
+//! "Close and install", then closes hoprs the normal way ([`Effect::RequestClose`]).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use hoprs_core::Error;
 use semver::Version;
 
 use super::{App, Effect, Message};
-use crate::update::download::DownloadEvent;
-use crate::update::package::{Os, PackageKind, current_package};
-use crate::update::{CHECK_EVERY, Release, http, is_newer, parse_version};
+use crate::terminal::Redacted;
+use crate::update::download::{DownloadEvent, DownloadJob};
+use crate::update::package::{Os, PackageKind, asset_name, current_package};
+use crate::update::{CHECK_EVERY, Release, SUMS_NAME, http, is_newer, parse_version};
 
 /// What this process is and may do.
 #[derive(Debug, Clone)]
@@ -34,11 +43,9 @@ pub struct UpdateEnv {
     /// Whether the app checks by itself: always in a release build, in a debug build only
     /// with `HOPRS_UPDATE_URL`.
     pub auto: bool,
-    // `os` and `package` choose the installer and its hand-off (Task 4).
-    #[allow(dead_code)]
+    /// Chooses the hand-off: Windows waits for "Close and install", then closes hoprs.
     pub os: Os,
     /// The installer that updates this install; `None` opens the release page instead.
-    #[allow(dead_code)]
     pub package: Option<PackageKind>,
 }
 
@@ -105,10 +112,8 @@ pub enum CardCheck {
     Failed(Error),
 }
 
-/// Where Update is (driven by Task 4; `Idle` until Update is clicked).
+/// Where Update is (`Idle` until Update is clicked).
 #[derive(Debug, Clone, PartialEq)]
-// Constructed by the download and hand-off (Task 4), read by the card (Task 5).
-#[allow(dead_code)]
 pub enum Phase {
     Idle,
     Downloading {
@@ -116,8 +121,10 @@ pub enum Phase {
         total: Option<u64>,
     },
     Verifying,
-    /// Verified, waiting for "Close and install" (Windows) or being handed off.
+    /// Verified, waiting for "Close and install" (Windows only).
     Ready(PathBuf),
+    /// The installer was opened (or is being opened; `open_error` if that failed on
+    /// macOS or Linux, where the card keeps the file and, on Linux, the command).
     HandedOff {
         file: PathBuf,
         open_error: Option<Error>,
@@ -144,6 +151,9 @@ pub struct Updater {
     in_flight: bool,
     /// The latest schedule's generation: only its `CheckDue` acts.
     generation: u64,
+    /// Update was asked for before any check returned the release: the check's result
+    /// continues it.
+    start_pending: bool,
 }
 
 impl Updater {
@@ -158,6 +168,7 @@ impl Updater {
             page_error: None,
             in_flight: false,
             generation: 0,
+            start_pending: false,
         }
     }
 }
@@ -208,6 +219,15 @@ impl UpdateMsg {
                 | UpdateMsg::CopyCommand
         )
     }
+}
+
+/// The Linux install command for the verified `.deb`: the absolute path, quoted for the
+/// shell (it always holds a `/`, so apt reads it as a file, not a package name).
+pub fn install_command(file: &Path) -> String {
+    let path = file.to_string_lossy();
+    // `try_quote` fails only on a NUL byte, which no path holds.
+    let quoted = shlex::try_quote(&path).unwrap_or_default();
+    format!("sudo apt install {quoted}")
 }
 
 /// The release page of `version`, built from the parsed version (never a URL the server
@@ -290,6 +310,7 @@ impl App {
             }
             UpdateMsg::Dismiss => {
                 self.updater.card = false;
+                self.updater.start_pending = false;
                 // Nobody waits for the footer's check any more: its result leaves the
                 // card closed.
                 self.updater.card_check = CardCheck::Idle;
@@ -305,13 +326,144 @@ impl App {
                 self.updater.page_error = result.err();
                 Vec::new()
             }
-            // The download and the hand-off (Task 4).
-            UpdateMsg::Start
-            | UpdateMsg::Download(_)
-            | UpdateMsg::Install
-            | UpdateMsg::Later
-            | UpdateMsg::CopyCommand
-            | UpdateMsg::InstallerOpened(_) => Vec::new(),
+            UpdateMsg::Start => self.start_update(),
+            UpdateMsg::Download(event) => self.download_event(event),
+            UpdateMsg::Install => self.install(),
+            UpdateMsg::Later => {
+                // The verified file stays: Update (or the palette) opens it.
+                self.updater.card = false;
+                Vec::new()
+            }
+            UpdateMsg::CopyCommand => match &self.updater.phase {
+                Phase::HandedOff { file, .. } => {
+                    vec![Effect::WriteClipboard(Redacted(install_command(file)))]
+                }
+                _ => Vec::new(),
+            },
+            UpdateMsg::InstallerOpened(result) => self.installer_opened(result),
+        }
+    }
+
+    /// How many transfers stop when hoprs closes for the Windows installer (running,
+    /// paused or waiting, and queued: they continue on the next start).
+    #[cfg_attr(not(test), allow(dead_code))] // The card's Windows text (Task 5).
+    pub fn transfers_to_stop(&self) -> usize {
+        let [active, queued, ..] = self.queue.counts();
+        active + queued
+    }
+
+    /// Update (the card's button, Try again, the palette).
+    fn start_update(&mut self) -> Vec<Effect> {
+        match &self.updater.phase {
+            // One download at a time; the release it fetches stays.
+            Phase::Downloading { .. } | Phase::Verifying => return Vec::new(),
+            Phase::Ready(_) => {
+                self.updater.card = true;
+                return self.install();
+            }
+            // Idle, Failed (Try again), HandedOff (again: the download step finds the
+            // file there, verifies and reuses it).
+            _ => {}
+        }
+        let Some(release) = self.updater.known.clone() else {
+            // Only `update_seen` so far: check first, the result continues.
+            self.updater.start_pending = true;
+            return self.update_msg(UpdateMsg::ShowCard);
+        };
+        let page = || vec![Effect::OpenPage(release_page(&release.version))];
+        let Some(kind) = self.updater.env.package else {
+            return page();
+        };
+        let (Some(asset), Some(sums)) = (
+            release.asset(&asset_name(kind, &release.version)),
+            release.asset(SUMS_NAME),
+        ) else {
+            return page();
+        };
+        self.updater.card = true;
+        self.updater.phase = Phase::Downloading {
+            done: 0,
+            total: Some(asset.size),
+        };
+        vec![Effect::DownloadUpdate(DownloadJob {
+            asset: asset.clone(),
+            sums_url: sums.url.clone(),
+        })]
+    }
+
+    /// A download's event; one that comes while no download runs is stale.
+    fn download_event(&mut self, event: DownloadEvent) -> Vec<Effect> {
+        let phase = &mut self.updater.phase;
+        if !matches!(phase, Phase::Downloading { .. } | Phase::Verifying) {
+            return Vec::new();
+        }
+        match event {
+            DownloadEvent::Progress { done, total } => {
+                if matches!(phase, Phase::Downloading { .. }) {
+                    *phase = Phase::Downloading { done, total };
+                }
+                Vec::new()
+            }
+            DownloadEvent::Verifying => {
+                *phase = Phase::Verifying;
+                Vec::new()
+            }
+            DownloadEvent::Done(Err(error)) => {
+                *phase = Phase::Failed(error);
+                Vec::new()
+            }
+            // Windows: hoprs must close for the installer, so it waits for a second
+            // click ("Close and install").
+            DownloadEvent::Done(Ok(file)) if self.updater.env.os == Os::Windows => {
+                *phase = Phase::Ready(file);
+                Vec::new()
+            }
+            DownloadEvent::Done(Ok(file)) => {
+                *phase = Phase::HandedOff {
+                    file: file.clone(),
+                    open_error: None,
+                };
+                vec![Effect::OpenInstaller(file)]
+            }
+        }
+    }
+
+    /// "Close and install": opens the verified installer (hoprs closes once it opened).
+    fn install(&mut self) -> Vec<Effect> {
+        let Phase::Ready(file) = &self.updater.phase else {
+            return Vec::new();
+        };
+        let file = file.clone();
+        // Opening: a second click opens nothing more.
+        self.updater.phase = Phase::HandedOff {
+            file: file.clone(),
+            open_error: None,
+        };
+        vec![Effect::OpenInstaller(file)]
+    }
+
+    fn installer_opened(&mut self, result: Result<(), Error>) -> Vec<Effect> {
+        let Phase::HandedOff { open_error, .. } = &mut self.updater.phase else {
+            return Vec::new();
+        };
+        let windows = self.updater.env.os == Os::Windows;
+        match result {
+            // Already closing: the close in progress is enough (a second request would
+            // force the exit).
+            Ok(()) if windows && !self.closing => vec![Effect::RequestClose],
+            Ok(()) => {
+                *open_error = None;
+                Vec::new()
+            }
+            // Windows: hoprs stays open, Try again downloads (reuses) and asks again.
+            Err(error) if windows => {
+                self.updater.phase = Phase::Failed(error);
+                Vec::new()
+            }
+            Err(error) => {
+                *open_error = Some(error);
+                Vec::new()
+            }
         }
     }
 
@@ -328,6 +480,10 @@ impl App {
             self.updater.card_check = CardCheck::Idle;
         }
         let mut effects = Vec::new();
+        // Update clicked before the release was known continues now (or, if the check
+        // failed, opens the release page of the version offered).
+        let start = std::mem::take(&mut self.updater.start_pending);
+        let failed = result.is_err();
         match result {
             Ok(release) if is_newer(&release.version, &self.updater.env.running) => {
                 let version = release.version.clone();
@@ -369,6 +525,16 @@ impl App {
                 if settings {
                     self.updater.manual = ManualCheck::Failed(error);
                 }
+            }
+        }
+        if start {
+            if failed {
+                effects.extend(
+                    self.update_offer()
+                        .map(|version| Effect::OpenPage(release_page(version))),
+                );
+            } else if self.updater.known.is_some() {
+                effects.extend(self.start_update());
             }
         }
         effects.extend(self.schedule_update_check(CHECK_EVERY));

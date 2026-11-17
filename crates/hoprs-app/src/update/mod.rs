@@ -15,7 +15,6 @@ pub mod sums;
 /// The latest stable release, as GitHub's API describes it.
 pub const API_URL: &str = "https://api.github.com/repos/engviniciusbs/hoprs/releases/latest";
 /// The release asset that lists every other asset's SHA-256.
-#[allow(dead_code)] // Used by Update's download job (Plan 15 Task 4).
 pub const SUMS_NAME: &str = "SHA256SUMS";
 /// How long after the settings load the first automatic check waits.
 pub const START_DELAY: Duration = Duration::from_secs(5);

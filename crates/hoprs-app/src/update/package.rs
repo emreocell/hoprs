@@ -65,7 +65,6 @@ pub fn package_for(os: Os, x86_64: bool, exe: &str, program_files: &[&str]) -> O
 }
 
 /// The release asset for `kind` at `version` (`.github/workflows/release.yml` names them).
-#[allow(dead_code)] // Used by Update's download job (Plan 15 Task 4).
 pub fn asset_name(kind: PackageKind, version: &Version) -> String {
     match kind {
         PackageKind::Deb => format!("hoprs_{version}-1_amd64.deb"),

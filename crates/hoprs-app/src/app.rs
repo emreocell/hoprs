@@ -797,6 +797,14 @@ pub enum Effect {
     },
     /// Opens a release page in the browser; back as [`UpdateMsg::PageOpened`].
     OpenPage(String),
+    /// Downloads and verifies the update; its events come back as [`UpdateMsg::Download`].
+    DownloadUpdate(crate::update::download::DownloadJob),
+    /// Opens a verified installer with the system handler; back as
+    /// [`UpdateMsg::InstallerOpened`].
+    OpenInstaller(std::path::PathBuf),
+    /// Closes the window the normal way ([`Message::CloseRequested`]: the unsent-edits
+    /// question, tabs saved, shutdown), so the Windows installer can replace hoprs.
+    RequestClose,
 }
 
 /// The window's width before the first resize event (`main`'s initial size).

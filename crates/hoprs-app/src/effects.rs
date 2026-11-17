@@ -243,6 +243,17 @@ pub fn run(
         Effect::OpenPage(url) => Task::perform(crate::opener::open(url.into()), |result| {
             Message::Update(UpdateMsg::PageOpened(result))
         }),
+        Effect::DownloadUpdate(job) => Task::run(backend.download_update(job), |event| {
+            Message::Update(UpdateMsg::Download(event))
+        }),
+        Effect::OpenInstaller(file) => {
+            Task::perform(crate::opener::open(file.into_os_string()), |result| {
+                Message::Update(UpdateMsg::InstallerOpened(result))
+            })
+        }
+        Effect::RequestClose => {
+            iced::window::oldest().and_then(|window| Task::done(Message::CloseRequested(window)))
+        }
         Effect::LoadSettings => Task::done(Message::SettingsLoaded(backend.settings())),
         Effect::LoadQueueStatus => Task::done(Message::QueueStatus(backend.queue_error())),
         Effect::SaveSettings(settings) => Task::future(save_settings(backend, settings)),

@@ -522,3 +522,358 @@ async fn update_input_ignored_while_closing_or_behind_dialog() {
     assert!(!UpdateMsg::CheckDue(0).is_user());
     assert!(!UpdateMsg::PageOpened(Ok(())).is_user());
 }
+
+// ---- Plan 15 Task 4: Update downloads, verifies and hands off. ----
+
+use std::path::{Path, PathBuf};
+
+use crate::app::update::{Phase, install_command};
+use crate::update::download::{DownloadEvent, DownloadJob};
+
+/// An app running 1.3.1 on `os` from `package` that has learned of 1.4.0 (card open).
+async fn knowing(os: Os, package: Option<PackageKind>) -> App {
+    let mut app = loaded(&FakeBackend::new()).await;
+    app.updater = Updater::new(UpdateEnv::test("1.3.1", os, package));
+    app.update(checked(false, Ok(release("1.4.0"))));
+    assert!(app.updater.card);
+    app
+}
+
+fn download(event: DownloadEvent) -> Message {
+    upd(UpdateMsg::Download(event))
+}
+
+fn jobs(effects: &[Effect]) -> Vec<DownloadJob> {
+    effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::DownloadUpdate(job) => Some(job.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn no_close(effects: &[Effect]) {
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::RequestClose)),
+        "{effects:?}"
+    );
+}
+
+fn page_of(effects: &[Effect]) -> Option<&str> {
+    match effects {
+        [Effect::OpenPage(url)] => Some(url),
+        _ => None,
+    }
+}
+
+const PAGE_140: &str = "https://github.com/engviniciusbs/hoprs/releases/tag/v1.4.0";
+
+#[tokio::test]
+async fn update_without_package_opens_release_page() {
+    let mut app = knowing(Os::Linux, None).await;
+    let effects = app.update(upd(UpdateMsg::Start));
+    assert_eq!(page_of(&effects), Some(PAGE_140), "{effects:?}");
+    assert!(jobs(&effects).is_empty());
+    assert_eq!(app.updater.phase, Phase::Idle);
+}
+
+#[tokio::test]
+async fn missing_asset_opens_release_page() {
+    for missing in ["hoprs_1.4.0-1_amd64.deb", "SHA256SUMS"] {
+        let mut app = knowing(Os::Linux, Some(PackageKind::Deb)).await;
+        let mut r = release("1.4.0");
+        r.assets.retain(|a| a.name != missing);
+        app.updater.known = Some(r);
+        let effects = app.update(upd(UpdateMsg::Start));
+        assert_eq!(page_of(&effects), Some(PAGE_140), "{missing}: {effects:?}");
+        assert_eq!(app.updater.phase, Phase::Idle);
+    }
+}
+
+#[tokio::test]
+async fn linux_downloads_verifies_and_hands_off() {
+    let mut app = knowing(Os::Linux, Some(PackageKind::Deb)).await;
+    app.update(upd(UpdateMsg::Dismiss));
+    let mut all = Vec::new();
+    let effects = app.update(upd(UpdateMsg::Start));
+    let job = match &jobs(&effects)[..] {
+        [job] => job.clone(),
+        other => panic!("{other:?} / {effects:?}"),
+    };
+    assert_eq!(effects.len(), 1, "{effects:?}");
+    assert_eq!(job.asset.name, "hoprs_1.4.0-1_amd64.deb");
+    assert_eq!(
+        job.sums_url,
+        "https://github.com/engviniciusbs/hoprs/releases/download/v1.4.0/SHA256SUMS"
+    );
+    assert!(app.updater.card, "Update shows the card");
+    assert_eq!(
+        app.updater.phase,
+        Phase::Downloading {
+            done: 0,
+            total: Some(1000)
+        }
+    );
+    all.extend(effects);
+
+    all.extend(app.update(download(DownloadEvent::Progress {
+        done: 10,
+        total: Some(100),
+    })));
+    assert_eq!(
+        app.updater.phase,
+        Phase::Downloading {
+            done: 10,
+            total: Some(100)
+        }
+    );
+    all.extend(app.update(download(DownloadEvent::Verifying)));
+    assert_eq!(app.updater.phase, Phase::Verifying);
+
+    let file = PathBuf::from("Downloads").join("hoprs_1.4.0-1_amd64.deb");
+    let effects = app.update(download(DownloadEvent::Done(Ok(file.clone()))));
+    assert!(
+        matches!(&effects[..], [Effect::OpenInstaller(f)] if f == &file),
+        "{effects:?}"
+    );
+    assert_eq!(
+        app.updater.phase,
+        Phase::HandedOff {
+            file: file.clone(),
+            open_error: None
+        }
+    );
+    all.extend(effects);
+    all.extend(app.update(upd(UpdateMsg::InstallerOpened(Ok(())))));
+    no_close(&all);
+    assert!(matches!(app.updater.phase, Phase::HandedOff { .. }));
+}
+
+#[test]
+fn install_command_quotes_the_full_path() {
+    assert_eq!(
+        install_command(Path::new("/home/u/My Downloads/hoprs_1.4.0-1_amd64.deb")),
+        "sudo apt install '/home/u/My Downloads/hoprs_1.4.0-1_amd64.deb'"
+    );
+    assert_eq!(
+        install_command(Path::new("/home/u/Downloads/hoprs_1.4.0-1_amd64.deb")),
+        "sudo apt install /home/u/Downloads/hoprs_1.4.0-1_amd64.deb"
+    );
+}
+
+#[tokio::test]
+async fn linux_open_failure_keeps_command() {
+    let mut app = knowing(Os::Linux, Some(PackageKind::Deb)).await;
+    app.update(upd(UpdateMsg::Start));
+    let file = PathBuf::from("/home/u/Downloads/hoprs_1.4.0-1_amd64.deb");
+    app.update(download(DownloadEvent::Done(Ok(file.clone()))));
+    let error = Error::new(ErrorKind::Io, "xdg-open failed");
+    let effects = app.update(upd(UpdateMsg::InstallerOpened(Err(error.clone()))));
+    no_close(&effects);
+    assert_eq!(
+        app.updater.phase,
+        Phase::HandedOff {
+            file: file.clone(),
+            open_error: Some(error)
+        }
+    );
+    let effects = app.update(upd(UpdateMsg::CopyCommand));
+    match &effects[..] {
+        [Effect::WriteClipboard(text)] => assert_eq!(text.0, install_command(&file)),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn macos_hands_off_without_closing() {
+    let mut app = knowing(Os::MacOs, Some(PackageKind::Dmg)).await;
+    let mut all = app.update(upd(UpdateMsg::Start));
+    let job = jobs(&all).pop().expect("a download");
+    assert_eq!(job.asset.name, "hoprs_1.4.0_macos_universal.dmg");
+    let file = PathBuf::from("hoprs_1.4.0_macos_universal.dmg");
+    let effects = app.update(download(DownloadEvent::Done(Ok(file.clone()))));
+    assert!(
+        matches!(&effects[..], [Effect::OpenInstaller(f)] if f == &file),
+        "{effects:?}"
+    );
+    all.extend(effects);
+    all.extend(app.update(upd(UpdateMsg::InstallerOpened(Ok(())))));
+    all.extend(app.update(upd(UpdateMsg::InstallerOpened(Err(failure())))));
+    no_close(&all);
+    assert!(matches!(
+        app.updater.phase,
+        Phase::HandedOff {
+            open_error: Some(_),
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn windows_waits_for_second_click() {
+    use crate::app::tests::transfers::{item, synced};
+    use hoprs_core::SiteId;
+    use hoprs_transfer::TransferState;
+
+    let mut app = knowing(Os::Windows, Some(PackageKind::Msi)).await;
+    let s = SiteId::new();
+    synced(
+        &mut app,
+        3,
+        vec![
+            item(1, &s, TransferState::Active),
+            item(2, &s, TransferState::Active),
+            item(3, &s, TransferState::Queued),
+            item(4, &s, TransferState::Done),
+        ],
+    );
+    assert_eq!(app.transfers_to_stop(), 3);
+
+    let effects = app.update(upd(UpdateMsg::Start));
+    assert_eq!(
+        jobs(&effects).pop().expect("a download").asset.name,
+        "hoprs_1.4.0_windows_x64.msi"
+    );
+    let file = PathBuf::from("hoprs_1.4.0_windows_x64.msi");
+    let effects = app.update(download(DownloadEvent::Done(Ok(file.clone()))));
+    assert!(effects.is_empty(), "{effects:?}");
+    assert_eq!(app.updater.phase, Phase::Ready(file.clone()));
+
+    let effects = app.update(upd(UpdateMsg::Install));
+    assert!(
+        matches!(&effects[..], [Effect::OpenInstaller(f)] if f == &file),
+        "{effects:?}"
+    );
+    // A second click while the installer opens does not open it twice.
+    assert!(app.update(upd(UpdateMsg::Install)).is_empty());
+    let effects = app.update(upd(UpdateMsg::InstallerOpened(Ok(()))));
+    assert!(matches!(effects[..], [Effect::RequestClose]), "{effects:?}");
+
+    // The opener failing: the error, and hoprs stays.
+    let mut app = knowing(Os::Windows, Some(PackageKind::Msi)).await;
+    app.update(upd(UpdateMsg::Start));
+    app.update(download(DownloadEvent::Done(Ok(file.clone()))));
+    app.update(upd(UpdateMsg::Install));
+    let effects = app.update(upd(UpdateMsg::InstallerOpened(Err(failure()))));
+    no_close(&effects);
+    assert_eq!(app.updater.phase, Phase::Failed(failure()));
+}
+
+#[tokio::test]
+async fn windows_later_keeps_the_file() {
+    let mut app = knowing(Os::Windows, Some(PackageKind::Msi)).await;
+    app.update(upd(UpdateMsg::Start));
+    let file = PathBuf::from("hoprs_1.4.0_windows_x64.msi");
+    app.update(download(DownloadEvent::Done(Ok(file.clone()))));
+    assert!(app.update(upd(UpdateMsg::Later)).is_empty());
+    assert!(!app.updater.card);
+    assert_eq!(app.updater.phase, Phase::Ready(file.clone()));
+
+    app.update(upd(UpdateMsg::ShowCard));
+    assert!(app.updater.card);
+    let effects = app.update(upd(UpdateMsg::Start));
+    assert!(
+        matches!(&effects[..], [Effect::OpenInstaller(f)] if f == &file),
+        "{effects:?}"
+    );
+}
+
+#[tokio::test]
+async fn download_error_offers_try_again() {
+    let mut app = knowing(Os::Linux, Some(PackageKind::Deb)).await;
+    app.update(upd(UpdateMsg::Start));
+    let error = Error::coded(ErrorKind::Protocol, "update-checksum-mismatch", "bad");
+    let effects = app.update(download(DownloadEvent::Done(Err(error.clone()))));
+    assert!(effects.is_empty(), "{effects:?}");
+    assert_eq!(app.updater.phase, Phase::Failed(error));
+    let effects = app.update(upd(UpdateMsg::Start));
+    assert_eq!(jobs(&effects).len(), 1, "{effects:?}");
+    assert!(matches!(app.updater.phase, Phase::Downloading { .. }));
+}
+
+#[tokio::test]
+async fn second_update_click_is_ignored_while_downloading() {
+    let mut app = knowing(Os::Linux, Some(PackageKind::Deb)).await;
+    let mut all = app.update(upd(UpdateMsg::Start));
+    all.extend(app.update(upd(UpdateMsg::Start)));
+    app.update(download(DownloadEvent::Verifying));
+    all.extend(app.update(upd(UpdateMsg::Start)));
+    assert_eq!(jobs(&all).len(), 1, "{all:?}");
+    assert_eq!(all.len(), 1, "{all:?}");
+}
+
+#[tokio::test]
+async fn newer_release_during_download_waits() {
+    let mut app = knowing(Os::Linux, Some(PackageKind::Deb)).await;
+    app.update(upd(UpdateMsg::Start));
+    let effects = app.update(checked(false, Ok(release("1.5.0"))));
+    assert!(
+        effects.iter().all(|e| matches!(e, Effect::Later { .. })),
+        "only the next timer: {effects:?}"
+    );
+    assert_eq!(app.updater.known.as_ref().unwrap().version, v("1.4.0"));
+    assert!(matches!(app.updater.phase, Phase::Downloading { .. }));
+}
+
+#[tokio::test]
+async fn start_before_any_check_checks_then_continues() {
+    // Only `update_seen` (the palette before any check this run).
+    let mut app = fresh().await;
+    app.update(settings_loaded(seen("1.4.0")));
+    assert!(app.updater.known.is_none());
+    let effects = app.update(upd(UpdateMsg::Start));
+    assert_eq!(check_requests(&effects), [true], "{effects:?}");
+    assert!(jobs(&effects).is_empty());
+    let effects = app.update(checked(true, Ok(release("1.4.0"))));
+    assert_eq!(jobs(&effects).len(), 1, "{effects:?}");
+    assert!(matches!(app.updater.phase, Phase::Downloading { .. }));
+
+    // The check failing opens the release page of the version seen.
+    let mut app = fresh().await;
+    app.update(settings_loaded(seen("1.4.0")));
+    app.update(upd(UpdateMsg::Start));
+    let effects = app.update(checked(true, Err(failure())));
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::OpenPage(url) if url == PAGE_140)),
+        "{effects:?}"
+    );
+    assert!(jobs(&effects).is_empty());
+
+    // ✕ before the result: nothing starts.
+    let mut app = fresh().await;
+    app.update(settings_loaded(seen("1.4.0")));
+    app.update(upd(UpdateMsg::Start));
+    app.update(upd(UpdateMsg::Dismiss));
+    let effects = app.update(checked(true, Ok(release("1.4.0"))));
+    assert!(jobs(&effects).is_empty(), "{effects:?}");
+    assert_eq!(app.updater.phase, Phase::Idle);
+}
+
+#[tokio::test]
+async fn stale_download_events_are_ignored() {
+    let mut app = knowing(Os::Linux, Some(PackageKind::Deb)).await;
+    // No download running: a late event changes nothing.
+    let effects = app.update(download(DownloadEvent::Done(Ok(PathBuf::from("x.deb")))));
+    assert!(effects.is_empty());
+    assert_eq!(app.updater.phase, Phase::Idle);
+    app.update(download(DownloadEvent::Progress {
+        done: 1,
+        total: None,
+    }));
+    assert_eq!(app.updater.phase, Phase::Idle);
+}
+
+#[tokio::test]
+async fn installer_opened_while_closing_does_not_close_again() {
+    let mut app = knowing(Os::Windows, Some(PackageKind::Msi)).await;
+    app.update(upd(UpdateMsg::Start));
+    let file = PathBuf::from("hoprs_1.4.0_windows_x64.msi");
+    app.update(download(DownloadEvent::Done(Ok(file))));
+    app.update(upd(UpdateMsg::Install));
+    app.closing = true;
+    let effects = app.update(upd(UpdateMsg::InstallerOpened(Ok(()))));
+    no_close(&effects);
+}

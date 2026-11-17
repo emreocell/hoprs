@@ -319,7 +319,6 @@ pub trait BackendApi: Send + Sync {
     /// stream ends with exactly one [`DownloadEvent::Done`]. While a download of the same
     /// asset runs (even one whose stream was dropped), another is refused at once with
     /// `update-download-busy`; nothing is started twice.
-    #[allow(dead_code)] // Called by Update (Plan 15 Task 4).
     fn download_update(&self, job: DownloadJob) -> BoxStream<'static, DownloadEvent>;
 }
 
