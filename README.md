@@ -31,7 +31,7 @@ click) and puts a terminal, a two-pane file browser, folder compare and a persis
 transfer queue behind it, in one quiet window that opens in under 100 ms and idles at about
 33 MB.
 
-- **Version:** 1.3.1 ([changelog](CHANGELOG.md))
+- **Version:** 1.4.0 ([changelog](CHANGELOG.md))
 - **Platforms:** Linux (Ubuntu 24.04 or newer, amd64), macOS 11 or newer (Apple Silicon and Intel), Windows 10 or newer (x64).
 - **Languages:** English and Brazilian Portuguese.
 - **License:** MIT OR Apache-2.0
@@ -111,32 +111,32 @@ Every release has these files on the
 
 | System | File |
 |---|---|
-| Linux (Ubuntu 24.04 or newer, amd64) | `hoprs_1.3.1-1_amd64.deb` |
-| macOS 11 or newer, Apple Silicon and Intel | `hoprs_1.3.1_macos_universal.dmg` |
-| Windows 10 or newer, x64 (installer, per machine) | `hoprs_1.3.1_windows_x64.msi` |
-| Windows 10 or newer, x64 (portable) | `hoprs_1.3.1_windows_x64.zip` |
+| Linux (Ubuntu 24.04 or newer, amd64) | `hoprs_1.4.0-1_amd64.deb` |
+| macOS 11 or newer, Apple Silicon and Intel | `hoprs_1.4.0_macos_universal.dmg` |
+| Windows 10 or newer, x64 (installer, per machine) | `hoprs_1.4.0_windows_x64.msi` |
+| Windows 10 or newer, x64 (portable) | `hoprs_1.4.0_windows_x64.zip` |
 
 The macOS and Windows builds are **not signed** with a paid certificate (see the steps
 below), so each system warns once on first launch.
 
 ### Linux: the `.deb` (recommended)
 
-1. Download `hoprs_1.3.1-1_amd64.deb` and `SHA256SUMS`.
+1. Download `hoprs_1.4.0-1_amd64.deb` and `SHA256SUMS`.
 2. Check the download and install it:
 
    ```sh
    sha256sum -c SHA256SUMS --ignore-missing
-   sudo apt install ./hoprs_1.3.1-1_amd64.deb
+   sudo apt install ./hoprs_1.4.0-1_amd64.deb
    ```
 
-   Expected output of the first command: `hoprs_1.3.1-1_amd64.deb: OK`. `apt` installs the
+   Expected output of the first command: `hoprs_1.4.0-1_amd64.deb: OK`. `apt` installs the
    libraries hoprs needs (Wayland, X11, Vulkan/EGL loaders, D-Bus).
 
 3. Start hoprs from the app menu, or run:
 
    ```sh
    hoprs             # opens the window
-   hoprs --version   # prints "hoprs 1.3.1"
+   hoprs --version   # prints "hoprs 1.4.0"
    hoprs --help
    ```
 
@@ -145,7 +145,7 @@ and exits.
 
 ### macOS: the `.dmg`
 
-1. Download `hoprs_1.3.1_macos_universal.dmg` and `SHA256SUMS`, and check it:
+1. Download `hoprs_1.4.0_macos_universal.dmg` and `SHA256SUMS`, and check it:
 
    ```sh
    shasum -a 256 -c SHA256SUMS --ignore-missing
@@ -170,11 +170,11 @@ The `.dmg` is one universal build for Apple Silicon and Intel Macs.
 
 ### Windows: the `.msi` or the `.zip`
 
-1. Download `hoprs_1.3.1_windows_x64.msi` (or the portable `hoprs_1.3.1_windows_x64.zip`)
+1. Download `hoprs_1.4.0_windows_x64.msi` (or the portable `hoprs_1.4.0_windows_x64.zip`)
    and `SHA256SUMS`. In PowerShell, compare the hash with the line in `SHA256SUMS`:
 
    ```powershell
-   (Get-FileHash .\hoprs_1.3.1_windows_x64.msi -Algorithm SHA256).Hash
+   (Get-FileHash .\hoprs_1.4.0_windows_x64.msi -Algorithm SHA256).Hash
    ```
 
 2. Run the `.msi`. It installs per machine (it asks for administrator rights) and adds a
@@ -188,9 +188,10 @@ The `.dmg` is one universal build for Apple Silicon and Intel Macs.
 
 ### Updating
 
-hoprs does not update itself. To move to a new version, quit hoprs, download the new file
-from the [latest release](https://github.com/engviniciusbs/hoprs/releases/latest) and install
-it over the old one:
+hoprs tells you when a new version is out (see [Updates](#updates) below). You can always
+update by hand: quit hoprs, download the new file from the
+[latest release](https://github.com/engviniciusbs/hoprs/releases/latest) and install it over
+the old one:
 
 | System | How |
 |---|---|
@@ -198,6 +199,31 @@ it over the old one:
 | macOS | Open the new `.dmg` and drag hoprs to Applications; choose Replace |
 | Windows, `.msi` | Run the new `.msi`; it replaces the installed version |
 | Windows, `.zip` | Unzip the new `.zip` over the old folder |
+
+### Updates
+
+hoprs looks at GitHub's latest release once, a few seconds after it starts, and again every
+24 hours. If a newer version exists, a card appears in the sidebar (once per version; a line
+above "Import from FileZilla" keeps the offer after you dismiss it).
+
+- **What is sent:** a normal HTTPS request to the GitHub API with `User-Agent: hoprs/<version>`.
+  No identifier, no account, nothing about your sites. The system proxy is honoured.
+- **Turn it off:** Settings → General → "Check for updates automatically". **Check now** (same
+  place) and Ctrl+K → "Update hoprs to …" work either way.
+- **What Update does:** it downloads the file for your system, checks it against the release's
+  `SHA256SUMS` and hands it to the system installer.
+
+  | System | Result |
+  |---|---|
+  | Linux (`.deb`) | Opens in the system installer (App Center); the card also shows the `sudo apt install` command to copy |
+  | macOS (`.dmg`) | Opens the disk image; drag hoprs to Applications and choose Replace |
+  | Windows (`.msi`) | After a second click ("Close and install"), hoprs closes and the installer runs |
+  | Windows `.zip`, source builds | Opens the release page |
+
+- **What the check proves:** the checksum catches a corrupted or truncated download. It does
+  not prove who published the release: `SHA256SUMS` comes from the same release, so the trust
+  is the same as downloading from the site. Signing `SHA256SUMS` is on the
+  [roadmap](docs/ROADMAP.md).
 
 Your sites, workspaces, settings, transfer queue and saved passwords stay where they are:
 they live in your user folders and the system keyring, not next to the program (see
@@ -445,7 +471,7 @@ The binary ends up in `target/release/hoprs`.
 
 ```sh
 scripts/package-deb.sh                                              # needs Docker
-scripts/check-deb.sh target/deb-ubuntu-24.04/debian/hoprs_1.3.1-1_amd64.deb
+scripts/check-deb.sh target/deb-ubuntu-24.04/debian/hoprs_1.4.0-1_amd64.deb
 ```
 
 `package-deb.sh` builds inside an Ubuntu 24.04 container pinned by digest, with

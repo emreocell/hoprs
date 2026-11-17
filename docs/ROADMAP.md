@@ -3,7 +3,9 @@
 What is planned, roughly in order, and where help is most welcome. Plans change; the
 [issues](https://github.com/engviniciusbs/hoprs/issues) and
 [discussions](https://github.com/engviniciusbs/hoprs/discussions) are where they get decided.
-Released work is in the [CHANGELOG](../CHANGELOG.md): 1.3.1 (2026-11-16) made workspaces
+Released work is in the [CHANGELOG](../CHANGELOG.md): 1.4.0 (2026-11-17) added the update
+notice (a card and a footer line when a new version is out; Update downloads, verifies and
+opens the system installer); 1.3.1 (2026-11-16) made workspaces
 plain groups in the sidebar (Open all / Close all in their menu) and shows a finished
 transfer in the pane without Refresh; 1.3.0 (2026-11-16) polished the interface (icons, Settings as a tab, right-click menus, a visible drag, a resizable compare
 panel and queue); 1.2.0 (2026-11-16) added the app in Brazilian Portuguese (the language
@@ -22,7 +24,8 @@ or missing on each side and transfers only the difference).
 - **Tunnels and port forwarding** saved with the site (for example a local port that reaches
   the server's database).
 - **Signed builds** for macOS (Developer ID + notarisation) and Windows, so the first launch
-  needs no "Open anyway" steps.
+  needs no "Open anyway" steps. Also sign `SHA256SUMS` (for example with minisign), so the
+  in-app update can verify who published a release, not only that the download is intact.
 
 ## Help wanted
 
@@ -42,4 +45,5 @@ one, so nobody duplicates the work.
 
 ## Not planned
 
-- **Telemetry** of any kind in the app. hoprs collects no data.
+- **Telemetry** of any kind in the app. hoprs collects no data; the update check is one request to GitHub and can be turned off
+  (see [Updates](../README.md#updates)).

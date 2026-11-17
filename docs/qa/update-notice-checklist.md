@@ -54,3 +54,56 @@ Start a debug build against a release newer than the one it pretends to run:
    "Procurar atualizações automaticamente", "Procurar agora", "O hoprs está atualizado".
 10. **Narrow window.** At the minimum window size (960 × 640) the card fits and the
     command wraps inside it.
+
+## Release 1.4.0: real updates and edge cases
+
+The first real update path is 1.4.0 → 1.4.x: 1.4.0 is the first version that can update, so
+these rows wait for the release after it. Until then use the debug variables of the section
+above (`HOPRS_UPDATE_URL`, `HOPRS_UPDATE_AS_VERSION`) against a test repository.
+
+### AUTOMATED
+
+| Check | Result |
+| --- | --- |
+| Release JSON parsing, version comparison, package choice per OS | Pass: unit tests in `update/` (`cargo test -p hoprs-app update`) |
+| `SHA256SUMS` parsing and the checksum check (mismatch, missing line, truncated file) | Pass: unit tests in `update/` |
+| Card once per version, footer line, Later / Install, cancelled close, busy and closing guards | Pass: app tests in `app/tests/update.rs` |
+| Settings off means no check; Check now works either way | Pass: app tests in `app/tests/update.rs` |
+| Every new text in English and pt-BR | Pass: catalog parity tests |
+
+### NEEDS HUMAN
+
+| Check | Result |
+| --- | --- |
+| Linux: real update 1.4.0 → next release from the `.deb`: App Center opens, the copied `sudo apt install` command works, hoprs keeps running | NEEDS HUMAN |
+| Windows `.msi`: Update downloads and verifies; "Ready to install. hoprs will close."; with a transfer running the warning names it; **Later** then footer "Install X.Y.Z" then **Close and install**; the installer replaces the version | NEEDS HUMAN |
+| Windows: cancel the close (unsent remote edit, answer Cancel): the card reads "Close hoprs", no second installer starts | NEEDS HUMAN |
+| macOS `.dmg`: Update opens the disk image; the Quit / Replace / Open Anyway text matches what Gatekeeper shows | NEEDS HUMAN |
+| Portable `.zip` on Windows: Update opens the release page, nothing is downloaded | NEEDS HUMAN |
+| Offline start: no card, no error on screen, one line in the log; Check now offline shows the inline error | NEEDS HUMAN |
+| Checksum mismatch: debug build with `HOPRS_UPDATE_URL` at a test repository whose `SHA256SUMS` is wrong: an error on the card, no file left in the updates folder, no installer opened | NEEDS HUMAN |
+| The card never takes focus: type in a terminal tab and in a rename field while it appears | NEEDS HUMAN |
+| The card fits inside the sidebar at 960 × 640 (command wraps, buttons visible) | NEEDS HUMAN |
+| pt-BR: card, footer line, Settings rows and errors read well | NEEDS HUMAN |
+| Settings off: restart, no request in the log; Check now still works | NEEDS HUMAN |
+
+## Task 6: release 1.4.0, real-update rows (2026-11-17)
+
+1.4.0 has nothing older that knows how to update, so the first real update path is
+1.4.0 → 1.4.x. These rows wait for that release; until then use the debug variables above.
+
+| Check | Result |
+| --- | --- |
+| AUTOMATED: release JSON parsing, version compare, `SHA256SUMS` parsing, package choice per OS, download and verify, app state machine, card/footer/Settings texts in en and pt-BR | Pass: the `update` and `app::tests::update` unit tests (`cargo test --workspace`) |
+| AUTOMATED: the version in `Cargo.toml` matches `site/src/facts.ts` | Pass: `facts.test.ts` |
+| NEEDS HUMAN: Linux `.deb`, real update 1.4.0 → 1.4.x. Update opens App Center; the shown `sudo apt install` command works; `hoprs --version` prints the new version | Open |
+| NEEDS HUMAN: Windows `.msi`, real update. After Update the card says "Ready to install. hoprs will close."; with a transfer running it warns that N transfers stop; Later keeps "Install X.Y.Z" in the footer; **Close and install** closes hoprs and the installer runs | Open |
+| NEEDS HUMAN: Windows, answer Cancel to the unsent-edits question after Close and install: the card reads "Close hoprs", which asks again and never opens a second installer | Open |
+| NEEDS HUMAN: macOS `.dmg`, real update. The disk image opens; the steps (Quit, Replace, Open Anyway) are right for Gatekeeper | Open |
+| NEEDS HUMAN: portable `.zip` (Windows) and a source build: Update opens the release page, nothing is downloaded | Open |
+| NEEDS HUMAN: offline start shows nothing (a log line only); Check now offline shows the inline error in red | Open |
+| NEEDS HUMAN: checksum mismatch. Debug build with `HOPRS_UPDATE_URL` at a test repository whose `SHA256SUMS` is wrong: an error, no file kept, no installer opened | Open |
+| NEEDS HUMAN: the card never takes focus while typing in a terminal tab or a rename field | Open |
+| NEEDS HUMAN: at 960 × 640 the card stays inside the sidebar | Open |
+| NEEDS HUMAN: pt-BR texts on the card, the footer line and Settings | Open |
+| NEEDS HUMAN: "Check for updates automatically" off, restart: no request (log line only) | Open |
