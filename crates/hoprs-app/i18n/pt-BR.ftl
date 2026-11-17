@@ -54,6 +54,7 @@ palette-close-tab = Fechar aba
 palette-close-settings = Fechar configurações
 palette-open-workspace = Abrir workspace…
 palette-close-all = Fechar todos em { $name }
+update-palette = Atualizar o hoprs para { $version }
 palette-edit = Abrir no editor
 palette-compare-folders = Comparar pastas
 palette-upload = Fazer upload da seleção

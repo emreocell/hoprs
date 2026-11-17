@@ -67,6 +67,8 @@ palette-close-settings = Close settings
 palette-open-workspace = Open workspace…
 # $name is the open workspace: its tabs are saved, then closed.
 palette-close-all = Close all in { $name }
+# $version is the newer release (e.g. 1.4.0).
+update-palette = Update hoprs to { $version }
 palette-edit = Edit in editor
 palette-compare-folders = Compare folders
 palette-upload = Upload selection

@@ -19,7 +19,7 @@ use crate::app::edit::{EditsFor, FLUSH_LIMIT, Settle, Settled};
 use crate::app::terminal::ShellSignal;
 use crate::app::{
     CompareItem, CompareMsg, CompareRunId, EditMsg, Effect, FileAction, Message, PickTarget,
-    ProfileOp, RequestId, TabId, TerminalMsg,
+    ProfileOp, RequestId, TabId, TerminalMsg, UpdateMsg,
 };
 use crate::backend::{
     BackendApi, KeptEdit, KnownHostEntry, PromptAnswer, PromptId, SessionId, ShellId, ShellOutput,
@@ -236,6 +236,13 @@ pub fn run(
                 exit_watchdog();
                 iced::window::close(window)
             }),
+        Effect::CheckUpdate { manual } => Task::perform(
+            async move { backend.latest_release().await },
+            move |result| Message::Update(UpdateMsg::Checked { manual, result }),
+        ),
+        Effect::OpenPage(url) => Task::perform(crate::opener::open(url.into()), |result| {
+            Message::Update(UpdateMsg::PageOpened(result))
+        }),
         Effect::LoadSettings => Task::done(Message::SettingsLoaded(backend.settings())),
         Effect::LoadQueueStatus => Task::done(Message::QueueStatus(backend.queue_error())),
         Effect::SaveSettings(settings) => Task::future(save_settings(backend, settings)),

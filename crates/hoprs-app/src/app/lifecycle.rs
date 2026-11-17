@@ -416,6 +416,7 @@ impl App {
                 answer: PromptAnswer::Cancel,
             }]),
             Message::Edit(msg) if msg.is_user() => Some(Vec::new()),
+            Message::Update(msg) if msg.is_user() => Some(Vec::new()),
             // Where the lists are and how far they scrolled (not input): stored as usual,
             // else a list's bounds reporter would publish them again every event.
             Message::Pane {

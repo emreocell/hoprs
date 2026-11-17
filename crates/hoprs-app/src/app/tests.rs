@@ -1484,3 +1484,4 @@ mod status;
 mod tabs;
 mod terminal;
 mod transfers;
+mod update;

@@ -100,6 +100,9 @@ pub fn palette_close_tab() -> &'static str {
 pub fn palette_close_all(name: &str) -> String {
     tr_args("palette-close-all", &[("name", name.into())])
 }
+pub fn update_palette(version: &str) -> String {
+    tr_args("update-palette", &[("version", version.into())])
+}
 pub fn workspace_open_tip() -> &'static str {
     tr("workspace-open-tip")
 }
