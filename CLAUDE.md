@@ -27,7 +27,7 @@ Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI) for Linux, Windows and m
 - Deferred follow-ups: `docs/superpowers/plans/2026-11-12-01-followups.md`
 - Contributor docs: `CONTRIBUTING.md` (setup, checks, translating), `docs/ARCHITECTURE.md` (crates, app data flow, where to put a change), `docs/ROADMAP.md` (public roadmap: keep it in sync when plans land), `SECURITY.md`, `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1, reports to conduct@hoprs.online via Cloudflare Email Routing), issue and PR templates in `.github/`
 
-## Current status (2026-11-16)
+## Current status (2026-11-17)
 
 - Landing page is live at https://hoprs.online, deployed by `.github/workflows/site.yml` on push to `main` (VPS via KoreGo, Cloudflare in front; see `site/deploy/README.md`).
 - Plans 1–7 merged to `main` (v1 feature-complete): core + transfer engine, SSH/SFTP, FTP/FTPS, vault + FileZilla import, the iced app, Plan 6 (terminal tabs over the site's SSH connection, remote editing with re-upload on save, Ctrl+K palette, technical log panel, idle-drop fixes, perf job) Plan 7 (one writer per destination) and Plan 8 (release 1.0.0: `.deb` packaging, icon, `.desktop`, release workflow).

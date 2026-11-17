@@ -207,7 +207,9 @@ hoprs looks at GitHub's latest release once, a few seconds after it starts, and 
 above "Import from FileZilla" keeps the offer after you dismiss it).
 
 - **What is sent:** a normal HTTPS request to the GitHub API with `User-Agent: hoprs/<version>`.
-  No identifier, no account, nothing about your sites. The system proxy is honoured.
+  No identifier, no account, nothing about your sites. The proxy environment variables
+  (`ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`) are honoured; the desktop's proxy settings are not
+  read.
 - **Turn it off:** Settings → General → "Check for updates automatically". **Check now** (same
   place) and Ctrl+K → "Update hoprs to …" work either way.
 - **What Update does:** it downloads the file for your system, checks it against the release's
@@ -215,20 +217,22 @@ above "Import from FileZilla" keeps the offer after you dismiss it).
 
   | System | Result |
   |---|---|
-  | Linux (`.deb`) | Opens in the system installer (App Center); the card also shows the `sudo apt install` command to copy |
-  | macOS (`.dmg`) | Opens the disk image; drag hoprs to Applications and choose Replace |
+  | Linux (`.deb`) | Opens with the default app for `.deb` files (App Center); the card also shows the `sudo apt install` command to copy |
+  | macOS (`.dmg`) | Opens the disk image; close the hoprs window, then drag hoprs to Applications and choose Replace |
   | Windows (`.msi`) | After a second click ("Close and install"), hoprs closes and the installer runs |
   | Windows `.zip`, source builds | Opens the release page |
 
 - **What the check proves:** the checksum catches a corrupted or truncated download. It does
   not prove who published the release: `SHA256SUMS` comes from the same release, so the trust
   is the same as downloading from the site. Signing `SHA256SUMS` is on the
-  [roadmap](docs/ROADMAP.md).
+  [roadmap](docs/ROADMAP.md). A file saved by hoprs carries no browser download mark
+  (Windows Mark-of-the-Web, macOS quarantine), so SmartScreen and Gatekeeper may not ask
+  before it runs.
 
 Your sites, workspaces, settings, transfer queue and saved passwords stay where they are:
 they live in your user folders and the system keyring, not next to the program (see
 [Where your data lives](#where-your-data-lives)). On macOS, steps 3 and 4 above apply to each
-new download ("Open Anyway" once, then Keychain access again).
+new download from the browser ("Open Anyway" once, then Keychain access again).
 
 ### Uninstall
 

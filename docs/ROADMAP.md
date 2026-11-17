@@ -45,5 +45,6 @@ one, so nobody duplicates the work.
 
 ## Not planned
 
-- **Telemetry** of any kind in the app. hoprs collects no data; the update check is one request to GitHub and can be turned off
-  (see [Updates](../README.md#updates)).
+- **Telemetry** of any kind in the app. hoprs collects no data; the update check is a
+  request to GitHub to check for a new version and can be turned off (see
+  [Updates](../README.md#updates)).

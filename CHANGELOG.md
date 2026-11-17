@@ -4,7 +4,7 @@
 
 hoprs tells you when a new version is out, and can install it.
 
-- An update card in the sidebar appears once per new version (a footer line keeps the offer after you dismiss it). hoprs checks GitHub's latest release a few seconds after start and every 24 hours; the request carries only `User-Agent: hoprs/<version>` and honours the system proxy.
+- An update card in the sidebar appears once per new version (a footer line keeps the offer after you dismiss it). hoprs checks GitHub's latest release a few seconds after start and every 24 hours; the request carries only `User-Agent: hoprs/<version>` and honours the proxy environment variables (`ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`).
 - **Update** downloads the right package for your system, verifies it against the release's `SHA256SUMS` and opens the system installer: the `.msi` on Windows after a second click ("Close and install", with a warning when transfers are running), the `.dmg` on macOS, the `.deb` on Linux (App Center, plus the `sudo apt install` command to copy). The portable `.zip` and source builds open the release page.
 - Settings → General: "Check for updates automatically" (on by default) and **Check now**.
 - Ctrl+K: "Update hoprs to …" while a newer version is known.
