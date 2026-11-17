@@ -7,7 +7,7 @@ use semver::Version;
 use super::*;
 use crate::app::palette::PaletteItem;
 use crate::app::settings::SettingsMsg;
-use crate::app::update::{ManualCheck, UpdateEnv, UpdateMsg, Updater};
+use crate::app::update::{CardCheck, ManualCheck, UpdateEnv, UpdateMsg, Updater};
 use crate::update::package::{Os, PackageKind};
 use crate::update::{Asset, CHECK_EVERY, Release, START_DELAY};
 
@@ -170,12 +170,27 @@ async fn toggling_setting_keeps_one_timer() {
         assert_eq!(app.settings.update_check, on);
         dues.extend(check_dues(&effects));
     }
-    assert!(!dues.is_empty());
-    let mut requests = Vec::new();
-    for (_, due) in dues {
-        requests.extend(check_requests(&app.update(due)));
+    // The start-up timer, then the two "on" ones: only the newest acts. The stale ones
+    // fire first, with nothing in flight, so only the generation stops them.
+    assert_eq!(dues.len(), 3, "{dues:?}");
+    let (_, newest) = dues.pop().unwrap();
+    for (_, stale) in dues.clone() {
+        assert!(app.update(stale).is_empty());
     }
-    assert_eq!(requests, [false]);
+    assert_eq!(check_requests(&app.update(newest)), [false]);
+    // Its result arms the next timer; the old ones still do nothing.
+    let next = check_dues(&app.update(checked(false, Ok(release("1.3.1")))));
+    for (_, stale) in dues {
+        assert!(app.update(stale).is_empty());
+    }
+    let (_, next) = next.into_iter().next().unwrap();
+    assert_eq!(check_requests(&app.update(next)), [false]);
+}
+
+#[test]
+fn unit_tests_never_check_by_themselves() {
+    // Whatever HOPRS_UPDATE_URL says: a test opts in with its own `UpdateEnv`.
+    assert!(!App::new().updater.env.auto);
 }
 
 #[tokio::test]
@@ -365,14 +380,59 @@ async fn show_card_without_release_checks_first() {
     assert!(app.updater.card);
     assert_eq!(check_requests(&effects), [true]);
     assert_eq!(effects.len(), 1, "{effects:?}");
+    // The card shows this check; Settings' Check now row is not touched.
+    assert_eq!(app.updater.card_check, CardCheck::Checking);
+    assert_eq!(app.updater.manual, ManualCheck::Idle);
     // Clicked again while it checks: no second request.
     assert!(app.update(upd(UpdateMsg::ShowCard)).is_empty());
+    app.update(checked(true, Err(failure())));
+    assert_eq!(app.updater.card_check, CardCheck::Failed(failure()));
+    assert_eq!(app.updater.manual, ManualCheck::Idle);
+    assert!(app.updater.card);
+    // A retry, and its success.
+    assert_eq!(
+        check_requests(&app.update(upd(UpdateMsg::ShowCard))),
+        [true]
+    );
+    assert_eq!(app.updater.card_check, CardCheck::Checking);
+    app.update(checked(true, Ok(release("1.4.0"))));
+    assert_eq!(app.updater.card_check, CardCheck::Idle);
+    assert_eq!(app.updater.manual, ManualCheck::Idle);
+    assert!(app.updater.card);
+    assert_eq!(app.updater.known, Some(release("1.4.0")));
+}
+
+#[tokio::test]
+async fn dismiss_during_footer_check_wins() {
+    let mut app = fresh().await;
+    app.update(settings_loaded(seen("1.4.0")));
+    assert_eq!(
+        check_requests(&app.update(upd(UpdateMsg::ShowCard))),
+        [true]
+    );
+    app.update(upd(UpdateMsg::Dismiss));
+    app.update(checked(true, Ok(release("1.4.0"))));
+    assert!(!app.updater.card);
+    assert_eq!(app.updater.card_check, CardCheck::Idle);
+    assert_eq!(app.update_offer(), Some(&v("1.4.0")));
+    // Its failure, after a ✕, shows nowhere either.
+    let mut app = fresh().await;
+    app.update(settings_loaded(seen("1.4.0")));
+    app.update(upd(UpdateMsg::ShowCard));
+    app.update(upd(UpdateMsg::Dismiss));
+    app.update(checked(true, Err(failure())));
+    assert!(!app.updater.card);
+    assert_eq!(app.updater.card_check, CardCheck::Idle);
+    assert_eq!(app.updater.manual, ManualCheck::Idle);
 }
 
 #[tokio::test]
 async fn whats_new_opens_the_release_page() {
     let mut app = fresh().await;
-    app.update(checked(false, Ok(release("1.4.0"))));
+    // The URL is built from the version, whatever page the server named.
+    let mut odd = release("1.4.0");
+    odd.page = "https://github.com/someone/else?x=1".to_owned();
+    app.update(checked(false, Ok(odd)));
     let effects = app.update(upd(UpdateMsg::WhatsNew));
     match &effects[..] {
         [Effect::OpenPage(url)] => assert_eq!(
@@ -437,6 +497,14 @@ async fn update_input_ignored_while_closing_or_behind_dialog() {
     app.update(upd(UpdateMsg::PageOpened(Err(failure()))));
     assert_eq!(app.updater.page_error, Some(failure()));
     app.update(Message::Palette(PaletteMsg::Close));
+
+    // A timer firing while the window closes starts no request.
+    let mut closing = fresh().await;
+    let (_, due) = check_dues(&closing.update(settings_loaded(Settings::default())))
+        .pop()
+        .unwrap();
+    closing.closing = true;
+    assert!(closing.update(due).is_empty());
 
     app.closing = true;
     for msg in [

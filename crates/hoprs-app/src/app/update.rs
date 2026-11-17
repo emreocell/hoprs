@@ -43,6 +43,20 @@ pub struct UpdateEnv {
 }
 
 impl UpdateEnv {
+    /// What `App::new` uses: the process, except in unit tests, where nothing checks by
+    /// itself unless a test sets its own environment (an exported `HOPRS_UPDATE_URL`
+    /// changes no unrelated test).
+    pub fn for_app() -> Self {
+        #[cfg(not(test))]
+        return Self::from_process();
+        #[cfg(test)]
+        return Self {
+            auto: false,
+            ..Self::test(env!("CARGO_PKG_VERSION"), Os::current(), None)
+        };
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
     pub fn from_process() -> Self {
         let built = Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or(Version::new(0, 0, 0));
         let running = if cfg!(debug_assertions) {
@@ -82,6 +96,15 @@ pub enum ManualCheck {
     Failed(Error),
 }
 
+/// The check the footer line starts (its click before any check this run returned the
+/// release), shown in the card; Settings' Check now has [`ManualCheck`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum CardCheck {
+    Idle,
+    Checking,
+    Failed(Error),
+}
+
 /// Where Update is (driven by Task 4; `Idle` until Update is clicked).
 #[derive(Debug, Clone, PartialEq)]
 // Constructed by the download and hand-off (Task 4), read by the card (Task 5).
@@ -111,7 +134,10 @@ pub struct Updater {
     /// The card is shown (not collapsed to the footer line).
     pub card: bool,
     pub phase: Phase,
+    /// Settings' Check now and its result.
     pub manual: ManualCheck,
+    /// The footer line's check, shown in the card.
+    pub card_check: CardCheck,
     /// Opening the release page failed.
     pub page_error: Option<Error>,
     /// A check runs.
@@ -128,6 +154,7 @@ impl Updater {
             card: false,
             phase: Phase::Idle,
             manual: ManualCheck::Idle,
+            card_check: CardCheck::Idle,
             page_error: None,
             in_flight: false,
             generation: 0,
@@ -183,7 +210,8 @@ impl UpdateMsg {
     }
 }
 
-/// The release page of `version`, when no check has returned it yet.
+/// The release page of `version`, built from the parsed version (never a URL the server
+/// sent).
 fn release_page(version: &Version) -> String {
     format!("https://github.com/engviniciusbs/hoprs/releases/tag/v{version}")
 }
@@ -255,24 +283,24 @@ impl App {
                 if self.updater.known.is_some() {
                     return Vec::new();
                 }
-                // Only `update_seen` so far (no check yet this run): ask now.
-                self.updater.manual = ManualCheck::Checking;
+                // Only `update_seen` so far (no check yet this run): ask now. The card
+                // shows this check's state, not Settings' Check now.
+                self.updater.card_check = CardCheck::Checking;
                 self.request_check(true)
             }
             UpdateMsg::Dismiss => {
                 self.updater.card = false;
+                // Nobody waits for the footer's check any more: its result leaves the
+                // card closed.
+                self.updater.card_check = CardCheck::Idle;
                 Vec::new()
             }
-            UpdateMsg::WhatsNew => {
-                let page = match &self.updater.known {
-                    Some(release) => release.page.clone(),
-                    None => match self.update_offer() {
-                        Some(version) => release_page(version),
-                        None => return Vec::new(),
-                    },
-                };
-                vec![Effect::OpenPage(page)]
-            }
+            UpdateMsg::WhatsNew => match self.update_offer() {
+                // Built from the parsed version: no server-supplied path reaches the
+                // opener.
+                Some(version) => vec![Effect::OpenPage(release_page(version))],
+                None => Vec::new(),
+            },
             UpdateMsg::PageOpened(result) => {
                 self.updater.page_error = result.err();
                 Vec::new()
@@ -287,15 +315,23 @@ impl App {
         }
     }
 
-    fn checked(&mut self, manual: bool, result: Result<Release, Error>) -> Vec<Effect> {
+    /// A check finished. Settings' Check now (`manual == Checking`, also when it was
+    /// clicked while an automatic check ran) gets its result in [`ManualCheck`]; the
+    /// footer's check (`card_check == Checking`) in [`CardCheck`]. A failure neither
+    /// waits for is only logged. (The message's `manual` flag says who asked; the state
+    /// says who still waits, which is what counts after a ✕ or a merged Check now.)
+    fn checked(&mut self, _manual: bool, result: Result<Release, Error>) -> Vec<Effect> {
         self.updater.in_flight = false;
-        // Check now clicked while an automatic check ran: this result answers it.
-        let manual = manual || self.updater.manual == ManualCheck::Checking;
+        let settings = self.updater.manual == ManualCheck::Checking;
+        let card = self.updater.card_check == CardCheck::Checking;
+        if card {
+            self.updater.card_check = CardCheck::Idle;
+        }
         let mut effects = Vec::new();
         match result {
             Ok(release) if is_newer(&release.version, &self.updater.env.running) => {
                 let version = release.version.clone();
-                if manual {
+                if settings {
                     self.updater.manual = ManualCheck::Available(version.clone());
                 }
                 // A download under way keeps the release it fetches (Task 4).
@@ -306,7 +342,9 @@ impl App {
                         .as_ref()
                         .is_none_or(|seen| seen < &version);
                     self.updater.known = Some(release);
-                    if unseen || manual {
+                    // Check now opens the card; the footer's check found it open (a ✕
+                    // since then wins); a version never shown opens it once.
+                    if unseen || settings {
                         self.updater.card = true;
                     }
                     if unseen {
@@ -317,15 +355,19 @@ impl App {
             }
             Ok(release) => {
                 tracing::debug!(latest = %release.version, "hoprs is up to date");
-                if manual {
+                if settings {
                     self.updater.manual = ManualCheck::UpToDate;
                 }
             }
             Err(error) => {
-                if manual {
-                    self.updater.manual = ManualCheck::Failed(error);
-                } else {
+                if !(settings || card) {
                     tracing::info!(%error, "update check failed");
+                }
+                if card {
+                    self.updater.card_check = CardCheck::Failed(error.clone());
+                }
+                if settings {
+                    self.updater.manual = ManualCheck::Failed(error);
                 }
             }
         }

@@ -870,7 +870,7 @@ impl App {
             kept_notice: None,
             editor_input: None,
             compare_ignore_input: None,
-            updater: update::Updater::new(update::UpdateEnv::from_process()),
+            updater: update::Updater::new(update::UpdateEnv::for_app()),
             held: HashMap::new(),
             replayed: HashSet::new(),
             relist_armed: false,
