@@ -27,6 +27,7 @@ pub mod strings;
 pub mod tabs;
 pub mod terminal;
 pub mod theme;
+pub mod update;
 pub mod virtual_list;
 pub mod widgets;
 pub mod workspace_form;

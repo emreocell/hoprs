@@ -103,6 +103,85 @@ pub fn palette_close_all(name: &str) -> String {
 pub fn update_palette(version: &str) -> String {
     tr_args("update-palette", &[("version", version.into())])
 }
+
+// The update card, its footer line and Settings → General (Plan 15).
+pub fn update_available(version: &str) -> String {
+    tr_args("update-available", &[("version", version.into())])
+}
+pub fn update_you_have(version: &str) -> String {
+    tr_args("update-you-have", &[("version", version.into())])
+}
+pub fn update_action() -> &'static str {
+    tr("update-action")
+}
+pub fn update_whats_new() -> &'static str {
+    tr("update-whats-new")
+}
+pub fn update_dismiss() -> &'static str {
+    tr("update-dismiss")
+}
+pub fn update_downloading(done: &str, total: &str) -> String {
+    tr_args(
+        "update-downloading",
+        &[("done", done.into()), ("total", total.into())],
+    )
+}
+/// The download's progress while the server gave no size.
+pub fn update_downloading_size(done: &str) -> String {
+    tr_args("update-downloading-size", &[("done", done.into())])
+}
+pub fn update_verifying() -> &'static str {
+    tr("update-verifying")
+}
+pub fn update_try_again() -> &'static str {
+    tr("update-try-again")
+}
+pub fn update_ready_windows() -> &'static str {
+    tr("update-ready-windows")
+}
+pub fn update_transfers_stop(count: usize) -> String {
+    tr_args("update-transfers-stop", &[("count", count.into())])
+}
+pub fn update_close_and_install() -> &'static str {
+    tr("update-close-and-install")
+}
+pub fn update_later() -> &'static str {
+    tr("update-later")
+}
+/// Windows, after "Close and install": the installer opens and hoprs closes.
+pub fn update_installing() -> &'static str {
+    tr("update-installing")
+}
+pub fn update_linux_opened() -> &'static str {
+    tr("update-linux-opened")
+}
+pub fn update_copy() -> &'static str {
+    tr("update-copy")
+}
+pub fn update_macos_steps() -> &'static str {
+    tr("update-macos-steps")
+}
+pub fn update_footer_available(version: &str) -> String {
+    tr_args("update-footer-available", &[("version", version.into())])
+}
+pub fn update_footer_install(version: &str) -> String {
+    tr_args("update-footer-install", &[("version", version.into())])
+}
+pub fn settings_update_check() -> &'static str {
+    tr("settings-update-check")
+}
+pub fn settings_update_check_hint() -> &'static str {
+    tr("settings-update-check-hint")
+}
+pub fn settings_check_now() -> &'static str {
+    tr("settings-check-now")
+}
+pub fn settings_update_checking() -> &'static str {
+    tr("settings-update-checking")
+}
+pub fn settings_up_to_date() -> &'static str {
+    tr("settings-up-to-date")
+}
 pub fn workspace_open_tip() -> &'static str {
     tr("workspace-open-tip")
 }

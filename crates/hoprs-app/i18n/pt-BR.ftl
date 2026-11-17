@@ -55,6 +55,40 @@ palette-close-settings = Fechar configurações
 palette-open-workspace = Abrir workspace…
 palette-close-all = Fechar todos em { $name }
 update-palette = Atualizar o hoprs para { $version }
+
+# O card de atualização (canto inferior esquerdo), a linha do rodapé e Configurações → Geral.
+# $version é uma versão (ex.: 1.4.0).
+update-available = hoprs { $version } está disponível
+# $version é a versão em uso.
+update-you-have = Você tem a { $version }.
+update-action = Atualizar
+update-whats-new = Novidades
+update-dismiss = Dispensar
+# $done e $total são tamanhos (ex.: 12,4 MB).
+update-downloading = Baixando… { $done } de { $total }
+update-downloading-size = Baixando… { $done }
+update-verifying = Verificando…
+update-try-again = Tentar de novo
+update-ready-windows = Pronto para instalar. O hoprs vai fechar.
+update-transfers-stop =
+    { $count ->
+        [0] { $count } transferências vão parar; elas continuam na próxima vez que o hoprs abrir.
+        [one] 1 transferência vai parar; ela continua na próxima vez que o hoprs abrir.
+       *[other] { $count } transferências vão parar; elas continuam na próxima vez que o hoprs abrir.
+    }
+update-close-and-install = Fechar e instalar
+update-later = Depois
+update-installing = Abrindo o instalador…
+update-linux-opened = Aberto no instalador do sistema. Ou execute:
+update-copy = Copiar
+update-macos-steps = Feche o hoprs, arraste o hoprs para Aplicativos e escolha Substituir. Se o macOS bloquear, escolha Abrir Mesmo Assim em Ajustes do Sistema, Privacidade e Segurança.
+update-footer-available = { $version } disponível
+update-footer-install = Instalar { $version }
+settings-update-check = Procurar atualizações automaticamente
+settings-update-check-hint = Uma vez por dia o hoprs pergunta ao GitHub qual é a versão mais recente. Nada sobre você é enviado.
+settings-check-now = Procurar agora
+settings-update-checking = Procurando…
+settings-up-to-date = O hoprs está atualizado
 palette-edit = Abrir no editor
 palette-compare-folders = Comparar pastas
 palette-upload = Fazer upload da seleção
@@ -476,7 +510,7 @@ pick-filter-xml = Arquivos XML
 
 ## Settings
 settings-general = Geral
-settings-general-description = Idioma e versão.
+settings-general-description = Idioma, atualizações e versão.
 settings-transfers-description = Quantos arquivos andam ao mesmo tempo, o que fazer com arquivos que já existem e como manter as conexões abertas.
 settings-compare-description = Quando as pastas são comparadas e quais nomes ficam de fora.
 settings-editing-description = O editor que abre os arquivos remotos.

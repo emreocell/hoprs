@@ -69,6 +69,39 @@ palette-open-workspace = Open workspace…
 palette-close-all = Close all in { $name }
 # $version is the newer release (e.g. 1.4.0).
 update-palette = Update hoprs to { $version }
+
+# The update card (bottom left), its footer line and Settings → General.
+# $version is a release (e.g. 1.4.0).
+update-available = hoprs { $version } is available
+# $version is the running version.
+update-you-have = You have { $version }.
+update-action = Update
+update-whats-new = What's new
+update-dismiss = Dismiss
+# $done and $total are sizes (e.g. 12.4 MB).
+update-downloading = Downloading… { $done } of { $total }
+update-downloading-size = Downloading… { $done }
+update-verifying = Checking…
+update-try-again = Try again
+update-ready-windows = Ready to install. hoprs will close.
+update-transfers-stop =
+    { $count ->
+        [one] 1 transfer will stop; it continues the next time hoprs starts.
+       *[other] { $count } transfers will stop; they continue the next time hoprs starts.
+    }
+update-close-and-install = Close and install
+update-later = Later
+update-installing = Opening the installer…
+update-linux-opened = Opened in the system installer. Or run:
+update-copy = Copy
+update-macos-steps = Quit hoprs, then drag hoprs to Applications and choose Replace. If macOS blocks it, choose Open Anyway in System Settings, Privacy & Security.
+update-footer-available = { $version } available
+update-footer-install = Install { $version }
+settings-update-check = Check for updates automatically
+settings-update-check-hint = Once a day hoprs asks GitHub for the latest release. Nothing about you is sent.
+settings-check-now = Check now
+settings-update-checking = Checking…
+settings-up-to-date = hoprs is up to date
 palette-edit = Edit in editor
 palette-compare-folders = Compare folders
 palette-upload = Upload selection
@@ -523,7 +556,7 @@ pick-filter-xml = XML files
 
 ## Settings
 settings-general = General
-settings-general-description = Language and version.
+settings-general-description = Language, updates and version.
 settings-transfers-description = How many files move at once, what happens to existing files, and how connections stay open.
 settings-compare-description = When folders are compared, and the names left out.
 settings-editing-description = The editor that opens remote files.

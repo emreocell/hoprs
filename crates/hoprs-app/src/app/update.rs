@@ -346,7 +346,6 @@ impl App {
 
     /// How many transfers stop when hoprs closes for the Windows installer (running,
     /// paused or waiting, and queued: they continue on the next start).
-    #[cfg_attr(not(test), allow(dead_code))] // The card's Windows text (Task 5).
     pub fn transfers_to_stop(&self) -> usize {
         let [active, queued, ..] = self.queue.counts();
         active + queued

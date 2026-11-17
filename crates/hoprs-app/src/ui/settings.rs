@@ -13,6 +13,7 @@ use iced::{Alignment, Element, Length, Padding};
 use crate::app::settings::{
     Backup, BackupMsg, BackupPanel, BackupState, SettingsMsg, SettingsSection, SettingsTab,
 };
+use crate::app::update::ManualCheck;
 use crate::app::{App, Message, PickTarget};
 use crate::settings::{
     FONT_SIZE_MAX, FONT_SIZE_MIN, LanguageChoice, TerminalTheme, WORKERS_MAX, WORKERS_MIN,
@@ -265,12 +266,48 @@ fn general(app: &App) -> Element<'_, Message> {
     .style(theme::pick_list)
     .menu_style(theme::menu);
 
+    let manual = &app.updater.manual;
+    let mut check = row![outlined(
+        strings::settings_check_now(),
+        (*manual != ManualCheck::Checking).then(|| msg(SettingsMsg::CheckNow)),
+    )]
+    .spacing(theme::SPACE_SM)
+    .align_y(Alignment::Center);
+    if let Some(status) = update_status(manual) {
+        let color = match manual {
+            ManualCheck::Failed(_) => palette().error,
+            _ => palette().muted,
+        };
+        check = check.push(text(status).size(theme::TEXT_SM).color(color));
+    }
+
     column![
         field(strings::settings_language(), language.into(), None),
+        field(
+            strings::settings_update_check(),
+            checkbox(settings.update_check)
+                .on_toggle(|on| msg(SettingsMsg::UpdateCheck(on)))
+                .style(theme::checkbox)
+                .into(),
+            None
+        ),
+        muted(strings::settings_update_check_hint()),
+        check,
         muted_owned(version_line()),
     ]
     .spacing(theme::SPACE_SM)
     .into()
+}
+
+/// Check now's inline result; `None` before it was clicked.
+pub fn update_status(manual: &ManualCheck) -> Option<String> {
+    match manual {
+        ManualCheck::Idle => None,
+        ManualCheck::Checking => Some(strings::settings_update_checking().to_owned()),
+        ManualCheck::UpToDate => Some(strings::settings_up_to_date().to_owned()),
+        ManualCheck::Available(version) => Some(strings::update_available(&version.to_string())),
+        ManualCheck::Failed(error) => Some(strings::error(error)),
+    }
 }
 
 fn muted_owned<'a>(label: String) -> Element<'a, Message> {
@@ -871,6 +908,33 @@ mod tests {
         icons.sort_unstable();
         icons.dedup();
         assert_eq!(icons.len(), 6);
+    }
+
+    #[test]
+    fn update_status_text_per_manual_check() {
+        set_language(Language::En);
+        let error = hoprs_core::Error::coded(
+            hoprs_core::ErrorKind::Network,
+            "update-check-failed",
+            "Could not check for updates",
+        );
+        assert_eq!(update_status(&ManualCheck::Idle), None);
+        assert_eq!(
+            update_status(&ManualCheck::Checking).as_deref(),
+            Some("Checking…")
+        );
+        assert_eq!(
+            update_status(&ManualCheck::UpToDate).as_deref(),
+            Some("hoprs is up to date")
+        );
+        assert_eq!(
+            update_status(&ManualCheck::Available(semver::Version::new(1, 4, 0))).as_deref(),
+            Some("hoprs 1.4.0 is available")
+        );
+        assert_eq!(
+            update_status(&ManualCheck::Failed(error.clone())),
+            Some(strings::error(&error))
+        );
     }
 
     #[test]
