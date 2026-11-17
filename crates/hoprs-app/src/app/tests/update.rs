@@ -983,3 +983,73 @@ async fn pending_start_does_not_continue_while_closing() {
         "{effects:?}"
     );
 }
+
+/// ✕ during the download: on Linux and macOS the hand-off opens the card again, so the
+/// command or the steps are seen.
+#[tokio::test]
+async fn hand_off_opens_a_collapsed_card() {
+    for (os, kind, name) in [
+        (Os::Linux, PackageKind::Deb, "hoprs_1.4.0-1_amd64.deb"),
+        (
+            Os::MacOs,
+            PackageKind::Dmg,
+            "hoprs_1.4.0_macos_universal.dmg",
+        ),
+    ] {
+        let mut app = knowing(os, Some(kind)).await;
+        app.update(upd(UpdateMsg::Start));
+        app.update(upd(UpdateMsg::Dismiss));
+        assert!(!app.updater.card);
+        let file = PathBuf::from(name);
+        let effects = app.update(download(DownloadEvent::Done(Ok(file.clone()))));
+        assert!(
+            matches!(&effects[..], [Effect::OpenInstaller(f)] if f == &file),
+            "{os:?}: {effects:?}"
+        );
+        assert!(app.updater.card, "{os:?}");
+    }
+}
+
+/// macOS, the disk image did not open: Try again downloads (reusing the verified file) and
+/// opens it again.
+#[tokio::test]
+async fn macos_open_failure_tries_again() {
+    let mut app = knowing(Os::MacOs, Some(PackageKind::Dmg)).await;
+    app.update(upd(UpdateMsg::Start));
+    let file = PathBuf::from("hoprs_1.4.0_macos_universal.dmg");
+    app.update(download(DownloadEvent::Done(Ok(file.clone()))));
+    app.update(upd(UpdateMsg::InstallerOpened(Err(failure()))));
+    let effects = app.update(upd(UpdateMsg::Start));
+    assert_eq!(
+        jobs(&effects).pop().expect("a download").asset.name,
+        "hoprs_1.4.0_macos_universal.dmg"
+    );
+    let effects = app.update(download(DownloadEvent::Done(Ok(file.clone()))));
+    assert!(
+        matches!(&effects[..], [Effect::OpenInstaller(f)] if f == &file),
+        "{effects:?}"
+    );
+    assert_eq!(
+        app.updater.phase,
+        Phase::HandedOff {
+            file,
+            open_error: None
+        }
+    );
+}
+
+/// A failed download, then a check finding a newer release: the card offers the new
+/// version (never above the old error). The same release again keeps the error.
+#[tokio::test]
+async fn newer_release_clears_a_failure() {
+    let mut app = knowing(Os::Linux, Some(PackageKind::Deb)).await;
+    app.update(upd(UpdateMsg::Start));
+    let error = Error::coded(ErrorKind::Protocol, "update-checksum-mismatch", "bad");
+    app.update(download(DownloadEvent::Done(Err(error.clone()))));
+    app.update(checked(false, Ok(release("1.4.0"))));
+    assert_eq!(app.updater.phase, Phase::Failed(error));
+    app.update(checked(false, Ok(release("1.5.0"))));
+    assert_eq!(app.updater.phase, Phase::Idle);
+    assert_eq!(app.updater.known.as_ref().unwrap().version, v("1.5.0"));
+    assert!(app.updater.card);
+}

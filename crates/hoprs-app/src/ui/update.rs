@@ -60,8 +60,9 @@ pub enum CardBody {
         command: String,
         open_error: Option<String>,
     },
-    /// macOS: the `.dmg` is open; the user replaces the app.
-    MacOs,
+    /// macOS: the `.dmg` is open and the user replaces the app; or (`open_error`) it did
+    /// not open, and Try again opens the verified file again.
+    MacOs { open_error: Option<String> },
     /// The update (or the card's check) failed.
     Failed(String),
 }
@@ -108,7 +109,9 @@ fn body_of(app: &App) -> CardBody {
                 open_error: open_error.as_ref().map(strings::error),
             },
             // Other never downloads (no package): the macOS text is the nearest.
-            Os::MacOs | Os::Other => CardBody::MacOs,
+            Os::MacOs | Os::Other => CardBody::MacOs {
+                open_error: open_error.as_ref().map(strings::error),
+            },
         },
         Phase::InstallerOpen(_) => CardBody::InstallerOpen,
         Phase::Failed(error) => CardBody::Failed(strings::error(error)),
@@ -168,15 +171,15 @@ fn msg(m: UpdateMsg) -> Message {
     Message::Update(m)
 }
 
-/// `base` with the card over its bottom left, above the sidebar's footer. Always a stack
-/// (as the menu's overlay), so `base` keeps its state when the card comes and goes. The
-/// layer has no backdrop: only the card's box takes presses.
 /// The card's left and right edges, from the window's left edge: inside the sidebar, with
 /// [`MARGIN`] on both sides.
 pub fn horizontal_span() -> (f32, f32) {
     (MARGIN, MARGIN + WIDTH)
 }
 
+/// `base` with the card over its bottom left, above the sidebar's footer. Always a stack
+/// (as the menu's overlay), so `base` keeps its state when the card comes and goes. The
+/// layer has no backdrop: only the card's box takes presses.
 pub fn overlay<'a>(app: &'a App, base: Element<'a, Message>) -> Element<'a, Message> {
     let Some((version, body)) = card_body(app) else {
         return stack![base].into();
@@ -304,7 +307,26 @@ fn card(app: &App, version: String, body: CardBody) -> Element<'_, Message> {
                     Some(msg(UpdateMsg::CopyCommand)),
                 ));
         }
-        CardBody::MacOs => lines = lines.push(plain(strings::update_macos_steps())),
+        CardBody::MacOs { open_error: None } => {
+            lines = lines.push(plain(strings::update_macos_steps()));
+        }
+        // The disk image did not open: the steps would not apply. Try again downloads
+        // nothing (the verified file is reused) and opens it again.
+        CardBody::MacOs {
+            open_error: Some(error),
+        } => {
+            lines = lines
+                .push(with_tip(
+                    muted(strings::update_open_failed().to_owned()),
+                    error,
+                ))
+                .push(actions(
+                    strings::update_try_again(),
+                    UpdateMsg::Start,
+                    strings::update_whats_new(),
+                    UpdateMsg::WhatsNew,
+                ));
+        }
         CardBody::Failed(error) => {
             let clipped = clip_error(&error);
             let cut = matches!(clipped, std::borrow::Cow::Owned(_));
@@ -515,7 +537,18 @@ mod tests {
             file: file.clone(),
             open_error: None,
         };
-        assert_eq!(body(&app), Some(CardBody::MacOs));
+        assert_eq!(body(&app), Some(CardBody::MacOs { open_error: None }));
+        // The disk image did not open: the error shows (Try again opens it again).
+        app.updater.phase = Phase::HandedOff {
+            file: file.clone(),
+            open_error: Some(failure()),
+        };
+        assert_eq!(
+            body(&app),
+            Some(CardBody::MacOs {
+                open_error: Some(strings::error(&failure())),
+            })
+        );
 
         let mut app = offered(Os::Windows);
         app.updater.phase = Phase::Ready(file.clone());
@@ -578,7 +611,7 @@ mod tests {
         set_language(Language::En);
         assert_eq!(
             linux_intro(false),
-            "Opened in the system installer. Or run:"
+            "Opened with the default app for .deb files. Or run:"
         );
         assert_eq!(linux_intro(true), "Run this command to install:");
     }

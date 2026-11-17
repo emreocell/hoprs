@@ -46,7 +46,8 @@ pub struct UpdateEnv {
     pub auto: bool,
     /// Chooses the hand-off: Windows waits for "Close and install", then closes hoprs.
     pub os: Os,
-    /// The installer that updates this install; `None` opens the release page instead.
+    /// The installer that updates this install; `None` opens the release page instead
+    /// (in a debug build, `HOPRS_UPDATE_AS_PACKAGE` when set).
     pub package: Option<PackageKind>,
 }
 
@@ -79,7 +80,7 @@ impl UpdateEnv {
             running,
             auto: !cfg!(debug_assertions) || http::api_url().is_some(),
             os: Os::current(),
-            package: current_package(),
+            package: package_override().or_else(current_package),
         }
     }
 
@@ -91,6 +92,32 @@ impl UpdateEnv {
             os,
             package,
         }
+    }
+}
+
+/// The package a debug build pretends to be installed from: `HOPRS_UPDATE_AS_PACKAGE`
+/// (`deb`, `msi` or `dmg`), so the real download and hand-off can be tried from
+/// `cargo run`. Release builds never read it: `cfg!` makes this a property of the build,
+/// as for `HOPRS_UPDATE_URL` and `HOPRS_UPDATE_AS_VERSION`.
+fn package_override() -> Option<PackageKind> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    let value = std::env::var("HOPRS_UPDATE_AS_PACKAGE").ok()?;
+    let kind = parse_package(&value);
+    if kind.is_none() {
+        tracing::warn!(%value, "HOPRS_UPDATE_AS_PACKAGE ignored: not deb, msi or dmg");
+    }
+    kind
+}
+
+/// `deb`, `msi` or `dmg`, exactly; anything else is no package.
+fn parse_package(value: &str) -> Option<PackageKind> {
+    match value {
+        "deb" => Some(PackageKind::Deb),
+        "msi" => Some(PackageKind::Msi),
+        "dmg" => Some(PackageKind::Dmg),
+        _ => None,
     }
 }
 
@@ -437,8 +464,11 @@ impl App {
                 *phase = Phase::Ready(file);
                 Vec::new()
             }
+            // macOS and Linux: the card opens (also after a ✕ during the download), so the
+            // steps or the command are seen.
             DownloadEvent::Done(Ok(file)) => {
-                *phase = Phase::HandedOff {
+                self.updater.card = true;
+                self.updater.phase = Phase::HandedOff {
                     file: file.clone(),
                     open_error: None,
                 };
@@ -523,6 +553,16 @@ impl App {
                 }
                 // A download under way keeps the release it fetches (Task 4).
                 if matches!(self.updater.phase, Phase::Idle | Phase::Failed(_)) {
+                    // A failure was about the release known then: a newer one starts over
+                    // (the card never shows the new version above the old error).
+                    let replaced = self
+                        .updater
+                        .known
+                        .as_ref()
+                        .is_none_or(|known| known.version < version);
+                    if replaced && matches!(self.updater.phase, Phase::Failed(_)) {
+                        self.updater.phase = Phase::Idle;
+                    }
                     let unseen = self
                         .settings
                         .update_seen
@@ -570,5 +610,34 @@ impl App {
         }
         effects.extend(self.schedule_update_check(CHECK_EVERY));
         effects
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_override_parses_strictly() {
+        assert_eq!(parse_package("deb"), Some(PackageKind::Deb));
+        assert_eq!(parse_package("msi"), Some(PackageKind::Msi));
+        assert_eq!(parse_package("dmg"), Some(PackageKind::Dmg));
+        for bad in [
+            "", "DEB", " deb", "deb ", ".deb", "zip", "appimage", "dmg\n",
+        ] {
+            assert_eq!(parse_package(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn package_override_follows_the_build() {
+        if cfg!(debug_assertions) {
+            // Debug: only what HOPRS_UPDATE_AS_PACKAGE says (the test runner does not set it).
+            let set = std::env::var("HOPRS_UPDATE_AS_PACKAGE").ok();
+            assert_eq!(package_override(), set.as_deref().and_then(parse_package));
+        } else {
+            // Release: never, whatever the environment says.
+            assert_eq!(package_override(), None);
+        }
     }
 }
