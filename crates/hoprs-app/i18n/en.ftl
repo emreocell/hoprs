@@ -94,6 +94,7 @@ update-later = Later
 update-installing = Opening the installer…
 update-linux-opened = Opened in the system installer. Or run:
 update-linux-run = Run this command to install:
+update-open-failed = The system installer did not open.
 update-installer-open = The installer is open. Close hoprs to finish.
 update-close-hoprs = Close hoprs
 update-copy = Copy

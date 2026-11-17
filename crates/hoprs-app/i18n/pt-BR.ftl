@@ -81,6 +81,7 @@ update-later = Depois
 update-installing = Abrindo o instalador…
 update-linux-opened = Aberto no instalador do sistema. Ou execute:
 update-linux-run = Execute este comando para instalar:
+update-open-failed = O instalador do sistema não abriu.
 update-installer-open = O instalador está aberto. Feche o hoprs para concluir.
 update-close-hoprs = Fechar o hoprs
 update-copy = Copiar

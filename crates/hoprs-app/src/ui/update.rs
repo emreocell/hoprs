@@ -3,22 +3,37 @@
 //! else reaches the app and leaves the card open), no text input, nothing focused, no
 //! animation. The state is [`crate::app::update`]'s; [`card_body`] picks what to draw.
 
-use iced::widget::{button, column, container, opaque, progress_bar, row, stack, text};
+use iced::widget::{button, column, container, opaque, progress_bar, row, stack, text, tooltip};
 use iced::{Alignment, Element, Length, Padding};
 use semver::Version;
 
 use crate::app::update::{CardCheck, ManualCheck, Phase, UpdateMsg, install_command};
 use crate::app::{App, Message};
-use crate::ui::format;
 use crate::ui::icons::{self, Icon};
 use crate::ui::sidebar;
 use crate::ui::strings;
 use crate::ui::theme::{self, palette};
 use crate::ui::widgets;
+use crate::ui::{fit, format};
 use crate::update::package::Os;
 
-/// The card's width: the sidebar's plus a margin, so it reads as floating over it.
-pub const WIDTH: f32 = sidebar::WIDTH + theme::SPACE_LG;
+/// The space between the card and the sidebar's edges (left, right, and above the
+/// footer row).
+pub const MARGIN: f32 = theme::SPACE_XS;
+/// The card's width: inside the sidebar, with [`MARGIN`] on both sides, so it never
+/// covers the content next to the sidebar.
+pub const WIDTH: f32 = sidebar::WIDTH - 2.0 * MARGIN;
+/// The card's inner padding, left and right (top and bottom: [`theme::SPACE_SM`]).
+const PADDING_X: f32 = theme::SPACE_XS;
+/// The body's indent: it lines up with the title's text, right of the icon.
+const INDENT: f32 = icons::ROW + theme::SPACE_XS;
+/// The width the body's lines get (the border counted on both sides).
+pub const BODY_WIDTH: f32 = WIDTH - 2.0 * PADDING_X - 2.0 * theme::HAIRLINE - INDENT;
+/// The Linux command's size and the code block's inner padding.
+const COMMAND_SIZE: f32 = theme::TEXT_TAG;
+const COMMAND_PADDING: f32 = theme::SPACE_XS;
+/// An error shows on at most about this many lines; the rest goes to its tooltip.
+const ERROR_LINES: f32 = 4.0;
 /// The progress bar's thickness (the queue's).
 const BAR_GIRTH: f32 = 4.0;
 
@@ -156,22 +171,29 @@ fn msg(m: UpdateMsg) -> Message {
 /// `base` with the card over its bottom left, above the sidebar's footer. Always a stack
 /// (as the menu's overlay), so `base` keeps its state when the card comes and goes. The
 /// layer has no backdrop: only the card's box takes presses.
+/// The card's left and right edges, from the window's left edge: inside the sidebar, with
+/// [`MARGIN`] on both sides.
+pub fn horizontal_span() -> (f32, f32) {
+    (MARGIN, MARGIN + WIDTH)
+}
+
 pub fn overlay<'a>(app: &'a App, base: Element<'a, Message>) -> Element<'a, Message> {
     let Some((version, body)) = card_body(app) else {
         return stack![base].into();
     };
+    let (left, right) = horizontal_span();
     let card = opaque(
         container(card(app, version.to_string(), body))
-            .width(WIDTH)
-            .padding(theme::SPACE_SM)
+            .width(right - left)
+            .padding(Padding::from([theme::SPACE_SM, PADDING_X]))
             .style(theme::dialog_box),
     );
     let layer = container(card)
         .width(Length::Fill)
         .height(Length::Fill)
         .padding(Padding {
-            left: theme::SPACE_XS,
-            bottom: sidebar::FOOTER_HEIGHT + theme::SPACE_XS,
+            left,
+            bottom: sidebar::FOOTER_HEIGHT + MARGIN,
             ..Padding::ZERO
         })
         .align_x(Alignment::Start)
@@ -252,58 +274,86 @@ fn card(app: &App, version: String, body: CardBody) -> Element<'_, Message> {
             command,
             open_error,
         } => {
-            let command = row![
-                container(
-                    text(command)
-                        .font(theme::MONO)
-                        .size(theme::TEXT_MONO)
-                        .wrapping(text::Wrapping::WordOrGlyph)
-                )
-                .width(Length::Fill),
-                widgets::tool_button(
+            // A code block across the body: the path breaks after a `/` (and only inside a
+            // name too long for a line); Copy copies the exact command, below it.
+            let block = container(
+                text(command)
+                    .font(theme::MONO)
+                    .size(COMMAND_SIZE)
+                    .wrapping(text::Wrapping::WordOrGlyph),
+            )
+            .width(Length::Fill)
+            .padding(COMMAND_PADDING)
+            .style(theme::code_block);
+            // Why the command shows first; the opener's own words only in the tooltip.
+            let open_failed = open_error.is_some();
+            if let Some(error) = open_error {
+                lines = lines.push(with_tip(
+                    muted(strings::update_open_failed().to_owned()),
+                    error,
+                ));
+            }
+            lines = lines
+                .push(plain(linux_intro(open_failed)))
+                .push(block)
+                .push(widgets::tool_button(
                     Icon::Copy,
                     strings::update_copy(),
                     None,
                     false,
                     Some(msg(UpdateMsg::CopyCommand)),
-                ),
-            ]
-            .spacing(theme::SPACE_XS)
-            .align_y(Alignment::Center);
-            lines = lines
-                .push(plain(linux_intro(open_error.is_some())))
-                .push(command);
-            if let Some(error) = open_error {
-                lines = lines.push(muted(error));
-            }
+                ));
         }
         CardBody::MacOs => lines = lines.push(plain(strings::update_macos_steps())),
         CardBody::Failed(error) => {
-            lines = lines
-                .push(text(error).size(theme::TEXT_SM).color(palette().error))
-                .push(actions(
-                    strings::update_try_again(),
-                    UpdateMsg::Start,
-                    strings::update_whats_new(),
-                    UpdateMsg::WhatsNew,
-                ));
+            let clipped = clip_error(&error);
+            let cut = matches!(clipped, std::borrow::Cow::Owned(_));
+            let shown: Element<'_, Message> = text(clipped.into_owned())
+                .size(theme::TEXT_SM)
+                .color(palette().error)
+                .into();
+            // A long error ends in an ellipsis; the whole text is in the tooltip.
+            let shown = if cut { with_tip(shown, error) } else { shown };
+            lines = lines.push(shown).push(actions(
+                strings::update_try_again(),
+                UpdateMsg::Start,
+                strings::update_whats_new(),
+                UpdateMsg::WhatsNew,
+            ));
         }
     }
     if let Some(error) = &app.updater.page_error {
-        lines = lines.push(muted(strings::error(error)));
+        lines = lines.push(muted(clip_error(&strings::error(error)).into_owned()));
     }
 
-    // The body lines up with the title's text, right of the icon.
-    let indent = icons::ROW + theme::SPACE_XS;
     column![
         title,
-        container(lines).padding(Padding {
-            left: indent,
+        container(lines.width(Length::Fill)).padding(Padding {
+            left: INDENT,
             ..Padding::ZERO
         }),
     ]
     .spacing(theme::SPACE_2XS)
     .into()
+}
+
+/// `error` cut to about [`ERROR_LINES`] lines of the body (an ellipsis at the end when cut).
+fn clip_error(error: &str) -> std::borrow::Cow<'_, str> {
+    fit::ellipsize(
+        error,
+        ERROR_LINES * BODY_WIDTH,
+        theme::TEXT_SM,
+        fit::INTER_ADVANCE,
+    )
+}
+
+/// `content` with `full` in a tooltip above it.
+fn with_tip<'a>(content: Element<'a, Message>, full: String) -> Element<'a, Message> {
+    let body = container(text(full).size(theme::TEXT_XS))
+        .max_width(sidebar::WIDTH * 1.5)
+        .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_XS]))
+        .style(theme::dialog_box);
+    tooltip(content, body, tooltip::Position::Top).into()
 }
 
 fn plain<'a>(label: &'a str) -> Element<'a, Message> {
@@ -324,13 +374,14 @@ fn actions<'a>(
     secondary: &'a str,
     on_secondary: UpdateMsg,
 ) -> Element<'a, Message> {
+    // Wraps to a second row rather than clipping (long translations).
     row![
         button(
             text(primary)
                 .size(theme::TEXT_SM)
                 .font(theme::INTER_SEMIBOLD)
         )
-        .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_MD]))
+        .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_SM]))
         .style(theme::button_primary)
         .on_press(msg(on_primary)),
         button(text(secondary).size(theme::TEXT_SM))
@@ -340,6 +391,8 @@ fn actions<'a>(
     ]
     .spacing(theme::SPACE_XS)
     .align_y(Alignment::Center)
+    .wrap()
+    .vertical_spacing(theme::SPACE_XS)
     .into()
 }
 
@@ -378,6 +431,11 @@ mod tests {
         app.updater.known = Some(release("1.4.0"));
         app.updater.card = true;
         app
+    }
+
+    /// How many characters of the Linux command fit on one line of its code block.
+    fn command_chars_per_line() -> usize {
+        ((BODY_WIDTH - 2.0 * COMMAND_PADDING) / (COMMAND_SIZE * fit::MONO_ADVANCE)).floor() as usize
     }
 
     /// The body only.
@@ -479,6 +537,40 @@ mod tests {
             body(&app),
             Some(CardBody::Failed(strings::error(&failure())))
         );
+    }
+
+    #[test]
+    fn card_stays_inside_the_sidebar() {
+        let (left, right) = horizontal_span();
+        assert_eq!(right - left, 240.0);
+        // Equal margins: the right edge stops as far from the sidebar's edge as the left
+        // one from the window's, before the sidebar's 1 px rule.
+        assert_eq!(sidebar::WIDTH - right, left);
+        assert!(right <= sidebar::WIDTH - theme::HAIRLINE);
+        let body = BODY_WIDTH;
+        assert!(body > 180.0, "{body}");
+    }
+
+    #[test]
+    fn the_deb_name_fits_one_command_line() {
+        // A name never breaks inside: the longest plausible one fits on a line.
+        let longest = "hoprs_10.10.10-1_amd64.deb".chars().count();
+        assert!(
+            command_chars_per_line() >= longest,
+            "{} < {longest}",
+            command_chars_per_line()
+        );
+    }
+
+    #[test]
+    fn long_errors_are_cut_short_ones_kept() {
+        let short = "Could not check for updates";
+        assert_eq!(clip_error(short), short);
+        let long = "x ".repeat(200);
+        let cut = clip_error(&long);
+        assert!(cut.ends_with('\u{2026}'), "{cut}");
+        let lines = cut.chars().count() as f32 * theme::TEXT_SM * fit::INTER_ADVANCE / BODY_WIDTH;
+        assert!(lines <= ERROR_LINES, "{lines}");
     }
 
     #[test]

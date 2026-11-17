@@ -359,6 +359,21 @@ pub fn outline_box(_: &Theme) -> container::Style {
     }
 }
 
+/// A code block (the update card's install command): `paper_3`, a 1 px `rule` outline,
+/// 4 px corners.
+pub fn code_block(_: &Theme) -> container::Style {
+    let p = palette();
+    container::Style {
+        text_color: Some(p.ink),
+        border: Border {
+            color: p.rule,
+            width: HAIRLINE,
+            radius: radius(),
+        },
+        ..surface(p.paper_3)
+    }
+}
+
 /// Behind a dialog: the window dimmed (no blur, no shadow).
 pub fn backdrop(_: &Theme) -> container::Style {
     let paper = palette().paper;

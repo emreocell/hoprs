@@ -160,6 +160,10 @@ pub fn update_linux_run() -> &'static str {
     tr("update-linux-run")
 }
 /// Windows, the installer open (a close the user cancelled).
+/// Linux: the system installer did not open (the error itself in the tooltip).
+pub fn update_open_failed() -> &'static str {
+    tr("update-open-failed")
+}
 pub fn update_installer_open() -> &'static str {
     tr("update-installer-open")
 }
