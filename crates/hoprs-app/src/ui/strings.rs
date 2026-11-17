@@ -155,6 +155,17 @@ pub fn update_installing() -> &'static str {
 pub fn update_linux_opened() -> &'static str {
     tr("update-linux-opened")
 }
+/// Linux, the system installer failed to open: the command is the way.
+pub fn update_linux_run() -> &'static str {
+    tr("update-linux-run")
+}
+/// Windows, the installer open (a close the user cancelled).
+pub fn update_installer_open() -> &'static str {
+    tr("update-installer-open")
+}
+pub fn update_close_hoprs() -> &'static str {
+    tr("update-close-hoprs")
+}
 pub fn update_copy() -> &'static str {
     tr("update-copy")
 }

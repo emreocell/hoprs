@@ -60,7 +60,7 @@ update-palette = Atualizar o hoprs para { $version }
 # $version é uma versão (ex.: 1.4.0).
 update-available = hoprs { $version } está disponível
 # $version é a versão em uso.
-update-you-have = Você tem a { $version }.
+update-you-have = Sua versão é a { $version }.
 update-action = Atualizar
 update-whats-new = Novidades
 update-dismiss = Dispensar
@@ -80,6 +80,9 @@ update-close-and-install = Fechar e instalar
 update-later = Depois
 update-installing = Abrindo o instalador…
 update-linux-opened = Aberto no instalador do sistema. Ou execute:
+update-linux-run = Execute este comando para instalar:
+update-installer-open = O instalador está aberto. Feche o hoprs para concluir.
+update-close-hoprs = Fechar o hoprs
 update-copy = Copiar
 update-macos-steps = Feche o hoprs, arraste o hoprs para Aplicativos e escolha Substituir. Se o macOS bloquear, escolha Abrir Mesmo Assim em Ajustes do Sistema, Privacidade e Segurança.
 update-footer-available = { $version } disponível

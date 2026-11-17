@@ -5,6 +5,7 @@
 
 use iced::widget::{button, column, container, opaque, progress_bar, row, stack, text};
 use iced::{Alignment, Element, Length, Padding};
+use semver::Version;
 
 use crate::app::update::{CardCheck, ManualCheck, Phase, UpdateMsg, install_command};
 use crate::app::{App, Message};
@@ -35,8 +36,10 @@ pub enum CardBody {
     Checking,
     /// Windows: the verified installer waits for "Close and install".
     Ready { transfers: usize },
-    /// Windows: the installer is being opened and hoprs closes.
+    /// Windows: between "Close and install" and the opener's answer.
     Installing,
+    /// Windows: the installer is open; hoprs must close (a cancelled close stays here).
+    InstallerOpen,
     /// Linux: the `.deb` went to the system installer; the command is the way without one.
     Linux {
         command: String,
@@ -48,14 +51,20 @@ pub enum CardBody {
     Failed(String),
 }
 
-/// What the card shows, or `None` while it is collapsed or no newer version is known.
-pub fn card_body(app: &App) -> Option<CardBody> {
-    let updater = &app.updater;
-    if !updater.card {
+/// The version the card offers and what it shows under its title, or `None` while it is
+/// collapsed or no newer version is known.
+pub fn card_body(app: &App) -> Option<(&Version, CardBody)> {
+    if !app.updater.card {
         return None;
     }
-    app.update_offer()?;
-    let body = match &updater.phase {
+    let version = app.update_offer()?;
+    Some((version, body_of(app)))
+}
+
+/// What the card shows for the updater's state (open or not).
+fn body_of(app: &App) -> CardBody {
+    let updater = &app.updater;
+    match &updater.phase {
         // Only `update_seen` so far: the check the card asked for (or Check now's).
         Phase::Idle if updater.known.is_none() => match &updater.card_check {
             CardCheck::Checking => CardBody::Checking,
@@ -86,9 +95,19 @@ pub fn card_body(app: &App) -> Option<CardBody> {
             // Other never downloads (no package): the macOS text is the nearest.
             Os::MacOs | Os::Other => CardBody::MacOs,
         },
+        Phase::InstallerOpen(_) => CardBody::InstallerOpen,
         Phase::Failed(error) => CardBody::Failed(strings::error(error)),
-    };
-    Some(body)
+    }
+}
+
+/// The Linux text above the command: the system installer opened, or (it failed) the
+/// command is the way.
+fn linux_intro(open_failed: bool) -> &'static str {
+    if open_failed {
+        strings::update_linux_run()
+    } else {
+        strings::update_linux_opened()
+    }
 }
 
 /// The share of the installer downloaded, in `0.0..=1.0`; `None` while the size is unknown.
@@ -102,7 +121,7 @@ fn fraction(done: u64, total: Option<u64>) -> Option<f32> {
 pub fn footer_label(app: &App) -> Option<String> {
     let version = app.update_offer()?.to_string();
     Some(match app.updater.phase {
-        Phase::Ready(_) => strings::update_footer_install(&version),
+        Phase::Ready(_) | Phase::InstallerOpen(_) => strings::update_footer_install(&version),
         _ => strings::update_footer_available(&version),
     })
 }
@@ -110,7 +129,8 @@ pub fn footer_label(app: &App) -> Option<String> {
 /// The line above the sidebar's footer row that reopens the card: while a newer version
 /// is known and the card is collapsed.
 pub fn footer_line(app: &App) -> Option<Element<'_, Message>> {
-    if card_body(app).is_some() {
+    // While the card is open (it shows whenever an offer exists) the line is not needed.
+    if app.updater.card {
         return None;
     }
     let label = footer_label(app)?;
@@ -137,11 +157,11 @@ fn msg(m: UpdateMsg) -> Message {
 /// (as the menu's overlay), so `base` keeps its state when the card comes and goes. The
 /// layer has no backdrop: only the card's box takes presses.
 pub fn overlay<'a>(app: &'a App, base: Element<'a, Message>) -> Element<'a, Message> {
-    let Some(body) = card_body(app) else {
+    let Some((version, body)) = card_body(app) else {
         return stack![base].into();
     };
     let card = opaque(
-        container(card(app, body))
+        container(card(app, version.to_string(), body))
             .width(WIDTH)
             .padding(theme::SPACE_SM)
             .style(theme::dialog_box),
@@ -159,11 +179,7 @@ pub fn overlay<'a>(app: &'a App, base: Element<'a, Message>) -> Element<'a, Mess
     stack![base, layer].into()
 }
 
-fn card(app: &App, body: CardBody) -> Element<'_, Message> {
-    let version = app
-        .update_offer()
-        .map(ToString::to_string)
-        .unwrap_or_default();
+fn card(app: &App, version: String, body: CardBody) -> Element<'_, Message> {
     let title = row![
         icons::icon(Icon::DownloadSimple, icons::ROW),
         container(
@@ -196,13 +212,15 @@ fn card(app: &App, body: CardBody) -> Element<'_, Message> {
             ));
         }
         CardBody::Progress { fraction, label } => {
-            lines = lines
-                .push(
-                    progress_bar(0.0..=1.0, fraction.unwrap_or(0.0))
+            // No bar while the size is unknown: the label says how much came.
+            if let Some(fraction) = fraction {
+                lines = lines.push(
+                    progress_bar(0.0..=1.0, fraction)
                         .girth(BAR_GIRTH)
                         .style(theme::progress),
-                )
-                .push(muted(label));
+                );
+            }
+            lines = lines.push(muted(label));
         }
         CardBody::Checking => lines = lines.push(muted(strings::update_verifying().to_owned())),
         CardBody::Ready { transfers } => {
@@ -218,6 +236,18 @@ fn card(app: &App, body: CardBody) -> Element<'_, Message> {
             ));
         }
         CardBody::Installing => lines = lines.push(plain(strings::update_installing())),
+        CardBody::InstallerOpen => {
+            lines = lines.push(plain(strings::update_installer_open())).push(
+                button(
+                    text(strings::update_close_hoprs())
+                        .size(theme::TEXT_SM)
+                        .font(theme::INTER_SEMIBOLD),
+                )
+                .padding(Padding::from([theme::SPACE_2XS, theme::SPACE_MD]))
+                .style(theme::button_primary)
+                .on_press(msg(UpdateMsg::CloseForInstall)),
+            );
+        }
         CardBody::Linux {
             command,
             open_error,
@@ -241,7 +271,7 @@ fn card(app: &App, body: CardBody) -> Element<'_, Message> {
             .spacing(theme::SPACE_XS)
             .align_y(Alignment::Center);
             lines = lines
-                .push(plain(strings::update_linux_opened()))
+                .push(plain(linux_intro(open_error.is_some())))
                 .push(command);
             if let Some(error) = open_error {
                 lines = lines.push(muted(error));
@@ -350,6 +380,11 @@ mod tests {
         app
     }
 
+    /// The body only.
+    fn body(app: &App) -> Option<CardBody> {
+        card_body(app).map(|(_, body)| body)
+    }
+
     fn failure() -> Error {
         Error::coded(
             ErrorKind::Network,
@@ -362,13 +397,13 @@ mod tests {
     fn card_body_per_phase() {
         let file = PathBuf::from("/home/me/Downloads/hoprs_1.4.0-1_amd64.deb");
         let mut app = offered(Os::Linux);
-        assert_eq!(card_body(&app), Some(CardBody::Offer));
+        assert_eq!(body(&app), Some(CardBody::Offer));
 
         app.updater.phase = Phase::Downloading {
             done: 512 * 1024,
             total: Some(1024 * 1024),
         };
-        match card_body(&app) {
+        match body(&app) {
             Some(CardBody::Progress { fraction, label }) => {
                 assert_eq!(fraction, Some(0.5));
                 assert!(label.starts_with("Downloading…"), "{label}");
@@ -381,19 +416,19 @@ mod tests {
             total: None,
         };
         assert!(matches!(
-            card_body(&app),
+            body(&app),
             Some(CardBody::Progress { fraction: None, .. })
         ));
 
         app.updater.phase = Phase::Verifying;
-        assert_eq!(card_body(&app), Some(CardBody::Checking));
+        assert_eq!(body(&app), Some(CardBody::Checking));
 
         app.updater.phase = Phase::HandedOff {
             file: file.clone(),
             open_error: None,
         };
         assert_eq!(
-            card_body(&app),
+            body(&app),
             Some(CardBody::Linux {
                 command: install_command(&file),
                 open_error: None,
@@ -404,7 +439,7 @@ mod tests {
             open_error: Some(failure()),
         };
         assert_eq!(
-            card_body(&app),
+            body(&app),
             Some(CardBody::Linux {
                 command: install_command(&file),
                 open_error: Some(strings::error(&failure())),
@@ -413,7 +448,7 @@ mod tests {
 
         app.updater.phase = Phase::Failed(failure());
         assert_eq!(
-            card_body(&app),
+            body(&app),
             Some(CardBody::Failed(strings::error(&failure())))
         );
 
@@ -422,21 +457,38 @@ mod tests {
             file: file.clone(),
             open_error: None,
         };
-        assert_eq!(card_body(&app), Some(CardBody::MacOs));
+        assert_eq!(body(&app), Some(CardBody::MacOs));
 
         let mut app = offered(Os::Windows);
         app.updater.phase = Phase::Ready(file.clone());
         assert_eq!(
-            card_body(&app),
+            body(&app),
             Some(CardBody::Ready {
                 transfers: app.transfers_to_stop()
             })
         );
         app.updater.phase = Phase::HandedOff {
-            file,
+            file: file.clone(),
             open_error: None,
         };
-        assert_eq!(card_body(&app), Some(CardBody::Installing));
+        assert_eq!(body(&app), Some(CardBody::Installing));
+        app.updater.phase = Phase::InstallerOpen(file);
+        assert_eq!(body(&app), Some(CardBody::InstallerOpen));
+        app.updater.phase = Phase::Failed(failure());
+        assert_eq!(
+            body(&app),
+            Some(CardBody::Failed(strings::error(&failure())))
+        );
+    }
+
+    #[test]
+    fn linux_intro_follows_the_open_result() {
+        set_language(Language::En);
+        assert_eq!(
+            linux_intro(false),
+            "Opened in the system installer. Or run:"
+        );
+        assert_eq!(linux_intro(true), "Run this command to install:");
     }
 
     #[test]
@@ -444,41 +496,44 @@ mod tests {
         let mut app = offered(Os::Linux);
         app.updater.known = None;
         app.settings.update_seen = Some(Version::new(1, 4, 0));
-        assert_eq!(card_body(&app), Some(CardBody::Offer));
+        assert_eq!(body(&app), Some(CardBody::Offer));
         app.updater.card_check = CardCheck::Checking;
-        assert_eq!(card_body(&app), Some(CardBody::Checking));
+        assert_eq!(body(&app), Some(CardBody::Checking));
         app.updater.card_check = CardCheck::Failed(failure());
         assert_eq!(
-            card_body(&app),
+            body(&app),
             Some(CardBody::Failed(strings::error(&failure())))
         );
         app.updater.card_check = CardCheck::Idle;
         app.updater.manual = ManualCheck::Checking;
-        assert_eq!(card_body(&app), Some(CardBody::Checking));
+        assert_eq!(body(&app), Some(CardBody::Checking));
 
         // Once the release is known, the card offers it whatever a check did.
         app.updater.known = Some(release("1.4.0"));
         app.updater.manual = ManualCheck::Failed(failure());
         app.updater.card_check = CardCheck::Failed(failure());
-        assert_eq!(card_body(&app), Some(CardBody::Offer));
+        assert_eq!(body(&app), Some(CardBody::Offer));
     }
 
     #[test]
     fn no_card_without_offer() {
         let mut app = offered(Os::Linux);
         app.updater.card = false;
-        assert_eq!(card_body(&app), None);
+        assert_eq!(body(&app), None);
 
         let mut app = offered(Os::Linux);
         app.updater.known = Some(release("1.3.1"));
-        assert_eq!(card_body(&app), None);
+        assert_eq!(body(&app), None);
     }
 
     #[test]
     fn footer_label_available_then_install() {
         let mut app = offered(Os::Windows);
         assert_eq!(footer_label(&app).as_deref(), Some("1.4.0 available"));
-        app.updater.phase = Phase::Ready(PathBuf::from("hoprs_1.4.0_windows_x64.msi"));
+        let file = PathBuf::from("hoprs_1.4.0_windows_x64.msi");
+        app.updater.phase = Phase::Ready(file.clone());
+        assert_eq!(footer_label(&app).as_deref(), Some("Install 1.4.0"));
+        app.updater.phase = Phase::InstallerOpen(file);
         assert_eq!(footer_label(&app).as_deref(), Some("Install 1.4.0"));
     }
 

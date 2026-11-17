@@ -11,6 +11,8 @@ One section per task; later tasks append theirs.
 | No card while collapsed or while no newer version is known | Pass: `no_card_without_offer` |
 | The footer line reads "1.4.0 available", "Install 1.4.0" after Later on Windows; none when up to date; hidden while the card is open | Pass: `footer_label_available_then_install`, `footer_line_absent_when_up_to_date` |
 | Settings → General shows Check now's result: Checking…, up to date, "hoprs X.Y.Z is available", the error | Pass: `update_status_text_per_manual_check` |
+| Windows: a cancelled close leaves "Close hoprs", which asks for the normal close once, never a second installer; the opener's error shows with Try again | Pass: `cancelled_close_offers_close_hoprs_again`, `close_for_install_needs_the_installer_open`, `windows_waits_for_second_click` |
+| Linux: "Run this command to install:" when the system installer did not open | Pass: `linux_intro_follows_the_open_result` |
 | Every new text in English and pt-BR | Pass: `every_en_key_is_used` and the catalog parity tests |
 | A new always-present layer costs no frame time (100k rows) | Pass: p95 0.80–0.84 ms against 0.71–0.76 ms at the base commit (noise between runs ±7%), criterion mean unchanged (577–594 µs both) |
 | The card's look, position, focus and click-through on a real display, in English and pt-BR | NEEDS HUMAN: steps below |
@@ -43,6 +45,10 @@ Start a debug build against a release newer than the one it pretends to run:
    macOS: the Quit / Replace / Open Anyway text; Windows: "Ready to install. hoprs will
    close." (with "N transfers will stop…" while a transfer runs), **Close and install**,
    **Later** (the footer line then reads "Install 1.3.1").
+   With a remote file open in an editor and edited (unsent), click **Close and install**,
+   then answer Cancel to the unsent-edits question: the card reads "The installer is open.
+   Close hoprs to finish." with **Close hoprs**, which asks the same question again (no
+   second installer); ✕ leaves "Install 1.3.1" in the footer.
 9. **pt-BR.** Switch Settings › Language to Português and repeat 1, 4 and 7: "hoprs 1.3.1
    está disponível", "Você tem a 1.3.0.", "Atualizar", "Novidades", "1.3.1 disponível",
    "Procurar atualizações automaticamente", "Procurar agora", "O hoprs está atualizado".

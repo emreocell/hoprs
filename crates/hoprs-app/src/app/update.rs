@@ -21,7 +21,8 @@
 //! the asset or `SHA256SUMS` missing, opens the release page instead. The verified file
 //! is opened with the system handler ([`Effect::OpenInstaller`]) at once on macOS and
 //! Linux (hoprs stays; Linux also shows [`install_command`] with Copy); Windows waits for
-//! "Close and install", then closes hoprs the normal way ([`Effect::RequestClose`]).
+//! "Close and install", then closes hoprs the normal way ([`Effect::RequestClose`]); a
+//! close the user cancels leaves [`Phase::InstallerOpen`] with "Close hoprs".
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -129,6 +130,9 @@ pub enum Phase {
         file: PathBuf,
         open_error: Option<Error>,
     },
+    /// Windows: the installer opened and hoprs was asked to close. A close the user
+    /// cancelled (the unsent-edits question) leaves it here: "Close hoprs" asks again.
+    InstallerOpen(PathBuf),
     Failed(Error),
 }
 
@@ -200,6 +204,8 @@ pub enum UpdateMsg {
     Later,
     /// Copies the Linux install command.
     CopyCommand,
+    /// "Close hoprs" (Windows, the installer open): the normal close request again.
+    CloseForInstall,
     InstallerOpened(Result<(), Error>),
 }
 
@@ -217,6 +223,7 @@ impl UpdateMsg {
                 | UpdateMsg::Install
                 | UpdateMsg::Later
                 | UpdateMsg::CopyCommand
+                | UpdateMsg::CloseForInstall
         )
     }
 }
@@ -334,13 +341,17 @@ impl App {
                 self.updater.card = false;
                 Vec::new()
             }
+            // The command is apt's: only for the `.deb`.
             UpdateMsg::CopyCommand => match &self.updater.phase {
-                Phase::HandedOff { file, .. } => {
+                Phase::HandedOff { file, .. }
+                    if self.updater.env.package == Some(PackageKind::Deb) =>
+                {
                     vec![Effect::WriteClipboard(Redacted(install_command(file)))]
                 }
                 _ => Vec::new(),
             },
             UpdateMsg::InstallerOpened(result) => self.installer_opened(result),
+            UpdateMsg::CloseForInstall => self.close_for_install(),
         }
     }
 
@@ -359,6 +370,11 @@ impl App {
             Phase::Ready(_) => {
                 self.updater.card = true;
                 return self.install();
+            }
+            // The installer is open: closing hoprs is what is left (never a second one).
+            Phase::InstallerOpen(_) => {
+                self.updater.card = true;
+                return self.close_for_install();
             }
             // Idle, Failed (Try again), HandedOff (again: the download step finds the
             // file there, verifies and reuses it).
@@ -407,6 +423,10 @@ impl App {
                 *phase = Phase::Verifying;
                 Vec::new()
             }
+            // A second request for the download under way: that one goes on.
+            DownloadEvent::Done(Err(error)) if error.code == Some("update-download-busy") => {
+                Vec::new()
+            }
             DownloadEvent::Done(Err(error)) => {
                 *phase = Phase::Failed(error);
                 Vec::new()
@@ -442,14 +462,15 @@ impl App {
     }
 
     fn installer_opened(&mut self, result: Result<(), Error>) -> Vec<Effect> {
-        let Phase::HandedOff { open_error, .. } = &mut self.updater.phase else {
+        let Phase::HandedOff { file, open_error } = &mut self.updater.phase else {
             return Vec::new();
         };
         let windows = self.updater.env.os == Os::Windows;
         match result {
-            // Already closing: the close in progress is enough (a second request would
-            // force the exit).
-            Ok(()) if windows && !self.closing => vec![Effect::RequestClose],
+            Ok(()) if windows => {
+                self.updater.phase = Phase::InstallerOpen(file.clone());
+                self.close_for_install()
+            }
             Ok(()) => {
                 *open_error = None;
                 Vec::new()
@@ -464,6 +485,16 @@ impl App {
                 Vec::new()
             }
         }
+    }
+
+    /// Windows, the installer open: the window's normal close request (the unsent-edits
+    /// question included). Already closing: the close in progress is enough (a second
+    /// request would force the exit).
+    fn close_for_install(&mut self) -> Vec<Effect> {
+        if !matches!(self.updater.phase, Phase::InstallerOpen(_)) || self.closing {
+            return Vec::new();
+        }
+        vec![Effect::RequestClose]
     }
 
     /// A check finished. Settings' Check now (`manual == Checking`, also when it was
@@ -481,7 +512,8 @@ impl App {
         let mut effects = Vec::new();
         // Update clicked before the release was known continues now (or, if the check
         // failed, opens the release page of the version offered).
-        let start = std::mem::take(&mut self.updater.start_pending);
+        // Nothing new starts once the window closes.
+        let start = std::mem::take(&mut self.updater.start_pending) && !self.closing;
         let failed = result.is_err();
         match result {
             Ok(release) if is_newer(&release.version, &self.updater.env.running) => {

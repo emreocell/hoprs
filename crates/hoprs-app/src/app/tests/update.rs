@@ -877,3 +877,109 @@ async fn installer_opened_while_closing_does_not_close_again() {
     let effects = app.update(upd(UpdateMsg::InstallerOpened(Ok(()))));
     no_close(&effects);
 }
+
+/// Windows, the installer opened: hoprs asked to close.
+async fn windows_installer_open() -> (App, PathBuf) {
+    let mut app = knowing(Os::Windows, Some(PackageKind::Msi)).await;
+    app.update(upd(UpdateMsg::Start));
+    let file = PathBuf::from("hoprs_1.4.0_windows_x64.msi");
+    app.update(download(DownloadEvent::Done(Ok(file.clone()))));
+    app.update(upd(UpdateMsg::Install));
+    let effects = app.update(upd(UpdateMsg::InstallerOpened(Ok(()))));
+    assert!(matches!(effects[..], [Effect::RequestClose]), "{effects:?}");
+    assert_eq!(app.updater.phase, Phase::InstallerOpen(file.clone()));
+    (app, file)
+}
+
+#[tokio::test]
+async fn cancelled_close_offers_close_hoprs_again() {
+    // The unsent-edits question was answered Cancel: the window stays, not closing.
+    let (mut app, file) = windows_installer_open().await;
+    assert!(!app.closing);
+    let effects = app.update(upd(UpdateMsg::CloseForInstall));
+    assert!(matches!(effects[..], [Effect::RequestClose]), "{effects:?}");
+    assert_eq!(app.updater.phase, Phase::InstallerOpen(file));
+
+    // Update (the palette) asks for the close too: never a second installer.
+    let effects = app.update(upd(UpdateMsg::Start));
+    assert!(matches!(effects[..], [Effect::RequestClose]), "{effects:?}");
+    assert!(jobs(&effects).is_empty());
+
+    // ✕ collapses the card; the footer line brings it back.
+    app.update(upd(UpdateMsg::Dismiss));
+    assert!(!app.updater.card);
+    app.update(upd(UpdateMsg::ShowCard));
+    assert!(app.updater.card);
+
+    // Already closing: no second request (it would force the exit).
+    app.closing = true;
+    no_close(&app.update(upd(UpdateMsg::CloseForInstall)));
+}
+
+#[tokio::test]
+async fn close_for_install_needs_the_installer_open() {
+    let mut app = knowing(Os::Windows, Some(PackageKind::Msi)).await;
+    assert!(app.update(upd(UpdateMsg::CloseForInstall)).is_empty());
+    app.update(upd(UpdateMsg::Start));
+    app.update(download(DownloadEvent::Done(Ok(PathBuf::from("x.msi")))));
+    assert!(app.update(upd(UpdateMsg::CloseForInstall)).is_empty());
+}
+
+#[tokio::test]
+async fn busy_download_error_is_ignored() {
+    let mut app = knowing(Os::Linux, Some(PackageKind::Deb)).await;
+    app.update(upd(UpdateMsg::Start));
+    let busy = Error::coded(
+        ErrorKind::Conflict,
+        "update-download-busy",
+        "This update is already downloading",
+    );
+    assert!(
+        app.update(download(DownloadEvent::Done(Err(busy))))
+            .is_empty()
+    );
+    assert!(matches!(app.updater.phase, Phase::Downloading { .. }));
+}
+
+#[tokio::test]
+async fn copy_command_only_for_the_deb() {
+    let file = PathBuf::from("/home/me/Downloads/hoprs_1.4.0-1_amd64.deb");
+    let mut app = knowing(Os::Linux, Some(PackageKind::Deb)).await;
+    app.updater.phase = Phase::HandedOff {
+        file: file.clone(),
+        open_error: None,
+    };
+    let effects = app.update(upd(UpdateMsg::CopyCommand));
+    assert!(
+        matches!(&effects[..], [Effect::WriteClipboard(_)]),
+        "{effects:?}"
+    );
+
+    let mut app = knowing(Os::MacOs, Some(PackageKind::Dmg)).await;
+    app.updater.phase = Phase::HandedOff {
+        file,
+        open_error: None,
+    };
+    assert!(app.update(upd(UpdateMsg::CopyCommand)).is_empty());
+}
+
+#[tokio::test]
+async fn pending_start_does_not_continue_while_closing() {
+    let mut app = fresh().await;
+    app.update(settings_loaded(seen("1.4.0")));
+    app.update(upd(UpdateMsg::Start));
+    app.closing = true;
+    let effects = app.update(checked(true, Ok(release("1.4.0"))));
+    assert!(jobs(&effects).is_empty(), "{effects:?}");
+    assert_eq!(app.updater.phase, Phase::Idle);
+
+    let mut app = fresh().await;
+    app.update(settings_loaded(seen("1.4.0")));
+    app.update(upd(UpdateMsg::Start));
+    app.closing = true;
+    let effects = app.update(checked(true, Err(failure())));
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::OpenPage(_))),
+        "{effects:?}"
+    );
+}
