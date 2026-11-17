@@ -19,6 +19,7 @@ mod renderer;
 mod settings;
 mod terminal;
 mod ui;
+mod update;
 
 use std::borrow::Cow;
 use std::fs::{self, File, OpenOptions};

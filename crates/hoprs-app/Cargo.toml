@@ -52,6 +52,14 @@ fluent-syntax = "0.12"
 unic-langid = "0.9"
 # The OS language, for the "System" language setting. MIT OR Apache-2.0.
 sys-locale = "0.3"
+# Compares the running version with the latest release's (update notice). Already in the
+# tree. MIT OR Apache-2.0.
+semver = "1"
+# Reads GitHub's release JSON by hand (update notice). Already in the tree. MIT OR Apache-2.0.
+serde_json = { workspace = true }
+# Checks a downloaded installer against SHA256SUMS (update notice). Already in the tree.
+# MIT OR Apache-2.0.
+sha2 = { workspace = true }
 
 # Windows: attach to the parent console so `hoprs.exe --version` prints (GUI subsystem),
 # and open remote edits with the default editor.
