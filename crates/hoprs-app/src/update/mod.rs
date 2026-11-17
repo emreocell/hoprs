@@ -62,8 +62,10 @@ fn bad(detail: impl Into<String>) -> Error {
     .with_detail(detail)
 }
 
+/// An `https://github.com/...` URL: the only host a release page or asset is listed on.
 fn https(url: &str) -> bool {
-    url.starts_with("https://")
+    url.strip_prefix("https://")
+        .is_some_and(|rest| rest.split(['/', '?', '#']).next() == Some("github.com"))
 }
 
 /// The release in GitHub's `releases/latest` JSON. Anything unexpected is an error: a
@@ -92,7 +94,7 @@ pub fn parse_release(json: &[u8]) -> Result<Release, Error> {
         parse_version(&tag).ok_or_else(|| bad(format!("tag `{tag}` is not a version")))?;
     let page = text(&value, "html_url")?;
     if !https(&page) {
-        return Err(bad("`html_url` is not https"));
+        return Err(bad("`html_url` is not an https://github.com URL"));
     }
     let list = value
         .get("assets")
@@ -102,7 +104,7 @@ pub fn parse_release(json: &[u8]) -> Result<Release, Error> {
     for item in list {
         let url = text(item, "browser_download_url")?;
         if !https(&url) {
-            return Err(bad("an asset URL is not https"));
+            return Err(bad("an asset URL is not an https://github.com URL"));
         }
         assets.push(Asset {
             name: text(item, "name")?,
@@ -184,6 +186,16 @@ mod tests {
             v["assets"][0]["browser_download_url"] = serde_json::json!("http://x/y");
         }));
         bodies.push(edit(&|v| v["assets"][0]["size"] = serde_json::json!("big")));
+        bodies.push(edit(&|v| {
+            v["assets"][0]["browser_download_url"] =
+                serde_json::json!("https://evil.example/a.deb");
+        }));
+        bodies.push(edit(&|v| {
+            v["html_url"] = serde_json::json!("https://github.com.evil.example/x");
+        }));
+        bodies.push(edit(&|v| {
+            v["html_url"] = serde_json::json!("https://user@github.com/x");
+        }));
         bodies.push("<html>rate limited</html>".to_owned());
         bodies.push(String::new());
         for body in bodies {

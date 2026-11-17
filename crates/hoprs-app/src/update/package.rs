@@ -43,7 +43,15 @@ pub fn package_for(os: Os, x86_64: bool, exe: &str, program_files: &[&str]) -> O
             .ends_with(".app/Contents/MacOS/hoprs")
             .then_some(PackageKind::Dmg),
         Os::Windows => {
-            let norm = |s: &str| s.replace('/', "\\").trim_end_matches('\\').to_lowercase();
+            let norm = |s: &str| {
+                // `canonicalize` gives `\\?\C:\...` (or `\\?\UNC\server\...`) on Windows.
+                let s = s.replace('/', "\\");
+                let s = match s.strip_prefix(r"\\?\UNC\") {
+                    Some(rest) => format!(r"\\{rest}"),
+                    None => s.strip_prefix(r"\\?\").unwrap_or(&s).to_owned(),
+                };
+                s.trim_end_matches('\\').to_lowercase()
+            };
             let exe = norm(exe);
             (x86_64
                 && program_files.iter().any(|dir| {
@@ -107,6 +115,23 @@ mod tests {
         assert_eq!(
             package_for(Os::Windows, true, r"c:\program files\HOPRS\hoprs.exe", &pf),
             Some(PackageKind::Msi)
+        );
+        assert_eq!(
+            package_for(
+                Os::Windows,
+                true,
+                r"\\?\C:\Program Files\hoprs\hoprs.exe",
+                &pf
+            ),
+            Some(PackageKind::Msi)
+        );
+        assert_eq!(
+            package_for(Os::Windows, true, r"\\?\C:\Users\u\hoprs\hoprs.exe", &pf),
+            None
+        );
+        assert_eq!(
+            package_for(Os::Windows, true, r"\\?\UNC\srv\share\hoprs\hoprs.exe", &pf),
+            None
         );
         assert_eq!(
             package_for(
