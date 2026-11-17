@@ -64,19 +64,34 @@ pub fn run(fetch: &dyn Fetch, job: &DownloadJob, dir: &Path, send: &mut dyn FnMu
 /// Where downloads go: the user's Downloads folder when there is one; otherwise a private
 /// per-user directory, `<cache>/hoprs/updates` (made `0700` on Unix), or, without a cache
 /// directory, a new private temporary directory. Never the shared temporary directory
-/// itself, where another user could plant or swap a file.
+/// itself, where another user could plant or swap a file. (The choice is
+/// `choose_download_dir`, which tests drive with their own directories.)
 pub fn download_dir() -> Result<PathBuf, Error> {
-    if let Some(dir) = dirs::download_dir().filter(|dir| dir.is_dir()) {
+    choose_download_dir(
+        dirs::download_dir(),
+        dirs::cache_dir(),
+        &std::env::temp_dir(),
+    )
+}
+
+/// [`download_dir`] from its inputs: the Downloads folder, the cache directory, and the
+/// directory a new private temporary directory goes in as the last resort.
+fn choose_download_dir(
+    downloads: Option<PathBuf>,
+    cache: Option<PathBuf>,
+    temp: &Path,
+) -> Result<PathBuf, Error> {
+    if let Some(dir) = downloads.filter(|dir| dir.is_dir()) {
         return Ok(dir);
     }
-    if let Some(dir) = dirs::cache_dir().map(|dir| dir.join("hoprs").join("updates"))
+    if let Some(dir) = cache.map(|dir| dir.join("hoprs").join("updates"))
         && private_dir(&dir).is_ok()
     {
         return Ok(dir);
     }
     tempfile::Builder::new()
         .prefix("hoprs-update-")
-        .tempdir()
+        .tempdir_in(temp)
         .map(tempfile::TempDir::keep)
         .map_err(|e| failed(format!("no directory to download into: {e}")))
 }
@@ -156,6 +171,52 @@ fn existing(target: &Path) -> Result<Existing, Error> {
     }
 }
 
+/// How old a part file must be (last written) before a new download removes it.
+const STALE_PART: Duration = Duration::from_secs(60 * 60);
+
+/// Whether `file` is a part file of `name` ([`create_part`]'s `<name>.<pid>.<digits>.part`).
+fn is_part_of(file: &str, name: &str) -> bool {
+    let Some(middle) = file
+        .strip_prefix(name)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .and_then(|rest| rest.strip_suffix(".part"))
+    else {
+        return false;
+    };
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    matches!(middle.split_once('.'), Some((pid, n)) if digits(pid) && digits(n))
+}
+
+/// Removes the part files of `name` in `dir` that earlier downloads left (a crash, a
+/// power cut): regular files this user owns, not written for [`STALE_PART`]. A download
+/// in flight writes its part file all the time (and one of the same asset in this process
+/// is refused while it runs), so its file is never this old. Best effort: errors are
+/// ignored.
+fn remove_stale_parts(dir: &Path, name: &str, now: std::time::SystemTime) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file = entry.file_name();
+        if !file.to_str().is_some_and(|file| is_part_of(file, name)) {
+            continue;
+        }
+        let path = entry.path();
+        // Not followed: a symlink is no regular file.
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let old = meta
+            .modified()
+            .ok()
+            .and_then(|at| now.duration_since(at).ok())
+            .is_some_and(|age| age >= STALE_PART);
+        if meta.is_file() && owned(&meta) && old {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
 /// A new part file next to `target`, created exclusively.
 fn create_part(dir: &Path, name: &str) -> Result<(PathBuf, File), Error> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -196,6 +257,7 @@ fn steps(
             "asset name `{name}` is not a file name"
         )));
     }
+    remove_stale_parts(dir, name, std::time::SystemTime::now());
     let sums = fetch.text(&job.sums_url)?;
     let expected = expected_for(&sums, name)?;
     let target = dir.join(name);
@@ -577,8 +639,35 @@ mod tests {
         }
         // Again: it already exists, fine.
         private_dir(&updates).unwrap();
-        // The real one is never the shared temporary directory itself.
-        assert_ne!(download_dir().unwrap(), std::env::temp_dir());
+    }
+
+    /// The Downloads folder, else `<cache>/hoprs/updates`, else a new directory inside the
+    /// temporary one (never the temporary directory itself). Only tempdirs are touched.
+    #[test]
+    fn download_dir_choice() {
+        let root = tempfile::tempdir().unwrap();
+        let downloads = root.path().join("Downloads");
+        let cache = root.path().join("cache");
+        let temp = root.path().join("tmp");
+        std::fs::create_dir(&downloads).unwrap();
+        std::fs::create_dir(&temp).unwrap();
+
+        let chosen =
+            choose_download_dir(Some(downloads.clone()), Some(cache.clone()), &temp).unwrap();
+        assert_eq!(chosen, downloads);
+        assert!(!cache.exists());
+
+        // No Downloads folder (or one that is not there): the private cache directory.
+        let missing = root.path().join("missing");
+        let chosen = choose_download_dir(Some(missing.clone()), Some(cache.clone()), &temp);
+        assert_eq!(chosen.unwrap(), cache.join("hoprs").join("updates"));
+        assert!(!missing.exists());
+
+        // Neither: a new directory inside `temp`, not `temp` itself.
+        let chosen = choose_download_dir(None, None, &temp).unwrap();
+        assert_ne!(chosen, temp);
+        assert_eq!(chosen.parent(), Some(temp.as_path()));
+        assert!(chosen.is_dir());
     }
 
     /// (c, e) A directory at the final name is refused, not replaced or reused.
@@ -668,7 +757,71 @@ mod tests {
     }
 
     #[test]
-    fn download_dir_exists() {
-        assert!(download_dir().unwrap().is_dir());
+    fn part_file_names() {
+        assert!(is_part_of(&format!("{NAME}.1234.5678.part"), NAME));
+        for other in [
+            format!("{NAME}.part"),
+            format!("{NAME}.1234.part"),
+            format!("{NAME}.x.5678.part"),
+            format!("{NAME}.1234.56a.part"),
+            format!("{NAME}.1234.5678.part.bak"),
+            format!("{NAME}.1234.5678"),
+            "other.deb.1234.5678.part".to_owned(),
+            format!("{NAME}x.1234.5678.part"),
+            NAME.to_owned(),
+        ] {
+            assert!(!is_part_of(&other, NAME), "{other}");
+        }
+    }
+
+    /// A new download removes this asset's part files older than an hour; a fresh one
+    /// (another download writing it), other files and other assets' parts stay.
+    #[test]
+    fn stale_part_files_are_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = std::time::SystemTime::now();
+        let old = now - STALE_PART - Duration::from_secs(60);
+        let make = |file: &str, at: std::time::SystemTime| {
+            let path = dir.path().join(file);
+            std::fs::write(&path, b"x").unwrap();
+            File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+            path
+        };
+        let stale = make(&format!("{NAME}.11.22.part"), old);
+        let live = make(&format!("{NAME}.33.44.part"), now);
+        let planted = make(&format!("{NAME}.part"), old);
+        let other = make("other.deb.11.22.part", old);
+        let installer = make(NAME, old);
+        // A directory with a part file's name is not a regular file: kept.
+        let folder = dir.path().join(format!("{NAME}.55.66.part"));
+        std::fs::create_dir(&folder).unwrap();
+        #[cfg(unix)]
+        let link = {
+            let target = make("target", old);
+            let link = dir.path().join(format!("{NAME}.77.88.part"));
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            link
+        };
+
+        remove_stale_parts(dir.path(), NAME, now);
+        assert!(!stale.exists());
+        for kept in [&live, &planted, &other, &installer, &folder] {
+            assert!(kept.exists(), "{}", kept.display());
+        }
+        #[cfg(unix)]
+        assert!(std::fs::symlink_metadata(&link).is_ok());
+
+        // Through a real download too.
+        let stale = make(&format!("{NAME}.11.23.part"), old);
+        let fetch = TestFetch::new(BYTES, BYTES);
+        let events = collect(&fetch, &job(BYTES.len() as u64), dir.path());
+        assert_eq!(done(&events).unwrap(), dir.path().join(NAME));
+        assert!(!stale.exists());
+        assert!(live.exists());
     }
 }

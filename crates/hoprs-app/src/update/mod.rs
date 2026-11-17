@@ -14,6 +14,8 @@ pub mod sums;
 
 /// The latest stable release, as GitHub's API describes it.
 pub const API_URL: &str = "https://api.github.com/repos/engviniciusbs/hoprs/releases/latest";
+/// Where every asset of a hoprs release is downloaded from (`browser_download_url`).
+pub const DOWNLOAD_PREFIX: &str = "https://github.com/engviniciusbs/hoprs/releases/download/";
 /// The release asset that lists every other asset's SHA-256.
 pub const SUMS_NAME: &str = "SHA256SUMS";
 /// How long after the settings load the first automatic check waits.
@@ -69,6 +71,20 @@ fn https(url: &str) -> bool {
         .is_some_and(|rest| rest.split(['/', '?', '#']).next() == Some("github.com"))
 }
 
+/// An asset URL of this project's releases: [`DOWNLOAD_PREFIX`], then a path of plain
+/// segments (no `.` or `..`, encoded or not, no backslash, query or fragment).
+fn release_asset_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix(DOWNLOAD_PREFIX) else {
+        return false;
+    };
+    !rest.is_empty()
+        && !rest.contains(['\\', '?', '#'])
+        && rest.split('/').all(|segment| {
+            let decoded = segment.to_ascii_lowercase().replace("%2e", ".");
+            !segment.is_empty() && decoded != "." && decoded != ".."
+        })
+}
+
 /// The release in GitHub's `releases/latest` JSON. Anything unexpected is an error: a
 /// missing field, a draft or pre-release, an unparsable tag, a URL that is not HTTPS.
 pub fn parse_release(json: &[u8]) -> Result<Release, Error> {
@@ -104,8 +120,8 @@ pub fn parse_release(json: &[u8]) -> Result<Release, Error> {
     let mut assets = Vec::with_capacity(list.len());
     for item in list {
         let url = text(item, "browser_download_url")?;
-        if !https(&url) {
-            return Err(bad("an asset URL is not an https://github.com URL"));
+        if !release_asset_url(&url) {
+            return Err(bad(format!("an asset URL is not under {DOWNLOAD_PREFIX}")));
         }
         assets.push(Asset {
             name: text(item, "name")?,
@@ -203,5 +219,41 @@ mod tests {
             let err = parse_release(body.as_bytes()).unwrap_err();
             assert_eq!(err.code, Some("update-bad-response"), "{body}");
         }
+    }
+
+    #[test]
+    fn asset_urls_are_pinned_to_the_release_downloads() {
+        let ok = [
+            "https://github.com/engviniciusbs/hoprs/releases/download/v1.4.0/hoprs_1.4.0-1_amd64.deb",
+            "https://github.com/engviniciusbs/hoprs/releases/download/v1.4.0/SHA256SUMS",
+        ];
+        for url in ok {
+            assert!(release_asset_url(url), "{url}");
+        }
+        let refused = [
+            "https://github.com/someone/hoprs/releases/download/v1.4.0/a.deb",
+            "https://github.com/engviniciusbs/other/releases/download/v1.4.0/a.deb",
+            "https://github.com/engviniciusbs/hoprs/archive/v1.4.0.zip",
+            "https://github.com/engviniciusbs/hoprs/releases/download/",
+            "https://github.com/engviniciusbs/hoprs/releases/download/../../../x/y/a.deb",
+            "https://github.com/engviniciusbs/hoprs/releases/download/v1.4.0/%2E%2E/a.deb",
+            "https://github.com/engviniciusbs/hoprs/releases/download/v1.4.0//a.deb",
+            "https://github.com/engviniciusbs/hoprs/releases/download/v1.4.0/a.deb?x=1",
+            "https://github.com/engviniciusbs/hoprs/releases/download/v1.4.0/a.deb#x",
+            "https://github.com/engviniciusbs/hoprs/releases/download/v1.4.0\\a.deb",
+            "http://github.com/engviniciusbs/hoprs/releases/download/v1.4.0/a.deb",
+            "https://objects.githubusercontent.com/engviniciusbs/hoprs/releases/download/v1/a",
+            "https://github.com.evil.example/engviniciusbs/hoprs/releases/download/v1/a",
+            "https://user@github.com/engviniciusbs/hoprs/releases/download/v1/a",
+        ];
+        for url in refused {
+            assert!(!release_asset_url(url), "{url}");
+        }
+        // In the release JSON: one asset elsewhere on github.com fails the whole answer.
+        let mut value: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        value["assets"][0]["browser_download_url"] =
+            serde_json::json!("https://github.com/someone/hoprs/releases/download/v1.3.1/a.deb");
+        let err = parse_release(value.to_string().as_bytes()).unwrap_err();
+        assert_eq!(err.code, Some("update-bad-response"));
     }
 }
