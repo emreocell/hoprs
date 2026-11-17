@@ -1,11 +1,8 @@
 <p align="center">
-  <img src="crates/hoprs-app/assets/icon/hoprs.svg" width="96" height="96" alt="hoprs logo">
+  <img src="docs/images/banner.png" width="100%" alt="hoprs: SSH, SFTP and FTP in one window. A fast, native desktop client for Linux, macOS and Windows, written in Rust. The banner shows the logo and the app with a terminal tab and a files tab, two files being dragged to the server.">
 </p>
 
-<h1 align="center">hoprs</h1>
-
 <p align="center">
-  <strong>SSH, SFTP and FTP in one window.</strong><br>
   A fast, native SSH, SFTP, FTP and FTPS desktop client for Linux, macOS and Windows, written in Rust.
 </p>
 
@@ -23,8 +20,6 @@
   <a href="CHANGELOG.md">Changelog</a> ·
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
-
-![hoprs: a saved SSH site open with the local and remote folders side by side, file kind icons and a selected row, the folder compare panel listing the differences, and an upload running in the transfer queue](docs/images/files.png)
 
 hoprs keeps the idea that made FileZilla useful (a list of saved sites you open with one
 click) and puts a terminal, a two-pane file browser, folder compare and a persistent
@@ -61,12 +56,16 @@ transfer queue behind it, in one quiet window that opens in under 100 ms and idl
 - **Saved sites with a protocol each:** `ssh` (terminal, files over SFTP, or both, over one
   connection), `ftp`, `ftps-explicit` and `ftps-implicit`. Plain FTP is allowed and labelled
   `ftp (unencrypted)`.
-- **Workspaces:** a workspace is a bundle of sites. Opening it connects all of them and
-  restores their tabs. A site can belong to several workspaces.
+- **Workspaces:** a workspace groups sites in the sidebar. Open its sites one by one, or
+  all at once (right-click, Open all), which also restores their tabs. A site can belong to
+  several workspaces.
 - **Terminal:** `xterm-256color` with truecolor, 10 000 lines of scrollback by default,
   find in scrollback, copy and paste, and a reconnect bar when the connection drops.
 - **Two-pane file browser:** local and remote side by side, virtualised lists that stay
   smooth at 100 000 entries, rename, new folder, delete, upload and download.
+- **Right-click menus and a visible drag:** every file, tab, site and queue row has a menu
+  with what can be done to it, and dragging files between the panes shows what is moving
+  and where it will land.
 - **Folder compare:** a panel lists what is new, changed or missing on each side of the two
   open folders, and uploads or downloads only the difference. Nothing is deleted.
 - **Transfer queue:** persistent (SQLite), parallel, resumes after a dropped connection or
@@ -88,10 +87,15 @@ transfer queue behind it, in one quiet window that opens in under 100 ms and idl
 - **Language:** English or Brazilian Portuguese. hoprs follows the OS language by default;
   Settings › Language switches it at once.
 - **Command palette:** Ctrl+K (Cmd+K on macOS) jumps to any tab, site, workspace or action.
+- **Update notice:** hoprs tells you when a new version is out and, with one click,
+  downloads it, checks it against the release's `SHA256SUMS` and opens the system
+  installer. It can be turned off; see [Updates](#updates).
 - **Technical log:** a log panel and `RUST_LOG` support, with no passwords, file contents or
   terminal bytes in it.
 
 ## Screenshots
+
+![hoprs: a saved SSH site open with the local and remote folders side by side, file kind icons and a selected row, the folder compare panel listing the differences, and an upload running in the transfer queue](docs/images/files.png)
 
 | | |
 |---|---|
@@ -497,6 +501,7 @@ and idles under 80 MB, and that removing and purging the package keep user data.
 | `scripts/release-notes.sh` | Prints a version's section of the changelog |
 | `scripts/workspace-version.sh` | Prints the workspace version |
 | `scripts/readme-shots.sh` | Retakes the README screenshots from the released `.deb` against the Docker test servers |
+| `scripts/readme-banner.sh` | Renders the README header (`docs/images/banner.png`) from `docs/images/banner.html` with headless Chrome |
 
 ## Architecture
 
