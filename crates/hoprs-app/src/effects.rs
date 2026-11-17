@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{Stream, StreamExt, stream};
-use hoprs_core::{Error, ErrorKind, RemotePath, Site, SiteId, WorkspaceId};
+use hoprs_core::{Error, RemotePath, Site, SiteId, WorkspaceId};
 use hoprs_transfer::{Event, TransferSpec};
 use tokio::sync::{broadcast, mpsc, watch};
 
@@ -19,7 +19,7 @@ use crate::app::edit::{EditsFor, FLUSH_LIMIT, Settle, Settled};
 use crate::app::terminal::ShellSignal;
 use crate::app::{
     CompareItem, CompareMsg, CompareRunId, EditMsg, Effect, FileAction, Message, PickTarget,
-    ProfileOp, RequestId, TabId, TerminalMsg,
+    ProfileOp, RequestId, TabId, TerminalMsg, UpdateMsg,
 };
 use crate::backend::{
     BackendApi, KeptEdit, KnownHostEntry, PromptAnswer, PromptId, SessionId, ShellId, ShellOutput,
@@ -73,7 +73,7 @@ pub fn run(
         Effect::CloseSession(session) => Task::future(close_session(backend, session))
             .and_then(|(kept, kept_in)| Task::done(Message::Edit(EditMsg::Kept { kept, kept_in }))),
         Effect::OpenProfileFolder => Task::perform(
-            open_folder(backend.profile_dir()),
+            crate::opener::open(backend.profile_dir().into_os_string()),
             Message::ProfileFolderOpened,
         ),
         // Never cancelled: a listing the user moved away from finishes, and `update`
@@ -236,6 +236,24 @@ pub fn run(
                 exit_watchdog();
                 iced::window::close(window)
             }),
+        Effect::CheckUpdate { manual } => Task::perform(
+            async move { backend.latest_release().await },
+            move |result| Message::Update(UpdateMsg::Checked { manual, result }),
+        ),
+        Effect::OpenPage(url) => Task::perform(crate::opener::open(url.into()), |result| {
+            Message::Update(UpdateMsg::PageOpened(result))
+        }),
+        Effect::DownloadUpdate(job) => Task::run(backend.download_update(job), |event| {
+            Message::Update(UpdateMsg::Download(event))
+        }),
+        Effect::OpenInstaller(file) => {
+            Task::perform(crate::opener::open(file.into_os_string()), |result| {
+                Message::Update(UpdateMsg::InstallerOpened(result))
+            })
+        }
+        Effect::RequestClose => {
+            iced::window::oldest().and_then(|window| Task::done(Message::CloseRequested(window)))
+        }
         Effect::LoadSettings => Task::done(Message::SettingsLoaded(backend.settings())),
         Effect::LoadQueueStatus => Task::done(Message::QueueStatus(backend.queue_error())),
         Effect::SaveSettings(settings) => Task::future(save_settings(backend, settings)),
@@ -1188,44 +1206,6 @@ pub fn connect_sites(
     stream::select(driver, results)
 }
 
-/// Opens `dir` with the system file manager, off the UI thread.
-async fn open_folder(dir: PathBuf) -> Result<(), Error> {
-    tokio::task::spawn_blocking(move || open_with_system(&dir))
-        .await
-        .map_err(|e| {
-            Error::coded(
-                ErrorKind::Io,
-                "app-opener-task-failed",
-                "Opener task failed",
-            )
-            .with_detail(e.to_string())
-        })?
-}
-
-fn open_with_system(dir: &Path) -> Result<(), Error> {
-    #[cfg(target_os = "windows")]
-    const OPENER: &str = "explorer";
-    #[cfg(target_os = "macos")]
-    const OPENER: &str = "open";
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    const OPENER: &str = "xdg-open";
-
-    let status = std::process::Command::new(OPENER).arg(dir).status()?;
-    // Explorer exits with 1 even when it opened the folder.
-    if status.success() || cfg!(target_os = "windows") {
-        Ok(())
-    } else {
-        let opener = OPENER;
-        Err(Error::coded(
-            ErrorKind::Io,
-            "app-opener-failed",
-            format!("{opener} failed"),
-        )
-        .arg("opener", opener)
-        .with_detail(status.to_string()))
-    }
-}
-
 #[cfg(test)]
 mod compare_tests {
     use super::*;
@@ -1390,7 +1370,7 @@ mod compare_tests {
                 local: 1,
                 remote: 1,
             }],
-            Err(Error::new(ErrorKind::Network, "not reached")),
+            Err(Error::new(hoprs_core::ErrorKind::Network, "not reached")),
             true,
         );
         let mut stream = start(&fake, &runs, session, 3, CompareOptions::default());

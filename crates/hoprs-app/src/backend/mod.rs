@@ -12,8 +12,9 @@ pub mod sessions;
 pub mod shells;
 pub mod vault;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -47,6 +48,9 @@ pub use shells::ShellId;
 pub use vault::{LazyKeyringStore, ProfileSnapshot, VaultHandle};
 
 use crate::settings::{self, Settings, SettingsLoad};
+use crate::update::Release;
+use crate::update::download::{self, DownloadEvent, DownloadJob};
+use crate::update::http::{self, Client};
 
 /// Which pane of a files tab.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -307,6 +311,15 @@ pub trait BackendApi: Send + Sync {
     fn set_workers(&self, workers: usize);
     /// Keepalive (seconds, `10..=300`) of the SSH and FTP connections made from now on.
     fn set_keepalive(&self, secs: u64);
+
+    /// The latest stable release (the update check). `update-dev-build` in a debug build
+    /// without `HOPRS_UPDATE_URL` (see [`http::api_url`]).
+    async fn latest_release(&self) -> Result<Release>;
+    /// Downloads and verifies `job` into the Downloads folder (see [`download::run`]). The
+    /// stream ends with exactly one [`DownloadEvent::Done`]. While a download of the same
+    /// asset runs (even one whose stream was dropped), another is refused at once with
+    /// `update-download-busy`; nothing is started twice.
+    fn download_update(&self, job: DownloadJob) -> BoxStream<'static, DownloadEvent>;
 }
 
 /// The concurrent listings per side for a session's protocol: `(local, remote)`.
@@ -339,6 +352,93 @@ async fn blocking<T: Send + 'static>(
         )
         .with_detail(e.to_string())
     })?
+}
+
+/// The update client, built on first use (reading the system roots is not free).
+type UpdateClient = Arc<OnceLock<Option<Arc<Client>>>>;
+
+fn update_client(cell: &OnceLock<Option<Arc<Client>>>) -> Result<Arc<Client>> {
+    cell.get_or_init(|| http::api_url().map(|url| Arc::new(Client::system(url))))
+        .clone()
+        .ok_or_else(|| {
+            Error::coded(
+                hoprs_core::ErrorKind::NotFound,
+                "update-dev-build",
+                "Update checks are off in development builds (set HOPRS_UPDATE_URL)",
+            )
+        })
+}
+
+/// The asset names being downloaded (see [`BackendApi::download_update`]).
+type Downloading = Arc<Mutex<HashSet<String>>>;
+
+/// Holds an asset name in [`Downloading`] until the worker ends.
+struct InFlight {
+    set: Downloading,
+    name: String,
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.set
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.name);
+    }
+}
+
+/// Runs `work` on the blocking pool unless `name` is already downloading, streaming what
+/// it sends; always ends with one `Done` (a panicking worker gives
+/// `app-background-task-failed`). Starts on the stream's first poll, inside the runtime.
+fn start_download(
+    downloading: Downloading,
+    name: String,
+    work: impl FnOnce(&mut dyn FnMut(DownloadEvent)) + Send + 'static,
+) -> BoxStream<'static, DownloadEvent> {
+    use futures_util::StreamExt;
+    futures_util::stream::once(async move {
+        let claimed = downloading
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(name.clone());
+        if !claimed {
+            let busy = Error::coded(
+                hoprs_core::ErrorKind::Conflict,
+                "update-download-busy",
+                "This update is already downloading",
+            );
+            return futures_util::stream::iter([DownloadEvent::Done(Err(busy))]).left_stream();
+        }
+        let guard = InFlight {
+            set: downloading,
+            name,
+        };
+        let (tx, rx) = mpsc::unbounded_channel();
+        let worker = tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            work(&mut |event| {
+                let _ = tx.send(event);
+            });
+        });
+        futures_util::stream::unfold(Some((rx, worker)), |state| async move {
+            let (mut rx, worker) = state?;
+            if let Some(event) = rx.recv().await {
+                return Some((event, Some((rx, worker))));
+            }
+            // The channel closed: after `Done`, or because the worker panicked.
+            let err = worker.await.err()?;
+            let err = Error::coded(
+                hoprs_core::ErrorKind::Io,
+                "app-background-task-failed",
+                "Background task failed",
+            )
+            .with_detail(err.to_string());
+            Some((DownloadEvent::Done(Err(err)), None))
+        })
+        .right_stream()
+    })
+    .flatten()
+    .boxed()
 }
 
 /// Where the backend keeps its files.
@@ -389,6 +489,8 @@ pub struct Backend {
     sessions: SessionManager,
     edits: EditManager,
     broker: PromptBroker,
+    update: UpdateClient,
+    downloading: Downloading,
 }
 
 impl Backend {
@@ -438,6 +540,8 @@ impl Backend {
             engine,
             sessions,
             broker,
+            update: UpdateClient::default(),
+            downloading: Downloading::default(),
         })
     }
 }
@@ -866,6 +970,24 @@ impl BackendApi for Backend {
                 secs,
             )));
     }
+
+    async fn latest_release(&self) -> Result<Release> {
+        let cell = self.update.clone();
+        blocking(move || update_client(&cell)?.latest()).await
+    }
+
+    fn download_update(&self, job: DownloadJob) -> BoxStream<'static, DownloadEvent> {
+        let cell = self.update.clone();
+        let name = job.asset.name.clone();
+        start_download(self.downloading.clone(), name, move |send| {
+            let ready =
+                update_client(&cell).and_then(|client| Ok((client, download::download_dir()?)));
+            match ready {
+                Ok((client, dir)) => download::run(client.as_ref(), &job, &dir, send),
+                Err(err) => send(DownloadEvent::Done(Err(err))),
+            }
+        })
+    }
 }
 
 #[cfg(test)]
@@ -899,6 +1021,96 @@ mod tests {
             recovered_dir: dir.join("recovered"),
         };
         Backend::open(config, Arc::new(MemoryStore::new())).unwrap()
+    }
+
+    /// A debug build without `HOPRS_UPDATE_URL` never reaches the network: both update
+    /// calls fail with `update-dev-build`.
+    #[tokio::test]
+    async fn update_calls_need_a_source_in_debug_builds() {
+        use futures_util::StreamExt;
+        if !cfg!(debug_assertions) || std::env::var_os("HOPRS_UPDATE_URL").is_some() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let backend = open(dir.path());
+        assert_eq!(
+            backend.latest_release().await.unwrap_err().code,
+            Some("update-dev-build")
+        );
+        let job = DownloadJob {
+            asset: crate::update::Asset {
+                name: "a.deb".into(),
+                url: "https://github.com/a.deb".into(),
+                size: 1,
+            },
+            sums_url: "https://github.com/SHA256SUMS".into(),
+        };
+        let events: Vec<_> = backend.download_update(job).collect().await;
+        assert!(
+            matches!(
+                events.as_slice(),
+                [DownloadEvent::Done(Err(err))] if err.code == Some("update-dev-build")
+            ),
+            "{events:?}"
+        );
+    }
+
+    /// (d) A second download of the same asset while one runs starts nothing and is
+    /// refused at once; another asset, or the same one afterwards, runs.
+    #[tokio::test]
+    async fn one_download_per_asset_at_a_time() {
+        use futures_util::StreamExt;
+        let downloading = Downloading::default();
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+        let started = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let work = |gate: Option<std::sync::mpsc::Receiver<()>>| {
+            let started = started.clone();
+            move |send: &mut dyn FnMut(DownloadEvent)| {
+                started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                send(DownloadEvent::Verifying);
+                if let Some(gate) = gate {
+                    let _ = gate.recv();
+                }
+                send(DownloadEvent::Done(Ok(PathBuf::from("a.deb"))));
+            }
+        };
+        let mut first = start_download(downloading.clone(), "a.deb".into(), work(Some(gate_rx)));
+        assert!(matches!(first.next().await, Some(DownloadEvent::Verifying)));
+        let second: Vec<_> = start_download(downloading.clone(), "a.deb".into(), work(None))
+            .collect()
+            .await;
+        assert!(
+            matches!(
+                second.as_slice(),
+                [DownloadEvent::Done(Err(err))] if err.code == Some("update-download-busy")
+            ),
+            "{second:?}"
+        );
+        // Another asset is independent.
+        let other: Vec<_> = start_download(downloading.clone(), "b.msi".into(), work(None))
+            .collect()
+            .await;
+        assert!(matches!(other.as_slice(), [_, DownloadEvent::Done(Ok(_))]));
+        // Dropping the first stream does not free the name: its worker still runs.
+        drop(first);
+        let again: Vec<_> = start_download(downloading.clone(), "a.deb".into(), work(None))
+            .collect()
+            .await;
+        assert!(matches!(again.as_slice(), [DownloadEvent::Done(Err(_))]));
+        assert_eq!(started.load(std::sync::atomic::Ordering::SeqCst), 2);
+        // Once it ends, the name is free again.
+        gate_tx.send(()).unwrap();
+        for _ in 0..200 {
+            if downloading.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let last: Vec<_> = start_download(downloading, "a.deb".into(), work(None))
+            .collect()
+            .await;
+        assert!(matches!(last.as_slice(), [_, DownloadEvent::Done(Ok(_))]));
+        assert_eq!(started.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
     /// A queue database that can't be read: the backend still opens, on an in-memory

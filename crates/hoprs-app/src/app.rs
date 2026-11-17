@@ -72,6 +72,7 @@ pub mod settings;
 pub mod tabs;
 pub mod terminal;
 pub mod transfers;
+pub mod update;
 
 pub use actions::FileAction;
 pub use compare::{CompareItem, CompareMsg, CompareRunId};
@@ -86,6 +87,7 @@ pub use queue::{Queue, QueueMsg, QueueTab, RowAction};
 pub use settings::{SettingsTab, SidebarMsg, SidebarSection};
 pub use tabs::{SiteConn, Tab, TabId, TabState};
 pub use terminal::TerminalMsg;
+pub use update::UpdateMsg;
 
 /// A workspace's entry as the sidebar lists it.
 #[derive(Debug, PartialEq)]
@@ -248,6 +250,8 @@ pub struct App {
     pub editor_input: Option<String>,
     /// The compare ignore field as typed, while the settings page is open.
     pub compare_ignore_input: Option<String>,
+    /// The update check, the card and the download ([`update`]).
+    pub updater: update::Updater,
     /// Actions waiting for their site's lost session to reconnect ([`reconnect`]).
     held: HashMap<SiteId, Vec<Effect>>,
     /// Listings sent again after a reconnection, which the reconnect's result does not
@@ -510,6 +514,8 @@ pub enum Message {
     /// Remote editing: the strip's choices, the close questions, the backend's events
     /// and results ([`edit`]).
     Edit(EditMsg),
+    /// The update check, the card's buttons and the download ([`update`]).
+    Update(UpdateMsg),
 }
 
 /// The profile change a form asked for, carried back with its result.
@@ -785,6 +791,20 @@ pub enum Effect {
         sessions: Vec<SessionId>,
         how: edit::Settle,
     },
+    /// Asks for the latest release; back as [`UpdateMsg::Checked`].
+    CheckUpdate {
+        manual: bool,
+    },
+    /// Opens a release page in the browser; back as [`UpdateMsg::PageOpened`].
+    OpenPage(String),
+    /// Downloads and verifies the update; its events come back as [`UpdateMsg::Download`].
+    DownloadUpdate(crate::update::download::DownloadJob),
+    /// Opens a verified installer with the system handler; back as
+    /// [`UpdateMsg::InstallerOpened`].
+    OpenInstaller(std::path::PathBuf),
+    /// Closes the window the normal way ([`Message::CloseRequested`]: the unsent-edits
+    /// question, tabs saved, shutdown), so the Windows installer can replace hoprs.
+    RequestClose,
 }
 
 /// The window's width before the first resize event (`main`'s initial size).
@@ -858,6 +878,7 @@ impl App {
             kept_notice: None,
             editor_input: None,
             compare_ignore_input: None,
+            updater: update::Updater::new(update::UpdateEnv::for_app()),
             held: HashMap::new(),
             replayed: HashSet::new(),
             relist_armed: false,
@@ -1185,7 +1206,7 @@ impl App {
             }
             Message::CloseSettings => return self.close_settings(),
             Message::Settings(msg) => return self.settings_msg(msg),
-            Message::SettingsLoaded(loaded) => self.settings_loaded(loaded),
+            Message::SettingsLoaded(loaded) => return self.settings_loaded(loaded),
             Message::QueueStatus(Some(error)) => self.queue_unavailable(error),
             Message::QueueStatus(None) => {}
             Message::SettingsSaved(result) => return self.settings_saved(result),
@@ -1215,6 +1236,7 @@ impl App {
                 result,
             } => return self.shell_opened(tab, request, result),
             Message::Edit(msg) => return self.edit_msg(msg),
+            Message::Update(msg) => return self.update_msg(msg),
         }
         Vec::new()
     }

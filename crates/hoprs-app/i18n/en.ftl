@@ -67,6 +67,45 @@ palette-close-settings = Close settings
 palette-open-workspace = Open workspace…
 # $name is the open workspace: its tabs are saved, then closed.
 palette-close-all = Close all in { $name }
+# $version is the newer release (e.g. 1.4.0).
+update-palette = Update hoprs to { $version }
+
+# The update card (bottom left), its footer line and Settings → General.
+# $version is a release (e.g. 1.4.0).
+update-available = hoprs { $version } is available
+# $version is the running version.
+update-you-have = You have { $version }.
+update-action = Update
+update-whats-new = What's new
+update-dismiss = Dismiss
+# $done and $total are sizes (e.g. 12.4 MB).
+update-downloading = Downloading… { $done } of { $total }
+update-downloading-size = Downloading… { $done }
+update-verifying = Checking…
+update-try-again = Try again
+update-ready-windows = Ready to install. hoprs will close.
+update-transfers-stop =
+    { $count ->
+        [one] 1 transfer will stop; it continues the next time hoprs starts.
+       *[other] { $count } transfers will stop; they continue the next time hoprs starts.
+    }
+update-close-and-install = Close and install
+update-later = Later
+update-installing = Opening the installer…
+update-linux-opened = Opened with the default app for .deb files. Or run:
+update-linux-run = Run this command to install:
+update-open-failed = The installer did not open.
+update-installer-open = The installer is open. Close hoprs to finish.
+update-close-hoprs = Close hoprs
+update-copy = Copy
+update-macos-steps = Close the hoprs window, then drag hoprs to Applications and choose Replace. If macOS blocks it, choose Open Anyway in System Settings, Privacy & Security.
+update-footer-available = { $version } available
+update-footer-install = Install { $version }
+settings-update-check = Check for updates automatically
+settings-update-check-hint = Once a day hoprs asks GitHub for the latest release. Nothing about you is sent.
+settings-check-now = Check now
+settings-update-checking = Checking…
+settings-up-to-date = hoprs is up to date
 palette-edit = Edit in editor
 palette-compare-folders = Compare folders
 palette-upload = Upload selection
@@ -521,7 +560,7 @@ pick-filter-xml = XML files
 
 ## Settings
 settings-general = General
-settings-general-description = Language and version.
+settings-general-description = Language, updates and version.
 settings-transfers-description = How many files move at once, what happens to existing files, and how connections stay open.
 settings-compare-description = When folders are compared, and the names left out.
 settings-editing-description = The editor that opens remote files.
@@ -813,6 +852,13 @@ error-import-delete-symlink = not deleting: the path is a symlink
 error-import-delete-not-regular = not deleting: not a regular file
 error-import-delete-not-filezilla = not deleting: not a FileZilla site manager file
 error-settings-cannot-read = Can't read settings.toml
+error-update-bad-response = The update server gave an unexpected answer
+error-update-checksum-missing = { $name } is not in the release's SHA256SUMS
+error-update-checksum-mismatch = The download does not match its checksum
+error-update-check-failed = Could not check for updates
+error-update-download-failed = The update could not be downloaded
+error-update-dev-build = Update checks are off in development builds (set HOPRS_UPDATE_URL)
+error-update-download-busy = This update is already downloading
 error-app-opener-task-failed = Opener task failed
 error-app-opener-failed = { $opener } failed
 error-app-vault-task-failed = Vault task failed

@@ -19,6 +19,11 @@ use crate::ui::widgets;
 
 pub const WIDTH: f32 = 256.0;
 pub const SEARCH_HEIGHT: f32 = 32.0;
+/// The footer row ("Import from FileZilla", settings) with the rule above it: the update
+/// card floats this far above the window's bottom edge.
+pub const FOOTER_HEIGHT: f32 = FOOTER_ROW + theme::HAIRLINE;
+/// The footer row's height: an icon button and 4 px above and below.
+const FOOTER_ROW: f32 = widgets::ICON_HIT + 2.0 * theme::SPACE_2XS;
 
 /// Whether `site` matches the filter: name, host or user contains it, ignoring case.
 pub fn site_matches(site: &Site, filter: &str) -> bool {
@@ -107,13 +112,19 @@ pub fn view(app: &App) -> Element<'_, Message> {
         }
     };
 
-    let content = column![
-        search,
-        container(body).height(Length::Fill),
-        group_rule(),
-        container(footer).padding(Padding::from([theme::SPACE_2XS, theme::SPACE_SM])),
-    ]
-    .height(Length::Fill);
+    let mut content =
+        column![search, container(body).height(Length::Fill), group_rule()].height(Length::Fill);
+    // "↓ 1.4.0 available" above the footer row, while the update card is collapsed.
+    if let Some(line) = crate::ui::update::footer_line(app) {
+        content = content.push(
+            container(line).padding(Padding::from([theme::SPACE_3XS, theme::SPACE_SM]).bottom(0)),
+        );
+    }
+    let content = content.push(
+        container(footer)
+            .center_y(FOOTER_ROW)
+            .padding(Padding::from([0.0, theme::SPACE_SM])),
+    );
 
     container(content)
         .width(WIDTH - theme::HAIRLINE)

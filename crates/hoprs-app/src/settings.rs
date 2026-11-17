@@ -165,10 +165,14 @@ pub struct Settings {
     pub compare_height: Option<f32>,
     /// The queue's maximum height in px (it still shrinks to its rows).
     pub queue_height: f32,
+    /// Whether the app checks for a newer release by itself.
+    pub update_check: bool,
+    /// The newest version an update card was shown for; `None` until one was.
+    pub update_seen: Option<semver::Version>,
 }
 
 /// Keys [`file_of`] leaves out when they hold their default.
-const OPTIONAL_KEYS: [&str; 1] = ["compare_height"];
+const OPTIONAL_KEYS: [&str; 2] = ["compare_height", "update_seen"];
 
 /// The largest height a saved panel size may have.
 const PANEL_HEIGHT_MAX: f32 = 10_000.0;
@@ -228,6 +232,8 @@ impl Default for Settings {
             sites: SectionState::default(),
             compare_height: None,
             queue_height: QUEUE_MAX_HEIGHT,
+            update_check: true,
+            update_seen: None,
         }
     }
 }
@@ -308,6 +314,10 @@ struct File {
     compare_height: Option<toml::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     queue_height: Option<toml::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    update_check: Option<toml::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    update_seen: Option<toml::Value>,
 }
 
 /// A bool key; anything else (or missing) is `false`.
@@ -428,6 +438,13 @@ pub fn parse(content: &str) -> Result<Settings> {
         },
         compare_height: panel_height(file.compare_height),
         queue_height: panel_height(file.queue_height).unwrap_or(defaults.queue_height),
+        update_check: file
+            .update_check
+            .and_then(|value| value.as_bool())
+            .unwrap_or(defaults.update_check),
+        update_seen: file
+            .update_seen
+            .and_then(|value| value.as_str().and_then(|text| text.parse().ok())),
     })
 }
 
@@ -467,6 +484,11 @@ fn file_of(settings: &Settings) -> File {
             panel_height(Some(toml::Value::Float(f64::from(settings.queue_height))))
                 .unwrap_or(QUEUE_MAX_HEIGHT),
         ))),
+        update_check: Some(toml::Value::Boolean(settings.update_check)),
+        update_seen: settings
+            .update_seen
+            .as_ref()
+            .map(|version| toml::Value::String(version.to_string())),
     }
 }
 
@@ -641,6 +663,39 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("future_key = 1"), "{text}");
         assert!(text.contains("sites_hidden = true"), "{text}");
+    }
+
+    #[test]
+    fn update_keys_roundtrip_and_invalid() {
+        let defaults = Settings::default();
+        assert!(defaults.update_check);
+        assert_eq!(defaults.update_seen, None);
+        assert!(!render(&defaults).contains("update_seen"));
+
+        let set = Settings {
+            update_check: false,
+            update_seen: Some(semver::Version::new(1, 4, 0)),
+            ..Settings::default()
+        };
+        assert_eq!(parse(&render(&set)).unwrap(), set);
+
+        assert!(parse("update_check = \"no\"").unwrap().update_check);
+        assert_eq!(parse("update_seen = 3").unwrap().update_seen, None);
+        assert_eq!(parse("update_seen = \"banana\"").unwrap().update_seen, None);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        std::fs::write(&path, "future_key = 1\nupdate_seen = \"1.4.0\"\n").unwrap();
+        let loaded = load(&path).settings;
+        assert_eq!(loaded.update_seen, Some(semver::Version::new(1, 4, 0)));
+        save(&path, &loaded).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("future_key = 1"), "{text}");
+        assert!(text.contains("update_seen = \"1.4.0\""), "{text}");
+        // Back to unset: the key goes away.
+        save(&path, &Settings::default()).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("update_seen"), "{text}");
     }
 
     #[test]

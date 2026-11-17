@@ -48,6 +48,10 @@ pub enum SettingsMsg {
     CompareAuto(bool),
     /// The compare's ignore list as typed (comma-separated): saved as parsed.
     CompareIgnore(String),
+    /// "Check for updates automatically"; saved at once.
+    UpdateCheck(bool),
+    /// "Check now": asks for the latest release, the result shown inline.
+    CheckNow,
     Backup(BackupMsg),
     /// A section of the left navigation.
     Section(SettingsSection),
@@ -315,9 +319,11 @@ impl App {
             .map(|tab| tab.id)
     }
 
-    pub(super) fn settings_loaded(&mut self, loaded: SettingsLoad) {
+    /// The settings the backend read at start; the first update check is armed.
+    pub(super) fn settings_loaded(&mut self, loaded: SettingsLoad) -> Vec<Effect> {
         self.settings = loaded.settings;
         self.settings_load_error = loaded.error;
+        self.schedule_update_check(crate::update::START_DELAY)
     }
 
     pub(super) fn settings_msg(&mut self, msg: SettingsMsg) -> Vec<Effect> {
@@ -438,6 +444,17 @@ impl App {
                 self.settings.compare_ignore = names;
                 self.save_settings_effect().into_iter().collect()
             }
+            SettingsMsg::UpdateCheck(on) => {
+                if on == self.settings.update_check {
+                    return Vec::new();
+                }
+                self.settings.update_check = on;
+                // On: the first check soon; off: the pending timer does nothing.
+                let mut effects = self.schedule_update_check(crate::update::START_DELAY);
+                effects.extend(self.save_settings_effect());
+                effects
+            }
+            SettingsMsg::CheckNow => self.update_msg(super::UpdateMsg::CheckNow),
             SettingsMsg::Backup(msg) => self.backup_msg(msg),
         }
     }

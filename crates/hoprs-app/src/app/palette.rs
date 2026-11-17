@@ -164,7 +164,9 @@ fn empty_query_order(
             PaletteItem::Tab(_) | PaletteItem::SettingsTab if tabs.len() < EMPTY_TABS => {
                 tabs.push(entry);
             }
-            PaletteItem::OpenWorkspace | PaletteItem::Settings => go_to.push(entry),
+            PaletteItem::OpenWorkspace | PaletteItem::Settings | PaletteItem::Update => {
+                go_to.push(entry);
+            }
             PaletteItem::Site(_) if sites.len() < EMPTY_SITES => sites.push(entry),
             PaletteItem::FileKey(..)
             | PaletteItem::Copy(_)
@@ -237,6 +239,8 @@ pub enum PaletteItem {
     Find(TabId),
     /// Compares the files tab's two folders.
     Compare(TabId),
+    /// "Update hoprs to X.Y.Z": the card's Update (listed while a newer version is known).
+    Update,
 }
 
 /// The group of a row, shown as a muted tag.
@@ -414,6 +418,12 @@ impl App {
                 strings::settings(),
                 Some(strings::key_settings()),
             ));
+            if let Some(version) = self.update_offer() {
+                out.push(Entry {
+                    label: strings::update_palette(&version.to_string()),
+                    ..Entry::action(PaletteItem::Update, "", None)
+                });
+            }
             out.extend(self.sites.iter().map(|site| Entry {
                 item: PaletteItem::Site(site.id.clone()),
                 label: site.name.clone(),
@@ -650,6 +660,7 @@ impl App {
                 tab: *tab,
                 msg: TerminalMsg::OpenSearch,
             },
+            PaletteItem::Update => Message::Update(super::UpdateMsg::Start),
         })
     }
 

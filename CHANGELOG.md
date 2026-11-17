@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.4.0 — 2026-11-17
+
+hoprs tells you when a new version is out, and can install it.
+
+- An update card in the sidebar appears once per new version (a footer line keeps the offer after you dismiss it). hoprs checks GitHub's latest release a few seconds after start and every 24 hours; the request carries only `User-Agent: hoprs/<version>` and honours the proxy environment variables (`ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`).
+- **Update** downloads the right package for your system, verifies it against the release's `SHA256SUMS` and opens the system installer: the `.msi` on Windows after a second click ("Close and install", with a warning when transfers are running), the `.dmg` on macOS, the `.deb` on Linux (App Center, plus the `sudo apt install` command to copy). The portable `.zip` and source builds open the release page.
+- Settings → General: "Check for updates automatically" (on by default) and **Check now**.
+- Ctrl+K: "Update hoprs to …" while a newer version is known.
+- The checksum catches a broken download; it does not prove who published the release (see README, Updates).
+
 ## 1.3.1 — 2026-11-16
 
 - Workspaces are plain groups in the sidebar: the big "Open workspace" button and the "Close tabs" link are gone. Right-click a workspace for "Open all", "Close all" (the open workspace) and "Edit". The open workspace is marked with a green icon, and Ctrl+K lists "Close all in (workspace name)" while one is open.

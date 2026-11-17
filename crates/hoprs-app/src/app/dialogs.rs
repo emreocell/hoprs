@@ -556,6 +556,7 @@ fn answer_of(dialog: &mut Dialog) -> PromptAnswer {
 fn behind_overlay(msg: &Message) -> bool {
     match msg {
         Message::Edit(msg) => msg.is_user(),
+        Message::Update(msg) => msg.is_user(),
         // Scroll offsets the lists report (also after a programmatic scroll).
         Message::Pane {
             msg: super::PaneMsg::Scrolled { .. } | super::PaneMsg::Placed(_),

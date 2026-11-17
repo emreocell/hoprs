@@ -62,6 +62,7 @@ The app follows iced's model: state, messages, a pure update, and views.
 | `src/ui/strings.rs` | **Every user-visible text**, as functions that look up the translation catalogs |
 | `src/i18n.rs`, `i18n/*.ftl` | The Fluent catalogs (English, Brazilian Portuguese), the active language, number formatting |
 | `src/terminal/` | The terminal widget on top of `alacritty_terminal` |
+| `src/update/`, `src/opener.rs` | The update notice. `update/` is pure logic (release JSON, version compare, `SHA256SUMS` parsing, picking the package for this system) plus a blocking HTTP client and the download sequence (download, verify, hand off), run on the blocking pool through `BackendApi` methods. `opener.rs` opens the package or page with the system. The state machine and its messages are `app/update.rs` (pure, like the rest of `update`); the card, footer line and Settings rows are `ui/update.rs` |
 | `src/settings.rs` | The settings file (`settings.toml`): load, validate, save, keeping keys a newer hoprs wrote |
 
 ### Where to put a change

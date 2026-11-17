@@ -52,6 +52,29 @@ fluent-syntax = "0.12"
 unic-langid = "0.9"
 # The OS language, for the "System" language setting. MIT OR Apache-2.0.
 sys-locale = "0.3"
+# Compares the running version with the latest release's (update notice). Already in the
+# tree. MIT OR Apache-2.0.
+semver = "1"
+# Reads GitHub's release JSON by hand (update notice). Already in the tree. MIT OR Apache-2.0.
+serde_json = { workspace = true }
+# Checks a downloaded installer against SHA256SUMS (update notice). Already in the tree.
+# MIT OR Apache-2.0.
+sha2 = { workspace = true }
+# The update check and download (blocking, run on the blocking pool): HTTPS only, on the
+# tree's rustls with aws-lc-rs and the system roots. Without its default features it adds
+# `ureq`, `ureq-proto`, `http`, `httparse` and `utf8-zero`; no OpenSSL, no ring, no
+# webpki-roots. MIT OR Apache-2.0.
+ureq = { version = "3.5", default-features = false, features = ["rustls-no-provider"] }
+rustls = { workspace = true }
+rustls-native-certs = { workspace = true }
+# The update download's private fallback directory (never the shared temp directory
+# itself). Already in the tree. MIT OR Apache-2.0.
+tempfile = { workspace = true }
+
+# Unix: the update download reuses an existing file only when this user (geteuid) owns
+# it. Already in the tree. MIT OR Apache-2.0.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # Windows: attach to the parent console so `hoprs.exe --version` prints (GUI subsystem),
 # and open remote edits with the default editor.
@@ -90,6 +113,8 @@ harness = false
 ttf-parser = "0.25"
 criterion = { workspace = true }
 tempfile = { workspace = true }
+# The certificate of the local HTTPS server in the update client's integration test.
+rcgen = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "macros", "time", "test-util"] }
 hoprs-remote = { path = "../hoprs-remote", features = ["testing"] }
 hoprs-ssh = { path = "../hoprs-ssh", features = ["testing"] }

@@ -5,7 +5,7 @@
 # debs/ folder: a local .deb there (LOCAL_DEB=...) is installed, else DEB_URL is downloaded.
 FROM ubuntu:24.04@sha256:2198e4c65076e9cb0b3d695219df667c0e3b0072da64ca3c2648aca17dcecaf5
 ENV DEBIAN_FRONTEND=noninteractive
-ARG DEB_URL=https://github.com/engviniciusbs/hoprs/releases/download/v1.3.1/hoprs_1.3.1-1_amd64.deb
+ARG DEB_URL=https://github.com/engviniciusbs/hoprs/releases/download/v1.4.0/hoprs_1.4.0-1_amd64.deb
 COPY debs/ /tmp/debs/
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl xvfb xdotool x11-utils \

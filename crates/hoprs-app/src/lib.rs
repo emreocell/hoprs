@@ -14,11 +14,13 @@ mod effects;
 mod i18n;
 mod icon;
 mod logbuf;
+mod opener;
 mod probe;
 mod renderer;
 mod settings;
 mod terminal;
 mod ui;
+mod update;
 
 use std::borrow::Cow;
 use std::fs::{self, File, OpenOptions};
