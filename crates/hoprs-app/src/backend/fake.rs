@@ -87,6 +87,8 @@ use super::{
     TransferSnapshot, WorkspaceTabs,
 };
 use crate::settings::{Settings, SettingsLoad};
+use crate::update::Release;
+use crate::update::download::{DownloadEvent, DownloadJob};
 use hoprs_vault::SecretKind;
 
 /// An import, backup or settings call, in [`FakeBackend::backup_calls`]. The test
@@ -262,6 +264,12 @@ struct State {
     compare_scripts: VecDeque<CompareScript>,
     /// Every `compare` call: session, local root, remote root.
     compare_calls: Vec<(SessionId, RemotePath, RemotePath)>,
+    /// What `latest_release` returns; `None` is a failed check.
+    release: Option<Result<Release>>,
+    releases_asked: u32,
+    /// What the next `download_update` streams.
+    download: Vec<DownloadEvent>,
+    downloads: Vec<DownloadJob>,
 }
 
 /// What a scripted `compare` does: sends `progress`, optionally waits on `hold`
@@ -348,6 +356,27 @@ impl FakeBackend {
 
     fn record(&self, call: BackupCall) {
         self.state().backup_calls.push(call);
+    }
+
+    /// What `latest_release` returns (by default a failed check).
+    pub fn with_release(self, release: Result<Release>) -> Self {
+        self.state().release = Some(release);
+        self
+    }
+
+    /// The events the next `download_update` streams.
+    pub fn set_download(&self, events: Vec<DownloadEvent>) {
+        self.state().download = events;
+    }
+
+    /// How many times `latest_release` was called.
+    pub fn releases_asked(&self) -> u32 {
+        self.state().releases_asked
+    }
+
+    /// Every `download_update` job, in order.
+    pub fn downloads(&self) -> Vec<DownloadJob> {
+        self.state().downloads.clone()
     }
 
     pub fn with_site(self, site: Site) -> Self {
@@ -1276,6 +1305,25 @@ impl BackendApi for FakeBackend {
         self.record(BackupCall::SetKeepalive(secs));
     }
 
+    async fn latest_release(&self) -> Result<Release> {
+        let mut state = self.state();
+        state.releases_asked += 1;
+        state.release.clone().unwrap_or_else(|| {
+            Err(Error::coded(
+                ErrorKind::Network,
+                "update-check-failed",
+                "Could not check for updates",
+            )
+            .with_detail("the fake has no release"))
+        })
+    }
+
+    fn download_update(&self, job: DownloadJob) -> BoxStream<'static, DownloadEvent> {
+        let mut state = self.state();
+        state.downloads.push(job);
+        futures_util::stream::iter(std::mem::take(&mut state.download)).boxed()
+    }
+
     async fn start_edit(
         &self,
         session: SessionId,
@@ -1355,6 +1403,44 @@ mod tests {
     use hoprs_transfer::Direction;
 
     use super::*;
+
+    /// The update calls: a scripted release (a failed check by default), scripted
+    /// download events, both recorded.
+    #[tokio::test]
+    async fn fake_backend_update_calls() {
+        let fake = FakeBackend::new();
+        assert_eq!(
+            fake.latest_release().await.unwrap_err().code,
+            Some("update-check-failed")
+        );
+        let release = Release {
+            version: semver::Version::new(9, 9, 9),
+            page: "https://github.com/a/b/releases/tag/v9.9.9".into(),
+            assets: Vec::new(),
+        };
+        let fake = fake.with_release(Ok(release.clone()));
+        assert_eq!(fake.latest_release().await.unwrap(), release);
+        assert_eq!(fake.releases_asked(), 2);
+        let job = DownloadJob {
+            asset: crate::update::Asset {
+                name: "a.deb".into(),
+                url: "https://github.com/a.deb".into(),
+                size: 1,
+            },
+            sums_url: "https://github.com/SHA256SUMS".into(),
+        };
+        fake.set_download(vec![
+            DownloadEvent::Verifying,
+            DownloadEvent::Done(Ok(PathBuf::from("a.deb"))),
+        ]);
+        let events: Vec<_> = fake.download_update(job.clone()).collect().await;
+        assert!(matches!(
+            events.as_slice(),
+            [DownloadEvent::Verifying, DownloadEvent::Done(Ok(_))]
+        ));
+        assert_eq!(fake.downloads().len(), 1);
+        assert_eq!(fake.downloads()[0].asset, job.asset);
+    }
 
     /// Edits run on the real edit manager: a save while the connection is down is held,
     /// and goes up once the session reconnects.

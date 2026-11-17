@@ -1,13 +1,14 @@
-//! Update notice: pure logic (versions, release JSON, package choice, checksums). No I/O
-//! happens here besides reading a file to hash it; the network and the UI live elsewhere.
-// The callers arrive with the network client (Task 2) and the app state (Task 3).
-#![allow(dead_code)]
+//! Update notice: versions, release JSON, package choice and checksums (pure logic here
+//! and in `package` and `sums`), the HTTPS client (`http`) and the verified download
+//! (`download`). The UI lives elsewhere.
 
 use std::time::Duration;
 
 use hoprs_core::{Error, ErrorKind};
 use semver::Version;
 
+pub mod download;
+pub mod http;
 pub mod package;
 pub mod sums;
 

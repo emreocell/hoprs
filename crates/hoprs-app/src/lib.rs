@@ -14,6 +14,7 @@ mod effects;
 mod i18n;
 mod icon;
 mod logbuf;
+pub mod opener;
 mod probe;
 mod renderer;
 mod settings;
