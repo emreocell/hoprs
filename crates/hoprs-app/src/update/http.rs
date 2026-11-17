@@ -15,9 +15,15 @@
 //!   size the release lists).
 //! - Time: the check and `SHA256SUMS` end within 10 s overall; a download has 10 s to
 //!   connect and get its headers, then each read must make progress within 30 s.
+//! - Proxy: the system proxy from the environment (`ALL_PROXY`, `HTTPS_PROXY`,
+//!   `HTTP_PROXY`, with `NO_PROXY`) is honoured, on purpose: users behind a corporate
+//!   proxy must still get updates. Requests go through it as `CONNECT host:443`, so TLS
+//!   stays end to end with the same certificate checks; the proxy sees the host name
+//!   (and its own credentials, if the user put them in the proxy URL), nothing else.
+//! - Rate limits: 429, or 403 with `x-ratelimit-remaining: 0`, is reported as "rate
+//!   limited"; any other error status as `HTTP <code>`.
 
 use std::io::{Read, Write};
-use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -25,7 +31,7 @@ use hoprs_core::{Error, ErrorKind};
 use rustls::pki_types::CertificateDer;
 use ureq::http::Uri;
 use ureq::tls::{Certificate, RootCerts, TlsConfig, TlsProvider};
-use ureq::{Agent, ResponseExt};
+use ureq::{Agent, Proxy, ResponseExt};
 
 use super::download::{Fetch, failed};
 use super::{API_URL, Release, parse_release};
@@ -62,12 +68,22 @@ fn check_failed(detail: impl Into<String>) -> Error {
     .with_detail(detail)
 }
 
-/// A readable reason for a ureq error; GitHub's rate limit answers 403 or 429.
+/// A readable reason for a ureq error.
 fn describe(err: ureq::Error) -> String {
     match err {
-        ureq::Error::StatusCode(code @ (403 | 429)) => format!("rate limited (HTTP {code})"),
         ureq::Error::StatusCode(code) => format!("HTTP {code}"),
         other => other.to_string(),
+    }
+}
+
+/// A readable reason for an error status: GitHub's rate limit is 429, or 403 with no
+/// requests remaining; other 403s (blocked, forbidden) are plain errors.
+fn status_detail(code: u16, remaining: Option<&str>) -> String {
+    let limited = code == 429 || (code == 403 && remaining.map(str::trim) == Some("0"));
+    if limited {
+        format!("rate limited (HTTP {code})")
+    } else {
+        format!("HTTP {code}")
     }
 }
 
@@ -80,8 +96,16 @@ pub struct Client {
 }
 
 impl Client {
-    /// A client that trusts `roots` only.
+    /// A client that trusts `roots` only, through the system proxy if one is set.
     pub fn new(api_url: String, roots: Vec<CertificateDer<'static>>) -> Client {
+        Client::with_proxy(api_url, roots, Proxy::try_from_env())
+    }
+
+    fn with_proxy(
+        api_url: String,
+        roots: Vec<CertificateDer<'static>>,
+        proxy: Option<Proxy>,
+    ) -> Client {
         let roots: Vec<Certificate<'static>> = roots
             .iter()
             .map(|der| Certificate::from_der(der.as_ref()).to_owned())
@@ -95,6 +119,7 @@ impl Client {
             .build();
         let agent = Agent::config_builder()
             .tls_config(tls)
+            .proxy(proxy)
             .https_only(true)
             .http_status_as_error(true)
             .max_redirects(5)
@@ -183,13 +208,23 @@ impl Client {
         if let Some(accept) = accept {
             request = request.header("Accept", accept);
         }
+        // Statuses read here, to see the rate-limit header.
         let response = request
             .config()
             .timeout_global(Some(TIMEOUT))
+            .http_status_as_error(false)
             .build()
             .call()
             .map_err(describe)?;
         self.check_chain(&response)?;
+        let status = response.status();
+        if !status.is_success() {
+            let remaining = response
+                .headers()
+                .get("x-ratelimit-remaining")
+                .and_then(|value| value.to_str().ok());
+            return Err(status_detail(status.as_u16(), remaining));
+        }
         response
             .into_body()
             .into_with_config()
@@ -208,7 +243,7 @@ impl Fetch for Client {
     fn file(
         &self,
         url: &str,
-        to: &Path,
+        out: &mut dyn Write,
         progress: &mut dyn FnMut(u64, Option<u64>),
     ) -> Result<u64, Error> {
         self.check_url(url).map_err(failed)?;
@@ -234,7 +269,6 @@ impl Fetch for Client {
             .limit(FILE_LIMIT)
             .reader();
         let io = |err: std::io::Error| failed(err.to_string());
-        let mut file = std::fs::File::create(to).map_err(io)?;
         let mut buffer = vec![0u8; 64 * 1024];
         let mut done = 0u64;
         loop {
@@ -244,11 +278,11 @@ impl Fetch for Client {
                 Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(err) => return Err(io(err)),
             };
-            file.write_all(&buffer[..n]).map_err(io)?;
+            out.write_all(&buffer[..n]).map_err(io)?;
             done += n as u64;
             progress(done, total);
         }
-        file.sync_all().map_err(io)?;
+        out.flush().map_err(io)?;
         match total {
             Some(total) if done != total => Err(failed(format!(
                 "the body ended after {done} of {total} bytes"
@@ -397,7 +431,7 @@ mod tests {
             .collect()
     }
 
-    fn run(client: &Client, job: &DownloadJob, dir: &Path) -> Vec<DownloadEvent> {
+    fn run(client: &Client, job: &DownloadJob, dir: &std::path::Path) -> Vec<DownloadEvent> {
         let mut events = Vec::new();
         download::run(client, job, dir, &mut |e| events.push(e));
         events
@@ -411,7 +445,16 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "starts a local HTTPS server; run with --ignored"]
+    fn rate_limit_only_when_github_says_so() {
+        assert_eq!(status_detail(429, None), "rate limited (HTTP 429)");
+        assert_eq!(status_detail(403, Some("0")), "rate limited (HTTP 403)");
+        assert_eq!(status_detail(403, Some("12")), "HTTP 403");
+        assert_eq!(status_detail(403, None), "HTTP 403");
+        assert_eq!(status_detail(404, Some("0")), "HTTP 404");
+    }
+
+    /// Runs in the normal suite: a local server in a thread, no network, ~0.1 s.
+    #[test]
     fn local_https_server_redirect_chunked_and_checksum() {
         // A test CA and a leaf for localhost (and 127.0.0.1, to test the host rule alone).
         let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
@@ -456,6 +499,12 @@ mod tests {
                         ..answer("200 OK", fixture)
                     },
                     "/limited" => answer("429 Too Many Requests", "slow down"),
+                    "/limited403" => {
+                        let mut a = answer("403 Forbidden", "slow down");
+                        a.headers.push(("X-RateLimit-Remaining".into(), "0".into()));
+                        a
+                    }
+                    "/forbidden" => answer("403 Forbidden", "no"),
                     p if p == format!("/dl/{SUMS_NAME}") => answer("200 OK", sums.clone()),
                     p if p == format!("/dl/{NAME}") => redirect("/objects/1".into()),
                     p if p == format!("/dl/bad/{NAME}") => redirect("/objects/bad".into()),
@@ -478,7 +527,11 @@ mod tests {
         }
 
         let ca = ca.der().clone();
-        let client = Client::new(format!("{base}/latest"), vec![ca.clone()]);
+        // No proxy: a proxy set in the developer's environment must not see this server.
+        let direct = |path: &str, roots: Vec<CertificateDer<'static>>| {
+            Client::with_proxy(format!("{base}{path}"), roots, None)
+        };
+        let client = direct("/latest", vec![ca.clone()]);
 
         // The release JSON, chunked. Its asset URLs stay on github.com: `parse_release`
         // accepts no other host, so the downloads below name the local server directly.
@@ -533,17 +586,19 @@ mod tests {
             );
         }
 
-        // Rate limited.
-        let limited = Client::new(format!("{base}/limited"), vec![ca]);
-        let err = limited.latest().unwrap_err();
-        assert_eq!(err.code, Some("update-check-failed"));
-        assert!(
-            err.detail.as_deref().unwrap_or("").contains("rate limited"),
-            "{err:?}"
-        );
+        // Rate limited (429, or 403 with no requests remaining); a plain 403 is not.
+        for (path, detail) in [
+            ("/limited", "rate limited (HTTP 429)"),
+            ("/limited403", "rate limited (HTTP 403)"),
+            ("/forbidden", "HTTP 403"),
+        ] {
+            let err = direct(path, vec![ca.clone()]).latest().unwrap_err();
+            assert_eq!(err.code, Some("update-check-failed"));
+            assert_eq!(err.detail.as_deref(), Some(detail), "{path}");
+        }
 
         // An unknown certificate authority: the system roots do not know the test CA.
-        let untrusted = Client::new(format!("{base}/latest"), vec![]);
+        let untrusted = direct("/latest", vec![]);
         assert_eq!(
             untrusted.latest().unwrap_err().code,
             Some("update-check-failed")

@@ -1,12 +1,24 @@
 //! The update download (ruling 7): `SHA256SUMS` first (a missing entry downloads nothing),
-//! then the asset into `<name>.part`, verified before it is renamed to `<name>`. The final
+//! then the asset into a part file, verified before it is renamed to `<name>`. The final
 //! name never holds unverified bytes; a file already there is reused when it matches and
 //! replaced only by a download that does.
+//!
+//! The part file is `<name>.<pid>.<n>.part`, created with `create_new` (never an existing
+//! path, never through a symlink), so two downloads never share one. It is written,
+//! hashed and synced through the one handle that created it. An existing `<name>` is
+//! reused only when it is a regular file (not a symlink) that this user owns (Unix: its
+//! uid; Windows has no cheap equivalent and the Downloads folder is per-user there, so
+//! the check is skipped) and that verifies. A `<name>` that is not a regular file (a
+//! directory, a symlink) is refused, never replaced.
 
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use hoprs_core::{Error, ErrorKind};
+use sha2::{Digest, Sha256};
 
 use super::Asset;
 use super::sums::{expected_for, verify};
@@ -15,12 +27,12 @@ use super::sums::{expected_for, verify};
 pub trait Fetch {
     /// A small text file (`SHA256SUMS`).
     fn text(&self, url: &str) -> Result<String, Error>;
-    /// Writes the body of `url` into `to` (created or truncated), calling `progress` with
-    /// the bytes written so far and the expected total, if known. Returns the bytes written.
+    /// Writes the body of `url` into `out`, calling `progress` with the bytes written so
+    /// far and the expected total, if known. Returns the bytes written.
     fn file(
         &self,
         url: &str,
-        to: &Path,
+        out: &mut dyn Write,
         progress: &mut dyn FnMut(u64, Option<u64>),
     ) -> Result<u64, Error>;
 }
@@ -49,11 +61,59 @@ pub fn run(fetch: &dyn Fetch, job: &DownloadJob, dir: &Path, send: &mut dyn FnMu
     send(DownloadEvent::Done(result));
 }
 
-/// Where downloads go: the user's Downloads folder, or the temporary directory without one.
-pub fn download_dir() -> PathBuf {
-    dirs::download_dir()
-        .filter(|dir| dir.is_dir())
-        .unwrap_or_else(std::env::temp_dir)
+/// Where downloads go: the user's Downloads folder when there is one; otherwise a private
+/// per-user directory, `<cache>/hoprs/updates` (made `0700` on Unix), or, without a cache
+/// directory, a new private temporary directory. Never the shared temporary directory
+/// itself, where another user could plant or swap a file.
+pub fn download_dir() -> Result<PathBuf, Error> {
+    if let Some(dir) = dirs::download_dir().filter(|dir| dir.is_dir()) {
+        return Ok(dir);
+    }
+    if let Some(dir) = dirs::cache_dir().map(|dir| dir.join("hoprs").join("updates"))
+        && private_dir(&dir).is_ok()
+    {
+        return Ok(dir);
+    }
+    tempfile::Builder::new()
+        .prefix("hoprs-update-")
+        .tempdir()
+        .map(tempfile::TempDir::keep)
+        .map_err(|e| failed(format!("no directory to download into: {e}")))
+}
+
+/// Makes `dir` (and its parents) if needed; it must be a real directory of this user,
+/// private on Unix.
+fn private_dir(dir: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)?;
+    let meta = std::fs::symlink_metadata(dir)?;
+    if !meta.is_dir() || !owned(&meta) {
+        return Err(std::io::Error::other("not a private directory"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// Whether this user owns the file (always true on Windows, see the module docs).
+fn owned(meta: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        meta.uid() == unsafe { libc::geteuid() }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        true
+    }
 }
 
 pub(super) fn failed(detail: impl Into<String>) -> Error {
@@ -74,6 +134,56 @@ fn plain_name(name: &str) -> bool {
         && !name.starts_with('.')
 }
 
+/// What is at the final path now.
+enum Existing {
+    None,
+    /// A regular file this user owns.
+    Ours,
+    /// A regular file of someone else: never reused, but replaced by a verified download.
+    Foreign,
+}
+
+fn existing(target: &Path) -> Result<Existing, Error> {
+    match std::fs::symlink_metadata(target) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Existing::None),
+        Err(e) => Err(failed(e.to_string())),
+        Ok(meta) if !meta.is_file() => Err(failed(format!(
+            "{} exists and is not a regular file",
+            target.display()
+        ))),
+        Ok(meta) if owned(&meta) => Ok(Existing::Ours),
+        Ok(_) => Ok(Existing::Foreign),
+    }
+}
+
+/// A new part file next to `target`, created exclusively.
+fn create_part(dir: &Path, name: &str) -> Result<(PathBuf, File), Error> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let pid = std::process::id();
+    let mut last = None;
+    for _ in 0..16 {
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        let path = dir.join(format!("{name}.{pid}.{n}{nanos:09}.part"));
+        match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
+            Err(e) => return Err(failed(e.to_string())),
+        }
+    }
+    Err(failed(format!(
+        "no free part file name: {}",
+        last.map(|e| e.to_string()).unwrap_or_default()
+    )))
+}
+
 fn steps(
     fetch: &dyn Fetch,
     job: &DownloadJob,
@@ -89,12 +199,16 @@ fn steps(
     let sums = fetch.text(&job.sums_url)?;
     let expected = expected_for(&sums, name)?;
     let target = dir.join(name);
-    if target.is_file() && verify(&target, &expected).is_ok() {
+    if matches!(existing(&target)?, Existing::Ours) && verify(&target, &expected).is_ok() {
         return Ok(target);
     }
-    let part = dir.join(format!("{name}.part"));
-    let result = fetch_and_verify(fetch, job, &part, &expected, send)
-        .and_then(|()| std::fs::rename(&part, &target).map_err(|e| failed(e.to_string())));
+    let (part, mut file) = create_part(dir, name)?;
+    let result = fetch_and_verify(fetch, job, &mut file, &expected, send).and_then(|()| {
+        drop(file);
+        // Checked again just before: something may have appeared meanwhile.
+        existing(&target)?;
+        std::fs::rename(&part, &target).map_err(|e| failed(e.to_string()))
+    });
     match result {
         Ok(()) => Ok(target),
         Err(err) => {
@@ -107,7 +221,7 @@ fn steps(
 fn fetch_and_verify(
     fetch: &dyn Fetch,
     job: &DownloadJob,
-    part: &Path,
+    file: &mut File,
     expected: &[u8; 32],
     send: &mut dyn FnMut(DownloadEvent),
 ) -> Result<(), Error> {
@@ -118,7 +232,7 @@ fn fetch_and_verify(
             send(DownloadEvent::Progress { done, total });
         }
     };
-    let written = fetch.file(&job.asset.url, part, &mut progress)?;
+    let written = fetch.file(&job.asset.url, file, &mut progress)?;
     // GitHub reports the exact size; a different count is a broken download, whatever
     // the checksum would say.
     let size = job.asset.size;
@@ -128,13 +242,33 @@ fn fetch_and_verify(
         )));
     }
     send(DownloadEvent::Verifying);
-    verify(part, expected)
+    let io = |e: std::io::Error| failed(e.to_string());
+    file.sync_all().map_err(io)?;
+    // Hashed through the handle that wrote it, not by reopening the path.
+    file.rewind().map_err(io)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buffer).map_err(io)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+    }
+    if <[u8; 32]>::from(hasher.finalize()) == *expected {
+        Ok(())
+    } else {
+        Err(Error::coded(
+            ErrorKind::Protocol,
+            "update-checksum-mismatch",
+            "The download does not match its checksum",
+        ))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha2::{Digest, Sha256};
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
 
@@ -150,12 +284,14 @@ mod tests {
     }
 
     /// Serves URLs from a map; `cut` stops a file body after that many bytes with an error.
+    /// With `watch`, `file` records that directory's entries while it writes.
     #[derive(Default)]
     struct TestFetch {
         bodies: HashMap<String, Vec<u8>>,
         cut: Option<usize>,
         files: Cell<u32>,
-        seen_part: RefCell<Vec<PathBuf>>,
+        watch: Option<PathBuf>,
+        seen: RefCell<Vec<String>>,
     }
 
     impl TestFetch {
@@ -182,19 +318,19 @@ mod tests {
         fn file(
             &self,
             url: &str,
-            to: &Path,
+            out: &mut dyn Write,
             progress: &mut dyn FnMut(u64, Option<u64>),
         ) -> Result<u64, Error> {
             self.files.set(self.files.get() + 1);
-            self.seen_part.borrow_mut().push(to.to_owned());
+            if let Some(dir) = &self.watch {
+                *self.seen.borrow_mut() = names(dir);
+            }
             let body = self.bodies.get(url).ok_or_else(|| failed("404"))?;
             let total = Some(body.len() as u64);
             let take = self.cut.unwrap_or(body.len()).min(body.len());
             let mut done = 0u64;
-            let mut out = Vec::new();
             for chunk in body[..take].chunks(3) {
-                out.extend_from_slice(chunk);
-                std::fs::write(to, &out).unwrap();
+                out.write_all(chunk).unwrap();
                 done += chunk.len() as u64;
                 progress(done, total);
             }
@@ -235,8 +371,19 @@ mod tests {
         }
     }
 
-    fn part(dir: &Path) -> PathBuf {
-        dir.join(format!("{NAME}.part"))
+    /// The entry names of `dir`, sorted.
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// No part file is left in `dir`.
+    fn no_parts(dir: &Path) -> bool {
+        !names(dir).iter().any(|n| n.ends_with(".part"))
     }
 
     const BYTES: &[u8] = b"the new installer bytes";
@@ -244,7 +391,8 @@ mod tests {
     #[test]
     fn verified_download_is_renamed() {
         let dir = tempfile::tempdir().unwrap();
-        let fetch = TestFetch::new(BYTES, BYTES);
+        let mut fetch = TestFetch::new(BYTES, BYTES);
+        fetch.watch = Some(dir.path().to_owned());
         let events = collect(&fetch, &job(BYTES.len() as u64), dir.path());
         assert!(
             matches!(
@@ -268,9 +416,15 @@ mod tests {
         );
         assert_eq!(done(&events).unwrap(), dir.path().join(NAME));
         assert_eq!(std::fs::read(dir.path().join(NAME)).unwrap(), BYTES);
-        assert!(!part(dir.path()).exists());
-        // The bytes went to the `.part`, never to the final name.
-        assert_eq!(*fetch.seen_part.borrow(), vec![part(dir.path())]);
+        assert!(no_parts(dir.path()));
+        // While downloading, only a unique part file existed, never the final name.
+        let seen = fetch.seen.borrow();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert!(
+            seen[0].starts_with(&format!("{NAME}.")) && seen[0].ends_with(".part"),
+            "{seen:?}"
+        );
+        assert_ne!(seen[0], format!("{NAME}.part"));
     }
 
     #[test]
@@ -283,7 +437,7 @@ mod tests {
             Some("update-checksum-mismatch")
         );
         assert!(!dir.path().join(NAME).exists());
-        assert!(!part(dir.path()).exists());
+        assert!(no_parts(dir.path()));
     }
 
     #[test]
@@ -298,7 +452,7 @@ mod tests {
         );
         assert!(!events.iter().any(|e| matches!(e, DownloadEvent::Verifying)));
         assert!(!dir.path().join(NAME).exists());
-        assert!(!part(dir.path()).exists());
+        assert!(no_parts(dir.path()));
     }
 
     #[test]
@@ -313,7 +467,7 @@ mod tests {
             Some("update-download-failed")
         );
         assert!(!dir.path().join(NAME).exists());
-        assert!(!part(dir.path()).exists());
+        assert!(no_parts(dir.path()));
     }
 
     #[test]
@@ -341,13 +495,13 @@ mod tests {
             Some("update-checksum-mismatch")
         );
         assert_eq!(std::fs::read(dir.path().join(NAME)).unwrap(), old);
-        assert!(!part(dir.path()).exists());
+        assert!(no_parts(dir.path()));
         // A good download replaces it.
         let fetch = TestFetch::new(BYTES, BYTES);
         let events = collect(&fetch, &job(BYTES.len() as u64), dir.path());
         assert_eq!(done(&events).unwrap(), dir.path().join(NAME));
         assert_eq!(std::fs::read(dir.path().join(NAME)).unwrap(), BYTES);
-        assert!(!part(dir.path()).exists());
+        assert!(no_parts(dir.path()));
     }
 
     #[test]
@@ -365,15 +519,15 @@ mod tests {
         );
         assert_eq!(fetch.files.get(), 0);
         assert!(!dir.path().join(NAME).exists());
-        assert!(!part(dir.path()).exists());
+        assert!(no_parts(dir.path()));
     }
 
     #[test]
     fn unwritable_directory_fails_cleanly() {
-        // The Downloads folder vanished (or cannot be written): an error, no panic.
+        // The download folder vanished (or cannot be written): an error, no panic.
         let dir = tempfile::tempdir().unwrap();
         let gone = dir.path().join("missing");
-        let fetch = RealFileFetch(TestFetch::new(BYTES, BYTES));
+        let fetch = TestFetch::new(BYTES, BYTES);
         let mut events = Vec::new();
         run(&fetch, &job(BYTES.len() as u64), &gone, &mut |e| {
             events.push(e)
@@ -382,25 +536,110 @@ mod tests {
             done(&events).unwrap_err().code,
             Some("update-download-failed")
         );
+        assert_eq!(fetch.files.get(), 0);
         assert!(!gone.exists());
     }
 
-    /// Opens the target like the real client: a missing directory is an I/O error.
-    struct RealFileFetch(TestFetch);
+    /// (a) Part files are created exclusively under fresh names: an old `<name>.part` (or
+    /// anything planted under that name) is neither followed nor touched, and two
+    /// downloads never share one.
+    #[test]
+    fn part_files_are_exclusive_and_unique() {
+        let dir = tempfile::tempdir().unwrap();
+        let planted = dir.path().join(format!("{NAME}.part"));
+        std::fs::write(&planted, b"planted").unwrap();
+        let (a, _fa) = create_part(dir.path(), NAME).unwrap();
+        let (b, _fb) = create_part(dir.path(), NAME).unwrap();
+        assert_ne!(a, b);
+        assert_ne!(a, planted);
+        let fetch = TestFetch::new(BYTES, BYTES);
+        let events = collect(&fetch, &job(BYTES.len() as u64), dir.path());
+        assert_eq!(done(&events).unwrap(), dir.path().join(NAME));
+        assert_eq!(std::fs::read(&planted).unwrap(), b"planted");
+    }
 
-    impl Fetch for RealFileFetch {
-        fn text(&self, url: &str) -> Result<String, Error> {
-            self.0.text(url)
+    /// (b) The fallback directory is a private one of this user.
+    #[test]
+    fn private_dir_is_private() {
+        let dir = tempfile::tempdir().unwrap();
+        let updates = dir.path().join("hoprs").join("updates");
+        private_dir(&updates).unwrap();
+        assert!(updates.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&updates).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+            // A symlink in its place is refused.
+            let link = dir.path().join("link");
+            std::os::unix::fs::symlink(dir.path(), &link).unwrap();
+            assert!(private_dir(&link).is_err());
         }
+        // Again: it already exists, fine.
+        private_dir(&updates).unwrap();
+        // The real one is never the shared temporary directory itself.
+        assert_ne!(download_dir().unwrap(), std::env::temp_dir());
+    }
 
-        fn file(
-            &self,
-            url: &str,
-            to: &Path,
-            progress: &mut dyn FnMut(u64, Option<u64>),
-        ) -> Result<u64, Error> {
-            std::fs::File::create(to).map_err(|e| failed(e.to_string()))?;
-            self.0.file(url, to, progress)
+    /// (c, e) A directory at the final name is refused, not replaced or reused.
+    #[test]
+    fn directory_at_final_name_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(NAME)).unwrap();
+        let fetch = TestFetch::new(BYTES, BYTES);
+        let events = collect(&fetch, &job(BYTES.len() as u64), dir.path());
+        assert_eq!(
+            done(&events).unwrap_err().code,
+            Some("update-download-failed")
+        );
+        assert_eq!(fetch.files.get(), 0);
+        assert!(dir.path().join(NAME).is_dir());
+        assert!(no_parts(dir.path()));
+    }
+
+    /// (c, e) A symlink at the final name, even to a matching file, is neither reused nor
+    /// replaced.
+    #[cfg(unix)]
+    #[test]
+    fn symlink_at_final_name_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let real = elsewhere.path().join("real.deb");
+        std::fs::write(&real, BYTES).unwrap();
+        std::os::unix::fs::symlink(&real, dir.path().join(NAME)).unwrap();
+        let fetch = TestFetch::new(BYTES, BYTES);
+        let events = collect(&fetch, &job(BYTES.len() as u64), dir.path());
+        assert_eq!(
+            done(&events).unwrap_err().code,
+            Some("update-download-failed")
+        );
+        assert_eq!(fetch.files.get(), 0);
+        assert!(
+            std::fs::symlink_metadata(dir.path().join(NAME))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read(&real).unwrap(), BYTES);
+    }
+
+    /// (c) Ownership: a file this user made counts as ours.
+    #[test]
+    fn own_files_are_owned() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(owned(&std::fs::symlink_metadata(&file).unwrap()));
+        assert!(matches!(existing(&file).unwrap(), Existing::Ours));
+        assert!(matches!(
+            existing(&dir.path().join("none")).unwrap(),
+            Existing::None
+        ));
+        // Someone else's file (the root directory belongs to root) is not ours.
+        #[cfg(unix)]
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        if unsafe { libc::geteuid() } != 0 {
+            assert!(!owned(&std::fs::symlink_metadata("/").unwrap()));
         }
     }
 
@@ -430,6 +669,6 @@ mod tests {
 
     #[test]
     fn download_dir_exists() {
-        assert!(download_dir().is_dir());
+        assert!(download_dir().unwrap().is_dir());
     }
 }

@@ -819,6 +819,7 @@ error-update-checksum-mismatch = The download does not match its checksum
 error-update-check-failed = Could not check for updates
 error-update-download-failed = The update could not be downloaded
 error-update-dev-build = Update checks are off in development builds (set HOPRS_UPDATE_URL)
+error-update-download-busy = This update is already downloading
 error-app-opener-task-failed = Opener task failed
 error-app-opener-failed = { $opener } failed
 error-app-vault-task-failed = Vault task failed

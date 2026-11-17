@@ -2212,6 +2212,7 @@ dependencies = [
  "iced",
  "iced_runtime",
  "iced_tiny_skia",
+ "libc",
  "notify",
  "png",
  "rcgen",
