@@ -1468,6 +1468,9 @@ pub fn language_english() -> &'static str {
 pub fn language_pt_br() -> &'static str {
     tr("language-pt-br")
 }
+pub fn language_tr() -> &'static str {
+    tr("language-tr")
+}
 pub fn theme_hoprs_dark() -> &'static str {
     tr("theme-hoprs-dark")
 }

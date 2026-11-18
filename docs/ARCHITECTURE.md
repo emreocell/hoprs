@@ -67,7 +67,7 @@ The app follows iced's model: state, messages, a pure update, and views.
 
 ### Where to put a change
 
-- **A new text on screen:** add the key to both `i18n/en.ftl` and `i18n/pt-BR.ftl`, and a
+- **A new text on screen:** add the key to `i18n/en.ftl`, `i18n/pt-BR.ftl` and `i18n/tr.ftl`, and a
   function in `ui/strings.rs` that looks it up with a literal key (`tr("my-key")` or
   `tr_args("my-key", &[…])`). Never put a user-visible string literal in a view. Tests fail
   if a key is missing in a language, unused, or uses different variables.
