@@ -26,9 +26,9 @@ click) and puts a terminal, a two-pane file browser, folder compare and a persis
 transfer queue behind it, in one quiet window that opens in under 100 ms and idles at about
 33 MB.
 
-- **Version:** 1.4.0 ([changelog](CHANGELOG.md))
+- **Version:** 1.5.0 ([changelog](CHANGELOG.md))
 - **Platforms:** Linux (Ubuntu 24.04 or newer, amd64), macOS 11 or newer (Apple Silicon and Intel), Windows 10 or newer (x64).
-- **Languages:** English and Brazilian Portuguese.
+- **Languages:** English, Brazilian Portuguese and Turkish.
 - **License:** MIT OR Apache-2.0
 
 ## Contents
@@ -84,7 +84,7 @@ transfer queue behind it, in one quiet window that opens in under 100 ms and idl
   a cascade of modal dialogs. `known_hosts` is verified; FTPS certificates can be pinned.
 - **Connections that survive:** keepalive, automatic reconnection with backoff, and recovery
   from connections that servers drop while idle.
-- **Language:** English or Brazilian Portuguese. hoprs follows the OS language by default;
+- **Language:** English, Brazilian Portuguese or Turkish. hoprs follows the OS language by default;
   Settings › Language switches it at once.
 - **Command palette:** Ctrl+K (Cmd+K on macOS) jumps to any tab, site, workspace or action.
 - **Update notice:** hoprs tells you when a new version is out and, with one click,
@@ -115,32 +115,32 @@ Every release has these files on the
 
 | System | File |
 |---|---|
-| Linux (Ubuntu 24.04 or newer, amd64) | `hoprs_1.4.0-1_amd64.deb` |
-| macOS 11 or newer, Apple Silicon and Intel | `hoprs_1.4.0_macos_universal.dmg` |
-| Windows 10 or newer, x64 (installer, per machine) | `hoprs_1.4.0_windows_x64.msi` |
-| Windows 10 or newer, x64 (portable) | `hoprs_1.4.0_windows_x64.zip` |
+| Linux (Ubuntu 24.04 or newer, amd64) | `hoprs_1.5.0-1_amd64.deb` |
+| macOS 11 or newer, Apple Silicon and Intel | `hoprs_1.5.0_macos_universal.dmg` |
+| Windows 10 or newer, x64 (installer, per machine) | `hoprs_1.5.0_windows_x64.msi` |
+| Windows 10 or newer, x64 (portable) | `hoprs_1.5.0_windows_x64.zip` |
 
 The macOS and Windows builds are **not signed** with a paid certificate (see the steps
 below), so each system warns once on first launch.
 
 ### Linux: the `.deb` (recommended)
 
-1. Download `hoprs_1.4.0-1_amd64.deb` and `SHA256SUMS`.
+1. Download `hoprs_1.5.0-1_amd64.deb` and `SHA256SUMS`.
 2. Check the download and install it:
 
    ```sh
    sha256sum -c SHA256SUMS --ignore-missing
-   sudo apt install ./hoprs_1.4.0-1_amd64.deb
+   sudo apt install ./hoprs_1.5.0-1_amd64.deb
    ```
 
-   Expected output of the first command: `hoprs_1.4.0-1_amd64.deb: OK`. `apt` installs the
+   Expected output of the first command: `hoprs_1.5.0-1_amd64.deb: OK`. `apt` installs the
    libraries hoprs needs (Wayland, X11, Vulkan/EGL loaders, D-Bus).
 
 3. Start hoprs from the app menu, or run:
 
    ```sh
    hoprs             # opens the window
-   hoprs --version   # prints "hoprs 1.4.0"
+   hoprs --version   # prints "hoprs 1.5.0"
    hoprs --help
    ```
 
@@ -149,7 +149,7 @@ and exits.
 
 ### macOS: the `.dmg`
 
-1. Download `hoprs_1.4.0_macos_universal.dmg` and `SHA256SUMS`, and check it:
+1. Download `hoprs_1.5.0_macos_universal.dmg` and `SHA256SUMS`, and check it:
 
    ```sh
    shasum -a 256 -c SHA256SUMS --ignore-missing
@@ -174,11 +174,11 @@ The `.dmg` is one universal build for Apple Silicon and Intel Macs.
 
 ### Windows: the `.msi` or the `.zip`
 
-1. Download `hoprs_1.4.0_windows_x64.msi` (or the portable `hoprs_1.4.0_windows_x64.zip`)
+1. Download `hoprs_1.5.0_windows_x64.msi` (or the portable `hoprs_1.5.0_windows_x64.zip`)
    and `SHA256SUMS`. In PowerShell, compare the hash with the line in `SHA256SUMS`:
 
    ```powershell
-   (Get-FileHash .\hoprs_1.4.0_windows_x64.msi -Algorithm SHA256).Hash
+   (Get-FileHash .\hoprs_1.5.0_windows_x64.msi -Algorithm SHA256).Hash
    ```
 
 2. Run the `.msi`. It installs per machine (it asks for administrator rights) and adds a
@@ -395,14 +395,15 @@ decisions. It never contains passwords, passphrases, file contents or terminal o
 
 ### Language
 
-The interface is in English and Brazilian Portuguese. "System" (the default) follows the OS
-language: any Portuguese locale gives Portuguese, anything else English. Pick one in
+The interface is in English, Brazilian Portuguese and Turkish. "System" (the default)
+follows the OS language: any Portuguese locale gives Portuguese, any Turkish locale Turkish,
+anything else English. Pick one in
 Settings › Language (Idioma); it applies immediately. Messages that come from servers or
 the OS (for example an SFTP server's own error text) are shown as they are.
 
 Translators: the texts are Fluent files in `crates/hoprs-app/i18n/`. `en.ftl` is the
 reference: copy it, translate the values, and keep the `{ $var }` names unchanged. The
-tests check that both catalogs have the same keys and variables (`cargo test -p hoprs-app`).
+tests check that every catalog has the same keys and variables as `en.ftl` (`cargo test -p hoprs-app`).
 
 ## Where your data lives
 
@@ -479,7 +480,7 @@ The binary ends up in `target/release/hoprs`.
 
 ```sh
 scripts/package-deb.sh                                              # needs Docker
-scripts/check-deb.sh target/deb-ubuntu-24.04/debian/hoprs_1.4.0-1_amd64.deb
+scripts/check-deb.sh target/deb-ubuntu-24.04/debian/hoprs_1.5.0-1_amd64.deb
 ```
 
 `package-deb.sh` builds inside an Ubuntu 24.04 container pinned by digest, with
