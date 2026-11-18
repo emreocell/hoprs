@@ -3,7 +3,8 @@
 What is planned, roughly in order, and where help is most welcome. Plans change; the
 [issues](https://github.com/engviniciusbs/hoprs/issues) and
 [discussions](https://github.com/engviniciusbs/hoprs/discussions) are where they get decided.
-Released work is in the [CHANGELOG](../CHANGELOG.md): 1.4.0 (2026-11-17) added the update
+Released work is in the [CHANGELOG](../CHANGELOG.md): 1.5.0 (2026-11-18) added the app in
+Turkish (a contributed translation); 1.4.0 (2026-11-17) added the update
 notice (a card and a footer line when a new version is out; Update downloads, verifies and
 opens the system installer); 1.3.1 (2026-11-16) made workspaces
 plain groups in the sidebar (Open all / Close all in their menu) and shows a finished

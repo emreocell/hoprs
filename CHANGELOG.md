@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.5.0 — 2026-11-18
+
+hoprs speaks Turkish.
+
+- The whole interface is available in Turkish (Türkçe), translated by İsmail Duran ([@P1LOTRX](https://github.com/P1LOTRX), #40): menus, dialogs, errors, the queue, dates and numbers (`1.000`, `4,1 KB`, `11 Kas 14:02`).
+- Settings › Language offers Türkçe, and "System" picks it on a Turkish OS locale (`tr_TR.UTF-8`, `tr-TR`, …).
+- The Linux desktop entry has Turkish names.
+
 ## 1.4.0 — 2026-11-17
 
 hoprs tells you when a new version is out, and can install it.

@@ -27,7 +27,7 @@ Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI) for Linux, Windows and m
 - Deferred follow-ups: `docs/superpowers/plans/2026-11-12-01-followups.md`
 - Contributor docs: `CONTRIBUTING.md` (setup, checks, translating), `docs/ARCHITECTURE.md` (crates, app data flow, where to put a change), `docs/ROADMAP.md` (public roadmap: keep it in sync when plans land), `SECURITY.md`, `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1, reports to conduct@hoprs.online via Cloudflare Email Routing), issue and PR templates in `.github/`
 
-## Current status (2026-11-17)
+## Current status (2026-11-18)
 
 - Landing page is live at https://hoprs.online, deployed by `.github/workflows/site.yml` on push to `main` (VPS via KoreGo, Cloudflare in front; see `site/deploy/README.md`).
 - Plans 1–7 merged to `main` (v1 feature-complete): core + transfer engine, SSH/SFTP, FTP/FTPS, vault + FileZilla import, the iced app, Plan 6 (terminal tabs over the site's SSH connection, remote editing with re-upload on save, Ctrl+K palette, technical log panel, idle-drop fixes, perf job) Plan 7 (one writer per destination) and Plan 8 (release 1.0.0: `.deb` packaging, icon, `.desktop`, release workflow).
@@ -47,6 +47,7 @@ Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI) for Linux, Windows and m
 - **v1.3.1 released (2026-11-16):** tag `v1.3.1` on `cc3bd07` (PR #34), assets and checksums verified, site on 1.3.1. Plan 14: workspaces are plain groups in the sidebar (no Open button; Open all / Close all in the right-click menu and the Ctrl+K palette; the open workspace has a green mark), and a finished transfer re-lists its destination folder quietly (selection, scroll and hover kept; one listing per pane per 500 ms, longer after a slow listing; never starts or blocks a comparison). Screenshots not re-taken (only the workspace row changed). QA: `docs/qa/release-1.3.1-checklist.md`; follow-ups: section Plan 14 in `docs/superpowers/plans/2026-11-12-01-followups.md`.
 - **v1.4.0 released (2026-11-17):** tag `v1.4.0` on `5ff3580` (PR #36), GitHub Release with `.deb`, `.dmg`, `.msi`, `.zip` and `SHA256SUMS` (checksums verified after download); the site switched to 1.4.0. It ships Plan 15 (update notice): the app checks GitHub's latest release (5 s after start, then every 24 h; Settings → General turns it off), shows a card once per version plus a footer line, and Update downloads the package, verifies it against `SHA256SUMS` and opens the system installer (integrity only, not authenticity). HTTP client: `ureq` on the existing rustls stack. Debug builds only: `HOPRS_UPDATE_URL`, `HOPRS_UPDATE_AS_VERSION`, `HOPRS_UPDATE_AS_PACKAGE`.
 - **Next step (1.4.0 follow-ups):** the NEEDS HUMAN rows of `docs/qa/update-notice-checklist.md` (the installers on Windows and macOS have never run on a real machine; the first real update path is 1.4.0 → 1.4.x); then section Plan 15 of `docs/superpowers/plans/2026-11-12-01-followups.md` (signing `SHA256SUMS` first). Build artifacts: `target/` grows fast (90 GB in a few days of agent builds) — clean it now and then, and never build under `/tmp` (RAM-backed on the author's machine).
+- **v1.5.0 (2026-11-18):** Turkish UI (`tr.ftl`, contributed by @P1LOTRX in PR #40, first outside contribution), Turkish names in the `.desktop`. First release the 1.4.0 update notice can offer: watch the real 1.4.0 → 1.5.0 path.
 
 ## Decisions already made (do not re-litigate)
 
@@ -56,7 +57,7 @@ Desktop SSH + SFTP + FTP/FTPS client in Rust (iced GUI) for Linux, Windows and m
 - **Workspace = a bundle of sites**; "Open workspace" connects all of them and restores tabs. A site can be in several workspaces.
 - Credentials: OS keyring (Secret Service) + encrypted export/import (Argon2id + XChaCha20-Poly1305). Profile TOML never holds secrets. ssh-agent preferred.
 - Import from FileZilla (`sitemanager.xml`) is in v1.
-- UI language: **English and Brazilian Portuguese** (Fluent catalogs in `crates/hoprs-app/i18n/`; `en.ftl` is the reference, tests keep both in step). Visual: mockup v2 — neutral near-black, **white accent**, Inter for UI, JetBrains Mono for data (file names, paths, permissions), 4px radius, 1px rules, no shadows, no modal cascades (errors inline).
+- UI language: **English, Brazilian Portuguese and Turkish** (Fluent catalogs in `crates/hoprs-app/i18n/`; `en.ftl` is the reference, tests keep every catalog in step; Turkish was contributed in PR #40, more languages come as one PR each under issue #19). Visual: mockup v2 — neutral near-black, **white accent**, Inter for UI, JetBrains Mono for data (file names, paths, permissions), 4px radius, 1px rules, no shadows, no modal cascades (errors inline).
 - Unencrypted FTP is allowed, labelled `ftp (unencrypted)`, no nagging.
 - Terminal: Ctrl+K goes to the shell; the palette opens with Ctrl+Shift+K there. Copy/paste are Ctrl+Shift+C/V. OSC 52 (server writing the clipboard) is off.
 - Remote-edit uploads go straight through `RemoteFs`, not the transfer queue. The perf job is separate and never a required PR check.
