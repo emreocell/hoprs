@@ -882,7 +882,7 @@ mod tests {
 
     #[test]
     fn every_section_has_title_description_and_icon() {
-        for language in [Language::En, Language::PtBr] {
+        for language in Language::ALL {
             set_language(language);
             let titles: Vec<&str> = SettingsSection::ALL
                 .into_iter()

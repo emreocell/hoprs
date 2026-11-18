@@ -19,6 +19,7 @@ settings-language = Idioma
 language-system = Sistema
 language-english = English
 language-pt-br = Português (Brasil)
+language-tr = Türkçe
 
 ## Top bar
 

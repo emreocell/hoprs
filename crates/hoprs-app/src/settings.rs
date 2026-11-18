@@ -91,10 +91,11 @@ pub enum LanguageChoice {
 
 impl LanguageChoice {
     /// The choices the settings page offers, in order.
-    pub const ALL: [LanguageChoice; 3] = [
+    pub const ALL: [LanguageChoice; 4] = [
         LanguageChoice::System,
         LanguageChoice::Fixed(Language::En),
         LanguageChoice::Fixed(Language::PtBr),
+        LanguageChoice::Fixed(Language::Tr),
     ];
 
     /// The value in `settings.toml`.
@@ -111,6 +112,7 @@ impl LanguageChoice {
             Self::System => crate::ui::strings::language_system(),
             Self::Fixed(Language::En) => crate::ui::strings::language_english(),
             Self::Fixed(Language::PtBr) => crate::ui::strings::language_pt_br(),
+            Self::Fixed(Language::Tr) => crate::ui::strings::language_tr(),
         }
     }
 

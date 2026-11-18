@@ -12,7 +12,7 @@
 #              *[other] { $count } sites
 #           }
 #   Keep technical names (SSH, SFTP, FTP, FTPS) as they are.
-# pt-BR.ftl must define the same keys with the same variables.
+# pt-BR.ftl and tr.ftl must define the same keys with the same variables.
 
 app-title = hoprs
 already-running = hoprs is already running
@@ -31,6 +31,7 @@ settings-language = Language
 language-system = System
 language-english = English
 language-pt-br = Português (Brasil)
+language-tr = Türkçe
 
 ## Top bar
 
